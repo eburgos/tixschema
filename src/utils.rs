@@ -79,17 +79,15 @@ pub(crate) fn get_enum_docs(item_enum: &ItemEnum) -> Option<Vec<String>> {
 pub(crate) fn get_variant_docs(variant: &Variant) -> Option<Vec<String>> {
     let mut doc_lines = Vec::new();
 
-    for field in &variant.fields {
-        for attr in &field.attrs {
-            if attr.path().is_ident("doc")
-                && let Meta::NameValue(meta_name_value) = &attr.meta
-                && let Expr::Lit(syn::ExprLit {
-                    lit: Lit::Str(lit_str),
-                    ..
-                }) = &meta_name_value.value
-            {
-                doc_lines.push(lit_str.value().trim().to_string());
-            }
+    for attr in &variant.attrs {
+        if attr.path().is_ident("doc")
+            && let Meta::NameValue(meta_name_value) = &attr.meta
+            && let Expr::Lit(syn::ExprLit {
+                lit: Lit::Str(lit_str),
+                ..
+            }) = &meta_name_value.value
+        {
+            doc_lines.push(lit_str.value().trim().to_string());
         }
     }
 
