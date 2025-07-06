@@ -26,16 +26,20 @@ serde_json = "1.0.140"
 
 
 [features]
-default = ["serde", "zod", "jsonschema", "object_id"]
+default = ["serde", "zod", "jsonschema", "object_id", "typescript"]
 
 # Core features
 serde = []          # Serde integration for attribute parsing and field renaming
 zod = []            # Zod schema generation alongside TypeScript types
 jsonschema = []     # JSON schema generation methods
 object_id = []      # MongoDB ObjectId type support
+typescript = []     # TypeScript type generation and TypeScript-style Zod schemas
 
 # Feature combinations for testing
-minimal = []                           # No features - TypeScript types only
-basic = ["zod"]                       # TypeScript + Zod schemas only
-advanced = ["serde", "zod"]           # Serde + Zod without JSON schemas
-mongodb = ["serde", "zod", "object_id"] # MongoDB support without JSON schemas
+minimal = []                           # No features - basic functionality only
+basic = ["zod"]                       # Zod schemas only (JavaScript)
+typescript_only = ["typescript"]      # TypeScript types only
+typescript_zod = ["typescript", "zod"] # TypeScript + Zod schemas with TypeScript types
+advanced = ["serde", "zod"]           # Serde + Zod without TypeScript
+mongodb = ["serde", "zod", "object_id"] # MongoDB support without TypeScript
+full_typescript = ["serde", "zod", "jsonschema", "object_id", "typescript"] # Full TypeScript support

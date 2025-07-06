@@ -39,6 +39,11 @@ impl Features {
         cfg!(feature = "object_id")
     }
 
+    /// Check if typescript feature is enabled
+    pub const fn has_typescript() -> bool {
+        cfg!(feature = "typescript")
+    }
+
     /// Get a description of enabled features for debugging
     pub fn enabled_features() -> Vec<&'static str> {
         let mut features = Vec::new();
@@ -55,6 +60,9 @@ impl Features {
         if Self::has_object_id() {
             features.push("object_id");
         }
+        if Self::has_typescript() {
+            features.push("typescript");
+        }
         
         if features.is_empty() {
             features.push("minimal");
@@ -65,12 +73,12 @@ impl Features {
 
     /// Check if we have minimal configuration (no features)
     pub const fn is_minimal() -> bool {
-        !Self::has_serde() && !Self::has_zod() && !Self::has_jsonschema() && !Self::has_object_id()
+        !Self::has_serde() && !Self::has_zod() && !Self::has_jsonschema() && !Self::has_object_id() && !Self::has_typescript()
     }
 
-    /// Check if we have a TypeScript-only configuration (no zod, no jsonschema)
+    /// Check if we have a TypeScript-only configuration (typescript enabled, but no zod, no jsonschema)
     pub const fn is_typescript_only() -> bool {
-        !Self::has_zod() && !Self::has_jsonschema()
+        Self::has_typescript() && !Self::has_zod() && !Self::has_jsonschema()
     }
 }
 
@@ -88,12 +96,13 @@ mod tests {
         println!("Enabled features: {:?}", enabled);
         
         // In default configuration, all features should be enabled
-        #[cfg(all(feature = "serde", feature = "zod", feature = "jsonschema", feature = "object_id"))]
+        #[cfg(all(feature = "serde", feature = "zod", feature = "jsonschema", feature = "object_id", feature = "typescript"))]
         {
             assert!(Features::has_serde());
             assert!(Features::has_zod());
             assert!(Features::has_jsonschema());
             assert!(Features::has_object_id());
+            assert!(Features::has_typescript());
             assert!(!Features::is_minimal());
             assert!(!Features::is_typescript_only());
         }
