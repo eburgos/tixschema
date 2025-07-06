@@ -24,10 +24,10 @@ jobs:
         toolchain: stable
         components: clippy, rustfmt
         
-    - name: Install just
+    - name: Install just and cargo-hack
       uses: taiki-e/install-action@v2
       with:
-        tool: just
+        tool: just,cargo-hack
         
     - name: Cache cargo registry
       uses: actions/cache@v3
