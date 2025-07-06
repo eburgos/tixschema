@@ -377,6 +377,257 @@ export const User$Schema: z.Schema<User, z.ZodTypeDef, unknown> = z.strictObject
 
 8. **Complex Nesting**: The crate supports extremely complex nested structures including `HashMap<String, Vec<HashMap<String, ObjectId>>>` and similar deep nesting patterns.
 
+## Error Handling & Troubleshooting
+
+This section covers common errors you might encounter and how to resolve them.
+
+### Feature-Related Errors
+
+The crate uses optional features to reduce dependencies. If features are disabled, you'll get specific compile-time or runtime behavior:
+
+#### ObjectId Errors
+
+**Error:** `cannot find type 'ObjectId' in this scope`
+
+**Cause:** Using `ObjectId` without the `object_id` feature enabled.
+
+**Solutions:**
+```toml
+# Option 1: Enable the object_id feature
+core_model_macros = { features = ["object_id"] }
+
+# Option 2: Use full path
+use mongodb::bson::oid::ObjectId;
+
+# Option 3: Define ObjectId type yourself
+pub type ObjectId = String; // Simple fallback
+```
+
+**Warning:** You'll see compile-time warnings when ObjectId is detected without the feature:
+```
+warning: ObjectId type detected but 'object_id' feature is not enabled
+         ObjectId will be treated as a custom type (may cause compilation errors)
+         Enable the object_id feature: features = ["object_id"]
+         Or add the required ObjectId type definition to your code
+```
+
+#### JSON Schema Method Missing
+
+**Error:** `no function or associated item named 'json_schema' found`
+
+**Cause:** Calling `.json_schema()` without the `jsonschema` feature enabled.
+
+**Solution:**
+```toml
+core_model_macros = { features = ["jsonschema"] }
+```
+
+**Alternative:** Check if the method exists at runtime:
+```rust
+#[cfg(feature = "jsonschema")]
+let schema = MyType::json_schema();
+```
+
+#### Zod Schema Missing  
+
+**Error:** Generated TypeScript contains only types, no Zod schemas
+
+**Cause:** `zod` feature is disabled.
+
+**Solution:**
+```toml
+core_model_macros = { features = ["zod"] }
+```
+
+#### Serde Attributes Ignored
+
+**Symptom:** Field names not transformed (e.g., `user_id` instead of `userId`)
+
+**Cause:** `serde` feature is disabled, but you're using serde attributes.
+
+**Warning:** You'll see compile-time warnings:
+```
+warning: serde attribute detected but 'serde' feature is not enabled
+         Field names will not be transformed (camelCase, etc.)
+         Enable the serde feature: features = ["serde"]
+```
+
+**Solution:**
+```toml
+core_model_macros = { features = ["serde"] }
+```
+
+### Common Feature Combinations
+
+```toml
+# Minimal (TypeScript only)
+core_model_macros = { default-features = false }
+
+# Basic (TypeScript + Zod)
+core_model_macros = { default-features = false, features = ["zod"] }
+
+# With serde support
+core_model_macros = { default-features = false, features = ["serde", "zod"] }
+
+# Full features (recommended)
+core_model_macros = { features = ["serde", "zod", "jsonschema", "object_id"] }
+
+# Default (all features enabled)
+core_model_macros = "0.1.0"
+```
+
+### Compilation Errors
+
+#### Unsupported Map Key Types
+
+**Error:** Compilation fails with complex HashMap key types
+
+**Cause:** Only `HashMap<String, T>` is fully supported.
+
+**Example of unsupported:**
+```rust
+// ❌ Not supported
+pub struct BadConfigJson {
+    pub settings: HashMap<i32, String>,
+    pub metadata: HashMap<UserId, UserData>,
+}
+```
+
+**Solution:** Use string keys:
+```rust
+// ✅ Supported
+pub struct ConfigJson {
+    pub settings: HashMap<String, String>,
+    pub metadata: HashMap<String, UserData>,
+}
+```
+
+#### Missing Derives
+
+**Error:** Various compilation errors related to traits
+
+**Cause:** Missing required derives for serde.
+
+**Solution:** Always include required derives:
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)] // All recommended
+pub struct MyTypeJson {
+    // fields...
+}
+```
+
+### Runtime Issues
+
+#### Zod Version Compatibility
+
+**Error:** TypeScript compilation fails with Zod schema errors
+
+**Cause:** Using Zod v3 with v4-generated schemas.
+
+**Solution:** Upgrade to Zod v4:
+```bash
+npm install zod@^4.0.0
+```
+
+**Generated schemas use modern syntax:**
+```typescript
+// ✅ Zod v4 compatible (generated)
+email: z.string().or(z.undefined()),
+
+// ❌ Old v3 style (not generated)
+email: z.string().optional(),
+```
+
+#### Missing TypeScript Types
+
+**Error:** `Cannot find name 'ObjectId'` in TypeScript
+
+**Cause:** ObjectId type not imported in frontend.
+
+**Solution:** Define ObjectId type in your TypeScript:
+```typescript
+// types/mongodb.ts
+export interface ObjectId {
+  $oid: string;
+}
+
+// Or use a library
+import { ObjectId } from 'mongodb';
+```
+
+#### JSON Schema Validation Failures
+
+**Problem:** Data doesn't validate against generated schemas
+
+**Common Causes:**
+1. **Field naming mismatch**: Check serde attributes and feature flags
+2. **Optional field handling**: Ensure consistent `Option<T>` usage
+3. **ObjectId format**: Must be `{ "$oid": "hex_string" }` format
+
+**Debug Tips:**
+```rust
+// Print generated schema to debug
+println!("{}", serde_json::to_string_pretty(&MyType::json_schema())?);
+
+// Check field naming
+let ts_def = MyType::ts_definition();
+println!("Generated TypeScript:\n{}", ts_def);
+```
+
+### Best Practices for Error Prevention
+
+1. **Use Default Features**: Start with all features enabled, disable only when needed
+   ```toml
+   core_model_macros = "0.1.0"  # All features enabled
+   ```
+
+2. **Consistent Naming**: Always use `Json` suffix
+   ```rust
+   // ✅ Good
+   pub struct UserJson { ... }
+   
+   // ❌ Bad
+   pub struct User { ... }
+   ```
+
+3. **Test Generation**: Include TypeScript generation in your test suite
+   ```rust
+   #[test]
+   fn test_typescript_generation() {
+       generate_ts_schemas("../frontend/types/generated.ts").unwrap();
+   }
+   ```
+
+4. **Version Lock Dependencies**: Pin Zod version in frontend
+   ```json
+   {
+     "dependencies": {
+       "zod": "^4.0.0"
+     }
+   }
+   ```
+
+5. **Use Type Checking**: Enable strict TypeScript checking
+   ```json
+   {
+     "compilerOptions": {
+       "strict": true,
+       "noUncheckedIndexedAccess": true
+     }
+   }
+   ```
+
+### Getting Help
+
+If you encounter issues not covered here:
+
+1. **Check Feature Flags**: Ensure required features are enabled
+2. **Review Generated Output**: Print generated TypeScript to debug
+3. **Validate JSON**: Test generated JSON schemas with sample data
+4. **Check Dependencies**: Ensure Zod v4 compatibility
+5. **Minimal Example**: Create a minimal reproduction case
+
 ## Zod v4 Migration & JSON Schema Generation
 
 This library now generates **Zod v4 compatible schemas** using the modern `.or(z.undefined())` syntax for optional fields instead of the older `.optional()` + `.transform()` approach.

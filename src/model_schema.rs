@@ -73,49 +73,23 @@ fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
             .join("\n"),
     };
 
-    // Generate the final output
+    // Generate the final output with conditional compilation
+    let json_schema_method = generate_json_schema_method(&json_schema_fields);
+    let ts_definition_method = generate_ts_definition_method(
+        &docs, 
+        &item_name, 
+        &type_code, 
+        &schema_code, 
+        &show_opts, 
+        fields_empty
+    );
+
     let output = quote! {
         #item_struct
 
         impl #name {
-            pub fn json_schema() -> serde_json::Value {
-                let mut schema_obj = serde_json::Map::new();
-                schema_obj.insert("type".to_string(), serde_json::Value::String("object".to_string()));
-                schema_obj.insert("additionalProperties".to_string(), serde_json::Value::Bool(false));
-                let mut properties = serde_json::Map::new();
-                let mut required = Vec::new();
-
-                #(#json_schema_fields)*
-
-                schema_obj.insert(
-                    "properties".to_string(),
-                    serde_json::Value::Object(properties),
-                );
-
-                schema_obj.insert("required".to_string(), serde_json::Value::Array(required));
-
-                serde_json::Value::Object(schema_obj)
-            }
-
-            pub fn ts_definition() -> String {
-                let docs = #docs;
-                let prettified = serde_json::to_string_pretty(&Self::json_schema()).unwrap().lines().map(|l| format!(" * {l}")).collect::<Vec<_>>().join("\n");
-                let bundled_docs = format!("/**\n{docs}\n * JSON Schema:\n{prettified}\n **/\n");
-                let type_def = {
-                    match #fields_empty {
-                        true => {
-                            format!(r#"{bundled_docs}export type {} = Record<string, never>;"#, #item_name)
-                        },
-                        false => {
-                            format!("{bundled_docs}export type {} = {{\n{}}};", #item_name, #type_code)
-                        }
-                    }
-                };
-                let schema_def = format!(r#"export const {}$Schema: z.Schema<{}, z.ZodTypeDef, unknown> = z.strictObject({{
-{}
-}}){};"#, #item_name, #item_name, #schema_code, #show_opts);
-                format!("{type_def}\n\n{schema_def}")
-            }
+            #json_schema_method
+            #ts_definition_method
         }
     };
 
@@ -169,9 +143,9 @@ fn process_plain_enum(
         .join(", ");
 
     // Enumerate the strings with indices
-    let enumerated = enum_options.iter().map(|v| {
+    let enumerated: Vec<proc_macro2::TokenStream> = enum_options.iter().map(|v| {
         quote! { #v }
-    });
+    }).collect();
 
     let docs = match get_enum_docs(&item_enum) {
         Some(doc_lines) => doc_lines
@@ -188,30 +162,28 @@ fn process_plain_enum(
             .join("\n"),
     };
 
+    // Generate conditional methods
+    let json_schema_method = generate_plain_enum_json_schema_method(&enumerated);
+    let ts_definition_method = generate_plain_enum_ts_definition_method(
+        &docs,
+        item_name,
+        &type_code,
+        &schema_code,
+    );
+    
+    // Use the enumerated values in the quote! macro
+    let enum_values = &enumerated;
+
     let output = quote! {
         #item_enum
 
         impl #name {
-            pub fn json_schema() -> serde_json::Value {
-                let mut schema_obj = serde_json::Map::new();
-                schema_obj.insert("type".to_string(), serde_json::Value::String("string".to_string()));
-                schema_obj.insert("enum".to_string(), serde_json::Value::Array(Self::enum_members().into_iter().map(|v| serde_json::Value::String(v)).collect()));
-
-                serde_json::Value::Object(schema_obj)
-            }
-
-            pub fn ts_definition() -> String {
-                let prettified = serde_json::to_string_pretty(&Self::json_schema()).unwrap().lines().map(|l| format!(" * {l}")).collect::<Vec<_>>().join("\n");
-                let docs = #docs;
-                let bundled_docs = format!("/**\n{docs}\n * JSON Schema:\n{prettified}\n **/\n");
-                let type_def = format!(r#"{bundled_docs}export type {} = {};"#, #item_name, #type_code);
-                let schema_def = format!(r#"export const {}$Schema: z.Schema<{}> = z.enum([{}]);"#, #item_name, #item_name, #schema_code);
-                format!("{type_def}\n\n{schema_def}")
-            }
-
+            #json_schema_method
+            #ts_definition_method
+            
             pub fn enum_members() -> Vec<String> {
                 [
-                    #(#enumerated),*
+                    #(#enum_values),*
                 ].iter().map(|v| v.to_string()).collect::<Vec<_>>()
             }
         }
@@ -306,6 +278,9 @@ fn process_discriminated_enum(
     };
 
     let type_code = type_code_items.join(" | ");
+    
+    // Generate Zod schema conditionally
+    #[cfg(feature = "zod")]
     let schema_code = format!(
         "z.discriminatedUnion(\"{tag_name}\", [{}])",
         schema_code_items
@@ -314,6 +289,9 @@ fn process_discriminated_enum(
             .collect::<Vec<_>>()
             .join(", ")
     );
+    
+    #[cfg(not(feature = "zod"))]
+    let schema_code = String::new(); // Empty schema when zod feature disabled
 
     let docs = match get_enum_docs(&item_enum) {
         Some(doc_lines) => doc_lines
@@ -330,22 +308,16 @@ fn process_discriminated_enum(
             .join("\n"),
     };
 
+    // Generate conditional implementation
+    let json_schema_method = generate_discriminated_enum_json_schema_method(&main_schema_code);
+    let ts_definition_method = generate_discriminated_enum_ts_definition_method(&docs, item_name, &type_code, &schema_code);
+
     let output = quote! {
         #item_enum
 
         impl #name {
-            pub fn json_schema() -> serde_json::Value {
-                #main_schema_code
-            }
-
-            pub fn ts_definition() -> String {
-                let prettified = serde_json::to_string_pretty(&Self::json_schema()).unwrap().lines().map(|l| format!(" * {l}")).collect::<Vec<_>>().join("\n");
-                let docs = #docs;
-                let bundled_docs = format!("/**\n{docs}\n * JSON Schema:\n{prettified}\n **/\n");
-                let type_def = format!(r#"{bundled_docs}export type {} = {};"#, #item_name, #type_code);
-                let schema_def = format!(r#"export const {}$Schema: z.Schema<{}, z.ZodTypeDef, unknown> = {};"#, #item_name, #item_name, #schema_code);
-                format!("{type_def}\n\n{schema_def}")
-            }
+            #json_schema_method
+            #ts_definition_method
         }
     };
 
@@ -409,9 +381,19 @@ fn generate_variant_code(
             panic!("Failed to write TypeScript type: {err}");
         }
 
-        // Add Zod schema definition
-        if let Err(err) = writeln!(variant_schema_code, "  {}: {},", fld.name, fld.zod_type()) {
-            panic!("Failed to write Zod schema: {err}");
+        // Add Zod schema definition - conditionally
+        #[cfg(feature = "zod")]
+        {
+            let zod_field_type = fld.zod_type();
+            if let Err(err) = writeln!(variant_schema_code, "  {}: {},", fld.name, zod_field_type) {
+                panic!("Failed to write Zod schema: {err}");
+            }
+        }
+        
+        #[cfg(not(feature = "zod"))]
+        {
+            // When zod feature is disabled, don't write to variant_schema_code
+            let _ = &variant_schema_code; // Suppress unused variable warning
         }
 
         if fld.name != tag_name {
@@ -1100,8 +1082,9 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
     }
 }
 
-/// Writes the TypeScript type and Zod schema for a field to the provided buffers.
+/// Writes the TypeScript type and conditionally Zod schema for a field to the provided buffers.
 fn write_field_type_and_schema(type_code: &mut String, schema_code: &mut String, fld: &FieldDef) {
+    // Always write TypeScript type
     if let Err(err) = writeln!(
         type_code,
         "  /**\n{}\n**/\n  {}: {};",
@@ -1112,8 +1095,18 @@ fn write_field_type_and_schema(type_code: &mut String, schema_code: &mut String,
         panic!("Failed to write TypeScript type: {err}");
     }
 
-    if let Err(err) = writeln!(schema_code, "  {}: {},", fld.name, fld.zod_type()) {
-        panic!("Failed to write Zod schema: {err}");
+    // Conditionally write Zod schema
+    #[cfg(feature = "zod")]
+    {
+        if let Err(err) = writeln!(schema_code, "  {}: {},", fld.name, fld.zod_type()) {
+            panic!("Failed to write Zod schema: {err}");
+        }
+    }
+    
+    #[cfg(not(feature = "zod"))]
+    {
+        // When zod feature is disabled, don't write to schema_code
+        let _ = schema_code; // Suppress unused variable warning
     }
 }
 
@@ -1203,4 +1196,241 @@ fn snake_to_camel(s: &str) -> String {
     }
 
     result
+}
+
+/// Generates the JSON schema method conditionally based on the jsonschema feature
+fn generate_json_schema_method(_json_schema_fields: &[proc_macro2::TokenStream]) -> proc_macro2::TokenStream {
+    #[cfg(feature = "jsonschema")]
+    {
+        crate::features::jsonschema::generate_struct_json_schema_method(_json_schema_fields)
+    }
+    
+    #[cfg(not(feature = "jsonschema"))]
+    {
+        quote::quote! {
+            // JSON schema method not available - jsonschema feature disabled
+            // To enable: add "jsonschema" to your features
+            // Example: core_model_macros = { features = ["jsonschema"] }
+        }
+    }
+}
+
+/// Generates the TypeScript definition method with conditional Zod schema and JSON schema docs
+fn generate_ts_definition_method(
+    docs: &str,
+    item_name: &str,
+    type_code: &str,
+    schema_code: &str,
+    show_opts: &str,
+    fields_empty: bool,
+) -> proc_macro2::TokenStream {
+    // TypeScript type generation (always available)
+    let typescript_type_gen = if fields_empty {
+        quote::quote! {
+            format!(r#"/**\n{}\n**/\nexport type {} = Record<string, never>;"#, docs, #item_name)
+        }
+    } else {
+        quote::quote! {
+            format!("/**\n{}\n**/\nexport type {} = {{\n{}\n}};", docs, #item_name, #type_code)
+        }
+    };
+
+    // Conditional Zod schema generation
+    let zod_schema_gen = generate_zod_schema_part(item_name, schema_code, show_opts);
+    
+    // Conditional JSON schema docs
+    let json_docs_gen = generate_json_docs_part();
+
+    quote::quote! {
+        pub fn ts_definition() -> String {
+            let docs = #docs;
+            #json_docs_gen
+            let type_def = #typescript_type_gen;
+            #zod_schema_gen
+            
+            #[cfg(feature = "zod")]
+            {
+                format!("{}\n\n{}", type_def, schema_def)
+            }
+            
+            #[cfg(not(feature = "zod"))]
+            {
+                type_def
+            }
+        }
+    }
+}
+
+/// Generates Zod schema part conditionally
+fn generate_zod_schema_part(_item_name: &str, _schema_code: &str, _show_opts: &str) -> proc_macro2::TokenStream {
+    #[cfg(feature = "zod")]
+    {
+        quote::quote! {
+            let schema_def = format!(r#"export const {}$Schema: z.Schema<{}, z.ZodTypeDef, unknown> = z.strictObject({{
+{}
+}}){};"#, #_item_name, #_item_name, #_schema_code, #_show_opts);
+        }
+    }
+    
+    #[cfg(not(feature = "zod"))]
+    {
+        quote::quote! {
+            // Zod schema not generated - zod feature disabled
+            // To enable: add "zod" to your features  
+            // Example: core_model_macros = { features = ["zod"] }
+        }
+    }
+}
+
+/// Generates JSON schema documentation part conditionally
+fn generate_json_docs_part() -> proc_macro2::TokenStream {
+    #[cfg(all(feature = "jsonschema", feature = "zod"))]
+    {
+        quote::quote! {
+            let prettified = serde_json::to_string_pretty(&Self::json_schema()).unwrap().lines().map(|l| format!(" * {l}")).collect::<Vec<_>>().join("\n");
+            let docs = format!("/**\n{docs}\n * JSON Schema:\n{prettified}\n **/\n");
+        }
+    }
+    
+    #[cfg(not(all(feature = "jsonschema", feature = "zod")))]
+    {
+        quote::quote! {
+            // No JSON schema docs when jsonschema feature is disabled
+            // To enable: add both "jsonschema" and "zod" features
+            // Example: core_model_macros = { features = ["jsonschema", "zod"] }
+        }
+    }
+}
+
+/// Generates the JSON schema method for plain enums conditionally
+fn generate_plain_enum_json_schema_method(_enumerated: &[proc_macro2::TokenStream]) -> proc_macro2::TokenStream {
+    #[cfg(feature = "jsonschema")]
+    {
+        crate::features::jsonschema::generate_plain_enum_json_schema_method()
+    }
+    
+    #[cfg(not(feature = "jsonschema"))]
+    {
+        let _ = _enumerated; // Suppress unused variable warning
+        quote::quote! {
+            // JSON schema method not available - jsonschema feature disabled
+            // To enable: add "jsonschema" to your features
+            // Example: core_model_macros = { features = ["jsonschema"] }
+        }
+    }
+}
+
+/// Generates the TypeScript definition method for plain enums with conditional features
+fn generate_plain_enum_ts_definition_method(
+    docs: &str,
+    item_name: &str,
+    type_code: &str,
+    schema_code: &str,
+) -> proc_macro2::TokenStream {
+    // TypeScript type generation (always available)
+    let typescript_type_gen = quote::quote! {
+        format!(r#"/**\n{}\n**/\nexport type {} = {};"#, docs, #item_name, #type_code)
+    };
+
+    // Conditional Zod schema generation
+    let zod_schema_gen = quote::quote! {
+        #[cfg(feature = "zod")]
+        let schema_def = format!(r#"export const {}$Schema: z.Schema<{}> = z.enum([{}]);"#, #item_name, #item_name, #schema_code);
+    };
+    
+    // Conditional JSON schema docs
+    let json_docs_gen = quote::quote! {
+        #[cfg(all(feature = "jsonschema", feature = "zod"))]
+        let prettified = serde_json::to_string_pretty(&Self::json_schema()).unwrap().lines().map(|l| format!(" * {l}")).collect::<Vec<_>>().join("\n");
+        
+        #[cfg(all(feature = "jsonschema", feature = "zod"))]
+        let docs = format!("/**\n{}\n * JSON Schema:\n{}\n **/\n", #docs, prettified);
+        
+        #[cfg(not(all(feature = "jsonschema", feature = "zod")))]
+        let docs = format!("/**\n{}\n**/\n", #docs);
+    };
+
+    quote::quote! {
+        pub fn ts_definition() -> String {
+            #json_docs_gen
+            let type_def = #typescript_type_gen;
+            #zod_schema_gen
+            
+            #[cfg(feature = "zod")]
+            {
+                format!("{}\n\n{}", type_def, schema_def)
+            }
+            
+            #[cfg(not(feature = "zod"))]
+            {
+                type_def
+            }
+        }
+    }
+}
+
+/// Generates the JSON schema method for discriminated enums conditionally
+fn generate_discriminated_enum_json_schema_method(main_schema_code: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    #[cfg(feature = "jsonschema")]
+    {
+        quote::quote! {
+            pub fn json_schema() -> serde_json::Value {
+                #main_schema_code
+            }
+        }
+    }
+    
+    #[cfg(not(feature = "jsonschema"))]
+    {
+        quote::quote! {
+            // JSON schema method not available - jsonschema feature disabled
+            // To enable: add "jsonschema" to your features
+            // Example: core_model_macros = { features = ["jsonschema"] }
+        }
+    }
+}
+
+/// Generates the TypeScript definition method for discriminated enums with conditional features
+fn generate_discriminated_enum_ts_definition_method(
+    docs: &str,
+    item_name: &str,
+    type_code: &str,
+    schema_code: &str,
+) -> proc_macro2::TokenStream {
+    // Conditional Zod schema generation
+    let zod_schema_gen = quote::quote! {
+        #[cfg(feature = "zod")]
+        let schema_def = format!(r#"export const {}$Schema: z.Schema<{}, z.ZodTypeDef, unknown> = {};"#, #item_name, #item_name, #schema_code);
+    };
+    
+    // Conditional JSON schema docs
+    let json_docs_gen = quote::quote! {
+        #[cfg(all(feature = "jsonschema", feature = "zod"))]
+        let prettified = serde_json::to_string_pretty(&Self::json_schema()).unwrap().lines().map(|l| format!(" * {l}")).collect::<Vec<_>>().join("\n");
+        
+        #[cfg(all(feature = "jsonschema", feature = "zod"))]
+        let docs = format!("/**\n{}\n * JSON Schema:\n{}\n **/\n", #docs, prettified);
+        
+        #[cfg(not(all(feature = "jsonschema", feature = "zod")))]
+        let docs = format!("/**\n{}\n**/\n", #docs);
+    };
+
+    quote::quote! {
+        pub fn ts_definition() -> String {
+            #json_docs_gen
+            let bundled_docs = docs;
+            let type_def = format!(r#"{bundled_docs}export type {} = {};"#, #item_name, #type_code);
+            #zod_schema_gen
+            
+            #[cfg(feature = "zod")]
+            {
+                format!("{type_def}\n\n{schema_def}")
+            }
+            
+            #[cfg(not(feature = "zod"))]
+            {
+                type_def
+            }
+        }
+    }
 }

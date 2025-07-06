@@ -1,6 +1,9 @@
 mod field_type;
 mod model_schema;
 mod utils;
+mod features;
+mod generation;
+
 use model_schema::exec_model_schema;
 use proc_macro::TokenStream;
 use utils::safe_type_name;

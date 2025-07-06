@@ -1,6 +1,5 @@
-use proc_macro2::TokenTree;
 use syn::{
-    Attribute, Fields, GenericArgument, ItemEnum, LitStr, Meta, MetaList, PathArguments, Type,
+    Attribute, Fields, GenericArgument, ItemEnum, PathArguments, Type,
 };
 
 use crate::safe_type_name;
@@ -38,16 +37,23 @@ pub(crate) struct FieldDef {
     pub array_num: Option<u16>,
 }
 
-/// Metadata for serde attributes applied to a struct or enum.
+// Re-export serde types conditionally based on feature
+#[cfg(feature = "serde")]
+pub(crate) use crate::features::serde::{SerdeTypeMeta, SerdeFieldMeta};
+
+// Provide fallback types when serde feature is disabled
+#[cfg(not(feature = "serde"))]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct SerdeTypeMeta {
-    pub tag: Option<String>,        // e.g., "behaviorType"
-    pub rename_all: Option<String>, // e.g., "camelCase"
+    pub tag: Option<String>,
+    pub rename_all: Option<String>,
 }
 
-/// Metadata for serde attributes applied to a field.
+#[cfg(not(feature = "serde"))]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct SerdeFieldMeta {
-    pub rename: Option<String>, // e.g., "new_name"
-    pub skip: bool,             // Whether to skip the field
+    pub rename: Option<String>,
+    pub skip: bool,
 }
 
 impl FieldDef {
@@ -88,7 +94,10 @@ impl FieldDef {
                 | FieldDefType::I8 | FieldDefType::I16 | FieldDefType::I32 | FieldDefType::I64 
                 | FieldDefType::Usize | FieldDefType::Isize => "number".to_string(),
             FieldDefType::F32 | FieldDefType::F64 => "number".to_string(),
-            FieldDefType::ObjectId => "ObjectId".to_string(),
+            #[cfg(feature = "object_id")]
+            FieldDefType::ObjectId => crate::features::object_id::get_object_id_typescript_type(),
+            #[cfg(not(feature = "object_id"))]
+            FieldDefType::ObjectId => "unknown".to_string(), // Fallback when feature disabled
         };
         let pre_result = if self.is_array {
             format!("Array<{result}>")
@@ -103,6 +112,7 @@ impl FieldDef {
         }
     }
 
+    #[cfg(feature = "zod")]
     pub fn zod_type(&self) -> String {
         let result = match &self.field_type {
             FieldDefType::Unknown => "z.unknown()".to_string(),
@@ -138,7 +148,10 @@ impl FieldDef {
                 "z.number().int()".to_string()
             }
             FieldDefType::F32 | FieldDefType::F64 => "z.number()".to_string(),
-            FieldDefType::ObjectId => "z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) })".to_string(),
+            #[cfg(feature = "object_id")]
+            FieldDefType::ObjectId => crate::features::object_id::get_object_id_zod_schema(),
+            #[cfg(not(feature = "object_id"))]
+            FieldDefType::ObjectId => "z.unknown()".to_string(), // Fallback when feature disabled
         };
         let pre_result = if self.is_array {
             format!("z.array({result})")
@@ -151,6 +164,13 @@ impl FieldDef {
         } else {
             pre_result
         }
+    }
+
+    #[cfg(not(feature = "zod"))]
+    pub fn zod_type(&self) -> String {
+        // When zod feature is disabled, return empty string
+        // This method should not be called when zod feature is disabled
+        String::new()
     }
 }
 
@@ -307,7 +327,23 @@ fn get_field_def_type_or_sibling(t_name: &str) -> FieldDefType {
         "isize" => FieldDefType::Isize,
         "f32" => FieldDefType::F32,
         "f64" => FieldDefType::F64,
-        "ObjectId" => FieldDefType::ObjectId,
+        #[cfg(feature = "object_id")]
+        "ObjectId" => {
+            if crate::features::object_id::should_handle_as_object_id(t_name) {
+                FieldDefType::ObjectId
+            } else {
+                FieldDefType::SiblingType(t_name.to_string(), vec![])
+            }
+        }
+        #[cfg(not(feature = "object_id"))]
+        "ObjectId" => {
+            // When object_id feature is disabled, warn user and treat as regular type
+            eprintln!("warning: ObjectId type detected but 'object_id' feature is not enabled");
+            eprintln!("         ObjectId will be treated as a custom type (may cause compilation errors)");
+            eprintln!("         Enable the object_id feature: features = [\"object_id\"]");
+            eprintln!("         Or add the required ObjectId type definition to your code");
+            FieldDefType::SiblingType(t_name.to_string(), vec![])
+        }
         type_name_json if type_name_json.ends_with("Json") => {
             FieldDefType::SiblingType(safe_type_name(type_name_json), vec![])
         }
@@ -316,114 +352,42 @@ fn get_field_def_type_or_sibling(t_name: &str) -> FieldDefType {
 }
 
 /// Parses serde attributes from a struct or enum.
+#[cfg(feature = "serde")]
 pub(crate) fn parse_serde_type_attributes(attrs: &[Attribute]) -> SerdeTypeMeta {
-    let mut meta = SerdeTypeMeta {
-        tag: None,
-        rename_all: None,
-    };
+    crate::features::serde::parse_serde_type_attributes(attrs)
+}
 
+#[cfg(not(feature = "serde"))]
+pub(crate) fn parse_serde_type_attributes(attrs: &[Attribute]) -> SerdeTypeMeta {
+    // Check for serde attributes and warn when serde feature is disabled
     for attr in attrs {
         if attr.path().is_ident("serde") {
-            attr.parse_nested_meta(|nested| {
-                // Handle `tag = "value"`
-                if nested.path.is_ident("tag") {
-                    let value = nested.value()?;
-                    let lit: LitStr = value.parse()?;
-                    meta.tag = Some(lit.value());
-                }
-                // Handle `rename_all = "value"`
-                else if nested.path.is_ident("rename_all") {
-                    let value = nested.value()?;
-                    let lit: LitStr = value.parse()?;
-                    meta.rename_all = Some(lit.value());
-                }
-                Ok(())
-            })
-            .unwrap_or_else(|e| {
-                log::error!("Failed to parse serde type attribute: {e}");
-            });
+            eprintln!("warning: serde attribute detected but 'serde' feature is not enabled");
+            eprintln!("         Field names will not be transformed (camelCase, etc.)");
+            eprintln!("         Enable the serde feature: features = [\"serde\"]");
+            break; // Only warn once per struct/enum
         }
     }
-
-    meta
+    SerdeTypeMeta::default()
 }
 /// Parses serde attributes from a field.
-pub fn parse_serde_field_attributes(attrs: &[Attribute]) -> SerdeFieldMeta {
-    let mut meta = SerdeFieldMeta {
-        rename: None,
-        skip: false,
-    };
+#[cfg(feature = "serde")]
+pub(crate) fn parse_serde_field_attributes(attrs: &[Attribute]) -> SerdeFieldMeta {
+    crate::features::serde::parse_serde_field_attributes(attrs)
+}
 
+#[cfg(not(feature = "serde"))]
+pub(crate) fn parse_serde_field_attributes(attrs: &[Attribute]) -> SerdeFieldMeta {
+    // Check for serde attributes and warn when serde feature is disabled
     for attr in attrs {
         if attr.path().is_ident("serde") {
-            match &attr.meta {
-                Meta::List(MetaList {
-                    path: _path,
-                    delimiter: _delimiter,
-                    tokens,
-                }) => {
-                    /*
-                    meta_list: Path { leading_colon: None, segments: [PathSegment { ident: Ident { ident: "serde", span: #0 bytes(34250..34255) }, arguments: PathArguments::None }] } - MacroDelimiter::Paren(Paren) -
-                    TokenStream [
-                        Ident { ident: "rename", span: #0 bytes(34256..34262) },
-                        Punct { ch: '=', spacing: Alone, span: #0 bytes(34263..34264) },
-                        Literal { kind: Str, symbol: "trialPeriodDays", suffix: None, span: #0 bytes(34265..34282) }, Punct { ch: ',', spacing: Alone, span: #0 bytes(34282..34283)
-                        },
-                        Ident { ident: "skip_serializing_if", span: #0 bytes(34284..34303) }, Punct { ch: '=', spacing: Alone, span: #0 bytes(34304..34305) }, Literal { kind: Str, symbol: "Option::is_none", suffix: None, span: #0 bytes(34306..34323) }]
-                     */
-
-                    let tokens_vec: Vec<TokenTree> = {
-                        let mut vec = Vec::new();
-                        for token in tokens.clone() {
-                            vec.push(token);
-                        }
-                        vec
-                    };
-                    let mut t = 0;
-                    let len = tokens_vec.len();
-                    while t < len {
-                        match &tokens_vec[t] {
-                            TokenTree::Ident(ident) if *ident == "rename" => {
-                                if t + 2 < len {
-                                    if let TokenTree::Literal(lit) = &tokens_vec[t + 2] {
-                                        let lit_str = lit.to_string();
-                                        if lit_str.starts_with("\"") && lit_str.ends_with("\"") {
-                                            meta.rename =
-                                                Some(lit_str[1..lit_str.len() - 1].to_string());
-                                        }
-                                    }
-                                    t += 3;
-                                } else {
-                                    t += 1;
-                                }
-                            }
-                            TokenTree::Ident(ident) if *ident == "skip" => {
-                                if t + 2 < len {
-                                    if let TokenTree::Ident(lit) = &tokens_vec[t + 2]
-                                        && *lit == "true"
-                                    {
-                                        meta.skip = true;
-                                    }
-                                    t += 3;
-                                } else {
-                                    t += 1;
-                                }
-                            }
-                            _ => {
-                                t += 1;
-                            }
-                        }
-                    }
-                }
-                Meta::NameValue(meta_name_value) => {
-                    log::error!("meta_name_value: {meta_name_value:?}");
-                }
-                _ => {}
-            };
+            eprintln!("warning: serde field attribute detected but 'serde' feature is not enabled");
+            eprintln!("         Field rename and skip attributes will be ignored");
+            eprintln!("         Enable the serde feature: features = [\"serde\"]");
+            break; // Only warn once per field
         }
     }
-
-    meta
+    SerdeFieldMeta::default()
 }
 
 pub(crate) fn is_plain_enum(item_enum: &ItemEnum) -> bool {
