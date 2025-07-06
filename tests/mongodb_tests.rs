@@ -161,10 +161,6 @@ mod tests {
         fn new() -> Self {
             ObjectId("507f1f77bcf86cd799439011".to_string())
         }
-
-        fn to_hex(&self) -> String {
-            self.0.clone()
-        }
     }
 
     #[test]
