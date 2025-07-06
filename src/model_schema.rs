@@ -75,6 +75,7 @@ fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
 
     // Generate the final output with conditional compilation
     let json_schema_method = generate_json_schema_method(&json_schema_fields);
+    #[cfg(feature = "typescript")]
     let ts_definition_method = generate_ts_definition_method(
         &docs, 
         &item_name, 
@@ -87,13 +88,26 @@ fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
         &show_opts,
     );
 
+    let mut impl_items: Vec<proc_macro2::TokenStream> = Vec::new();
+    #[cfg(feature = "jsonschema")]
+    {
+        impl_items.push(json_schema_method);
+    }
+    #[cfg(feature = "typescript")]
+    {
+        impl_items.push(ts_definition_method);
+    }
+    #[cfg(feature = "zod")]
+    {
+        impl_items.push(zod_schema_method);
+    }
+
+
     let output = quote! {
         #item_struct
 
         impl #name {
-            #json_schema_method
-            #ts_definition_method
-            #zod_schema_method
+            #(#impl_items) *
         }
     };
 
@@ -1225,6 +1239,7 @@ fn generate_json_schema_method(_json_schema_fields: &[proc_macro2::TokenStream])
     }
 }
 
+#[cfg(feature = "typescript")]
 /// Generates the TypeScript definition method (TypeScript types only, no Zod schema)
 fn generate_ts_definition_method(
     docs: &str,
@@ -1232,8 +1247,8 @@ fn generate_ts_definition_method(
     type_code: &str,
     fields_empty: bool,
 ) -> proc_macro2::TokenStream {
-    #[cfg(feature = "typescript")]
-    {
+    
+    
         // TypeScript type generation (only available when typescript feature is enabled)
         let typescript_type_gen = if fields_empty {
             quote::quote! {
@@ -1255,16 +1270,9 @@ fn generate_ts_definition_method(
                 #typescript_type_gen
             }
         }
-    }
     
-    #[cfg(not(feature = "typescript"))]
-    {
-        quote::quote! {
-            // TypeScript definition method not available - typescript feature disabled
-            // To enable: add "typescript" to your features
-            // Example: tixschema = { features = ["typescript"] }
-        }
-    }
+    
+    
 }
 
 
