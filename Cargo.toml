@@ -13,7 +13,7 @@ keywords = ["macros", "proc-macro", "model", "tixena"]
 proc-macro = true
 
 [dependencies]
-syn = { version = "2.0.100", features = ["full", "parsing", "extra-traits"] }
+syn = { version = "2.0.104", features = ["full", "parsing", "extra-traits"] }
 quote = "1.0"
 proc-macro2 = "1.0"
 log = "0.4.27"
