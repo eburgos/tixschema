@@ -1,0 +1,178 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+env:
+  CARGO_TERM_COLOR: always
+  DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Rust
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: stable
+        components: clippy, rustfmt
+        
+    - name: Install just
+      uses: taiki-e/install-action@v2
+      with:
+        tool: just
+        
+    - name: Cache cargo registry
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-
+          
+    - name: Build project
+      id: build
+      run: |
+        echo "🏗️ Building project..."
+        cargo build --verbose
+        
+    - name: Run code checks
+      id: check
+      run: |
+        echo "🔍 Running code checks..."
+        just check
+        
+    - name: Run basic tests
+      id: test-basic
+      run: |
+        echo "🧪 Running basic tests..."
+        cargo test --verbose
+        
+    - name: Run extensive tests
+      id: test-extensive
+      run: |
+        echo "🚀 Running extensive tests..."
+        just test
+        
+    - name: Send Discord success notification
+      if: success()
+      run: |
+        curl -H "Content-Type: application/json" \
+             -d '{
+               "embeds": [{
+                 "title": "✅ CI Pipeline Success",
+                 "description": "All tests passed successfully!",
+                 "color": 3066993,
+                 "fields": [
+                   {
+                     "name": "Repository",
+                     "value": "${{ github.repository }}",
+                     "inline": true
+                   },
+                   {
+                     "name": "Branch",
+                     "value": "${{ github.ref_name }}",
+                     "inline": true
+                   },
+                   {
+                     "name": "Commit",
+                     "value": "[`${{ github.sha }}`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})",
+                     "inline": true
+                   },
+                   {
+                     "name": "Build Status",
+                     "value": "🏗️ Build: ✅\n🔍 Check: ✅\n🧪 Basic Tests: ✅\n🚀 Extensive Tests: ✅",
+                     "inline": false
+                   }
+                 ],
+                 "footer": {
+                   "text": "Core Model Macros CI"
+                 },
+                 "timestamp": "${{ github.event.head_commit.timestamp }}"
+               }],
+               "components": [{
+                 "type": 1,
+                 "components": [{
+                   "type": 2,
+                   "style": 5,
+                   "label": "View Build",
+                   "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                 }]
+               }]
+             }' \
+             https://discord.com/api/webhooks/1391549647381594152/q30qmcaFaQWf-_yPCP6d-82za6U9-BM9lKjyNgPL4Lp8fTmdtsYzgRpEBoN1qnNBPv8y
+        
+    - name: Send Discord failure notification
+      if: failure()
+      run: |
+        # Determine which step failed
+        FAILED_STEP="Unknown"
+        if [[ "${{ steps.build.outcome }}" == "failure" ]]; then
+          FAILED_STEP="Build (cargo build)"
+        elif [[ "${{ steps.check.outcome }}" == "failure" ]]; then
+          FAILED_STEP="Code checks (just check)"
+        elif [[ "${{ steps.test-basic.outcome }}" == "failure" ]]; then
+          FAILED_STEP="Basic tests (cargo test)"
+        elif [[ "${{ steps.test-extensive.outcome }}" == "failure" ]]; then
+          FAILED_STEP="Extensive tests (just test)"
+        fi
+        
+        curl -H "Content-Type: application/json" \
+             -d '{
+               "embeds": [{
+                 "title": "❌ CI Pipeline Failed",
+                 "description": "Build or tests failed!",
+                 "color": 15158332,
+                 "fields": [
+                   {
+                     "name": "Repository",
+                     "value": "${{ github.repository }}",
+                     "inline": true
+                   },
+                   {
+                     "name": "Branch",
+                     "value": "${{ github.ref_name }}",
+                     "inline": true
+                   },
+                   {
+                     "name": "Commit",
+                     "value": "[`${{ github.sha }}`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})",
+                     "inline": true
+                   },
+                   {
+                     "name": "Failed Step",
+                     "value": "'"$FAILED_STEP"'",
+                     "inline": false
+                   },
+                   {
+                     "name": "Build Status",
+                     "value": "🏗️ Build: ${{ steps.build.outcome == 'success' && '✅' || steps.build.outcome == 'failure' && '❌' || '⏭️' }}\n🔍 Check: ${{ steps.check.outcome == 'success' && '✅' || steps.check.outcome == 'failure' && '❌' || '⏭️' }}\n🧪 Basic Tests: ${{ steps.test-basic.outcome == 'success' && '✅' || steps.test-basic.outcome == 'failure' && '❌' || '⏭️' }}\n🚀 Extensive Tests: ${{ steps.test-extensive.outcome == 'success' && '✅' || steps.test-extensive.outcome == 'failure' && '❌' || '⏭️' }}",
+                     "inline": false
+                   }
+                 ],
+                 "footer": {
+                   "text": "Core Model Macros CI"
+                 },
+                 "timestamp": "${{ github.event.head_commit.timestamp }}"
+               }],
+               "components": [{
+                 "type": 1,
+                 "components": [{
+                   "type": 2,
+                   "style": 4,
+                   "label": "View Failed Build",
+                   "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                 }]
+               }]
+             }' \
+             https://discord.com/api/webhooks/1391549647381594152/q30qmcaFaQWf-_yPCP6d-82za6U9-BM9lKjyNgPL4Lp8fTmdtsYzgRpEBoN1qnNBPv8y 
