@@ -1220,7 +1220,7 @@ fn generate_json_schema_method(_json_schema_fields: &[proc_macro2::TokenStream])
         quote::quote! {
             // JSON schema method not available - jsonschema feature disabled
             // To enable: add "jsonschema" to your features
-            // Example: core_model_macros = { features = ["jsonschema"] }
+            // Example: tixschema = { features = ["jsonschema"] }
         }
     }
 }
@@ -1262,7 +1262,7 @@ fn generate_ts_definition_method(
         quote::quote! {
             // TypeScript definition method not available - typescript feature disabled
             // To enable: add "typescript" to your features
-            // Example: core_model_macros = { features = ["typescript"] }
+            // Example: tixschema = { features = ["typescript"] }
         }
     }
 }
@@ -1307,7 +1307,7 @@ fn generate_zod_schema_method(
         quote::quote! {
             // Zod schema method not available - zod feature disabled
             // To enable: add "zod" to your features
-            // Example: core_model_macros = { features = ["zod"] }
+            // Example: tixschema = { features = ["zod"] }
         }
     }
 }
@@ -1327,7 +1327,7 @@ fn generate_json_docs_part() -> proc_macro2::TokenStream {
         quote::quote! {
             // No JSON schema docs when jsonschema feature is disabled
             // To enable: add both "jsonschema" and "zod" features
-            // Example: core_model_macros = { features = ["jsonschema", "zod"] }
+            // Example: tixschema = { features = ["jsonschema", "zod"] }
         }
     }
 }
@@ -1345,7 +1345,7 @@ fn generate_plain_enum_json_schema_method(_enumerated: &[proc_macro2::TokenStrea
         quote::quote! {
             // JSON schema method not available - jsonschema feature disabled
             // To enable: add "jsonschema" to your features
-            // Example: core_model_macros = { features = ["jsonschema"] }
+            // Example: tixschema = { features = ["jsonschema"] }
         }
     }
 }
@@ -1388,7 +1388,7 @@ fn generate_plain_enum_ts_definition_method(
         quote::quote! {
             // TypeScript definition method not available - typescript feature disabled
             // To enable: add "typescript" to your features
-            // Example: core_model_macros = { features = ["typescript"] }
+            // Example: tixschema = { features = ["typescript"] }
         }
     }
 }
@@ -1426,7 +1426,7 @@ fn generate_plain_enum_zod_schema_method(
         quote::quote! {
             // Zod schema method not available - zod feature disabled
             // To enable: add "zod" to your features
-            // Example: core_model_macros = { features = ["zod"] }
+            // Example: tixschema = { features = ["zod"] }
         }
     }
 }
@@ -1447,7 +1447,7 @@ fn generate_discriminated_enum_json_schema_method(main_schema_code: &proc_macro2
         quote::quote! {
             // JSON schema method not available - jsonschema feature disabled
             // To enable: add "jsonschema" to your features
-            // Example: core_model_macros = { features = ["jsonschema"] }
+            // Example: tixschema = { features = ["jsonschema"] }
         }
     }
 }
@@ -1486,7 +1486,7 @@ fn generate_discriminated_enum_ts_definition_method(
         quote::quote! {
             // TypeScript definition method not available - typescript feature disabled
             // To enable: add "typescript" to your features
-            // Example: core_model_macros = { features = ["typescript"] }
+            // Example: tixschema = { features = ["typescript"] }
         }
     }
 }
@@ -1524,7 +1524,7 @@ fn generate_discriminated_enum_zod_schema_method(
         quote::quote! {
             // Zod schema method not available - zod feature disabled
             // To enable: add "zod" to your features
-            // Example: core_model_macros = { features = ["zod"] }
+            // Example: tixschema = { features = ["zod"] }
         }
     }
 }

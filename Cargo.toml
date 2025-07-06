@@ -1,13 +1,13 @@
 [package]
-name = "core_model_macros"
+name = "tixschema"
 version = "0.1.0"
 edition = "2024"
-description = "Procedural macros for generating TypeScript types and Zod v4 schemas from Rust structs and enums, with MongoDB ObjectId support"
+description = "TixSchema: Procedural macros for generating TypeScript types and Zod v4 schemas from Rust structs and enums, with MongoDB ObjectId support"
 license = "Proprietary"
 readme = "README.md"
 repository = "https://github.com/tixena/tixena"
 categories = ["development-tools::procedural-macros"]
-keywords = ["macros", "proc-macro", "typescript", "zod", "codegen"]
+keywords = ["macros", "proc-macro", "typescript", "zod", "codegen", "tixschema"]
 
 [lib]
 proc-macro = true

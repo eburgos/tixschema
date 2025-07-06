@@ -1,4 +1,4 @@
-# Justfile for core_model_macros
+# Justfile for tixschema
 # Run `just --list` to see all available commands
 
 # Default recipe - runs comprehensive tests

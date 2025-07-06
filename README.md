@@ -1,10 +1,10 @@
-# Core Model Macros
+# TixSchema
 
 A Rust procedural macro library for generating TypeScript type definitions and Zod validation schemas from Rust structs and enums in Tixena applications.
 
 ## Overview
 
-`core_model_macros` provides procedural macros that automatically generate TypeScript types and Zod schemas from your Rust data models. This ensures type safety and consistency between your Rust backend and TypeScript frontend without manual synchronization.
+`tixschema` provides procedural macros that automatically generate TypeScript types and Zod schemas from your Rust data models. This ensures type safety and consistency between your Rust backend and TypeScript frontend without manual synchronization.
 
 ## Features
 
@@ -29,7 +29,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-core_model_macros = <path or crate_id or repo>  # eg: { git = "https://github.com/tixena/core_model_macros.git" }
+tixschema = <path or crate_id or repo>  # eg: { git = "https://github.com/tixena/tixschema.git" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ```
@@ -53,7 +53,7 @@ yarn add zod@^4.0.0
 ### Basic Struct
 
 ```rust
-use core_model_macros::model_schema;
+use tixschema::model_schema;
 use serde::{Deserialize, Serialize};
 
 #[model_schema()]
@@ -182,7 +182,7 @@ pub struct UserWithAddressJson {
 Use `model_schema_prop` for field-specific overrides:
 
 ```rust
-use core_model_macros::{model_schema, model_schema_prop};
+use tixschema::{model_schema, model_schema_prop};
 
 #[model_schema()]
 #[derive(Serialize, Deserialize)]
@@ -199,7 +199,7 @@ pub struct ApiConfigJson {
 The crate provides first-class support for MongoDB ObjectId types with proper serialization and validation:
 
 ```rust
-use core_model_macros::model_schema;
+use tixschema::model_schema;
 use serde::{Deserialize, Serialize};
 use mongodb::bson::oid::ObjectId;
 
@@ -394,7 +394,7 @@ The crate uses optional features to reduce dependencies. If features are disable
 **Solutions:**
 ```toml
 # Option 1: Enable the object_id feature
-core_model_macros = { features = ["object_id"] }
+tixschema = { features = ["object_id"] }
 
 # Option 2: Use full path
 use mongodb::bson::oid::ObjectId;
@@ -419,7 +419,7 @@ warning: ObjectId type detected but 'object_id' feature is not enabled
 
 **Solution:**
 ```toml
-core_model_macros = { features = ["jsonschema"] }
+tixschema = { features = ["jsonschema"] }
 ```
 
 **Alternative:** Check if the method exists at runtime:
@@ -436,7 +436,7 @@ let schema = MyType::json_schema();
 
 **Solution:**
 ```toml
-core_model_macros = { features = ["zod"] }
+tixschema = { features = ["zod"] }
 ```
 
 #### Serde Attributes Ignored
@@ -454,26 +454,26 @@ warning: serde attribute detected but 'serde' feature is not enabled
 
 **Solution:**
 ```toml
-core_model_macros = { features = ["serde"] }
+tixschema = { features = ["serde"] }
 ```
 
 ### Common Feature Combinations
 
 ```toml
 # Minimal (TypeScript only)
-core_model_macros = { default-features = false }
+tixschema = { default-features = false }
 
 # Basic (TypeScript + Zod)
-core_model_macros = { default-features = false, features = ["zod"] }
+tixschema = { default-features = false, features = ["zod"] }
 
 # With serde support
-core_model_macros = { default-features = false, features = ["serde", "zod"] }
+tixschema = { default-features = false, features = ["serde", "zod"] }
 
 # Full features (recommended)
-core_model_macros = { features = ["serde", "zod", "jsonschema", "object_id"] }
+tixschema = { features = ["serde", "zod", "jsonschema", "object_id"] }
 
 # Default (all features enabled)
-core_model_macros = "0.1.0"
+tixschema = "0.1.0"
 ```
 
 ### Compilation Errors
@@ -579,7 +579,7 @@ println!("Generated TypeScript:\n{}", ts_def);
 
 1. **Use Default Features**: Start with all features enabled, disable only when needed
    ```toml
-   core_model_macros = "0.1.0"  # All features enabled
+   tixschema = "0.1.0"  # All features enabled
    ```
 
 2. **Consistent Naming**: Always use `Json` suffix

@@ -29,7 +29,7 @@ use utils::safe_type_name;
 /// ## Usage
 ///
 /// ```rust
-/// use core_model_macros::model_schema;
+/// use tixschema::model_schema;
 /// use serde::{Deserialize, Serialize};
 ///
 /// #[derive(Serialize, Deserialize)]
@@ -65,7 +65,7 @@ use utils::safe_type_name;
 /// ## Enum Support
 ///
 /// ```rust
-/// use core_model_macros::model_schema;
+/// use tixschema::model_schema;
 /// use serde;
 /// use serde::{Deserialize, Serialize};
 ///
@@ -86,7 +86,7 @@ use utils::safe_type_name;
 /// ## Tagged Unions (Discriminated Unions)
 ///
 /// ```rust
-/// use core_model_macros::model_schema;
+/// use tixschema::model_schema;
 /// use serde;
 /// use serde::{Deserialize, Serialize};
 ///
@@ -122,7 +122,7 @@ use utils::safe_type_name;
 ///
 #[cfg_attr(feature = "object_id", doc = r##"
 ```rust
-use core_model_macros::model_schema;
+use tixschema::model_schema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -179,8 +179,8 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 /// ## Usage
 ///
 /// ```rust
-/// use core_model_macros::model_schema;
-/// use core_model_macros::model_schema_prop;
+/// use tixschema::model_schema;
+/// use tixschema::model_schema_prop;
 /// use serde::{Deserialize, Serialize};
 ///
 /// #[model_schema()]
@@ -202,9 +202,9 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 /// ## Example
 ///
 /// ```rust
-/// use core_model_macros::model_schema_prop;
+/// use tixschema::model_schema_prop;
 /// use serde::{Deserialize, Serialize};
-/// use core_model_macros::model_schema;
+/// use tixschema::model_schema;
 ///
 /// #[model_schema()]
 /// #[derive(Serialize, Deserialize)]

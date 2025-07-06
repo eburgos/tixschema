@@ -1,4 +1,4 @@
-# Core Model Macros Usage Rules
+# TixSchema Usage Rules
 
 ## Overview
 This crate provides procedural macros for generating TypeScript types and Zod schemas from Rust structs and enums.
@@ -27,7 +27,7 @@ pub struct User {
 ### 2. Required derives and imports
 ```rust
 // ✅ REQUIRED imports and derives
-use core_model_macros::model_schema;
+use tixschema::model_schema;
 use serde::{Deserialize, Serialize};
 
 #[model_schema()]
@@ -136,7 +136,7 @@ pub struct UserJson {
 ### 9. Field-level customization
 ```rust
 // ✅ Use model_schema_prop for field overrides
-use core_model_macros::{model_schema, model_schema_prop};
+use tixschema::{model_schema, model_schema_prop};
 
 #[model_schema()]
 #[derive(Serialize, Deserialize)]

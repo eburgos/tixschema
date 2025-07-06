@@ -1,4 +1,4 @@
-//! Feature detection and conditional compilation utilities for core_model_macros
+//! Feature detection and conditional compilation utilities for tixschema
 //! 
 //! This module provides compile-time feature detection and utilities for handling
 //! different feature combinations in the macro expansion process.

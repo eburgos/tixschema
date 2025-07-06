@@ -1,4 +1,4 @@
-use core_model_macros::model_schema;
+use tixschema::model_schema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde::de::{self, Visitor, MapAccess};
 use std::collections::HashMap;

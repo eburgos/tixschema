@@ -1,4 +1,4 @@
-use core_model_macros::model_schema;
+use tixschema::model_schema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
