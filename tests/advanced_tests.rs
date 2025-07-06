@@ -165,7 +165,7 @@ mod advanced_tests {
 
         // Check optional fields in nested structures
         assert!(employee_definition.contains("manager: string | undefined;"));
-        assert!(employee_definition.contains("manager: z.string().optional()"));
+        assert!(employee_definition.contains("manager: z.string().or(z.undefined())"));
 
         // Check discriminated union
         assert!(retirement_definition.contains("type: \"option401k\""));
@@ -296,9 +296,9 @@ mod advanced_tests {
         // Check Zod schemas (without Json suffix)
         assert!(ts_definition.contains("tiny_number: z.number().int()"));
         assert!(ts_definition.contains("float_number: z.number()"));
-        assert!(ts_definition.contains("optional_strings: z.array(z.string()).optional()"));
-        assert!(ts_definition.contains("nested_optional: ContactInfo$Schema.optional()"));
-        assert!(ts_definition.contains("optional_nested_array: z.array(ContactInfo$Schema).optional()"));
+        assert!(ts_definition.contains("optional_strings: z.array(z.string()).or(z.undefined())"));
+        assert!(ts_definition.contains("nested_optional: ContactInfo$Schema.or(z.undefined())"));
+        assert!(ts_definition.contains("optional_nested_array: z.array(ContactInfo$Schema).or(z.undefined())"));
     }
 
     // Test discriminated union with complex fields

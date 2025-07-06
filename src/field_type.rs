@@ -144,7 +144,7 @@ impl FieldDef {
         };
 
         if self.is_optional {
-            format!("{pre_result}.optional()")
+            format!("{pre_result}.or(z.undefined())")
         } else {
             pre_result
         }

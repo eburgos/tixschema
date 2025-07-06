@@ -71,8 +71,8 @@ mod tests {
         // Check Zod schema
         assert!(ts_definition.contains("large_unsigned: z.number().int()"));
         assert!(ts_definition.contains("large_signed: z.number().int()"));
-        assert!(ts_definition.contains("optional_large_unsigned: z.number().int().optional()"));
-        assert!(ts_definition.contains("optional_large_signed: z.number().int().optional()"));
+        assert!(ts_definition.contains("optional_large_unsigned: z.number().int().or(z.undefined())"));
+        assert!(ts_definition.contains("optional_large_signed: z.number().int().or(z.undefined())"));
         assert!(ts_definition.contains("array_of_u64: z.array(z.number().int())"));
         assert!(ts_definition.contains("array_of_i64: z.array(z.number().int())"));
     }
@@ -295,9 +295,9 @@ mod tests {
         assert!(ts_definition.contains("float_double: z.number()"));  // No .int() for floats
         
         // Optional Zod schemas
-        assert!(ts_definition.contains("opt_i8: z.number().int().optional()"));
-        assert!(ts_definition.contains("opt_u64: z.number().int().optional()"));
-        assert!(ts_definition.contains("opt_f64: z.number().optional()"));  // No .int() for float
+        assert!(ts_definition.contains("opt_i8: z.number().int().or(z.undefined())"));
+        assert!(ts_definition.contains("opt_u64: z.number().int().or(z.undefined())"));
+        assert!(ts_definition.contains("opt_f64: z.number().or(z.undefined())"));  // No .int() for float
         
         // Array Zod schemas
         assert!(ts_definition.contains("array_i8: z.array(z.number().int())"));

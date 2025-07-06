@@ -9,7 +9,7 @@
 //! - **`enum_tests.rs`** - Plain enums, discriminated unions
 //! - **`serde_tests.rs`** - Serde attribute integration and field renaming
 //! - **`primitive_types_tests.rs`** - All primitive type edge cases and comprehensive testing
-//! - **`edge_cases_tests.rs`** - Bug reproductions, nested structures, complex scenarios
+//! - **`edge_cases_tests.rs`** - Bug reproductions, nested structures, deeply nested HashMap scenarios
 //! - **`advanced_tests.rs`** - Complex scenarios (already exists)
 //!
 //! ## Total Test Coverage:
@@ -40,8 +40,8 @@ mod tests {
         println!("- enum_tests.rs: {} tests", "3");
         println!("- serde_tests.rs: {} tests", "2");
         println!("- primitive_types_tests.rs: {} tests", "6");
-        println!("- edge_cases_tests.rs: {} tests", "6");
+        println!("- edge_cases_tests.rs: {} tests", "7");
         println!("- advanced_tests.rs: {} tests", "9");
-        println!("Total: 38 organized tests");
+        println!("Total: 39 organized tests");
     }
 } 

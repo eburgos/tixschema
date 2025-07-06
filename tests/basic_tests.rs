@@ -117,9 +117,9 @@ mod tests {
         assert!(ts_definition.contains("nickname: string | undefined;"));
         
         // Check Zod schema has optional fields
-        assert!(ts_definition.contains("email: z.string().optional()"));
-        assert!(ts_definition.contains("age: z.number().int().optional()"));
-        assert!(ts_definition.contains("nickname: z.string().optional()"));
+        assert!(ts_definition.contains("email: z.string().or(z.undefined())"));
+        assert!(ts_definition.contains("age: z.number().int().or(z.undefined())"));
+        assert!(ts_definition.contains("nickname: z.string().or(z.undefined())"));
     }
 
     // Test empty struct

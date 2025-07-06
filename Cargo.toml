@@ -2,12 +2,12 @@
 name = "core_model_macros"
 version = "0.1.0"
 edition = "2024"
-description = "Procedural macros for core models in Tixena applications"
+description = "Procedural macros for generating TypeScript types and Zod v4 schemas from Rust structs and enums"
 license = "Proprietary"
 readme = "README.md"
 repository = "https://github.com/tixena/tixena"
 categories = ["development-tools::procedural-macros"]
-keywords = ["macros", "proc-macro", "model", "tixena"]
+keywords = ["macros", "proc-macro", "typescript", "zod", "codegen"]
 
 [lib]
 proc-macro = true

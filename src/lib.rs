@@ -52,7 +52,7 @@ use utils::safe_type_name;
 /// //   id: z.string(),
 /// //   firstName: z.string(),
 /// //   lastName: z.string(),
-/// //   age: z.number().optional(),
+/// //   age: z.number().or(z.undefined()),
 /// //   roles: z.array(z.string()),
 /// // });
 /// ```

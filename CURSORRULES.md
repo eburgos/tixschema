@@ -237,11 +237,50 @@ impl MyEntities {
 }
 ```
 
+## Zod v4 Requirements
+
+**⚠️ IMPORTANT: This crate requires Zod v4 for full functionality.**
+
+### Frontend Dependencies
+```bash
+npm install zod@^4.0.0
+```
+
+### Zod Syntax Changes
+
+The generated schemas use **Zod v4 syntax**:
+
+```typescript
+// ✅ Generated (Zod v4 compatible)
+export const User$Schema = z.strictObject({
+  id: z.string(),
+  name: z.string(),
+  email: z.string().or(z.undefined()),      // Modern v4 syntax
+  age: z.number().int().or(z.undefined()),  // Works with JSON schema generation
+});
+
+// ❌ OLD FORMAT (no longer generated)
+export const User$Schema = z.strictObject({
+  id: z.string(),
+  name: z.string(),
+  email: z.string().optional(),
+  age: z.number().int().optional(),
+}).transform(args => Object.assign(args, {
+  email: args.email,
+  age: args.age
+}));
+```
+
+### Benefits of Zod v4:
+- **JSON Schema Generation**: Can generate JSON schemas from Zod schemas
+- **Cleaner Code**: No transform functions needed
+- **Better Performance**: No runtime transform overhead
+
 ## Generated Output Understanding
 
 1. **Type Name Transformation**: `UserJson` in Rust becomes `User` in TypeScript
 2. **Field Names**: Respect serde rename attributes
-3. **Optional Fields**: `Option<T>` becomes `T | undefined`
+3. **Optional Fields**: `Option<T>` becomes `T | undefined` and `.or(z.undefined())` in Zod
 4. **Arrays**: `Vec<T>` becomes `Array<T>`
 5. **Maps**: `HashMap<String, T>` becomes `Partial<Record<string, T>>`
 6. **Nested Types**: Reference other types without Json suffix

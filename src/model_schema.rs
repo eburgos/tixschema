@@ -1018,23 +1018,10 @@ fn write_field_type_and_schema(type_code: &mut String, schema_code: &mut String,
 }
 
 /// Generates optional fields transformation code for Zod schema.
-fn show_optionals(opts: &[String]) -> String {
-    if opts.is_empty() {
-        String::new()
-    } else {
-        format!(
-            r#".transform(args => Object.assign(args, {{
-  {}
-}}))"#,
-            opts.iter()
-                .map(|v| format!("{v}: args.{v}"))
-                .collect::<Vec<_>>()
-                .join(
-                    r#",
-  "#
-                )
-        )
-    }
+/// In Zod v4, we use .or(z.undefined()) instead of .optional() + .transform()
+fn show_optionals(_opts: &[String]) -> String {
+    // No longer needed in Zod v4 - we use .or(z.undefined()) directly in field definitions
+    String::new()
 }
 
 /// Processes a field and returns its definition.

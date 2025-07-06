@@ -9,9 +9,9 @@ A Rust procedural macro library for generating TypeScript type definitions and Z
 ## Features
 
 - **Automatic TypeScript Generation**: Creates TypeScript type definitions from Rust structs and enums
-- **Zod Schema Generation**: Generates runtime validation schemas for TypeScript
+- **Zod v4 Schema Generation**: Generates modern runtime validation schemas using Zod v4 syntax
+- **JSON Schema Support**: Generates JSON schemas for API documentation and validation (enabled by Zod v4 compatibility)
 - **Serde Integration**: Respects Serde attributes for consistent naming and serialization
-- **JSON Schema Support**: Generates JSON schemas for API documentation and validation
 - **Type Mapping**: Handles complex types including:
   - Nested objects and references
   - Arrays and collections (`Vec<T>` → `Array<T>`)
@@ -30,6 +30,20 @@ core_model_macros = <path or crate_id or repo>  # eg: { git = "https://github.co
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ```
+
+### Frontend Dependencies
+
+**⚠️ Important: This crate requires Zod v4 for full functionality, especially JSON schema generation.**
+
+Install Zod v4 in your TypeScript/JavaScript project:
+
+```bash
+npm install zod@^4.0.0
+# or
+yarn add zod@^4.0.0
+```
+
+**Note**: Zod v3 is not supported. The generated schemas use Zod v4 syntax (`.or(z.undefined())`) which is incompatible with earlier versions.
 
 ## Usage
 
@@ -277,9 +291,57 @@ export const User$Schema: z.Schema<User, z.ZodTypeDef, unknown> = z.strictObject
 
 4. **Array Types**: `Vec<T>` becomes `Array<T>` in TypeScript.
 
-5. **Optional Fields**: `Option<T>` becomes `T | undefined` in TypeScript and `.optional()` in Zod.
+5. **Optional Fields**: `Option<T>` becomes `T | undefined` in TypeScript and `.or(z.undefined())` in Zod (v4 syntax).
 
 6. **Supported Map Keys**: Currently only `HashMap<String, T>` is fully supported.
+
+## Zod v4 Migration & JSON Schema Generation
+
+This library now generates **Zod v4 compatible schemas** using the modern `.or(z.undefined())` syntax for optional fields instead of the older `.optional()` + `.transform()` approach.
+
+### Benefits of Zod v4 Support:
+
+- **🚀 JSON Schema Generation**: Zod v4 can generate JSON schemas directly from the validation schemas
+- **🧹 Cleaner Code**: No complex transform functions needed
+- **⚡ Better Performance**: Eliminates runtime transform overhead
+- **🎯 Type Safety**: Maintains the same `T | undefined` TypeScript semantics
+
+### Optional Field Examples:
+
+**Generated Zod v4 Schema (Current):**
+```typescript
+export const User$Schema = z.strictObject({
+  id: z.string(),
+  name: z.string(),
+  email: z.string().or(z.undefined()),    // ✅ Modern v4 syntax
+  age: z.number().int().or(z.undefined()), // ✅ Works with JSON schema generation
+});
+```
+
+**Old Zod v3 Style (No longer generated):**
+```typescript
+// ❌ This format is no longer generated
+export const User$Schema = z.strictObject({
+  id: z.string(),
+  name: z.string(),
+  email: z.string().optional(),
+  age: z.number().int().optional(),
+}).transform(args => Object.assign(args, {
+  email: args.email,
+  age: args.age
+}));
+```
+
+### Using with Zod v4 JSON Schema Generation:
+
+```typescript
+import { generateSchema } from '@zod-schema/json-schema';
+import { User$Schema } from './types/generated';
+
+// Generate JSON schema for API docs, OpenAPI, etc.
+const jsonSchema = generateSchema(User$Schema);
+console.log(jsonSchema);
+```
 
 ## Testing
 
