@@ -1,0 +1,65 @@
+use core_model_macros::model_schema;
+use serde::{Deserialize, Serialize};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Test struct with serde attributes
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+    #[serde(rename_all = "camelCase")]
+    struct UserWithSerde {
+        user_id: String,
+        first_name: String,
+        last_name: String,
+        #[serde(rename = "emailAddress")]
+        email: String,
+        created_at: String,
+        is_verified: bool,
+    }
+
+    #[test]
+    fn test_serde_attributes_json_schema() {
+        let schema = UserWithSerde::json_schema();
+        
+        let properties = schema["properties"].as_object().unwrap();
+        
+        // Check that field names are converted to camelCase
+        assert!(properties.contains_key("userId"));
+        assert!(properties.contains_key("firstName"));
+        assert!(properties.contains_key("lastName"));
+        assert!(properties.contains_key("emailAddress")); // Custom rename
+        assert!(properties.contains_key("createdAt"));
+        assert!(properties.contains_key("isVerified"));
+        
+        // Check that snake_case names are NOT present
+        assert!(!properties.contains_key("user_id"));
+        assert!(!properties.contains_key("first_name"));
+        assert!(!properties.contains_key("last_name"));
+        assert!(!properties.contains_key("email"));
+        assert!(!properties.contains_key("created_at"));
+        assert!(!properties.contains_key("is_verified"));
+    }
+
+    #[test]
+    fn test_serde_attributes_ts_definition() {
+        let ts_definition = UserWithSerde::ts_definition();
+        
+        // Check that field names are converted in TypeScript
+        assert!(ts_definition.contains("userId: string;"));
+        assert!(ts_definition.contains("firstName: string;"));
+        assert!(ts_definition.contains("lastName: string;"));
+        assert!(ts_definition.contains("emailAddress: string;"));
+        assert!(ts_definition.contains("createdAt: string;"));
+        assert!(ts_definition.contains("isVerified: boolean;"));
+        
+        // Check Zod schema
+        assert!(ts_definition.contains("userId: z.string()"));
+        assert!(ts_definition.contains("firstName: z.string()"));
+        assert!(ts_definition.contains("lastName: z.string()"));
+        assert!(ts_definition.contains("emailAddress: z.string()"));
+        assert!(ts_definition.contains("createdAt: z.string()"));
+        assert!(ts_definition.contains("isVerified: z.boolean()"));
+    }
+} 

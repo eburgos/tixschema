@@ -498,7 +498,9 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
                 }
             }
         }
-        FieldDefType::U32 | FieldDefType::U16 | FieldDefType::U8 => {
+        FieldDefType::U32 | FieldDefType::U16 | FieldDefType::U8 | FieldDefType::U64 
+            | FieldDefType::I8 | FieldDefType::I16 | FieldDefType::I32 | FieldDefType::I64 
+            | FieldDefType::Usize | FieldDefType::Isize => {
             if fld.is_array {
                 quote! {
                     properties.insert(#field_name_str.to_string(), {
@@ -518,7 +520,7 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
                 }
             }
         }
-        FieldDefType::F32 => {
+        FieldDefType::F32 | FieldDefType::F64 => {
             if fld.is_array {
                 quote! {
                     properties.insert(#field_name_str.to_string(), {
@@ -605,19 +607,311 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
             match &key.field_type {
                 FieldDefType::String => match &value.field_type {
                     FieldDefType::String => {
+                        if value.is_array {
+                            quote! {
+                                properties.insert(#field_name_str.to_string(), {
+                                    serde_json::json!({
+                                        "type": "object",
+                                        "additionalProperties": {
+                                            "type": "array",
+                                            "items": { "type": "string" }
+                                        }
+                                    })
+                                });
+                            }
+                        } else {
+                            quote! {
+                                properties.insert(#field_name_str.to_string(), {
+                                    serde_json::json!({
+                                        "type": "object",
+                                        "additionalProperties": {
+                                            "type": "string"
+                                        }
+                                    })
+                                });
+                            }
+                        }
+                    }
+                    FieldDefType::U8 | FieldDefType::U16 | FieldDefType::U32 | FieldDefType::U64 
+                        | FieldDefType::I8 | FieldDefType::I16 | FieldDefType::I32 | FieldDefType::I64 
+                        | FieldDefType::Usize | FieldDefType::Isize => {
+                        if value.is_array {
+                            quote! {
+                                properties.insert(#field_name_str.to_string(), {
+                                    serde_json::json!({
+                                        "type": "object",
+                                        "additionalProperties": {
+                                            "type": "array",
+                                            "items": { "type": "integer" }
+                                        }
+                                    })
+                                });
+                            }
+                        } else {
+                            quote! {
+                                properties.insert(#field_name_str.to_string(), {
+                                    serde_json::json!({
+                                        "type": "object",
+                                        "additionalProperties": {
+                                            "type": "integer"
+                                        }
+                                    })
+                                });
+                            }
+                        }
+                    }
+                    FieldDefType::F32 | FieldDefType::F64 => {
+                        if value.is_array {
+                            quote! {
+                                properties.insert(#field_name_str.to_string(), {
+                                    serde_json::json!({
+                                        "type": "object",
+                                        "additionalProperties": {
+                                            "type": "array",
+                                            "items": { "type": "number" }
+                                        }
+                                    })
+                                });
+                            }
+                        } else {
+                            quote! {
+                                properties.insert(#field_name_str.to_string(), {
+                                    serde_json::json!({
+                                        "type": "object",
+                                        "additionalProperties": {
+                                            "type": "number"
+                                        }
+                                    })
+                                });
+                            }
+                        }
+                    }
+                    FieldDefType::Boolean => {
+                        if value.is_array {
+                            quote! {
+                                properties.insert(#field_name_str.to_string(), {
+                                    serde_json::json!({
+                                        "type": "object",
+                                        "additionalProperties": {
+                                            "type": "array",
+                                            "items": { "type": "boolean" }
+                                        }
+                                    })
+                                });
+                            }
+                        } else {
+                            quote! {
+                                properties.insert(#field_name_str.to_string(), {
+                                    serde_json::json!({
+                                        "type": "object",
+                                        "additionalProperties": {
+                                            "type": "boolean"
+                                        }
+                                    })
+                                });
+                            }
+                        }
+                    }
+                    FieldDefType::Map(inner_key, inner_value) => {
+                        if env::var("RUST_LOG") == Ok(String::from("trace")) {
+                            println!("Map Value is another Map => inner_key: {:?}, inner_value: {:?}, is_array: {}", inner_key, inner_value, value.is_array);
+                        }
+                        
+                        // Handle Vec<HashMap<String, T>> case
+                        if value.is_array && matches!(inner_key.field_type, FieldDefType::String) {
+                            let inner_value_schema = match &inner_value.field_type {
+                                FieldDefType::U8 | FieldDefType::U16 | FieldDefType::U32 | FieldDefType::U64 
+                                    | FieldDefType::I8 | FieldDefType::I16 | FieldDefType::I32 | FieldDefType::I64 
+                                    | FieldDefType::Usize | FieldDefType::Isize => {
+                                    quote! { { "type": "integer" } }
+                                }
+                                FieldDefType::F32 | FieldDefType::F64 => {
+                                    quote! { { "type": "number" } }
+                                }
+                                FieldDefType::String => {
+                                    quote! { { "type": "string" } }
+                                }
+                                FieldDefType::Boolean => {
+                                    quote! { { "type": "boolean" } }
+                                }
+                                _ => {
+                                    quote! { true }
+                                }
+                            };
+                            
+                            quote! {
+                                properties.insert(#field_name_str.to_string(), {
+                                    serde_json::json!({
+                                        "type": "object",
+                                        "additionalProperties": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "object",
+                                                "additionalProperties": #inner_value_schema
+                                            }
+                                        }
+                                    })
+                                });
+                            }
+                        } else {
+                            // Fallback for non-array Maps or complex cases
+                            quote! {
+                                properties.insert(#field_name_str.to_string(), {
+                                    serde_json::json!({
+                                        "type": "object",
+                                        "additionalProperties": true
+                                    })
+                                });
+                            }
+                        }
+                    }
+                    FieldDefType::SiblingType(value_type_name, value_args) => {
+                        if env::var("RUST_LOG") == Ok(String::from("trace")) {
+                            println!("Map Value SiblingType => value_type_name: {value_type_name}, value_args: {value_args:?}");
+                        }
+                        
+                        // Handle Vec<T> as map value
+                        if value_type_name == "Vec" && value_args.len() == 1 {
+                            let inner_type = &value_args[0];
+                            match &inner_type.field_type {
+                                // Vec<HashMap<String, T>>
+                                FieldDefType::Map(inner_key, inner_value) => {
+                                    match &inner_key.field_type {
+                                        FieldDefType::String => {
+                                            let inner_value_schema = match &inner_value.field_type {
+                                                FieldDefType::U8 | FieldDefType::U16 | FieldDefType::U32 | FieldDefType::U64 
+                                                    | FieldDefType::I8 | FieldDefType::I16 | FieldDefType::I32 | FieldDefType::I64 
+                                                    | FieldDefType::Usize | FieldDefType::Isize => {
+                                                    quote! { { "type": "integer" } }
+                                                }
+                                                FieldDefType::F32 | FieldDefType::F64 => {
+                                                    quote! { { "type": "number" } }
+                                                }
+                                                FieldDefType::String => {
+                                                    quote! { { "type": "string" } }
+                                                }
+                                                FieldDefType::Boolean => {
+                                                    quote! { { "type": "boolean" } }
+                                                }
+                                                _ => {
+                                                    quote! { true }
+                                                }
+                                            };
+                                            
+                                            quote! {
+                                                properties.insert(#field_name_str.to_string(), {
+                                                    serde_json::json!({
+                                                        "type": "object",
+                                                        "additionalProperties": {
+                                                            "type": "array",
+                                                            "items": {
+                                                                "type": "object",
+                                                                "additionalProperties": #inner_value_schema
+                                                            }
+                                                        }
+                                                    })
+                                                });
+                                            }
+                                        }
+                                        _ => {
+                                            quote! {
+                                                properties.insert(#field_name_str.to_string(), {
+                                                    serde_json::json!({
+                                                        "type": "object",
+                                                        "additionalProperties": true
+                                                    })
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                                // Vec<primitive>
+                                FieldDefType::U8 | FieldDefType::U16 | FieldDefType::U32 | FieldDefType::U64 
+                                    | FieldDefType::I8 | FieldDefType::I16 | FieldDefType::I32 | FieldDefType::I64 
+                                    | FieldDefType::Usize | FieldDefType::Isize => {
+                                    quote! {
+                                        properties.insert(#field_name_str.to_string(), {
+                                            serde_json::json!({
+                                                "type": "object",
+                                                "additionalProperties": {
+                                                    "type": "array",
+                                                    "items": { "type": "integer" }
+                                                }
+                                            })
+                                        });
+                                    }
+                                }
+                                FieldDefType::F32 | FieldDefType::F64 => {
+                                    quote! {
+                                        properties.insert(#field_name_str.to_string(), {
+                                            serde_json::json!({
+                                                "type": "object",
+                                                "additionalProperties": {
+                                                    "type": "array",
+                                                    "items": { "type": "number" }
+                                                }
+                                            })
+                                        });
+                                    }
+                                }
+                                FieldDefType::String => {
+                                    quote! {
+                                        properties.insert(#field_name_str.to_string(), {
+                                            serde_json::json!({
+                                                "type": "object",
+                                                "additionalProperties": {
+                                                    "type": "array",
+                                                    "items": { "type": "string" }
+                                                }
+                                            })
+                                        });
+                                    }
+                                }
+                                FieldDefType::Boolean => {
+                                    quote! {
+                                        properties.insert(#field_name_str.to_string(), {
+                                            serde_json::json!({
+                                                "type": "object",
+                                                "additionalProperties": {
+                                                    "type": "array",
+                                                    "items": { "type": "boolean" }
+                                                }
+                                            })
+                                        });
+                                    }
+                                }
+                                _ => {
+                                    quote! {
+                                        properties.insert(#field_name_str.to_string(), {
+                                            serde_json::json!({
+                                                "type": "object",
+                                                "additionalProperties": true
+                                            })
+                                        });
+                                    }
+                                }
+                            }
+                        } else {
+                            // Other SiblingType cases - fallback to generic
+                            quote! {
+                                properties.insert(#field_name_str.to_string(), {
+                                    serde_json::json!({
+                                        "type": "object",
+                                        "additionalProperties": true
+                                    })
+                                });
+                            }
+                        }
+                    }
+                    _ => {
                         quote! {
                             properties.insert(#field_name_str.to_string(), {
                                 serde_json::json!({
                                     "type": "object",
-                                    "additionalProperties": {
-                                        "type": "string"
-                                    }
+                                    "additionalProperties": true
                                 })
                             });
                         }
-                    }
-                    _ => {
-                        panic!("Unsupported map key type: {:?}", value.field_type);
                     }
                 },
                 FieldDefType::SiblingType(key_type_name, lst) if lst.is_empty() => {
@@ -673,7 +967,6 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
                             })
                         });
                     }
-                    // panic!("Unsupported map key type: {:?}", key.field_type);
                 }
             }
         }

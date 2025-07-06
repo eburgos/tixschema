@@ -16,7 +16,15 @@ pub(crate) enum FieldDefType {
     U8,
     U16,
     U32,
+    U64,
+    I8,
+    I16,
+    I32,
+    I64,
+    Usize,
+    Isize,
     F32,
+    F64,
 }
 
 #[derive(Clone, Debug)]
@@ -75,8 +83,10 @@ impl FieldDef {
             }
             FieldDefType::Boolean => "boolean".to_string(),
             FieldDefType::String => "string".to_string(),
-            FieldDefType::U8 | FieldDefType::U16 | FieldDefType::U32 => "number".to_string(),
-            FieldDefType::F32 => "number".to_string(),
+            FieldDefType::U8 | FieldDefType::U16 | FieldDefType::U32 | FieldDefType::U64 
+                | FieldDefType::I8 | FieldDefType::I16 | FieldDefType::I32 | FieldDefType::I64 
+                | FieldDefType::Usize | FieldDefType::Isize => "number".to_string(),
+            FieldDefType::F32 | FieldDefType::F64 => "number".to_string(),
         };
         let pre_result = if self.is_array {
             format!("Array<{result}>")
@@ -120,10 +130,12 @@ impl FieldDef {
             }
             FieldDefType::Boolean => "z.boolean()".to_string(),
             FieldDefType::String => "z.string()".to_string(),
-            FieldDefType::U8 | FieldDefType::U16 | FieldDefType::U32 => {
+            FieldDefType::U8 | FieldDefType::U16 | FieldDefType::U32 | FieldDefType::U64 
+                | FieldDefType::I8 | FieldDefType::I16 | FieldDefType::I32 | FieldDefType::I64 
+                | FieldDefType::Usize | FieldDefType::Isize => {
                 "z.number().int()".to_string()
             }
-            FieldDefType::F32 => "z.number()".to_string(),
+            FieldDefType::F32 | FieldDefType::F64 => "z.number()".to_string(),
         };
         let pre_result = if self.is_array {
             format!("z.array({result})")
@@ -187,6 +199,10 @@ pub(crate) fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef
                             result.is_array = true;
                             result
                         } else if arg_types.len() == 2 && &ident == "HashMap" {
+                            // Debug print to see what's happening
+                            if std::env::var("RUST_LOG") == Ok(String::from("trace")) {
+                                println!("Creating HashMap Map type - key: {:?}, value: {:?}", arg_types[0], arg_types[1]);
+                            }
                             FieldDef {
                                 is_array: false,
                                 is_optional: false,
@@ -199,6 +215,10 @@ pub(crate) fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef
                                 docs: field_docs.to_string(),
                             }
                         } else {
+                            // Debug print to see what's happening with SiblingType
+                            if std::env::var("RUST_LOG") == Ok(String::from("trace")) {
+                                println!("Creating SiblingType - name: {}, arg_types: {:?}", ident, arg_types);
+                            }
                             FieldDef {
                                 is_optional: false,
                                 name: safe_name,
@@ -275,7 +295,15 @@ fn get_field_def_type_or_sibling(t_name: &str) -> FieldDefType {
         "u8" => FieldDefType::U8,
         "u16" => FieldDefType::U16,
         "u32" => FieldDefType::U32,
+        "u64" => FieldDefType::U64,
+        "i8" => FieldDefType::I8,
+        "i16" => FieldDefType::I16,
+        "i32" => FieldDefType::I32,
+        "i64" => FieldDefType::I64,
+        "usize" => FieldDefType::Usize,
+        "isize" => FieldDefType::Isize,
         "f32" => FieldDefType::F32,
+        "f64" => FieldDefType::F64,
         type_name_json if type_name_json.ends_with("Json") => {
             FieldDefType::SiblingType(safe_type_name(type_name_json), vec![])
         }
