@@ -3,6 +3,7 @@
 //! This module handles JSON schema generation when the "jsonschema" feature is enabled.
 
 /// Check if we should generate JSON schema methods
+#[cfg(test)]
 pub fn should_generate_json_schema() -> bool {
     true // Always true when this module is compiled (feature is enabled)
 }
@@ -46,31 +47,6 @@ pub fn generate_plain_enum_json_schema_method() -> proc_macro2::TokenStream {
     }
 }
 
-/// Generates the JSON schema method implementation for discriminated enums
-pub fn generate_discriminated_enum_json_schema_method(
-    json_schema_variants: &[proc_macro2::TokenStream],
-) -> proc_macro2::TokenStream {
-    quote::quote! {
-        pub fn json_schema() -> serde_json::Value {
-            let mut schema_obj = serde_json::Map::new();
-            schema_obj.insert("type".to_string(), serde_json::Value::String("object".to_string()));
-            schema_obj.insert("oneOf".to_string(), {
-                let result: Vec<serde_json::Value> = vec![
-                    #(#json_schema_variants), *
-                ];
-
-                serde_json::Value::Array(result)
-            });
-
-            serde_json::Value::Object(schema_obj)
-        }
-    }
-}
-
-/// Generates JSON schema documentation for TypeScript comments
-pub fn generate_json_schema_docs() -> String {
-    r#"let prettified = serde_json::to_string_pretty(&Self::json_schema()).unwrap().lines().map(|l| format!(" * {l}")).collect::<Vec<_>>().join("\n");"#.to_string()
-}
 
 #[cfg(test)]
 mod tests {

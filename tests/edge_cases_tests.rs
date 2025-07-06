@@ -26,6 +26,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jsonschema")]
     fn test_nested_struct_json_schema() {
         let user_schema = UserWithAddressJson::json_schema();
         let address_schema = AddressJson::json_schema();
@@ -48,6 +49,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "typescript", feature = "zod"))]
     fn test_nested_struct_ts_definition() {
         let user_definition = UserWithAddressJson::ts_definition();
         let address_definition = AddressJson::ts_definition();
@@ -86,6 +88,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jsonschema")]
     fn test_original_bug_reproduction_json_schema() {
         let schema = OriginalBugReproductionJson::json_schema();
         
@@ -111,6 +114,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "typescript", feature = "zod"))]
     fn test_original_bug_reproduction_typescript() {
         let ts_definition = OriginalBugReproductionJson::ts_definition();
         
@@ -150,6 +154,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jsonschema")]
     fn test_complex_nested_maps_json_schema() {
         let schema = SimpleComplexTestJson::json_schema();
         let properties = schema["properties"].as_object().unwrap();
@@ -168,7 +173,8 @@ mod tests {
         assert_eq!(inner_additional_props["type"], "integer");
     }
 
-    #[test]  
+    #[test]
+    #[cfg(all(feature = "typescript", feature = "zod"))]
     fn test_complex_nested_maps_typescript() {
         let ts_definition = SimpleComplexTestJson::ts_definition();
         
@@ -181,6 +187,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "jsonschema", feature = "typescript"))]
     fn test_quadruple_nested_maps_compilation() {
         // If this compiles without panic, it's a huge success!
         let schema = ReallyComplexTestJson::json_schema();
@@ -198,6 +205,4 @@ mod tests {
         assert!(ts_definition.contains("quadruple_nested"));
         assert!(ts_definition.contains("optional_nested"));
     }
-
-
 } 

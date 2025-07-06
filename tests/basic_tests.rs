@@ -18,6 +18,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jsonschema")]
     fn test_basic_struct_json_schema() {
         let schema = BasicUser::json_schema();
         
@@ -51,6 +52,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "typescript")]
     fn test_basic_struct_ts_definition() {
         let ts_definition = BasicUser::ts_definition();
         
@@ -71,6 +73,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "zod")]
     fn test_basic_struct_zod_schema() {
         let zod_schema = BasicUser::zod_schema();
         
@@ -101,6 +104,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jsonschema")]
     fn test_optional_fields_json_schema() {
         let schema = UserWithOptionals::json_schema();
         
@@ -123,6 +127,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "typescript")]
     fn test_optional_fields_ts_definition() {
         let ts_definition = UserWithOptionals::ts_definition();
         
@@ -139,6 +144,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "zod")]
     fn test_optional_fields_zod_schema() {
         let zod_schema = UserWithOptionals::zod_schema();
         
@@ -158,6 +164,7 @@ mod tests {
     struct EmptyStruct {}
 
     #[test]
+    #[cfg(feature = "jsonschema")]
     fn test_empty_struct_json_schema() {
         let schema = EmptyStruct::json_schema();
         
@@ -172,6 +179,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "typescript")]
     fn test_empty_struct_ts_definition() {
         let ts_definition = EmptyStruct::ts_definition();
         

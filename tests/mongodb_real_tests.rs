@@ -2,7 +2,7 @@
 // These tests use the actual mongodb library to ensure our macro works
 // correctly with real MongoDB ObjectIds
 
-#[cfg(test)]
+#[cfg(all(test, feature = "object_id"))]
 mod tests {
     use core_model_macros::model_schema;
     use serde::{Deserialize, Serialize};
@@ -34,6 +34,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "object_id", feature = "typescript", feature = "zod"))]
     fn test_real_objectid_basic_types() {
         let ts_definition = RealUserJson::ts_definition();
         
@@ -50,6 +51,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "object_id", feature = "jsonschema"))]
     fn test_real_objectid_json_schema() {
         let schema = RealUserJson::json_schema();
         let properties = schema["properties"].as_object().unwrap();
@@ -91,6 +93,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "object_id", feature = "typescript", feature = "zod"))]
     fn test_real_objectid_complex_structures() {
         let ts_definition = RealDocumentJson::ts_definition();
         
@@ -171,6 +174,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "object_id", feature = "jsonschema"))]
     fn test_real_objectid_json_schema_structure() {
         let schema = RealDocumentJson::json_schema();
         let properties = schema["properties"].as_object().unwrap();
@@ -219,6 +223,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "object_id", feature = "jsonschema", feature = "typescript"))]
     fn test_real_objectid_compilation_smoke_test() {
         // This test ensures all ObjectId types compile without panics with real MongoDB ObjectIds
         let _user_schema = RealUserJson::json_schema();

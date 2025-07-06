@@ -109,6 +109,7 @@ mod advanced_tests {
     }
 
     #[test]
+    #[cfg(feature = "jsonschema")]
     fn test_complex_nested_json_schema() {
         let company_schema = CompanyJson::json_schema();
         let employee_schema = EmployeeJson::json_schema();
@@ -146,6 +147,7 @@ mod advanced_tests {
     }
 
     #[test]
+    #[cfg(all(feature = "typescript", feature = "serde", feature = "zod"))]
     fn test_complex_nested_ts_definition() {
         let company_definition = CompanyJson::ts_definition();
         let employee_definition = EmployeeJson::ts_definition();
@@ -237,6 +239,7 @@ mod advanced_tests {
     }
 
     #[test]
+    #[cfg(feature = "jsonschema")]
     fn test_edge_cases_json_schema() {
         let schema = EdgeCasesJson::json_schema();
         let properties = schema["properties"].as_object().unwrap();
@@ -270,6 +273,7 @@ mod advanced_tests {
     }
 
     #[test]
+    #[cfg(all(feature = "typescript", feature = "zod"))]
     fn test_edge_cases_ts_definition() {
         let ts_definition = EdgeCasesJson::ts_definition();
 
@@ -299,9 +303,17 @@ mod advanced_tests {
         // Check Zod schemas (without Json suffix) - now in separate method
         let zod_schema = EdgeCasesJson::zod_schema();
         assert!(zod_schema.contains("tiny_number: z.number().int()"));
+        assert!(zod_schema.contains("small_number: z.number().int()"));
+        assert!(zod_schema.contains("medium_number: z.number().int()"));
         assert!(zod_schema.contains("float_number: z.number()"));
+        assert!(zod_schema.contains("strings: z.array(z.string())"));
+        assert!(zod_schema.contains("numbers: z.array(z.number().int())"));
+        assert!(zod_schema.contains("booleans: z.array(z.boolean())"));
         assert!(zod_schema.contains("optional_strings: z.array(z.string()).or(z.undefined())"));
+        assert!(zod_schema.contains("optional_numbers: z.array(z.number().int()).or(z.undefined())"));
+        assert!(zod_schema.contains("string_map: z.record(z.string(), z.string())"));
         assert!(zod_schema.contains("nested_optional: ContactInfo$Schema.or(z.undefined())"));
+        assert!(zod_schema.contains("nested_array: z.array(ContactInfo$Schema)"));
         assert!(zod_schema.contains("optional_nested_array: z.array(ContactInfo$Schema).or(z.undefined())"));
     }
 
@@ -343,6 +355,7 @@ mod advanced_tests {
     }
 
     #[test]
+    #[cfg(all(feature = "jsonschema", feature = "typescript", feature = "serde", feature = "zod"))]
     fn test_complex_discriminated_union() {
         let schema = ComplexEventJson::json_schema();
         let ts_definition = ComplexEventJson::ts_definition();
@@ -402,6 +415,7 @@ mod advanced_tests {
     }
 
     #[test]
+    #[cfg(all(feature = "jsonschema", feature = "typescript"))]
     fn test_documented_struct() {
         let schema = DocumentedUserJson::json_schema();
         let ts_definition = DocumentedUserJson::ts_definition();
@@ -427,6 +441,7 @@ mod advanced_tests {
 
     // Test validation of generated JSON schemas
     #[test]
+    #[cfg(feature = "jsonschema")]
     fn test_json_schema_validation() {
         let schemas = vec![
             ("CompanyJson", CompanyJson::json_schema()),

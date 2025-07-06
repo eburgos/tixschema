@@ -240,7 +240,7 @@ pub(crate) fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef
                         } else {
                             // Debug print to see what's happening with SiblingType
                             if std::env::var("RUST_LOG") == Ok(String::from("trace")) {
-                                println!("Creating SiblingType - name: {}, arg_types: {:?}", ident, arg_types);
+                                println!("Creating SiblingType - name: {ident}, arg_types: {arg_types:?}");
                             }
                             FieldDef {
                                 is_optional: false,

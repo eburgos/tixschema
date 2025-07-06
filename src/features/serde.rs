@@ -86,6 +86,7 @@ pub fn parse_serde_field_attributes(attrs: &[Attribute]) -> SerdeFieldMeta {
 }
 
 /// Applies serde rename_all transformation to a field name
+#[cfg(test)]
 pub fn apply_rename_all(field_name: &str, rename_all: &Option<String>) -> String {
     match rename_all.as_deref() {
         Some("camelCase") => to_camel_case(field_name),
@@ -100,6 +101,7 @@ pub fn apply_rename_all(field_name: &str, rename_all: &Option<String>) -> String
 }
 
 /// Get the final field name after applying serde transformations
+#[cfg(test)]
 pub fn get_final_field_name(
     original_name: String,
     field_meta: &SerdeFieldMeta,
@@ -115,6 +117,7 @@ pub fn get_final_field_name(
 }
 
 /// Convert snake_case to camelCase
+#[cfg(test)]
 fn to_camel_case(s: &str) -> String {
     let mut result = String::new();
     let mut capitalize_next = false;
@@ -135,6 +138,7 @@ fn to_camel_case(s: &str) -> String {
 }
 
 /// Convert snake_case to PascalCase
+#[cfg(test)]
 fn to_pascal_case(s: &str) -> String {
     let camel = to_camel_case(s);
     if let Some(first_char) = camel.chars().next() {
@@ -145,6 +149,7 @@ fn to_pascal_case(s: &str) -> String {
 }
 
 /// Convert snake_case to kebab-case
+#[cfg(test)]
 fn to_kebab_case(s: &str) -> String {
     s.replace('_', "-")
 }

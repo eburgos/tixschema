@@ -34,12 +34,3 @@ zod = []            # Zod schema generation alongside TypeScript types
 jsonschema = []     # JSON schema generation methods
 object_id = []      # MongoDB ObjectId type support
 typescript = []     # TypeScript type generation and TypeScript-style Zod schemas
-
-# Feature combinations for testing
-minimal = []                           # No features - basic functionality only
-basic = ["zod"]                       # Zod schemas only (JavaScript)
-typescript_only = ["typescript"]      # TypeScript types only
-typescript_zod = ["typescript", "zod"] # TypeScript + Zod schemas with TypeScript types
-advanced = ["serde", "zod"]           # Serde + Zod without TypeScript
-mongodb = ["serde", "zod", "object_id"] # MongoDB support without TypeScript
-full_typescript = ["serde", "zod", "jsonschema", "object_id", "typescript"] # Full TypeScript support

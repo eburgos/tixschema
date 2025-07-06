@@ -21,6 +21,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jsonschema")]
     fn test_64bit_integers_json_schema() {
         let schema = LargeNumbersJson::json_schema();
         
@@ -57,6 +58,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "typescript", feature = "zod"))]
     fn test_64bit_integers_ts_definition() {
         let ts_definition = LargeNumbersJson::ts_definition();
         
@@ -95,6 +97,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jsonschema")]
     fn test_mixed_integers_json_schema() {
         let schema = MixedIntegersJson::json_schema();
         
@@ -114,6 +117,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "typescript", feature = "zod"))]
     fn test_mixed_integers_ts_definition() {
         let ts_definition = MixedIntegersJson::ts_definition();
         
@@ -188,6 +192,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jsonschema")]
     fn test_primitive_types_json_schema_details() {
         let schema = PrimitiveTypesShowcaseJson::json_schema();
         
@@ -246,6 +251,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "typescript", feature = "zod"))]
     fn test_primitive_types_typescript_generation_details() {
         let ts_definition = PrimitiveTypesShowcaseJson::ts_definition();
         
@@ -288,7 +294,7 @@ mod tests {
         assert!(ts_definition.contains("map_to_u64_array: Partial<Record<string, Array<number>>>;"));
         assert!(ts_definition.contains("map_to_f64_array: Partial<Record<string, Array<number>>>;"));
         
-        // Zod schemas - integers use .int(), floats don't - now in separate method
+        // Check Zod schema - now in separate method
         let zod_schema = PrimitiveTypesShowcaseJson::zod_schema();
         assert!(zod_schema.contains("tiny_signed: z.number().int()"));
         assert!(zod_schema.contains("tiny_unsigned: z.number().int()"));

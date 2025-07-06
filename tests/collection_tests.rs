@@ -17,6 +17,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jsonschema")]
     fn test_collections_json_schema() {
         let schema = UserWithCollections::json_schema();
         
@@ -35,6 +36,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "typescript", feature = "zod"))]
     fn test_collections_ts_definition() {
         let ts_definition = UserWithCollections::ts_definition();
         
@@ -75,6 +77,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jsonschema")]
     fn test_comprehensive_hashmap_json_schema() {
         let schema = ComprehensiveHashMapTestJson::json_schema();
         
@@ -119,6 +122,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "typescript", feature = "zod"))]
     fn test_comprehensive_hashmap_typescript_generation() {
         let ts_definition = ComprehensiveHashMapTestJson::ts_definition();
         
@@ -163,6 +167,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jsonschema")]
     fn test_hashmap_with_64bit_json_schema() {
         let schema = HashMapWith64BitJson::json_schema();
         
@@ -183,6 +188,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "typescript", feature = "zod"))]
     fn test_hashmap_with_64bit_ts_definition() {
         let ts_definition = HashMapWith64BitJson::ts_definition();
         

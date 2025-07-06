@@ -18,6 +18,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "jsonschema", feature = "serde"))]
     fn test_plain_enum_json_schema() {
         let schema = UserStatus::json_schema();
         
@@ -32,7 +33,8 @@ mod tests {
     }
 
     #[test]
-    fn test_plain_enum_ts_definition() {
+    #[cfg(all(feature = "typescript", feature = "serde", feature = "zod"))]
+    fn test_plain_enum_ts_definition_serde_style() {
         let ts_definition = UserStatus::ts_definition();
         
         // Check TypeScript union type
@@ -46,6 +48,22 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "typescript", not(feature = "serde"), feature = "zod"))]
+    fn test_plain_enum_ts_definition_not_serde_style() {
+        let ts_definition = UserStatus::ts_definition();
+        
+        // Check TypeScript union type
+        assert!(ts_definition.contains("export type UserStatus = "));
+        assert!(ts_definition.contains("\"Active\" | \"Inactive\" | \"Pending\" | \"Suspended\""));
+        
+        // Check Zod schema - now in separate method
+        let zod_schema = UserStatus::zod_schema();
+        assert!(zod_schema.contains("export const UserStatus$Schema"));
+        assert!(zod_schema.contains("z.enum([\"Active\", \"Inactive\", \"Pending\", \"Suspended\"])"));
+    }
+
+    #[test]
+    #[cfg(all(any(feature = "typescript", feature = "zod", feature = "jsonschema"), feature = "serde"))]
     fn test_plain_enum_members() {
         let members = UserStatus::enum_members();
         assert_eq!(members.len(), 4);
@@ -75,6 +93,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jsonschema")]
     fn test_discriminated_union_json_schema() {
         let schema = PaymentMethod::json_schema();
         
@@ -94,6 +113,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "typescript", feature = "serde", feature = "zod"))]
     fn test_discriminated_union_ts_definition() {
         let ts_definition = PaymentMethod::ts_definition();
         

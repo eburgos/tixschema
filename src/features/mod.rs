@@ -16,8 +16,10 @@ pub mod jsonschema;
 pub mod object_id;
 
 /// Feature detection utilities
+#[cfg(test)]
 pub struct Features;
 
+#[cfg(test)]
 impl Features {
     /// Check if serde feature is enabled
     pub const fn has_serde() -> bool {

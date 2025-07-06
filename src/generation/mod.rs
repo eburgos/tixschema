@@ -4,11 +4,15 @@
 
 pub mod typescript;
 
+#[cfg(test)]
 use crate::field_type::FieldDef;
 
+
 /// Common utilities for code generation
+#[cfg(test)]
 pub struct GenerationUtils;
 
+#[cfg(test)]
 impl GenerationUtils {
     /// Formats documentation for TypeScript comments
     pub fn format_docs(docs: &str) -> String {
@@ -32,11 +36,11 @@ impl GenerationUtils {
         )
     }
 
-    /// Formats a field for Zod schema definition
-    #[cfg(feature = "zod")]
-    pub fn format_zod_field(fld: &FieldDef) -> String {
-        format!("  {}: {},", fld.name, fld.zod_type())
-    }
+    // /// Formats a field for Zod schema definition
+    // #[cfg(feature = "zod")]
+    // pub fn format_zod_field(fld: &FieldDef) -> String {
+    //     format!("  {}: {},", fld.name, fld.zod_type())
+    // }
 
     /// Generates safe type name by removing Json suffix for TypeScript
     pub fn safe_typescript_name(rust_name: &str) -> String {

@@ -53,7 +53,7 @@ use utils::safe_type_name;
 /// //   roles: Array<string>,
 /// // };
 /// //
-/// // export const User$Schema: z.Schema<User, z.ZodTypeDef, unknown> = z.strictObject({
+/// // export const User$Schema: z.ZodType<User, z.ZodTypeDef, unknown> = z.strictObject({
 /// //   id: z.string(),
 /// //   firstName: z.string(),
 /// //   lastName: z.string(),
@@ -80,7 +80,7 @@ use utils::safe_type_name;
 ///
 /// // Generates:
 /// // export type Status = "active" | "pending" | "inactive";
-/// // export const Status$Schema: z.Schema<Status> = z.enum(["active", "pending", "inactive"]);
+/// // export const Status$Schema: z.ZodType<Status> = z.enum(["active", "pending", "inactive"]);
 /// ```
 ///
 /// ## Tagged Unions (Discriminated Unions)
@@ -118,44 +118,50 @@ use utils::safe_type_name;
 ///
 /// ## MongoDB ObjectId Support
 ///
-/// The macro provides first-class support for MongoDB ObjectId types:
+/// When the `object_id` feature is enabled, the macro provides first-class support for MongoDB ObjectId types:
 ///
-/// ```rust
-/// use core_model_macros::model_schema;
-/// use serde::{Deserialize, Serialize};
-/// use mongodb::bson::oid::ObjectId;
-/// use std::collections::HashMap;
+#[cfg_attr(feature = "object_id", doc = r##"
+```rust
+use core_model_macros::model_schema;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+// Dummy ObjectId for doctest (in real usage, use mongodb::bson::oid::ObjectId)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct ObjectId(String);
+
+#[derive(Serialize, Deserialize)]
+#[model_schema()]
+pub struct Document {
+    pub id: ObjectId,
+    pub title: String,
+    pub author_id: ObjectId,
+    pub tags: Vec<ObjectId>,
+    pub metadata: HashMap<String, ObjectId>,
+    pub parent_id: Option<ObjectId>,
+}
+
+// Generates:
+// export type Document = {
+//   id: ObjectId;
+//   title: string;
+//   author_id: ObjectId;
+//   tags: Array<ObjectId>;
+//   metadata: Partial<Record<string, ObjectId>>;
+//   parent_id: ObjectId | undefined;
+// };
+//
+// export const Document$Schema = z.strictObject({
+//   id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }),
+//   title: z.string(),
+//   author_id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }),
+//   tags: z.array(z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) })),
+//   metadata: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) })),
+//   parent_id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }).or(z.undefined()),
+// });
+```
+"##)]
 ///
-/// #[derive(Serialize, Deserialize)]
-/// #[model_schema()]
-/// pub struct Document {
-///     pub id: ObjectId,
-///     pub title: String,
-///     pub author_id: ObjectId,
-///     pub tags: Vec<ObjectId>,
-///     pub metadata: HashMap<String, ObjectId>,
-///     pub parent_id: Option<ObjectId>,
-/// }
-///
-/// // Generates:
-/// // export type Document = {
-/// //   id: ObjectId;
-/// //   title: string;
-/// //   author_id: ObjectId;
-/// //   tags: Array<ObjectId>;
-/// //   metadata: Partial<Record<string, ObjectId>>;
-/// //   parent_id: ObjectId | undefined;
-/// // };
-/// //
-/// // export const Document$Schema = z.strictObject({
-/// //   id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }),
-/// //   title: z.string(),
-/// //   author_id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }),
-/// //   tags: z.array(z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) })),
-/// //   metadata: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) })),
-/// //   parent_id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }).or(z.undefined()),
-/// // });
-/// ```
 ///
 /// ObjectId fields are serialized using MongoDB's standard format: `{ "$oid": "hex_string" }`
 /// and include proper validation for 24-character hexadecimal ObjectId strings.

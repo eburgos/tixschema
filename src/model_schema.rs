@@ -1282,7 +1282,7 @@ fn generate_zod_schema_method(
         {
             quote::quote! {
                 pub fn zod_schema() -> String {
-                    format!(r#"export const {}$Schema: z.Schema<{}, z.ZodTypeDef, unknown> = z.strictObject({{
+                    format!(r#"export const {}$Schema: z.ZodType<{}, z.ZodTypeDef, unknown> = z.strictObject({{
 {}
 }}){};"#, #item_name, #item_name, #schema_code, #show_opts)
                 }
@@ -1405,7 +1405,7 @@ fn generate_plain_enum_zod_schema_method(
         {
             quote::quote! {
                 pub fn zod_schema() -> String {
-                    format!(r#"export const {}$Schema: z.Schema<{}> = z.enum([{}]);"#, #item_name, #item_name, #schema_code)
+                    format!(r#"export const {}$Schema: z.ZodType<{}> = z.enum([{}]);"#, #item_name, #item_name, #schema_code)
                 }
             }
         }
@@ -1503,7 +1503,7 @@ fn generate_discriminated_enum_zod_schema_method(
         {
             quote::quote! {
                 pub fn zod_schema() -> String {
-                    format!(r#"export const {}$Schema: z.Schema<{}, z.ZodTypeDef, unknown> = {};"#, #item_name, #item_name, #schema_code)
+                    format!(r#"export const {}$Schema: z.ZodType<{}, z.ZodTypeDef, unknown> = {};"#, #item_name, #item_name, #schema_code)
                 }
             }
         }
