@@ -560,6 +560,38 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
                 }
             }
         }
+        FieldDefType::ObjectId => {
+            if fld.is_array {
+                quote! {
+                    properties.insert(#field_name_str.to_string(), {
+                        serde_json::json!({
+                            "type": "array",
+                            "items": serde_json::json!({
+                                "type": "object",
+                                "properties": {
+                                    "$oid": { "type": "string" }
+                                },
+                                "required": ["$oid"],
+                                "additionalProperties": false
+                            })
+                        })
+                    });
+                }
+            } else {
+                quote! {
+                    properties.insert(#field_name_str.to_string(), {
+                        serde_json::json!({
+                            "type": "object",
+                            "properties": {
+                                "$oid": { "type": "string" }
+                            },
+                            "required": ["$oid"],
+                            "additionalProperties": false
+                        })
+                    });
+                }
+            }
+        }
         FieldDefType::SiblingType(name, lst) => {
             if env::var("RUST_LOG") == Ok(String::from("trace")) {
                 println!("SiblingType => name: {name}, lst: {lst:?}");
@@ -712,6 +744,44 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
                             }
                         }
                     }
+                    FieldDefType::ObjectId => {
+                        if value.is_array {
+                            quote! {
+                                properties.insert(#field_name_str.to_string(), {
+                                    serde_json::json!({
+                                        "type": "object",
+                                        "additionalProperties": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "$oid": { "type": "string" }
+                                                },
+                                                "required": ["$oid"],
+                                                "additionalProperties": false
+                                            }
+                                        }
+                                    })
+                                });
+                            }
+                        } else {
+                            quote! {
+                                properties.insert(#field_name_str.to_string(), {
+                                    serde_json::json!({
+                                        "type": "object",
+                                        "additionalProperties": {
+                                            "type": "object",
+                                            "properties": {
+                                                "$oid": { "type": "string" }
+                                            },
+                                            "required": ["$oid"],
+                                            "additionalProperties": false
+                                        }
+                                    })
+                                });
+                            }
+                        }
+                    }
                     FieldDefType::Map(inner_key, inner_value) => {
                         if env::var("RUST_LOG") == Ok(String::from("trace")) {
                             println!("Map Value is another Map => inner_key: {:?}, inner_value: {:?}, is_array: {}", inner_key, inner_value, value.is_array);
@@ -733,6 +803,16 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
                                 }
                                 FieldDefType::Boolean => {
                                     quote! { { "type": "boolean" } }
+                                }
+                                FieldDefType::ObjectId => {
+                                    quote! { {
+                                        "type": "object",
+                                        "properties": {
+                                            "$oid": { "type": "string" }
+                                        },
+                                        "required": ["$oid"],
+                                        "additionalProperties": false
+                                    } }
                                 }
                                 _ => {
                                     quote! { true }
@@ -875,6 +955,26 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
                                                 "additionalProperties": {
                                                     "type": "array",
                                                     "items": { "type": "boolean" }
+                                                }
+                                            })
+                                        });
+                                    }
+                                }
+                                FieldDefType::ObjectId => {
+                                    quote! {
+                                        properties.insert(#field_name_str.to_string(), {
+                                            serde_json::json!({
+                                                "type": "object",
+                                                "additionalProperties": {
+                                                    "type": "array",
+                                                    "items": {
+                                                        "type": "object",
+                                                        "properties": {
+                                                            "$oid": { "type": "string" }
+                                                        },
+                                                        "required": ["$oid"],
+                                                        "additionalProperties": false
+                                                    }
                                                 }
                                             })
                                         });

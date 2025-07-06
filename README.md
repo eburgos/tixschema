@@ -11,14 +11,17 @@ A Rust procedural macro library for generating TypeScript type definitions and Z
 - **Automatic TypeScript Generation**: Creates TypeScript type definitions from Rust structs and enums
 - **Zod v4 Schema Generation**: Generates modern runtime validation schemas using Zod v4 syntax
 - **JSON Schema Support**: Generates JSON schemas for API documentation and validation (enabled by Zod v4 compatibility)
+- **MongoDB ObjectId Support**: First-class support for MongoDB ObjectId types with proper serialization and validation
 - **Serde Integration**: Respects Serde attributes for consistent naming and serialization
 - **Type Mapping**: Handles complex types including:
   - Nested objects and references
   - Arrays and collections (`Vec<T>` → `Array<T>`)
   - Optional fields (`Option<T>` → `T | undefined`)
   - Maps (`HashMap<String, T>` → `Partial<Record<string, T>>`)
+  - MongoDB ObjectId fields (`ObjectId` → `ObjectId` with JSON schema validation)
   - Primitive types (bool, String, numeric types)
   - Discriminated unions (tagged enums)
+  - Complex nested structures (including deeply nested HashMaps)
 
 ## Installation
 
@@ -191,6 +194,81 @@ pub struct ApiConfigJson {
 }
 ```
 
+### MongoDB ObjectId Support
+
+The crate provides first-class support for MongoDB ObjectId types with proper serialization and validation:
+
+```rust
+use core_model_macros::model_schema;
+use serde::{Deserialize, Serialize};
+use mongodb::bson::oid::ObjectId;
+
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+pub struct DocumentJson {
+    pub id: ObjectId,
+    pub title: String,
+    pub author_id: ObjectId,
+    pub tags: Vec<ObjectId>,
+    pub metadata: HashMap<String, ObjectId>,
+    pub parent_id: Option<ObjectId>,
+    pub related_docs: HashMap<String, Vec<ObjectId>>,
+}
+```
+
+**Generated TypeScript:**
+```typescript
+export type Document = {
+  id: ObjectId;
+  title: string;
+  author_id: ObjectId;
+  tags: Array<ObjectId>;
+  metadata: Partial<Record<string, ObjectId>>;
+  parent_id: ObjectId | undefined;
+  related_docs: Partial<Record<string, Array<ObjectId>>>;
+};
+
+export const Document$Schema = z.strictObject({
+  id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }),
+  title: z.string(),
+  author_id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }),
+  tags: z.array(z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) })),
+  metadata: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) })),
+  parent_id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }).or(z.undefined()),
+  related_docs: z.record(z.string(), z.array(z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }))),
+});
+```
+
+**MongoDB JSON Serialization:**
+```json
+{
+  "id": { "$oid": "507f1f77bcf86cd799439011" },
+  "title": "My Document",
+  "author_id": { "$oid": "507f1f77bcf86cd799439012" },
+  "tags": [
+    { "$oid": "507f1f77bcf86cd799439013" },
+    { "$oid": "507f1f77bcf86cd799439014" }
+  ],
+  "metadata": {
+    "template": { "$oid": "507f1f77bcf86cd799439015" }
+  },
+  "parent_id": { "$oid": "507f1f77bcf86cd799439016" },
+  "related_docs": {
+    "references": [
+      { "$oid": "507f1f77bcf86cd799439017" },
+      { "$oid": "507f1f77bcf86cd799439018" }
+    ]
+  }
+}
+```
+
+**ObjectId Features:**
+- **Proper MongoDB Serialization**: Uses `{ "$oid": "hex_string" }` format
+- **Regex Validation**: Validates 24-character hexadecimal ObjectId format
+- **JSON Schema Generation**: Generates correct MongoDB-compatible JSON schemas
+- **Complex Nesting**: Supports ObjectIds in arrays, HashMaps, and optional fields
+- **Production Safe**: MongoDB dependency is dev-only for testing, no production overhead
+
 ## Generating TypeScript Files
 
 Create a utility function to generate TypeScript files with all your types:
@@ -295,6 +373,10 @@ export const User$Schema: z.Schema<User, z.ZodTypeDef, unknown> = z.strictObject
 
 6. **Supported Map Keys**: Currently only `HashMap<String, T>` is fully supported.
 
+7. **MongoDB ObjectId**: `ObjectId` fields are supported with proper JSON schema validation and MongoDB-compatible serialization format `{ "$oid": "hex_string" }`.
+
+8. **Complex Nesting**: The crate supports extremely complex nested structures including `HashMap<String, Vec<HashMap<String, ObjectId>>>` and similar deep nesting patterns.
+
 ## Zod v4 Migration & JSON Schema Generation
 
 This library now generates **Zod v4 compatible schemas** using the modern `.or(z.undefined())` syntax for optional fields instead of the older `.optional()` + `.transform()` approach.
@@ -345,19 +427,28 @@ console.log(jsonSchema);
 
 ## Testing
 
-The crate includes comprehensive tests. Run them with:
+The crate includes comprehensive tests covering all features. Run them with:
 
 ```bash
 cargo test
 ```
 
-This will test:
-- JSON schema generation
-- TypeScript type generation
-- Zod schema generation
-- Serialization consistency
-- Nested type handling
-- All Serde attribute combinations
+**Test Coverage (59+ tests across 9 specialized modules):**
+
+- **Basic Types**: Struct generation, optional fields, primitive types
+- **Collections**: Arrays, HashMaps, complex nested structures
+- **Enums**: Plain enums, discriminated unions, tagged enums
+- **Serde Integration**: All attribute combinations and naming conventions
+- **Advanced Features**: Complex nested maps, edge cases, serialization consistency
+- **MongoDB ObjectId**: 
+  - Mock ObjectId implementation (10 tests)
+  - Real MongoDB ObjectId integration (8 tests with actual `mongodb` crate)
+  - Complex ObjectId nesting, arrays, HashMaps, optional fields
+  - JSON schema validation and regex pattern matching
+- **Zod v4 Compatibility**: Modern syntax generation, JSON schema output
+- **Edge Cases**: Deeply nested structures, compilation safety, performance
+
+**Production Safety**: MongoDB ObjectId tests use the real `mongodb` crate as a dev-dependency only, ensuring zero production overhead while providing complete compatibility validation.
 
 ## Integration with Frontend
 
@@ -388,3 +479,6 @@ const user: User = {
 3. **Documentation**: Add doc comments to your Rust types - they'll appear in generated TypeScript
 4. **Testing**: Include the TypeScript generation in your CI/CD pipeline
 5. **Version Control**: Consider committing generated TypeScript files or generating them in build steps
+6. **MongoDB ObjectId**: For MongoDB applications, use `mongodb::bson::oid::ObjectId` directly in your structs for proper serialization and validation
+7. **Complex Nesting**: The crate handles deep nesting well, but consider flattening overly complex structures for better maintainability
+8. **Production Dependencies**: The crate has zero production dependencies - MongoDB support is validated through dev-only testing

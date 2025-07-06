@@ -25,6 +25,7 @@ pub(crate) enum FieldDefType {
     Isize,
     F32,
     F64,
+    ObjectId,
 }
 
 #[derive(Clone, Debug)]
@@ -87,6 +88,7 @@ impl FieldDef {
                 | FieldDefType::I8 | FieldDefType::I16 | FieldDefType::I32 | FieldDefType::I64 
                 | FieldDefType::Usize | FieldDefType::Isize => "number".to_string(),
             FieldDefType::F32 | FieldDefType::F64 => "number".to_string(),
+            FieldDefType::ObjectId => "ObjectId".to_string(),
         };
         let pre_result = if self.is_array {
             format!("Array<{result}>")
@@ -136,6 +138,7 @@ impl FieldDef {
                 "z.number().int()".to_string()
             }
             FieldDefType::F32 | FieldDefType::F64 => "z.number()".to_string(),
+            FieldDefType::ObjectId => "z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) })".to_string(),
         };
         let pre_result = if self.is_array {
             format!("z.array({result})")
@@ -304,6 +307,7 @@ fn get_field_def_type_or_sibling(t_name: &str) -> FieldDefType {
         "isize" => FieldDefType::Isize,
         "f32" => FieldDefType::F32,
         "f64" => FieldDefType::F64,
+        "ObjectId" => FieldDefType::ObjectId,
         type_name_json if type_name_json.ends_with("Json") => {
             FieldDefType::SiblingType(safe_type_name(type_name_json), vec![])
         }

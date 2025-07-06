@@ -148,6 +148,76 @@ pub struct ApiConfigJson {
 }
 ```
 
+### 10. MongoDB ObjectId Support
+```rust
+// ✅ SUPPORTED - MongoDB ObjectId types
+use mongodb::bson::oid::ObjectId;
+
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+pub struct DocumentJson {
+    pub id: ObjectId,                           // becomes ObjectId in TypeScript
+    pub author_id: ObjectId,                    // becomes ObjectId in TypeScript
+    pub tags: Vec<ObjectId>,                    // becomes Array<ObjectId>
+    pub metadata: HashMap<String, ObjectId>,    // becomes Partial<Record<string, ObjectId>>
+    pub parent_id: Option<ObjectId>,            // becomes ObjectId | undefined
+    pub related: HashMap<String, Vec<ObjectId>>, // becomes Partial<Record<string, Array<ObjectId>>>
+}
+
+// ✅ Generated TypeScript uses ObjectId type
+export type Document = {
+  id: ObjectId;
+  author_id: ObjectId;
+  tags: Array<ObjectId>;
+  metadata: Partial<Record<string, ObjectId>>;
+  parent_id: ObjectId | undefined;
+  related: Partial<Record<string, Array<ObjectId>>>;
+};
+
+// ✅ Generated Zod schema with MongoDB validation
+export const Document$Schema = z.strictObject({
+  id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }),
+  author_id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }),
+  tags: z.array(z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) })),
+  metadata: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) })),
+  parent_id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }).or(z.undefined()),
+  related: z.record(z.string(), z.array(z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }))),
+});
+
+// ✅ Generated JSON Schema with MongoDB format
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "object",
+      "properties": { "$oid": { "type": "string" } },
+      "required": ["$oid"],
+      "additionalProperties": false
+    }
+  }
+}
+
+// ✅ Serialization format matches MongoDB
+{
+  "id": { "$oid": "507f1f77bcf86cd799439011" },
+  "author_id": { "$oid": "507f1f77bcf86cd799439012" },
+  "tags": [
+    { "$oid": "507f1f77bcf86cd799439013" },
+    { "$oid": "507f1f77bcf86cd799439014" }
+  ],
+  "metadata": {
+    "template": { "$oid": "507f1f77bcf86cd799439015" }
+  },
+  "parent_id": { "$oid": "507f1f77bcf86cd799439016" },
+  "related": {
+    "references": [
+      { "$oid": "507f1f77bcf86cd799439017" },
+      { "$oid": "507f1f77bcf86cd799439018" }
+    ]
+  }
+}
+```
+
 ## TypeScript Generation Pattern
 
 ### 1. Create entities enum
@@ -237,6 +307,26 @@ impl MyEntities {
 }
 ```
 
+### 5. ❌ Incorrect ObjectId usage
+```rust
+// Wrong - using wrong ObjectId type
+use bson::oid::ObjectId;  // ❌ Wrong import
+
+// Wrong - using String instead of ObjectId
+#[model_schema()]
+pub struct DocumentJson {
+    pub id: String,  // ❌ Should be ObjectId for MongoDB documents
+}
+
+// ✅ Correct - use mongodb::bson::oid::ObjectId
+use mongodb::bson::oid::ObjectId;
+
+#[model_schema()]
+pub struct DocumentJson {
+    pub id: ObjectId,  // ✅ Correct ObjectId type
+}
+```
+
 ## Zod v4 Requirements
 
 **⚠️ IMPORTANT: This crate requires Zod v4 for full functionality.**
@@ -284,6 +374,9 @@ export const User$Schema = z.strictObject({
 4. **Arrays**: `Vec<T>` becomes `Array<T>`
 5. **Maps**: `HashMap<String, T>` becomes `Partial<Record<string, T>>`
 6. **Nested Types**: Reference other types without Json suffix
+7. **MongoDB ObjectId**: `ObjectId` becomes `ObjectId` in TypeScript with proper JSON schema validation
+8. **ObjectId Serialization**: Uses MongoDB format `{ "$oid": "hex_string" }`
+9. **ObjectId Validation**: Includes regex validation for 24-character hexadecimal strings
 
 ## Testing Best Practices
 
@@ -292,6 +385,9 @@ export const User$Schema = z.strictObject({
 3. **Test serialization roundtrips**: Ensure serde compatibility
 4. **Version control**: Consider committing generated TypeScript files
 5. **CI/CD integration**: Run generation tests in your pipeline
+6. **MongoDB ObjectId Testing**: The crate includes comprehensive ObjectId tests with real MongoDB library (dev-only dependency)
+7. **Complex Structure Testing**: Test deeply nested structures and edge cases
+8. **Production Safety**: MongoDB dependency is dev-only, ensuring zero production overhead
 
 ## File Organization
 

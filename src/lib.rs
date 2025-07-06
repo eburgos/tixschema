@@ -20,6 +20,8 @@ use utils::safe_type_name;
 /// - Respects Serde attributes like `rename` and `rename_all`
 /// - Provides proper type mappings between Rust and TypeScript
 /// - Handles nested types, generics, optional fields, and collections
+/// - First-class MongoDB ObjectId support with proper serialization and validation
+/// - Supports complex nested structures including deeply nested HashMaps
 ///
 /// ## Usage
 ///
@@ -110,6 +112,50 @@ use utils::safe_type_name;
 /// //   reason: string | undefined;
 /// // };
 /// ```
+///
+/// ## MongoDB ObjectId Support
+///
+/// The macro provides first-class support for MongoDB ObjectId types:
+///
+/// ```rust
+/// use core_model_macros::model_schema;
+/// use serde::{Deserialize, Serialize};
+/// use mongodb::bson::oid::ObjectId;
+/// use std::collections::HashMap;
+///
+/// #[derive(Serialize, Deserialize)]
+/// #[model_schema()]
+/// pub struct Document {
+///     pub id: ObjectId,
+///     pub title: String,
+///     pub author_id: ObjectId,
+///     pub tags: Vec<ObjectId>,
+///     pub metadata: HashMap<String, ObjectId>,
+///     pub parent_id: Option<ObjectId>,
+/// }
+///
+/// // Generates:
+/// // export type Document = {
+/// //   id: ObjectId;
+/// //   title: string;
+/// //   author_id: ObjectId;
+/// //   tags: Array<ObjectId>;
+/// //   metadata: Partial<Record<string, ObjectId>>;
+/// //   parent_id: ObjectId | undefined;
+/// // };
+/// //
+/// // export const Document$Schema = z.strictObject({
+/// //   id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }),
+/// //   title: z.string(),
+/// //   author_id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }),
+/// //   tags: z.array(z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) })),
+/// //   metadata: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) })),
+/// //   parent_id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }).or(z.undefined()),
+/// // });
+/// ```
+///
+/// ObjectId fields are serialized using MongoDB's standard format: `{ "$oid": "hex_string" }`
+/// and include proper validation for 24-character hexadecimal ObjectId strings.
 ///
 #[proc_macro_attribute]
 pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
