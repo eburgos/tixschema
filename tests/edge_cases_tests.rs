@@ -56,15 +56,16 @@ mod tests {
         assert!(user_definition.contains("address: Address;"));
         assert!(user_definition.contains("backup_addresses: Array<Address>;"));
         
-        // Check Zod schema references (without Json suffix)
-        assert!(user_definition.contains("address: Address$Schema"));
-        assert!(user_definition.contains("backup_addresses: z.array(Address$Schema)"));
-        
         // Verify Address definition exists (without Json suffix in export type)
         assert!(address_definition.contains("export type Address = {"));
         assert!(address_definition.contains("street: string;"));
         assert!(address_definition.contains("city: string;"));
         assert!(address_definition.contains("zip_code: string;"));
+        
+        // Check Zod schema references (without Json suffix) - now in separate method
+        let user_zod_schema = UserWithAddressJson::zod_schema();
+        assert!(user_zod_schema.contains("address: Address$Schema"));
+        assert!(user_zod_schema.contains("backup_addresses: z.array(Address$Schema)"));
     }
 
     // Test the specific edge case that was originally failing
@@ -120,12 +121,13 @@ mod tests {
         assert!(ts_definition.contains("string_to_vec_bool: Partial<Record<string, Array<boolean>>>;"));
         assert!(ts_definition.contains("string_to_vec_string: Partial<Record<string, Array<string>>>;"));
         
-        // Zod schemas should use z.array(...) for the HashMap values
-        assert!(ts_definition.contains("problematic_map: z.record(z.string(), z.array(z.number().int()))"));
-        assert!(ts_definition.contains("string_to_vec_i64: z.record(z.string(), z.array(z.number().int()))"));
-        assert!(ts_definition.contains("string_to_vec_f64: z.record(z.string(), z.array(z.number()))"));
-        assert!(ts_definition.contains("string_to_vec_bool: z.record(z.string(), z.array(z.boolean()))"));
-        assert!(ts_definition.contains("string_to_vec_string: z.record(z.string(), z.array(z.string()))"));
+        // Zod schemas should use z.array(...) for the HashMap values - now in separate method
+        let zod_schema = OriginalBugReproductionJson::zod_schema();
+        assert!(zod_schema.contains("problematic_map: z.record(z.string(), z.array(z.number().int()))"));
+        assert!(zod_schema.contains("string_to_vec_i64: z.record(z.string(), z.array(z.number().int()))"));
+        assert!(zod_schema.contains("string_to_vec_f64: z.record(z.string(), z.array(z.number()))"));
+        assert!(zod_schema.contains("string_to_vec_bool: z.record(z.string(), z.array(z.boolean()))"));
+        assert!(zod_schema.contains("string_to_vec_string: z.record(z.string(), z.array(z.string()))"));
     }
 
     // Let's start with just one complex case to debug
@@ -173,8 +175,9 @@ mod tests {
         // TypeScript should use the correct nested structure
         assert!(ts_definition.contains("nested_map_of_arrays: Partial<Record<string, Array<Partial<Record<string, number>>>>>;"));
         
-        // Zod schema should use the correct nested structure
-        assert!(ts_definition.contains("nested_map_of_arrays: z.record(z.string(), z.array(z.record(z.string(), z.number().int()))),"));
+        // Zod schema should use the correct nested structure - now in separate method
+        let zod_schema = SimpleComplexTestJson::zod_schema();
+        assert!(zod_schema.contains("nested_map_of_arrays: z.record(z.string(), z.array(z.record(z.string(), z.number().int()))),"));
     }
 
     #[test]

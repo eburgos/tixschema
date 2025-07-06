@@ -42,10 +42,11 @@ mod tests {
         assert!(ts_definition.contains("name: string;"));
         assert!(ts_definition.contains("email: string | undefined;"));
         
-        // Zod schema should use the MongoDB ObjectId structure with regex validation
-        assert!(ts_definition.contains("id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }),"));
-        assert!(ts_definition.contains("name: z.string(),"));
-        assert!(ts_definition.contains("email: z.string().or(z.undefined()),"));
+        // Zod schema should use the MongoDB ObjectId structure with regex validation - now in separate method
+        let zod_schema = RealUserJson::zod_schema();
+        assert!(zod_schema.contains("id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }),"));
+        assert!(zod_schema.contains("name: z.string(),"));
+        assert!(zod_schema.contains("email: z.string().or(z.undefined()),"));
     }
 
     #[test]
@@ -101,14 +102,15 @@ mod tests {
         assert!(ts_definition.contains("parent_id: ObjectId | undefined;"));
         assert!(ts_definition.contains("nested_refs: Partial<Record<string, Array<ObjectId>>>;"));
         
-        // Zod schema should handle all ObjectId variations with regex validation
+        // Zod schema should handle all ObjectId variations with regex validation - now in separate method
+        let zod_schema = RealDocumentJson::zod_schema();
         let regex_pattern = "z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" })";
-        assert!(ts_definition.contains(&format!("id: z.object({{ $oid: {} }}),", regex_pattern)));
-        assert!(ts_definition.contains(&format!("author_id: z.object({{ $oid: {} }}),", regex_pattern)));
-        assert!(ts_definition.contains(&format!("references: z.array(z.object({{ $oid: {} }})),", regex_pattern)));
-        assert!(ts_definition.contains(&format!("metadata: z.record(z.string(), z.object({{ $oid: {} }})),", regex_pattern)));
-        assert!(ts_definition.contains(&format!("parent_id: z.object({{ $oid: {} }}).or(z.undefined()),", regex_pattern)));
-        assert!(ts_definition.contains(&format!("nested_refs: z.record(z.string(), z.array(z.object({{ $oid: {} }}))),", regex_pattern)));
+        assert!(zod_schema.contains(&format!("id: z.object({{ $oid: {} }}),", regex_pattern)));
+        assert!(zod_schema.contains(&format!("author_id: z.object({{ $oid: {} }}),", regex_pattern)));
+        assert!(zod_schema.contains(&format!("references: z.array(z.object({{ $oid: {} }})),", regex_pattern)));
+        assert!(zod_schema.contains(&format!("metadata: z.record(z.string(), z.object({{ $oid: {} }})),", regex_pattern)));
+        assert!(zod_schema.contains(&format!("parent_id: z.object({{ $oid: {} }}).or(z.undefined()),", regex_pattern)));
+        assert!(zod_schema.contains(&format!("nested_refs: z.record(z.string(), z.array(z.object({{ $oid: {} }}))),", regex_pattern)));
     }
 
     #[test]

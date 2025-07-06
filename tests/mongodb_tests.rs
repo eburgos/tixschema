@@ -130,10 +130,11 @@ mod tests {
         assert!(ts_definition.contains("name: string;"));
         assert!(ts_definition.contains("email: string | undefined;"));
         
-        // Zod schema should use the MongoDB ObjectId structure with regex validation
-        assert!(ts_definition.contains("id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }),"));
-        assert!(ts_definition.contains("name: z.string(),"));
-        assert!(ts_definition.contains("email: z.string().or(z.undefined()),"));
+        // Zod schema should use the MongoDB ObjectId structure with regex validation - now in separate method
+        let zod_schema = UserJson::zod_schema();
+        assert!(zod_schema.contains("id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }),"));
+        assert!(zod_schema.contains("name: z.string(),"));
+        assert!(zod_schema.contains("email: z.string().or(z.undefined()),"));
     }
 
     #[test]
@@ -161,10 +162,11 @@ mod tests {
         assert!(ts_definition.contains("tags: Array<ObjectId>;"));
         assert!(ts_definition.contains("author_id: ObjectId;"));
         
-        // Zod schema should use array of ObjectId objects with regex validation
-        assert!(ts_definition.contains("id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }),"));
-        assert!(ts_definition.contains("tags: z.array(z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) })),"));
-        assert!(ts_definition.contains("author_id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }),"));
+        // Zod schema should use array of ObjectId objects with regex validation - now in separate method
+        let zod_schema = PostJson::zod_schema();
+        assert!(zod_schema.contains("id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }),"));
+        assert!(zod_schema.contains("tags: z.array(z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) })),"));
+        assert!(zod_schema.contains("author_id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }),"));
     }
 
     #[test]
@@ -190,10 +192,11 @@ mod tests {
         assert!(ts_definition.contains("parent_id: ObjectId | undefined;"));
         assert!(ts_definition.contains("author_id: ObjectId;"));
         
-        // Zod schema should use .or(z.undefined()) for optional with regex validation
-        assert!(ts_definition.contains("id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }),"));
-        assert!(ts_definition.contains("parent_id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }).or(z.undefined()),"));
-        assert!(ts_definition.contains("author_id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }),"));
+        // Zod schema should use .or(z.undefined()) for optional with regex validation - now in separate method
+        let zod_schema = CommentJson::zod_schema();
+        assert!(zod_schema.contains("id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }),"));
+        assert!(zod_schema.contains("parent_id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }).or(z.undefined()),"));
+        assert!(zod_schema.contains("author_id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }),"));
     }
 
     #[test]
@@ -204,9 +207,10 @@ mod tests {
         assert!(ts_definition.contains("member_roles: Partial<Record<string, ObjectId>>;"));
         assert!(ts_definition.contains("tags: Array<ObjectId>;"));
         
-        // Zod schema should use record with ObjectId values with regex validation
-        assert!(ts_definition.contains("member_roles: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) })),"));
-        assert!(ts_definition.contains("tags: z.array(z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) })),"));
+        // Zod schema should use record with ObjectId values with regex validation - now in separate method
+        let zod_schema = ProjectJson::zod_schema();
+        assert!(zod_schema.contains("member_roles: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) })),"));
+        assert!(zod_schema.contains("tags: z.array(z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) })),"));
     }
 
     #[test]
@@ -236,13 +240,14 @@ mod tests {
         assert!(ts_definition.contains("optional_parent: ObjectId | undefined;"));
         assert!(ts_definition.contains("nested_refs: Partial<Record<string, Array<ObjectId>>>;"));
         
-        // Zod schema should handle all ObjectId variations with regex validation
-        assert!(ts_definition.contains("id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }),"));
-        assert!(ts_definition.contains("author_id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }),"));
-        assert!(ts_definition.contains("references: z.array(z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) })),"));
-        assert!(ts_definition.contains("metadata: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) })),"));
-        assert!(ts_definition.contains("optional_parent: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }).or(z.undefined()),"));
-        assert!(ts_definition.contains("nested_refs: z.record(z.string(), z.array(z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }))),"));
+        // Zod schema should handle all ObjectId variations with regex validation - now in separate method
+        let zod_schema = ComplexDocumentJson::zod_schema();
+        assert!(zod_schema.contains("id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }),"));
+        assert!(zod_schema.contains("author_id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }),"));
+        assert!(zod_schema.contains("references: z.array(z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) })),"));
+        assert!(zod_schema.contains("metadata: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) })),"));
+        assert!(zod_schema.contains("optional_parent: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }).or(z.undefined()),"));
+        assert!(zod_schema.contains("nested_refs: z.record(z.string(), z.array(z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }))),"));
     }
 
     #[test]

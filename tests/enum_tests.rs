@@ -39,9 +39,10 @@ mod tests {
         assert!(ts_definition.contains("export type UserStatus = "));
         assert!(ts_definition.contains("\"active\" | \"inactive\" | \"pending\" | \"suspended\""));
         
-        // Check Zod schema
-        assert!(ts_definition.contains("export const UserStatus$Schema"));
-        assert!(ts_definition.contains("z.enum([\"active\", \"inactive\", \"pending\", \"suspended\"])"));
+        // Check Zod schema - now in separate method
+        let zod_schema = UserStatus::zod_schema();
+        assert!(zod_schema.contains("export const UserStatus$Schema"));
+        assert!(zod_schema.contains("z.enum([\"active\", \"inactive\", \"pending\", \"suspended\"])"));
     }
 
     #[test]
@@ -108,7 +109,8 @@ mod tests {
         assert!(ts_definition.contains("accountNumber: string;"));
         assert!(ts_definition.contains("routingNumber: string;"));
         
-        // Check Zod discriminated union
-        assert!(ts_definition.contains("z.discriminatedUnion(\"type\""));
+        // Check Zod discriminated union - now in separate method
+        let zod_schema = PaymentMethod::zod_schema();
+        assert!(zod_schema.contains("z.discriminatedUnion(\"type\""));
     }
 } 

@@ -157,15 +157,8 @@ mod advanced_tests {
         assert!(company_definition.contains("headquarters: Address;"));
         assert!(company_definition.contains("settings: CompanySettings;"));
 
-        // Check Zod schema references (without Json suffix)
-        assert!(company_definition.contains("employees: z.array(Employee$Schema)"));
-        assert!(company_definition.contains("department_names: z.array(z.string())"));
-        assert!(company_definition.contains("headquarters: Address$Schema"));
-        assert!(company_definition.contains("settings: CompanySettings$Schema"));
-
         // Check optional fields in nested structures
         assert!(employee_definition.contains("manager: string | undefined;"));
-        assert!(employee_definition.contains("manager: z.string().or(z.undefined())"));
 
         // Check discriminated union
         assert!(retirement_definition.contains("type: \"option401k\""));
@@ -174,6 +167,16 @@ mod advanced_tests {
         assert!(retirement_definition.contains("employerMatchPercentage: number;"));
         assert!(retirement_definition.contains("yearsOfServiceRequired: number;"));
         assert!(retirement_definition.contains("contributionLimit: number;"));
+
+        // Check Zod schema references (without Json suffix) - now in separate method
+        let company_zod_schema = CompanyJson::zod_schema();
+        let employee_zod_schema = EmployeeJson::zod_schema();
+        
+        assert!(company_zod_schema.contains("employees: z.array(Employee$Schema)"));
+        assert!(company_zod_schema.contains("department_names: z.array(z.string())"));
+        assert!(company_zod_schema.contains("headquarters: Address$Schema"));
+        assert!(company_zod_schema.contains("settings: CompanySettings$Schema"));
+        assert!(employee_zod_schema.contains("manager: z.string().or(z.undefined())"));
     }
 
     // Test serialization consistency
@@ -293,12 +296,13 @@ mod advanced_tests {
         assert!(ts_definition.contains("nested_array: Array<ContactInfo>;"));
         assert!(ts_definition.contains("optional_nested_array: Array<ContactInfo> | undefined;"));
 
-        // Check Zod schemas (without Json suffix)
-        assert!(ts_definition.contains("tiny_number: z.number().int()"));
-        assert!(ts_definition.contains("float_number: z.number()"));
-        assert!(ts_definition.contains("optional_strings: z.array(z.string()).or(z.undefined())"));
-        assert!(ts_definition.contains("nested_optional: ContactInfo$Schema.or(z.undefined())"));
-        assert!(ts_definition.contains("optional_nested_array: z.array(ContactInfo$Schema).or(z.undefined())"));
+        // Check Zod schemas (without Json suffix) - now in separate method
+        let zod_schema = EdgeCasesJson::zod_schema();
+        assert!(zod_schema.contains("tiny_number: z.number().int()"));
+        assert!(zod_schema.contains("float_number: z.number()"));
+        assert!(zod_schema.contains("optional_strings: z.array(z.string()).or(z.undefined())"));
+        assert!(zod_schema.contains("nested_optional: ContactInfo$Schema.or(z.undefined())"));
+        assert!(zod_schema.contains("optional_nested_array: z.array(ContactInfo$Schema).or(z.undefined())"));
     }
 
     // Test discriminated union with complex fields
@@ -375,8 +379,9 @@ mod advanced_tests {
         assert!(ts_definition.contains("affectedServices: Array<string>;"));
         assert!(ts_definition.contains("notificationSent: boolean;"));
 
-        // Check Zod discriminated union
-        assert!(ts_definition.contains("z.discriminatedUnion(\"eventType\""));
+        // Check Zod discriminated union - now in separate method
+        let zod_schema = ComplexEventJson::zod_schema();
+        assert!(zod_schema.contains("z.discriminatedUnion(\"eventType\""));
     }
 
     // Test with documentation comments

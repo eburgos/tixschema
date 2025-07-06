@@ -68,13 +68,14 @@ mod tests {
         assert!(ts_definition.contains("array_of_u64: Array<number>;"));
         assert!(ts_definition.contains("array_of_i64: Array<number>;"));
         
-        // Check Zod schema
-        assert!(ts_definition.contains("large_unsigned: z.number().int()"));
-        assert!(ts_definition.contains("large_signed: z.number().int()"));
-        assert!(ts_definition.contains("optional_large_unsigned: z.number().int().or(z.undefined())"));
-        assert!(ts_definition.contains("optional_large_signed: z.number().int().or(z.undefined())"));
-        assert!(ts_definition.contains("array_of_u64: z.array(z.number().int())"));
-        assert!(ts_definition.contains("array_of_i64: z.array(z.number().int())"));
+        // Check Zod schema - now in separate method
+        let zod_schema = LargeNumbersJson::zod_schema();
+        assert!(zod_schema.contains("large_unsigned: z.number().int()"));
+        assert!(zod_schema.contains("large_signed: z.number().int()"));
+        assert!(zod_schema.contains("optional_large_unsigned: z.number().int().or(z.undefined())"));
+        assert!(zod_schema.contains("optional_large_signed: z.number().int().or(z.undefined())"));
+        assert!(zod_schema.contains("array_of_u64: z.array(z.number().int())"));
+        assert!(zod_schema.contains("array_of_i64: z.array(z.number().int())"));
     }
 
     // Test edge cases with mixed integer types
@@ -128,17 +129,18 @@ mod tests {
         assert!(ts_definition.contains("size_type: number;"));
         assert!(ts_definition.contains("isize_type: number;"));
         
-        // All should use z.number().int() in Zod
-        assert!(ts_definition.contains("small_u8: z.number().int()"));
-        assert!(ts_definition.contains("small_i8: z.number().int()"));
-        assert!(ts_definition.contains("medium_u16: z.number().int()"));
-        assert!(ts_definition.contains("medium_i16: z.number().int()"));
-        assert!(ts_definition.contains("normal_u32: z.number().int()"));
-        assert!(ts_definition.contains("normal_i32: z.number().int()"));
-        assert!(ts_definition.contains("large_u64: z.number().int()"));
-        assert!(ts_definition.contains("large_i64: z.number().int()"));
-        assert!(ts_definition.contains("size_type: z.number().int()"));
-        assert!(ts_definition.contains("isize_type: z.number().int()"));
+        // All should use z.number().int() in Zod - now in separate method
+        let zod_schema = MixedIntegersJson::zod_schema();
+        assert!(zod_schema.contains("small_u8: z.number().int()"));
+        assert!(zod_schema.contains("small_i8: z.number().int()"));
+        assert!(zod_schema.contains("medium_u16: z.number().int()"));
+        assert!(zod_schema.contains("medium_i16: z.number().int()"));
+        assert!(zod_schema.contains("normal_u32: z.number().int()"));
+        assert!(zod_schema.contains("normal_i32: z.number().int()"));
+        assert!(zod_schema.contains("large_u64: z.number().int()"));
+        assert!(zod_schema.contains("large_i64: z.number().int()"));
+        assert!(zod_schema.contains("size_type: z.number().int()"));
+        assert!(zod_schema.contains("isize_type: z.number().int()"));
     }
 
     // Test edge cases with all primitive integer types in various contexts
@@ -286,32 +288,33 @@ mod tests {
         assert!(ts_definition.contains("map_to_u64_array: Partial<Record<string, Array<number>>>;"));
         assert!(ts_definition.contains("map_to_f64_array: Partial<Record<string, Array<number>>>;"));
         
-        // Zod schemas - integers use .int(), floats don't
-        assert!(ts_definition.contains("tiny_signed: z.number().int()"));
-        assert!(ts_definition.contains("tiny_unsigned: z.number().int()"));
-        assert!(ts_definition.contains("large_signed: z.number().int()"));
-        assert!(ts_definition.contains("large_unsigned: z.number().int()"));
-        assert!(ts_definition.contains("float_single: z.number()"));  // No .int() for floats
-        assert!(ts_definition.contains("float_double: z.number()"));  // No .int() for floats
+        // Zod schemas - integers use .int(), floats don't - now in separate method
+        let zod_schema = PrimitiveTypesShowcaseJson::zod_schema();
+        assert!(zod_schema.contains("tiny_signed: z.number().int()"));
+        assert!(zod_schema.contains("tiny_unsigned: z.number().int()"));
+        assert!(zod_schema.contains("large_signed: z.number().int()"));
+        assert!(zod_schema.contains("large_unsigned: z.number().int()"));
+        assert!(zod_schema.contains("float_single: z.number()"));  // No .int() for floats
+        assert!(zod_schema.contains("float_double: z.number()"));  // No .int() for floats
         
         // Optional Zod schemas
-        assert!(ts_definition.contains("opt_i8: z.number().int().or(z.undefined())"));
-        assert!(ts_definition.contains("opt_u64: z.number().int().or(z.undefined())"));
-        assert!(ts_definition.contains("opt_f64: z.number().or(z.undefined())"));  // No .int() for float
+        assert!(zod_schema.contains("opt_i8: z.number().int().or(z.undefined())"));
+        assert!(zod_schema.contains("opt_u64: z.number().int().or(z.undefined())"));
+        assert!(zod_schema.contains("opt_f64: z.number().or(z.undefined())"));  // No .int() for float
         
         // Array Zod schemas
-        assert!(ts_definition.contains("array_i8: z.array(z.number().int())"));
-        assert!(ts_definition.contains("array_u64: z.array(z.number().int())"));
-        assert!(ts_definition.contains("array_f64: z.array(z.number())"));  // No .int() for float
+        assert!(zod_schema.contains("array_i8: z.array(z.number().int())"));
+        assert!(zod_schema.contains("array_u64: z.array(z.number().int())"));
+        assert!(zod_schema.contains("array_f64: z.array(z.number())"));  // No .int() for float
         
         // HashMap Zod schemas
-        assert!(ts_definition.contains("map_to_i8: z.record(z.string(), z.number().int())"));
-        assert!(ts_definition.contains("map_to_u64: z.record(z.string(), z.number().int())"));
-        assert!(ts_definition.contains("map_to_f64: z.record(z.string(), z.number())"));  // No .int() for float
+        assert!(zod_schema.contains("map_to_i8: z.record(z.string(), z.number().int())"));
+        assert!(zod_schema.contains("map_to_u64: z.record(z.string(), z.number().int())"));
+        assert!(zod_schema.contains("map_to_f64: z.record(z.string(), z.number())"));  // No .int() for float
         
         // HashMap with array Zod schemas
-        assert!(ts_definition.contains("map_to_i8_array: z.record(z.string(), z.array(z.number().int()))"));
-        assert!(ts_definition.contains("map_to_u64_array: z.record(z.string(), z.array(z.number().int()))"));
-        assert!(ts_definition.contains("map_to_f64_array: z.record(z.string(), z.array(z.number()))"));  // No .int() for float
+        assert!(zod_schema.contains("map_to_i8_array: z.record(z.string(), z.array(z.number().int()))"));
+        assert!(zod_schema.contains("map_to_u64_array: z.record(z.string(), z.array(z.number().int()))"));
+        assert!(zod_schema.contains("map_to_f64_array: z.record(z.string(), z.array(z.number()))"));  // No .int() for float
     }
 } 

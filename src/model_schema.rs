@@ -79,9 +79,12 @@ fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
         &docs, 
         &item_name, 
         &type_code, 
-        &schema_code, 
-        &show_opts, 
         fields_empty
+    );
+    let zod_schema_method = generate_zod_schema_method(
+        &item_name,
+        &schema_code,
+        &show_opts,
     );
 
     let output = quote! {
@@ -90,6 +93,7 @@ fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
         impl #name {
             #json_schema_method
             #ts_definition_method
+            #zod_schema_method
         }
     };
 
@@ -168,6 +172,9 @@ fn process_plain_enum(
         &docs,
         item_name,
         &type_code,
+    );
+    let zod_schema_method = generate_plain_enum_zod_schema_method(
+        item_name,
         &schema_code,
     );
     
@@ -180,6 +187,7 @@ fn process_plain_enum(
         impl #name {
             #json_schema_method
             #ts_definition_method
+            #zod_schema_method
             
             pub fn enum_members() -> Vec<String> {
                 [
@@ -310,7 +318,8 @@ fn process_discriminated_enum(
 
     // Generate conditional implementation
     let json_schema_method = generate_discriminated_enum_json_schema_method(&main_schema_code);
-    let ts_definition_method = generate_discriminated_enum_ts_definition_method(&docs, item_name, &type_code, &schema_code);
+    let ts_definition_method = generate_discriminated_enum_ts_definition_method(&docs, item_name, &type_code);
+    let zod_schema_method = generate_discriminated_enum_zod_schema_method(item_name, &schema_code);
 
     let output = quote! {
         #item_enum
@@ -318,6 +327,7 @@ fn process_discriminated_enum(
         impl #name {
             #json_schema_method
             #ts_definition_method
+            #zod_schema_method
         }
     };
 
@@ -1215,13 +1225,11 @@ fn generate_json_schema_method(_json_schema_fields: &[proc_macro2::TokenStream])
     }
 }
 
-/// Generates the TypeScript definition method with conditional Zod schema and JSON schema docs
+/// Generates the TypeScript definition method (TypeScript types only, no Zod schema)
 fn generate_ts_definition_method(
     docs: &str,
     item_name: &str,
     type_code: &str,
-    schema_code: &str,
-    show_opts: &str,
     fields_empty: bool,
 ) -> proc_macro2::TokenStream {
     // TypeScript type generation (always available)
@@ -1235,9 +1243,6 @@ fn generate_ts_definition_method(
         }
     };
 
-    // Conditional Zod schema generation
-    let zod_schema_gen = generate_zod_schema_part(item_name, schema_code, show_opts);
-    
     // Conditional JSON schema docs
     let json_docs_gen = generate_json_docs_part();
 
@@ -1245,38 +1250,35 @@ fn generate_ts_definition_method(
         pub fn ts_definition() -> String {
             let docs = #docs;
             #json_docs_gen
-            let type_def = #typescript_type_gen;
-            #zod_schema_gen
-            
-            #[cfg(feature = "zod")]
-            {
-                format!("{}\n\n{}", type_def, schema_def)
-            }
-            
-            #[cfg(not(feature = "zod"))]
-            {
-                type_def
-            }
+            #typescript_type_gen
         }
     }
 }
 
-/// Generates Zod schema part conditionally
-fn generate_zod_schema_part(_item_name: &str, _schema_code: &str, _show_opts: &str) -> proc_macro2::TokenStream {
+
+
+/// Generates the Zod schema method (Zod schemas only, no TypeScript types)
+fn generate_zod_schema_method(
+    item_name: &str,
+    schema_code: &str,
+    show_opts: &str,
+) -> proc_macro2::TokenStream {
     #[cfg(feature = "zod")]
     {
         quote::quote! {
-            let schema_def = format!(r#"export const {}$Schema: z.Schema<{}, z.ZodTypeDef, unknown> = z.strictObject({{
+            pub fn zod_schema() -> String {
+                format!(r#"export const {}$Schema: z.Schema<{}, z.ZodTypeDef, unknown> = z.strictObject({{
 {}
-}}){};"#, #_item_name, #_item_name, #_schema_code, #_show_opts);
+}}){};"#, #item_name, #item_name, #schema_code, #show_opts)
+            }
         }
     }
     
     #[cfg(not(feature = "zod"))]
     {
         quote::quote! {
-            // Zod schema not generated - zod feature disabled
-            // To enable: add "zod" to your features  
+            // Zod schema method not available - zod feature disabled
+            // To enable: add "zod" to your features
             // Example: core_model_macros = { features = ["zod"] }
         }
     }
@@ -1320,22 +1322,15 @@ fn generate_plain_enum_json_schema_method(_enumerated: &[proc_macro2::TokenStrea
     }
 }
 
-/// Generates the TypeScript definition method for plain enums with conditional features
+/// Generates the TypeScript definition method for plain enums (TypeScript types only)
 fn generate_plain_enum_ts_definition_method(
     docs: &str,
     item_name: &str,
     type_code: &str,
-    schema_code: &str,
 ) -> proc_macro2::TokenStream {
     // TypeScript type generation (always available)
     let typescript_type_gen = quote::quote! {
         format!(r#"/**\n{}\n**/\nexport type {} = {};"#, docs, #item_name, #type_code)
-    };
-
-    // Conditional Zod schema generation
-    let zod_schema_gen = quote::quote! {
-        #[cfg(feature = "zod")]
-        let schema_def = format!(r#"export const {}$Schema: z.Schema<{}> = z.enum([{}]);"#, #item_name, #item_name, #schema_code);
     };
     
     // Conditional JSON schema docs
@@ -1353,18 +1348,31 @@ fn generate_plain_enum_ts_definition_method(
     quote::quote! {
         pub fn ts_definition() -> String {
             #json_docs_gen
-            let type_def = #typescript_type_gen;
-            #zod_schema_gen
-            
-            #[cfg(feature = "zod")]
-            {
-                format!("{}\n\n{}", type_def, schema_def)
+            #typescript_type_gen
+        }
+    }
+}
+
+/// Generates the Zod schema method for plain enums (Zod schemas only)
+fn generate_plain_enum_zod_schema_method(
+    item_name: &str,
+    schema_code: &str,
+) -> proc_macro2::TokenStream {
+    #[cfg(feature = "zod")]
+    {
+        quote::quote! {
+            pub fn zod_schema() -> String {
+                format!(r#"export const {}$Schema: z.Schema<{}> = z.enum([{}]);"#, #item_name, #item_name, #schema_code)
             }
-            
-            #[cfg(not(feature = "zod"))]
-            {
-                type_def
-            }
+        }
+    }
+    
+    #[cfg(not(feature = "zod"))]
+    {
+        quote::quote! {
+            // Zod schema method not available - zod feature disabled
+            // To enable: add "zod" to your features
+            // Example: core_model_macros = { features = ["zod"] }
         }
     }
 }
@@ -1390,19 +1398,12 @@ fn generate_discriminated_enum_json_schema_method(main_schema_code: &proc_macro2
     }
 }
 
-/// Generates the TypeScript definition method for discriminated enums with conditional features
+/// Generates the TypeScript definition method for discriminated enums (TypeScript types only)
 fn generate_discriminated_enum_ts_definition_method(
     docs: &str,
     item_name: &str,
     type_code: &str,
-    schema_code: &str,
 ) -> proc_macro2::TokenStream {
-    // Conditional Zod schema generation
-    let zod_schema_gen = quote::quote! {
-        #[cfg(feature = "zod")]
-        let schema_def = format!(r#"export const {}$Schema: z.Schema<{}, z.ZodTypeDef, unknown> = {};"#, #item_name, #item_name, #schema_code);
-    };
-    
     // Conditional JSON schema docs
     let json_docs_gen = quote::quote! {
         #[cfg(all(feature = "jsonschema", feature = "zod"))]
@@ -1419,18 +1420,31 @@ fn generate_discriminated_enum_ts_definition_method(
         pub fn ts_definition() -> String {
             #json_docs_gen
             let bundled_docs = docs;
-            let type_def = format!(r#"{bundled_docs}export type {} = {};"#, #item_name, #type_code);
-            #zod_schema_gen
-            
-            #[cfg(feature = "zod")]
-            {
-                format!("{type_def}\n\n{schema_def}")
+            format!(r#"{bundled_docs}export type {} = {};"#, #item_name, #type_code)
+        }
+    }
+}
+
+/// Generates the Zod schema method for discriminated enums (Zod schemas only)
+fn generate_discriminated_enum_zod_schema_method(
+    item_name: &str,
+    schema_code: &str,
+) -> proc_macro2::TokenStream {
+    #[cfg(feature = "zod")]
+    {
+        quote::quote! {
+            pub fn zod_schema() -> String {
+                format!(r#"export const {}$Schema: z.Schema<{}, z.ZodTypeDef, unknown> = {};"#, #item_name, #item_name, #schema_code)
             }
-            
-            #[cfg(not(feature = "zod"))]
-            {
-                type_def
-            }
+        }
+    }
+    
+    #[cfg(not(feature = "zod"))]
+    {
+        quote::quote! {
+            // Zod schema method not available - zod feature disabled
+            // To enable: add "zod" to your features
+            // Example: core_model_macros = { features = ["zod"] }
         }
     }
 }

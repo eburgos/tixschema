@@ -44,10 +44,11 @@ mod tests {
         // HashMap becomes Partial<Record<...>> in the generated output
         assert!(ts_definition.contains("metadata: Partial<Record<string, string>>;"));
         
-        // Check Zod schema
-        assert!(ts_definition.contains("tags: z.array(z.string())"));
-        assert!(ts_definition.contains("scores: z.array(z.number().int())"));
-        assert!(ts_definition.contains("metadata: z.record(z.string(), z.string())"));
+        // Check Zod schema - now in separate method
+        let zod_schema = UserWithCollections::zod_schema();
+        assert!(zod_schema.contains("tags: z.array(z.string())"));
+        assert!(zod_schema.contains("scores: z.array(z.number().int())"));
+        assert!(zod_schema.contains("metadata: z.record(z.string(), z.string())"));
     }
 
     // Test comprehensive HashMap scenarios with various value types
@@ -135,19 +136,20 @@ mod tests {
         assert!(ts_definition.contains("string_to_f64_array: Partial<Record<string, Array<number>>>;"));
         assert!(ts_definition.contains("string_to_bool_array: Partial<Record<string, Array<boolean>>>;"));
         
-        // Test Zod schema generation for simple values
-        assert!(ts_definition.contains("string_to_string: z.record(z.string(), z.string())"));
-        assert!(ts_definition.contains("string_to_u64: z.record(z.string(), z.number().int())"));
-        assert!(ts_definition.contains("string_to_i64: z.record(z.string(), z.number().int())"));
-        assert!(ts_definition.contains("string_to_f64: z.record(z.string(), z.number())"));
-        assert!(ts_definition.contains("string_to_bool: z.record(z.string(), z.boolean())"));
+        // Test Zod schema generation for simple values - now in separate method
+        let zod_schema = ComprehensiveHashMapTestJson::zod_schema();
+        assert!(zod_schema.contains("string_to_string: z.record(z.string(), z.string())"));
+        assert!(zod_schema.contains("string_to_u64: z.record(z.string(), z.number().int())"));
+        assert!(zod_schema.contains("string_to_i64: z.record(z.string(), z.number().int())"));
+        assert!(zod_schema.contains("string_to_f64: z.record(z.string(), z.number())"));
+        assert!(zod_schema.contains("string_to_bool: z.record(z.string(), z.boolean())"));
         
         // Test Zod schema generation for array values  
-        assert!(ts_definition.contains("string_to_string_array: z.record(z.string(), z.array(z.string()))"));
-        assert!(ts_definition.contains("string_to_u64_array: z.record(z.string(), z.array(z.number().int()))"));
-        assert!(ts_definition.contains("string_to_i64_array: z.record(z.string(), z.array(z.number().int()))"));
-        assert!(ts_definition.contains("string_to_f64_array: z.record(z.string(), z.array(z.number()))"));
-        assert!(ts_definition.contains("string_to_bool_array: z.record(z.string(), z.array(z.boolean()))"));
+        assert!(zod_schema.contains("string_to_string_array: z.record(z.string(), z.array(z.string()))"));
+        assert!(zod_schema.contains("string_to_u64_array: z.record(z.string(), z.array(z.number().int()))"));
+        assert!(zod_schema.contains("string_to_i64_array: z.record(z.string(), z.array(z.number().int()))"));
+        assert!(zod_schema.contains("string_to_f64_array: z.record(z.string(), z.array(z.number()))"));
+        assert!(zod_schema.contains("string_to_bool_array: z.record(z.string(), z.array(z.boolean()))"));
     }
 
     // Test potential edge case with HashMap containing 64-bit integers
@@ -189,9 +191,10 @@ mod tests {
         assert!(ts_definition.contains("i64_map: Partial<Record<string, number>>;"));
         assert!(ts_definition.contains("mixed_map: Partial<Record<string, Array<number>>>;"));
         
-        // Check Zod schema
-        assert!(ts_definition.contains("u64_map: z.record(z.string(), z.number().int())"));
-        assert!(ts_definition.contains("i64_map: z.record(z.string(), z.number().int())"));
-        assert!(ts_definition.contains("mixed_map: z.record(z.string(), z.array(z.number().int()))"));
+        // Check Zod schema - now in separate method
+        let zod_schema = HashMapWith64BitJson::zod_schema();
+        assert!(zod_schema.contains("u64_map: z.record(z.string(), z.number().int())"));
+        assert!(zod_schema.contains("i64_map: z.record(z.string(), z.number().int())"));
+        assert!(zod_schema.contains("mixed_map: z.record(z.string(), z.array(z.number().int()))"));
     }
 } 

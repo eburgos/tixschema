@@ -62,14 +62,31 @@ mod tests {
         assert!(ts_definition.contains("height: number;"));
         assert!(ts_definition.contains("is_active: boolean;"));
         
+        // Should NOT contain Zod schema (now separated)
+        assert!(!ts_definition.contains("export const BasicUser$Schema"));
+        assert!(!ts_definition.contains("z.strictObject"));
+        assert!(!ts_definition.contains("z.string()"));
+        assert!(!ts_definition.contains("z.number()"));
+        assert!(!ts_definition.contains("z.boolean()"));
+    }
+
+    #[test]
+    fn test_basic_struct_zod_schema() {
+        let zod_schema = BasicUser::zod_schema();
+        
         // Check that it contains Zod schema
-        assert!(ts_definition.contains("export const BasicUser$Schema"));
-        assert!(ts_definition.contains("z.strictObject({"));
-        assert!(ts_definition.contains("id: z.string()"));
-        assert!(ts_definition.contains("name: z.string()"));
-        assert!(ts_definition.contains("age: z.number().int()"));
-        assert!(ts_definition.contains("height: z.number()"));
-        assert!(ts_definition.contains("is_active: z.boolean()"));
+        assert!(zod_schema.contains("export const BasicUser$Schema"));
+        assert!(zod_schema.contains("z.strictObject({"));
+        assert!(zod_schema.contains("id: z.string()"));
+        assert!(zod_schema.contains("name: z.string()"));
+        assert!(zod_schema.contains("age: z.number().int()"));
+        assert!(zod_schema.contains("height: z.number()"));
+        assert!(zod_schema.contains("is_active: z.boolean()"));
+        
+        // Should NOT contain TypeScript type definition
+        assert!(!zod_schema.contains("export type BasicUser"));
+        assert!(!zod_schema.contains("id: string;"));
+        assert!(!zod_schema.contains("age: number;"));
     }
 
     // Test struct with optional fields
@@ -116,10 +133,23 @@ mod tests {
         assert!(ts_definition.contains("age: number | undefined;"));
         assert!(ts_definition.contains("nickname: string | undefined;"));
         
+        // Should NOT contain Zod schema (now separated)
+        assert!(!ts_definition.contains("z.string().or(z.undefined())"));
+        assert!(!ts_definition.contains("z.number().int().or(z.undefined())"));
+    }
+
+    #[test]
+    fn test_optional_fields_zod_schema() {
+        let zod_schema = UserWithOptionals::zod_schema();
+        
         // Check Zod schema has optional fields
-        assert!(ts_definition.contains("email: z.string().or(z.undefined())"));
-        assert!(ts_definition.contains("age: z.number().int().or(z.undefined())"));
-        assert!(ts_definition.contains("nickname: z.string().or(z.undefined())"));
+        assert!(zod_schema.contains("email: z.string().or(z.undefined())"));
+        assert!(zod_schema.contains("age: z.number().int().or(z.undefined())"));
+        assert!(zod_schema.contains("nickname: z.string().or(z.undefined())"));
+        
+        // Should NOT contain TypeScript type definition
+        assert!(!zod_schema.contains("email: string | undefined;"));
+        assert!(!zod_schema.contains("age: number | undefined;"));
     }
 
     // Test empty struct

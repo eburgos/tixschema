@@ -54,12 +54,13 @@ mod tests {
         assert!(ts_definition.contains("createdAt: string;"));
         assert!(ts_definition.contains("isVerified: boolean;"));
         
-        // Check Zod schema
-        assert!(ts_definition.contains("userId: z.string()"));
-        assert!(ts_definition.contains("firstName: z.string()"));
-        assert!(ts_definition.contains("lastName: z.string()"));
-        assert!(ts_definition.contains("emailAddress: z.string()"));
-        assert!(ts_definition.contains("createdAt: z.string()"));
-        assert!(ts_definition.contains("isVerified: z.boolean()"));
+        // Check Zod schema - now in separate method
+        let zod_schema = UserWithSerde::zod_schema();
+        assert!(zod_schema.contains("userId: z.string()"));
+        assert!(zod_schema.contains("firstName: z.string()"));
+        assert!(zod_schema.contains("lastName: z.string()"));
+        assert!(zod_schema.contains("emailAddress: z.string()"));
+        assert!(zod_schema.contains("createdAt: z.string()"));
+        assert!(zod_schema.contains("isVerified: z.boolean()"));
     }
 } 
