@@ -72,6 +72,7 @@ mod tests {
             field_type: FieldDefType::String,
             is_array: false,
             array_num: None,
+            model_schema_prop_meta: None,
         };
 
         let formatted = GenerationUtils::format_typescript_field(&field);

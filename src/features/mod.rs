@@ -15,6 +15,9 @@ pub mod jsonschema;
 #[cfg(feature = "object_id")]
 pub mod object_id;
 
+/// Module for parsing model_schema_prop attributes
+pub mod model_schema_prop;
+
 /// Feature detection utilities
 #[cfg(test)]
 pub struct Features;

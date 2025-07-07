@@ -15,6 +15,7 @@ pub(crate) enum FieldDefType {
     Tuple(Vec<FieldDef>),
     Boolean,
     String,
+    StringLiteral(String),  // For string literal types like "ProDoctivity"
     U8,
     U16,
     U32,
@@ -40,6 +41,7 @@ pub(crate) struct FieldDef {
     pub field_type: FieldDefType,
     pub is_array: bool,
     pub array_num: Option<u16>,
+    pub model_schema_prop_meta: Option<crate::features::model_schema_prop::ModelSchemaPropMeta>,
 }
 
 // Re-export serde types conditionally based on feature
@@ -82,6 +84,7 @@ impl FieldDef {
             }
             FieldDefType::Boolean => "boolean".to_string(),
             FieldDefType::String => "string".to_string(),
+            FieldDefType::StringLiteral(literal) => format!("\"{}\"", literal),
             FieldDefType::U8 | FieldDefType::U16 | FieldDefType::U32 | FieldDefType::U64 
                 | FieldDefType::I8 | FieldDefType::I16 | FieldDefType::I32 | FieldDefType::I64 
                 | FieldDefType::Usize | FieldDefType::Isize => "number".to_string(),
@@ -132,6 +135,7 @@ impl FieldDef {
             }
             FieldDefType::Boolean => "z.boolean()".to_string(),
             FieldDefType::String => "z.string()".to_string(),
+            FieldDefType::StringLiteral(literal) => format!("z.literal(\"{}\")", literal),
             FieldDefType::U8 | FieldDefType::U16 | FieldDefType::U32 | FieldDefType::U64 
                 | FieldDefType::I8 | FieldDefType::I16 | FieldDefType::I32 | FieldDefType::I64 
                 | FieldDefType::Usize | FieldDefType::Isize => {
@@ -171,6 +175,7 @@ pub(crate) fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef
                         is_array: false,
                         array_num: None,
                         docs: field_docs.to_string(),
+                        model_schema_prop_meta: None,
                     },
                     PathArguments::AngleBracketed(args) => {
                         let arg_types: Vec<FieldDef> = args
@@ -193,6 +198,7 @@ pub(crate) fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef
                                 is_array: false,
                                 array_num: None,
                                 docs: field_docs.to_string(),
+                                model_schema_prop_meta: None,
                             }
                         } else if arg_types.len() == 1 && &ident == "Option" {
                             let mut result = arg_types[0].clone();
@@ -219,6 +225,7 @@ pub(crate) fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef
                                     Box::new(arg_types[1].clone()),
                                 ),
                                 docs: field_docs.to_string(),
+                                model_schema_prop_meta: None,
                             }
                         } else {
                             // Debug print to see what's happening with SiblingType
@@ -232,6 +239,7 @@ pub(crate) fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef
                                 is_array: false,
                                 array_num: None,
                                 docs: field_docs.to_string(),
+                                model_schema_prop_meta: None,
                             }
                         }
                     }
@@ -245,6 +253,7 @@ pub(crate) fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef
                     is_array: false,
                     array_num: None,
                     docs: field_docs.to_string(),
+                    model_schema_prop_meta: None,
                 }
             }
         }
@@ -281,6 +290,7 @@ pub(crate) fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef
                 is_array: false,
                 array_num: None,
                 docs: field_docs.to_string(),
+                model_schema_prop_meta: None,
             }
         }
         _ => FieldDef {
@@ -290,6 +300,7 @@ pub(crate) fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef
             is_array: false,
             array_num: None,
             docs: field_docs.to_string(),
+            model_schema_prop_meta: None,
         }, // Fallback for BareFn, ImplTrait, etc.
     }
 }

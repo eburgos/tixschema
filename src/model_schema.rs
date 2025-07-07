@@ -566,6 +566,27 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
                 }
             }
         }
+        FieldDefType::StringLiteral(literal) => {
+            if fld.is_array {
+                quote! {
+                    properties.insert(#field_name_str.to_string(), {
+                        serde_json::json!({
+                            "type": "array",
+                            "items": serde_json::json!({ "type": "string", "const": #literal })
+                        })
+                    });
+                }
+            } else {
+                quote! {
+                    properties.insert(#field_name_str.to_string(), {
+                        serde_json::json!({
+                            "type": "string",
+                            "const": #literal
+                        })
+                    });
+                }
+            }
+        }
         FieldDefType::U32
         | FieldDefType::U16
         | FieldDefType::U8
@@ -1249,6 +1270,9 @@ fn process_field(rename_all: &Option<String>, field: &mut Field) -> FieldDef {
     #[cfg(not(feature = "serde"))]
     let field_rename = None;
 
+    // Parse model_schema_prop attributes before filtering them out
+    let model_schema_prop_meta = crate::features::model_schema_prop::parse_model_schema_prop_attributes(&field.attrs);
+
     // Filter out model_schema_prop attributes
     for attr in &field.attrs {
         if !attr.path().is_ident("model_schema_prop") {
@@ -1281,7 +1305,25 @@ fn process_field(rename_all: &Option<String>, field: &mut Field) -> FieldDef {
             .collect::<Vec<_>>()
             .join("\n"),
     };
-    get_field_def(&final_name, field_type, &field_docs)
+    
+    // Create the field definition and apply any model_schema_prop overrides
+    let mut field_def = get_field_def(&final_name, field_type, &field_docs);
+    field_def.model_schema_prop_meta = if model_schema_prop_meta.as_type.is_some() || model_schema_prop_meta.literal.is_some() {
+        Some(model_schema_prop_meta.clone())
+    } else {
+        None
+    };
+    
+    // Apply type overrides based on model_schema_prop attributes
+    if let Some(ref meta) = field_def.model_schema_prop_meta {
+        if let Some(ref literal) = meta.literal {
+            // If literal is specified, override the field type to StringLiteral
+            field_def.field_type = crate::field_type::FieldDefType::StringLiteral(literal.clone());
+        }
+        // TODO: Handle `as` parameter for type overrides in future implementation
+    }
+    
+    field_def
 }
 
 /// Gets the final name for a field or enum variant, considering serde attributes.
