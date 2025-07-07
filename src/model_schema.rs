@@ -548,21 +548,66 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
     let schema_code = match field_type {
         FieldDefType::String => {
             if fld.is_array {
-                quote! {
-                    properties.insert(#field_name_str.to_string(), {
-                        serde_json::json!({
-                            "type": "array",
-                            "items": serde_json::json!({ "type": "string" })
-                        })
-                    });
+                // Check if minLength is specified for array items
+                if let Some(ref meta) = fld.model_schema_prop_meta {
+                    if let Some(min_len) = meta.min_length {
+                        quote! {
+                            properties.insert(#field_name_str.to_string(), {
+                                serde_json::json!({
+                                    "type": "array",
+                                    "items": serde_json::json!({ "type": "string", "minLength": #min_len })
+                                })
+                            });
+                        }
+                    } else {
+                        quote! {
+                            properties.insert(#field_name_str.to_string(), {
+                                serde_json::json!({
+                                    "type": "array",
+                                    "items": serde_json::json!({ "type": "string" })
+                                })
+                            });
+                        }
+                    }
+                } else {
+                    quote! {
+                        properties.insert(#field_name_str.to_string(), {
+                            serde_json::json!({
+                                "type": "array",
+                                "items": serde_json::json!({ "type": "string" })
+                            })
+                        });
+                    }
                 }
             } else {
-                quote! {
-                    properties.insert(#field_name_str.to_string(), {
-                        serde_json::json!({
-                            "type": "string",
-                        })
-                    });
+                // Check if minLength is specified
+                if let Some(ref meta) = fld.model_schema_prop_meta {
+                    if let Some(min_len) = meta.min_length {
+                        quote! {
+                            properties.insert(#field_name_str.to_string(), {
+                                serde_json::json!({
+                                    "type": "string",
+                                    "minLength": #min_len
+                                })
+                            });
+                        }
+                    } else {
+                        quote! {
+                            properties.insert(#field_name_str.to_string(), {
+                                serde_json::json!({
+                                    "type": "string",
+                                })
+                            });
+                        }
+                    }
+                } else {
+                    quote! {
+                        properties.insert(#field_name_str.to_string(), {
+                            serde_json::json!({
+                                "type": "string",
+                            })
+                        });
+                    }
                 }
             }
         }
@@ -1308,7 +1353,9 @@ fn process_field(rename_all: &Option<String>, field: &mut Field) -> FieldDef {
     
     // Create the field definition and apply any model_schema_prop overrides
     let mut field_def = get_field_def(&final_name, field_type, &field_docs);
-    field_def.model_schema_prop_meta = if model_schema_prop_meta.as_type.is_some() || model_schema_prop_meta.literal.is_some() {
+    field_def.model_schema_prop_meta = if model_schema_prop_meta.as_type.is_some() || 
+                                            model_schema_prop_meta.literal.is_some() || 
+                                            model_schema_prop_meta.min_length.is_some() {
         Some(model_schema_prop_meta.clone())
     } else {
         None
@@ -1321,6 +1368,19 @@ fn process_field(rename_all: &Option<String>, field: &mut Field) -> FieldDef {
             field_def.field_type = crate::field_type::FieldDefType::StringLiteral(literal.clone());
         }
         // TODO: Handle `as` parameter for type overrides in future implementation
+    }
+    
+    // Update field docs to include minimum length information
+    if let Some(ref meta) = field_def.model_schema_prop_meta {
+        if let Some(min_len) = meta.min_length {
+            // Add minimum length information to the docs
+            let min_len_doc = format!(" * Minimum length: {}", min_len);
+            field_def.docs = if field_def.docs.is_empty() {
+                format!(" * {}\n * \n{}", final_name, min_len_doc)
+            } else {
+                format!("{}\n{}", field_def.docs, min_len_doc)
+            };
+        }
     }
     
     field_def

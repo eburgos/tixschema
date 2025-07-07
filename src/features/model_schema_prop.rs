@@ -10,6 +10,7 @@ use syn::{Attribute, LitStr, Type};
 pub struct ModelSchemaPropMeta {
     pub as_type: Option<String>,    // e.g., "String" from as = String
     pub literal: Option<String>,    // e.g., "ProDoctivity" from literal = "ProDoctivity"
+    pub min_length: Option<usize>,  // e.g., 1 from minLength = 1
 }
 
 /// Parses model_schema_prop attributes from a field.
@@ -32,6 +33,14 @@ pub fn parse_model_schema_prop_attributes(attrs: &[Attribute]) -> ModelSchemaPro
                     let value = nested.value()?;
                     let lit: LitStr = value.parse()?;
                     meta.literal = Some(lit.value());
+                }
+                // Handle `minLength = N`
+                else if nested.path.is_ident("minLength") {
+                    let value = nested.value()?;
+                    let lit = value.parse::<syn::LitInt>()?;
+                    if let Ok(min_len) = lit.base10_parse::<usize>() {
+                        meta.min_length = Some(min_len);
+                    }
                 }
                 Ok(())
             })
@@ -57,6 +66,7 @@ mod tests {
         let meta = parse_model_schema_prop_attributes(&attrs);
         assert!(meta.as_type.is_none());
         assert!(meta.literal.is_none());
+        assert!(meta.min_length.is_none());
     }
 
     #[test]
@@ -66,6 +76,7 @@ mod tests {
         assert!(meta.as_type.is_some());
         assert_eq!(meta.as_type.unwrap(), "String");
         assert!(meta.literal.is_none());
+        assert!(meta.min_length.is_none());
     }
 
     #[test]
@@ -75,6 +86,7 @@ mod tests {
         assert!(meta.as_type.is_none());
         assert!(meta.literal.is_some());
         assert_eq!(meta.literal.unwrap(), "ProDoctivity");
+        assert!(meta.min_length.is_none());
     }
 
     #[test]
@@ -85,5 +97,39 @@ mod tests {
         assert_eq!(meta.as_type.unwrap(), "String");
         assert!(meta.literal.is_some());
         assert_eq!(meta.literal.unwrap(), "ProDoctivity");
+        assert!(meta.min_length.is_none());
+    }
+
+    #[test]
+    fn test_parse_min_length() {
+        let attr: Attribute = parse_quote! { #[model_schema_prop(minLength = 1)] };
+        let meta = parse_model_schema_prop_attributes(&[attr]);
+        assert!(meta.as_type.is_none());
+        assert!(meta.literal.is_none());
+        assert!(meta.min_length.is_some());
+        assert_eq!(meta.min_length.unwrap(), 1);
+    }
+
+    #[test]
+    fn test_parse_as_and_min_length() {
+        let attr: Attribute = parse_quote! { #[model_schema_prop(as = String, minLength = 5)] };
+        let meta = parse_model_schema_prop_attributes(&[attr]);
+        assert!(meta.as_type.is_some());
+        assert_eq!(meta.as_type.unwrap(), "String");
+        assert!(meta.literal.is_none());
+        assert!(meta.min_length.is_some());
+        assert_eq!(meta.min_length.unwrap(), 5);
+    }
+
+    #[test]
+    fn test_parse_all_attributes() {
+        let attr: Attribute = parse_quote! { #[model_schema_prop(as = String, literal = "test", minLength = 3)] };
+        let meta = parse_model_schema_prop_attributes(&[attr]);
+        assert!(meta.as_type.is_some());
+        assert_eq!(meta.as_type.unwrap(), "String");
+        assert!(meta.literal.is_some());
+        assert_eq!(meta.literal.unwrap(), "test");
+        assert!(meta.min_length.is_some());
+        assert_eq!(meta.min_length.unwrap(), 3);
     }
 } 
