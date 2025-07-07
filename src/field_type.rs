@@ -84,7 +84,7 @@ impl FieldDef {
             }
             FieldDefType::Boolean => "boolean".to_string(),
             FieldDefType::String => "string".to_string(),
-            FieldDefType::StringLiteral(literal) => format!("\"{}\"", literal),
+            FieldDefType::StringLiteral(literal) => format!("\"{literal}\""),
             FieldDefType::U8 | FieldDefType::U16 | FieldDefType::U32 | FieldDefType::U64 
                 | FieldDefType::I8 | FieldDefType::I16 | FieldDefType::I32 | FieldDefType::I64 
                 | FieldDefType::Usize | FieldDefType::Isize => "number".to_string(),
@@ -137,14 +137,13 @@ impl FieldDef {
             FieldDefType::String => {
                 let mut result = "z.string()".to_string();
                 // Add min length validation if specified
-                if let Some(ref meta) = self.model_schema_prop_meta {
-                    if let Some(min_len) = meta.min_length {
-                        result = format!("{}.min({})", result, min_len);
+                if let Some(ref meta) = self.model_schema_prop_meta
+                    && let Some(min_len) = meta.min_length {
+                        result = format!("{result}.min({min_len})");
                     }
-                }
                 result
             },
-            FieldDefType::StringLiteral(literal) => format!("z.literal(\"{}\")", literal),
+            FieldDefType::StringLiteral(literal) => format!("z.literal(\"{literal}\")"),
             FieldDefType::U8 | FieldDefType::U16 | FieldDefType::U32 | FieldDefType::U64 
                 | FieldDefType::I8 | FieldDefType::I16 | FieldDefType::I32 | FieldDefType::I64 
                 | FieldDefType::Usize | FieldDefType::Isize => {

@@ -1362,26 +1362,24 @@ fn process_field(rename_all: &Option<String>, field: &mut Field) -> FieldDef {
     };
     
     // Apply type overrides based on model_schema_prop attributes
-    if let Some(ref meta) = field_def.model_schema_prop_meta {
-        if let Some(ref literal) = meta.literal {
+    if let Some(ref meta) = field_def.model_schema_prop_meta
+        && let Some(ref literal) = meta.literal {
             // If literal is specified, override the field type to StringLiteral
             field_def.field_type = crate::field_type::FieldDefType::StringLiteral(literal.clone());
         }
         // TODO: Handle `as` parameter for type overrides in future implementation
-    }
     
     // Update field docs to include minimum length information
-    if let Some(ref meta) = field_def.model_schema_prop_meta {
-        if let Some(min_len) = meta.min_length {
+    if let Some(ref meta) = field_def.model_schema_prop_meta
+        && let Some(min_len) = meta.min_length {
             // Add minimum length information to the docs
-            let min_len_doc = format!(" * Minimum length: {}", min_len);
+            let min_len_doc = format!(" * Minimum length: {min_len}");
             field_def.docs = if field_def.docs.is_empty() {
-                format!(" * {}\n * \n{}", final_name, min_len_doc)
+                format!(" * {final_name}\n * \n{min_len_doc}")
             } else {
                 format!("{}\n{}", field_def.docs, min_len_doc)
             };
         }
-    }
     
     field_def
 }
