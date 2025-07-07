@@ -2,13 +2,11 @@
 mod tests {
     #[cfg(all(test, feature = "serde"))]
     use serde::{Deserialize, Serialize};
-    #[cfg(all(test, any(feature = "jsonschema")))]
-    use serde_json::Value;
     #[cfg(all(
         test,
         any(feature = "typescript", feature = "jsonschema", feature = "zod", feature = "serde")
     ))]
-    use tixschema::{model_schema, model_schema_prop};
+    use tixschema::{model_schema};
 
     // Test the example from the user request
     #[cfg(all(
@@ -27,7 +25,7 @@ mod tests {
         pub aud: String,
         pub exp: i64,
         pub iat: i64,
-        #[model_schema_prop(as = String, literal = "ProDoctivity")]
+        #[model_schema_prop(as = String, literal = "Tixena")]
         pub iss: String,
         pub nbf: i64,
         #[model_schema_prop(as = String, minLength = 1)]
@@ -42,7 +40,7 @@ mod tests {
         let ts_definition = AccountContextJson::ts_definition();
         
         // Check that the literal field generates the correct TypeScript type
-        assert!(ts_definition.contains("iss: \"ProDoctivity\";"));
+        assert!(ts_definition.contains("iss: \"Tixena\";"));
         
         // Check that other fields are still normal string types
         assert!(ts_definition.contains("aud: string;"));
@@ -64,7 +62,7 @@ mod tests {
         let zod_schema = AccountContextJson::zod_schema();
         
         // Check that the literal field generates the correct Zod schema
-        assert!(zod_schema.contains("iss: z.literal(\"ProDoctivity\")"));
+        assert!(zod_schema.contains("iss: z.literal(\"Tixena\")"));
         
         // Check that other fields are still normal string schemas
         assert!(zod_schema.contains("aud: z.string()"));
@@ -88,7 +86,7 @@ mod tests {
         // Check that the literal field has the correct JSON schema
         let iss_prop = &properties["iss"];
         assert_eq!(iss_prop["type"], "string");
-        assert_eq!(iss_prop["const"], "ProDoctivity");
+        assert_eq!(iss_prop["const"], "Tixena");
         
         // Check that other string fields are normal strings without const
         let aud_prop = &properties["aud"];

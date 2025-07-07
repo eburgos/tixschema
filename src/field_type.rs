@@ -15,7 +15,7 @@ pub(crate) enum FieldDefType {
     Tuple(Vec<FieldDef>),
     Boolean,
     String,
-    StringLiteral(String),  // For string literal types like "ProDoctivity"
+    StringLiteral(String),  // For string literal types like "Tixena"
     U8,
     U16,
     U32,

@@ -9,7 +9,7 @@ use syn::{Attribute, LitStr, Type};
 #[derive(Clone, Debug, Default)]
 pub struct ModelSchemaPropMeta {
     pub as_type: Option<String>,    // e.g., "String" from as = String
-    pub literal: Option<String>,    // e.g., "ProDoctivity" from literal = "ProDoctivity"
+    pub literal: Option<String>,    // e.g., "Tixena" from literal = "Tixena"
     pub min_length: Option<usize>,  // e.g., 1 from minLength = 1
 }
 
@@ -81,22 +81,22 @@ mod tests {
 
     #[test]
     fn test_parse_literal() {
-        let attr: Attribute = parse_quote! { #[model_schema_prop(literal = "ProDoctivity")] };
+        let attr: Attribute = parse_quote! { #[model_schema_prop(literal = "Tixena")] };
         let meta = parse_model_schema_prop_attributes(&[attr]);
         assert!(meta.as_type.is_none());
         assert!(meta.literal.is_some());
-        assert_eq!(meta.literal.unwrap(), "ProDoctivity");
+        assert_eq!(meta.literal.unwrap(), "Tixena");
         assert!(meta.min_length.is_none());
     }
 
     #[test]
     fn test_parse_both_as_and_literal() {
-        let attr: Attribute = parse_quote! { #[model_schema_prop(as = String, literal = "ProDoctivity")] };
+        let attr: Attribute = parse_quote! { #[model_schema_prop(as = String, literal = "Tixena")] };
         let meta = parse_model_schema_prop_attributes(&[attr]);
         assert!(meta.as_type.is_some());
         assert_eq!(meta.as_type.unwrap(), "String");
         assert!(meta.literal.is_some());
-        assert_eq!(meta.literal.unwrap(), "ProDoctivity");
+        assert_eq!(meta.literal.unwrap(), "Tixena");
         assert!(meta.min_length.is_none());
     }
 
