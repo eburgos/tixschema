@@ -53,7 +53,7 @@ use utils::safe_type_name;
 /// //   roles: Array<string>,
 /// // };
 /// //
-/// // export const User$Schema: z.ZodType<User, z.ZodTypeDef, unknown> = z.strictObject({
+/// // export const User$Schema: ZodType<User> = z.strictObject({
 /// //   id: z.string(),
 /// //   firstName: z.string(),
 /// //   lastName: z.string(),
@@ -80,7 +80,7 @@ use utils::safe_type_name;
 ///
 /// // Generates:
 /// // export type Status = "active" | "pending" | "inactive";
-/// // export const Status$Schema: z.ZodType<Status> = z.enum(["active", "pending", "inactive"]);
+/// // export const Status$Schema: ZodType<Status> = z.enum(["active", "pending", "inactive"]);
 /// ```
 ///
 /// ## Tagged Unions (Discriminated Unions)

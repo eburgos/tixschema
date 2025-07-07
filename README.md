@@ -350,7 +350,7 @@ export type User = {
   is_active: boolean;
 };
 
-export const User$Schema: z.ZodType<User, z.ZodTypeDef, unknown> = z.strictObject({
+export const User$Schema: ZodType<User> = z.strictObject({
   id: z.string(),
   name: z.string(),
   email: z.string(),
