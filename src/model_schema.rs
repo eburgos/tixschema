@@ -95,7 +95,7 @@ fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
         generate_ts_definition_method(&docs, &item_name, &type_code, fields_empty);
 
     #[cfg(feature = "zod")]
-    let zod_schema_method = generate_zod_schema_method(&item_name, &schema_code, &show_opts);
+    let zod_schema_method = generate_zod_schema_method(&item_name, &schema_code, show_opts);
 
     let impl_items: Vec<proc_macro2::TokenStream> = vec![
         #[cfg(feature = "jsonschema")]
@@ -321,7 +321,7 @@ fn process_discriminated_enum(
     for (discriminator_value, field_defs) in discriminator_field_defs {
         let (variant_type_code, variant_schema_code, optional_fields, json_schema_variant) =
             generate_variant_code(
-                &tag_name,
+                tag_name,
                 &discriminator_value,
                 field_defs,
                 &discriminator_field_docs[&discriminator_value],
