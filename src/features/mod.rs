@@ -72,16 +72,6 @@ impl Features {
         
         features
     }
-
-    /// Check if we have minimal configuration (no features)
-    pub const fn is_minimal() -> bool {
-        !Self::has_serde() && !Self::has_zod() && !Self::has_jsonschema() && !Self::has_object_id() && !Self::has_typescript()
-    }
-
-    /// Check if we have a TypeScript-only configuration (typescript enabled, but no zod, no jsonschema)
-    pub const fn is_typescript_only() -> bool {
-        Self::has_typescript() && !Self::has_zod() && !Self::has_jsonschema()
-    }
 }
 
 // Note: Proc-macro crates cannot export macro_rules! macros
@@ -105,8 +95,6 @@ mod tests {
             assert!(Features::has_jsonschema());
             assert!(Features::has_object_id());
             assert!(Features::has_typescript());
-            assert!(!Features::is_minimal());
-            assert!(!Features::is_typescript_only());
         }
     }
 } 

@@ -1,4 +1,7 @@
-use syn::{Expr, Field, ItemEnum, ItemStruct, Lit, Meta, Variant};
+use syn::{Expr, Field, Lit, Meta, Variant};
+
+#[cfg(feature = "typescript")]
+use syn::{ItemStruct, ItemEnum};
 
 pub fn safe_type_name(key: &str) -> String {
     if key.ends_with("Json") {
@@ -9,6 +12,8 @@ pub fn safe_type_name(key: &str) -> String {
     }
 }
 
+
+#[cfg(feature = "typescript")]
 /// Extracts and concatenates documentation comments from a syn::ItemStruct.
 ///
 /// # Arguments
@@ -48,6 +53,7 @@ pub(crate) fn get_struct_docs(item_struct: &ItemStruct) -> Option<Vec<String>> {
     }
 }
 
+#[cfg(feature = "typescript")]
 pub(crate) fn get_enum_docs(item_enum: &ItemEnum) -> Option<Vec<String>> {
     let mut doc_lines = Vec::new();
 

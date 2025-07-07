@@ -14,7 +14,7 @@ pub fn get_object_id_typescript_type() -> String {
     "ObjectId".to_string()
 }
 
-/// Generates Zod schema for ObjectId with regex validation
+#[cfg(all(feature = "object_id", any(test, feature = "zod")))]
 pub fn get_object_id_zod_schema() -> String {
     "z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) })".to_string()
 }
@@ -40,6 +40,7 @@ mod tests {
         assert_eq!(get_object_id_typescript_type(), "ObjectId");
     }
 
+    #[cfg(feature = "object_id")]
     #[test]
     fn test_object_id_zod_schema() {
         let schema = get_object_id_zod_schema();

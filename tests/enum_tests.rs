@@ -1,15 +1,34 @@
-use tixschema::model_schema;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-
 #[cfg(test)]
 mod tests {
-    use super::*;
 
-    // Test plain enum
+    #[cfg(all(
+        test,
+        any(feature = "typescript", feature = "jsonschema", feature = "zod", feature = "serde")
+    ))]
+    use tixschema::model_schema;
+
+    #[cfg(all(test, feature = "serde"))]
+    use serde;
+    #[cfg(all(test, feature = "serde"))]
+    use serde::{Deserialize, Serialize};
+    #[cfg(all(test, feature = "jsonschema", feature = "serde"))]
+    use serde_json::Value;
+
+    #[cfg(all(
+        test,
+        any(
+            feature = "typescript",
+            feature = "zod",
+            feature = "serde"
+        )
+    ))]
     #[model_schema()]
-    #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-    #[serde(rename_all = "lowercase")]
+    #[cfg_attr(
+        feature = "serde",
+        derive(Serialize, Deserialize),
+        serde(rename_all = "lowercase")
+    )]
+    #[derive(Debug, Clone, PartialEq)]
     enum UserStatus {
         Active,
         Inactive,
@@ -21,9 +40,9 @@ mod tests {
     #[cfg(all(feature = "jsonschema", feature = "serde"))]
     fn test_plain_enum_json_schema() {
         let schema = UserStatus::json_schema();
-        
+
         assert_eq!(schema["type"], "string");
-        
+
         let enum_values = schema["enum"].as_array().unwrap();
         assert_eq!(enum_values.len(), 4);
         assert!(enum_values.contains(&Value::String("active".to_string())));
@@ -36,34 +55,41 @@ mod tests {
     #[cfg(all(feature = "typescript", feature = "serde", feature = "zod"))]
     fn test_plain_enum_ts_definition_serde_style() {
         let ts_definition = UserStatus::ts_definition();
-        
+
         // Check TypeScript union type
         assert!(ts_definition.contains("export type UserStatus = "));
         assert!(ts_definition.contains("\"active\" | \"inactive\" | \"pending\" | \"suspended\""));
-        
+
         // Check Zod schema - now in separate method
         let zod_schema = UserStatus::zod_schema();
         assert!(zod_schema.contains("export const UserStatus$Schema"));
-        assert!(zod_schema.contains("z.enum([\"active\", \"inactive\", \"pending\", \"suspended\"])"));
+        assert!(
+            zod_schema.contains("z.enum([\"active\", \"inactive\", \"pending\", \"suspended\"])")
+        );
     }
 
     #[test]
     #[cfg(all(feature = "typescript", not(feature = "serde"), feature = "zod"))]
     fn test_plain_enum_ts_definition_not_serde_style() {
         let ts_definition = UserStatus::ts_definition();
-        
+
         // Check TypeScript union type
         assert!(ts_definition.contains("export type UserStatus = "));
         assert!(ts_definition.contains("\"Active\" | \"Inactive\" | \"Pending\" | \"Suspended\""));
-        
+
         // Check Zod schema - now in separate method
         let zod_schema = UserStatus::zod_schema();
         assert!(zod_schema.contains("export const UserStatus$Schema"));
-        assert!(zod_schema.contains("z.enum([\"Active\", \"Inactive\", \"Pending\", \"Suspended\"])"));
+        assert!(
+            zod_schema.contains("z.enum([\"Active\", \"Inactive\", \"Pending\", \"Suspended\"])")
+        );
     }
 
     #[test]
-    #[cfg(all(any(feature = "typescript", feature = "zod", feature = "jsonschema"), feature = "serde"))]
+    #[cfg(all(
+        any(feature = "typescript", feature = "zod", feature = "jsonschema"),
+        feature = "serde"
+    ))]
     fn test_plain_enum_members() {
         let members = UserStatus::enum_members();
         assert_eq!(members.len(), 4);
@@ -73,10 +99,15 @@ mod tests {
         assert!(members.contains(&"suspended".to_string()));
     }
 
+    #[cfg(all(
+        test,
+        any(feature = "typescript", feature = "jsonschema", feature = "zod")
+    ))]
     // Test discriminated union (tagged enum)
     #[model_schema()]
-    #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-    #[serde(tag = "type", rename_all = "camelCase")]
+    #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+    #[derive(Debug, Clone, PartialEq)]
+    #[cfg_attr(feature = "serde", serde(tag = "type", rename_all = "camelCase"))]
     enum PaymentMethod {
         CreditCard {
             card_number: String,
@@ -96,13 +127,13 @@ mod tests {
     #[cfg(feature = "jsonschema")]
     fn test_discriminated_union_json_schema() {
         let schema = PaymentMethod::json_schema();
-        
+
         assert_eq!(schema["type"], "object");
         assert!(schema.get("oneOf").is_some());
-        
+
         let one_of = schema["oneOf"].as_array().unwrap();
         assert_eq!(one_of.len(), 3);
-        
+
         // Check that each variant has the discriminator field
         for variant in one_of {
             let properties = variant["properties"].as_object().unwrap();
@@ -113,24 +144,39 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "jsonschema")]
+    fn test_payment_method_variants_json_schema() {
+        
+        let payment_method = PaymentMethod::PayPal { email: "test@test.com".to_string() };
+        assert_ne!(Some(payment_method), None);
+        
+        let payment_method = PaymentMethod::CreditCard { card_number: "1234567890".to_string(), expiry_date: "12/2025".to_string(), cvv: "123".to_string() };
+        assert_ne!(Some(payment_method), None);
+
+        let payment_method = PaymentMethod::BankTransfer { account_number: "1234567890".to_string(), routing_number: "1234567890".to_string() };
+        assert_ne!(Some(payment_method), None);
+
+    }
+
+    #[test]
     #[cfg(all(feature = "typescript", feature = "serde", feature = "zod"))]
     fn test_discriminated_union_ts_definition() {
         let ts_definition = PaymentMethod::ts_definition();
-        
+
         // Check that it contains discriminated union syntax
         assert!(ts_definition.contains("export type PaymentMethod = "));
         assert!(ts_definition.contains("type: \"creditCard\""));
         assert!(ts_definition.contains("type: \"bankTransfer\""));
         assert!(ts_definition.contains("type: \"payPal\""));
-        
+
         // Check field names are converted to camelCase
         assert!(ts_definition.contains("cardNumber: string;"));
         assert!(ts_definition.contains("expiryDate: string;"));
         assert!(ts_definition.contains("accountNumber: string;"));
         assert!(ts_definition.contains("routingNumber: string;"));
-        
+
         // Check Zod discriminated union - now in separate method
         let zod_schema = PaymentMethod::zod_schema();
         assert!(zod_schema.contains("z.discriminatedUnion(\"type\""));
     }
-} 
+}

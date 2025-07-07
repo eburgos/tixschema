@@ -6,13 +6,16 @@ use quote::quote;
 use syn::{Field, Item, parse_macro_input};
 
 use crate::{
-    field_type::{
-        FieldDef, FieldDefType, SerdeFieldMeta, SerdeTypeMeta, get_field_def, is_plain_enum,
-        parse_serde_field_attributes, parse_serde_type_attributes,
-    },
+    field_type::{FieldDef, FieldDefType, get_field_def, is_plain_enum},
     safe_type_name,
-    utils::{get_enum_docs, get_field_docs, get_struct_docs, get_variant_docs},
+    utils::{get_field_docs, get_variant_docs},
 };
+
+#[cfg(feature = "serde")]
+use crate::field_type::{parse_serde_field_attributes, parse_serde_type_attributes};
+
+#[cfg(feature = "typescript")]
+use crate::utils::{get_enum_docs, get_struct_docs};
 
 /// Executes the model_schema macro processing to generate TypeScript and Zod schema definitions.
 ///
@@ -29,13 +32,19 @@ pub(crate) fn exec_model_schema(_args: TokenStream, input: TokenStream) -> Token
 /// Processes a struct item and generates TypeScript and Zod schema definitions for it.
 fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
     let name = &item_struct.ident;
-    let serde_type_meta = parse_serde_type_attributes(&item_struct.attrs);
+
+    #[cfg(feature = "serde")]
+    let rename_all = parse_serde_type_attributes(&item_struct.attrs).rename_all;
+    #[cfg(not(feature = "serde"))]
+    let rename_all = None;
+
+    #[cfg(any(feature = "typescript", feature = "zod"))]
     let item_name = safe_type_name(&name.to_string());
 
     // Process all fields in the struct
     let mut field_defs = Vec::new();
     for field in &mut item_struct.fields {
-        let f_def = process_field(&serde_type_meta, field);
+        let f_def = process_field(&rename_all, field);
         field_defs.push(f_def);
     }
 
@@ -55,9 +64,13 @@ fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
         json_schema_fields.push(build_field_schema(&fld));
     }
 
+    #[cfg(feature = "typescript")]
     let fields_empty = json_schema_fields.is_empty();
-    let show_opts = show_optionals(&opts);
 
+    #[cfg(feature = "zod")]
+    let show_opts = "";
+
+    #[cfg(feature = "typescript")]
     let docs = match get_struct_docs(&item_struct) {
         Some(doc_lines) => doc_lines
             .into_iter()
@@ -74,34 +87,24 @@ fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
     };
 
     // Generate the final output with conditional compilation
-    let json_schema_method = generate_json_schema_method(&json_schema_fields);
-    #[cfg(feature = "typescript")]
-    let ts_definition_method = generate_ts_definition_method(
-        &docs, 
-        &item_name, 
-        &type_code, 
-        fields_empty
-    );
-    let zod_schema_method = generate_zod_schema_method(
-        &item_name,
-        &schema_code,
-        &show_opts,
-    );
-
-    let mut impl_items: Vec<proc_macro2::TokenStream> = Vec::new();
     #[cfg(feature = "jsonschema")]
-    {
-        impl_items.push(json_schema_method);
-    }
-    #[cfg(feature = "typescript")]
-    {
-        impl_items.push(ts_definition_method);
-    }
-    #[cfg(feature = "zod")]
-    {
-        impl_items.push(zod_schema_method);
-    }
+    let json_schema_method = generate_json_schema_method(&json_schema_fields);
 
+    #[cfg(feature = "typescript")]
+    let ts_definition_method =
+        generate_ts_definition_method(&docs, &item_name, &type_code, fields_empty);
+
+    #[cfg(feature = "zod")]
+    let zod_schema_method = generate_zod_schema_method(&item_name, &schema_code, &show_opts);
+
+    let impl_items: Vec<proc_macro2::TokenStream> = vec![
+        #[cfg(feature = "jsonschema")]
+        json_schema_method,
+        #[cfg(feature = "typescript")]
+        ts_definition_method,
+        #[cfg(feature = "zod")]
+        zod_schema_method,
+    ];
 
     let output = quote! {
         #item_struct
@@ -122,13 +125,40 @@ fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
 /// Processes an enum item and generates TypeScript and Zod schema definitions for it.
 fn process_enum(item_enum: syn::ItemEnum) -> TokenStream {
     let name = item_enum.ident.clone();
+
+    #[cfg(feature = "serde")]
     let serde_type_meta = parse_serde_type_attributes(&item_enum.attrs);
+
     let item_name = safe_type_name(&name.to_string());
 
     if is_plain_enum(&item_enum) {
-        process_plain_enum(item_enum, &name, &serde_type_meta, &item_name)
+        #[cfg(feature = "serde")]
+        let rename_all = &serde_type_meta.rename_all;
+
+        #[cfg(not(feature = "serde"))]
+        let rename_all = &None;
+
+        process_plain_enum(item_enum, &name, rename_all, &item_name)
     } else {
-        process_discriminated_enum(item_enum, &name, &serde_type_meta, &item_name)
+        #[cfg(feature = "serde")]
+        let (tag_name, rename_all) = (
+            serde_type_meta
+                .tag
+                .as_ref()
+                .map_or_else(|| "type".to_string(), Clone::clone),
+            serde_type_meta.rename_all,
+        );
+
+        #[cfg(not(feature = "serde"))]
+        let (tag_name, rename_all) = ("type".to_string(), None);
+
+        process_discriminated_enum(
+            item_enum,
+            &name,
+            &tag_name,
+            &rename_all,
+            &item_name,
+        )
     }
 }
 
@@ -136,24 +166,29 @@ fn process_enum(item_enum: syn::ItemEnum) -> TokenStream {
 fn process_plain_enum(
     mut item_enum: syn::ItemEnum,
     name: &syn::Ident,
-    serde_type_meta: &SerdeTypeMeta,
+    rename_all: &Option<String>,
     item_name: &str,
 ) -> TokenStream {
     let mut enum_options = Vec::new();
 
     for item in &mut item_enum.variants {
-        let serde_field_meta = parse_serde_field_attributes(&item.attrs);
-        let final_name = get_final_name(item.ident.to_string(), &serde_field_meta, serde_type_meta);
+        #[cfg(feature = "serde")]
+        let field_rename = parse_serde_field_attributes(&item.attrs).rename;
+        #[cfg(not(feature = "serde"))]
+        let field_rename = None;
+
+        let final_name = get_final_name(item.ident.to_string(), &field_rename, rename_all);
         enum_options.push(final_name);
     }
 
-    // Generate TypeScript and Zod schema representations
+    #[cfg(feature = "typescript")]
     let type_code = enum_options
         .iter()
         .map(|v| format!("\"{v}\""))
         .collect::<Vec<_>>()
         .join(" | ");
 
+    #[cfg(feature = "zod")]
     let schema_code = enum_options
         .iter()
         .map(|v| format!("\"{v}\""))
@@ -161,10 +196,14 @@ fn process_plain_enum(
         .join(", ");
 
     // Enumerate the strings with indices
-    let enumerated: Vec<proc_macro2::TokenStream> = enum_options.iter().map(|v| {
-        quote! { #v }
-    }).collect();
+    let enumerated: Vec<proc_macro2::TokenStream> = enum_options
+        .iter()
+        .map(|v| {
+            quote! { #v }
+        })
+        .collect();
 
+    #[cfg(feature = "typescript")]
     let docs = match get_enum_docs(&item_enum) {
         Some(doc_lines) => doc_lines
             .into_iter()
@@ -181,17 +220,27 @@ fn process_plain_enum(
     };
 
     // Generate conditional methods
+    #[cfg(feature = "jsonschema")]
     let json_schema_method = generate_plain_enum_json_schema_method(&enumerated);
-    let ts_definition_method = generate_plain_enum_ts_definition_method(
-        &docs,
-        item_name,
-        &type_code,
-    );
-    let zod_schema_method = generate_plain_enum_zod_schema_method(
-        item_name,
-        &schema_code,
-    );
-    
+
+    #[cfg(feature = "typescript")]
+    let ts_definition_method =
+        generate_plain_enum_ts_definition_method(&docs, item_name, &type_code);
+    #[cfg(feature = "zod")]
+    let zod_schema_method = generate_plain_enum_zod_schema_method(item_name, &schema_code);
+
+    #[cfg(not(any(feature = "typescript", feature = "zod")))]
+    let _ = item_name;
+
+    let impl_items: Vec<proc_macro2::TokenStream> = vec![
+        #[cfg(feature = "jsonschema")]
+        json_schema_method,
+        #[cfg(feature = "typescript")]
+        ts_definition_method,
+        #[cfg(feature = "zod")]
+        zod_schema_method,
+    ];
+
     // Use the enumerated values in the quote! macro
     let enum_values = &enumerated;
 
@@ -199,10 +248,8 @@ fn process_plain_enum(
         #item_enum
 
         impl #name {
-            #json_schema_method
-            #ts_definition_method
-            #zod_schema_method
-            
+            #(#impl_items) *
+
             pub fn enum_members() -> Vec<String> {
                 [
                     #(#enum_values),*
@@ -223,28 +270,28 @@ fn process_plain_enum(
 fn process_discriminated_enum(
     mut item_enum: syn::ItemEnum,
     name: &syn::Ident,
-    serde_type_meta: &SerdeTypeMeta,
+    tag_name: &str,
+    rename_all: &Option<String>,
     item_name: &str,
 ) -> TokenStream {
     let mut discriminator_field_defs: HashMap<String, Vec<FieldDef>> = HashMap::new();
     let mut discriminator_field_docs: HashMap<String, String> = HashMap::new();
     let mut json_schema_variants: Vec<proc_macro2::TokenStream> = Vec::new();
 
-    let tag_name = serde_type_meta
-        .tag
-        .as_ref()
-        .map_or_else(|| "type".to_string(), Clone::clone);
-
     // Process each variant in the enum
     for item in &mut item_enum.variants {
-        let serde_field_meta = parse_serde_field_attributes(&item.attrs);
-        let final_name = get_final_name(item.ident.to_string(), &serde_field_meta, serde_type_meta);
+        #[cfg(feature = "serde")]
+        let field_rename = parse_serde_field_attributes(&item.attrs).rename;
+        #[cfg(not(feature = "serde"))]
+        let field_rename = None;
+
+        let final_name = get_final_name(item.ident.to_string(), &field_rename, rename_all);
 
         let mut field_defs: Vec<FieldDef> = Vec::new();
         let mut json_schema_fields: Vec<proc_macro2::TokenStream> = Vec::new();
 
         for field in &mut item.fields {
-            let f_def = process_field(serde_type_meta, field);
+            let f_def = process_field(rename_all, field);
             json_schema_fields.push(build_field_schema(&f_def));
             field_defs.push(f_def);
         }
@@ -285,6 +332,7 @@ fn process_discriminated_enum(
         json_schema_variants.push(json_schema_variant);
     }
 
+    #[cfg(feature = "jsonschema")]
     let main_schema_code = quote! {
         let mut schema_obj = serde_json::Map::new();
         schema_obj.insert("type".to_string(), serde_json::Value::String("object".to_string()));
@@ -299,22 +347,21 @@ fn process_discriminated_enum(
         serde_json::Value::Object(schema_obj)
     };
 
+    #[cfg(feature = "typescript")]
     let type_code = type_code_items.join(" | ");
-    
+
     // Generate Zod schema conditionally
     #[cfg(feature = "zod")]
     let schema_code = format!(
         "z.discriminatedUnion(\"{tag_name}\", [{}])",
         schema_code_items
             .iter()
-            .map(|(v, opts)| format!("z.strictObject({}){}", v, show_optionals(opts)))
+            .map(|(v, _opts)| format!("z.strictObject({}){}", v, ""))
             .collect::<Vec<_>>()
             .join(", ")
     );
-    
-    #[cfg(not(feature = "zod"))]
-    let schema_code = String::new(); // Empty schema when zod feature disabled
 
+    #[cfg(feature = "typescript")]
     let docs = match get_enum_docs(&item_enum) {
         Some(doc_lines) => doc_lines
             .into_iter()
@@ -330,18 +377,33 @@ fn process_discriminated_enum(
             .join("\n"),
     };
 
-    // Generate conditional implementation
+    #[cfg(feature = "jsonschema")]
     let json_schema_method = generate_discriminated_enum_json_schema_method(&main_schema_code);
-    let ts_definition_method = generate_discriminated_enum_ts_definition_method(&docs, item_name, &type_code);
+
+    #[cfg(feature = "typescript")]
+    let ts_definition_method =
+        generate_discriminated_enum_ts_definition_method(&docs, item_name, &type_code);
+
+    #[cfg(feature = "zod")]
     let zod_schema_method = generate_discriminated_enum_zod_schema_method(item_name, &schema_code);
+
+    #[cfg(not(any(feature = "typescript", feature = "zod")))]
+    let _ = item_name;
+
+    let impl_items: Vec<proc_macro2::TokenStream> = vec![
+        #[cfg(feature = "jsonschema")]
+        json_schema_method,
+        #[cfg(feature = "typescript")]
+        ts_definition_method,
+        #[cfg(feature = "zod")]
+        zod_schema_method,
+    ];
 
     let output = quote! {
         #item_enum
 
         impl #name {
-            #json_schema_method
-            #ts_definition_method
-            #zod_schema_method
+            #(#impl_items) *
         }
     };
 
@@ -413,7 +475,7 @@ fn generate_variant_code(
                 panic!("Failed to write Zod schema: {err}");
             }
         }
-        
+
         #[cfg(not(feature = "zod"))]
         {
             // When zod feature is disabled, don't write to variant_schema_code
@@ -504,9 +566,16 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
                 }
             }
         }
-        FieldDefType::U32 | FieldDefType::U16 | FieldDefType::U8 | FieldDefType::U64 
-            | FieldDefType::I8 | FieldDefType::I16 | FieldDefType::I32 | FieldDefType::I64 
-            | FieldDefType::Usize | FieldDefType::Isize => {
+        FieldDefType::U32
+        | FieldDefType::U16
+        | FieldDefType::U8
+        | FieldDefType::U64
+        | FieldDefType::I8
+        | FieldDefType::I16
+        | FieldDefType::I32
+        | FieldDefType::I64
+        | FieldDefType::Usize
+        | FieldDefType::Isize => {
             if fld.is_array {
                 quote! {
                     properties.insert(#field_name_str.to_string(), {
@@ -566,6 +635,7 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
                 }
             }
         }
+        #[cfg(feature = "object_id")]
         FieldDefType::ObjectId => {
             if fld.is_array {
                 quote! {
@@ -670,9 +740,16 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
                             }
                         }
                     }
-                    FieldDefType::U8 | FieldDefType::U16 | FieldDefType::U32 | FieldDefType::U64 
-                        | FieldDefType::I8 | FieldDefType::I16 | FieldDefType::I32 | FieldDefType::I64 
-                        | FieldDefType::Usize | FieldDefType::Isize => {
+                    FieldDefType::U8
+                    | FieldDefType::U16
+                    | FieldDefType::U32
+                    | FieldDefType::U64
+                    | FieldDefType::I8
+                    | FieldDefType::I16
+                    | FieldDefType::I32
+                    | FieldDefType::I64
+                    | FieldDefType::Usize
+                    | FieldDefType::Isize => {
                         if value.is_array {
                             quote! {
                                 properties.insert(#field_name_str.to_string(), {
@@ -750,6 +827,7 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
                             }
                         }
                     }
+                    #[cfg(feature = "object_id")]
                     FieldDefType::ObjectId => {
                         if value.is_array {
                             quote! {
@@ -790,15 +868,25 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
                     }
                     FieldDefType::Map(inner_key, inner_value) => {
                         if env::var("RUST_LOG") == Ok(String::from("trace")) {
-                            println!("Map Value is another Map => inner_key: {:?}, inner_value: {:?}, is_array: {}", inner_key, inner_value, value.is_array);
+                            println!(
+                                "Map Value is another Map => inner_key: {:?}, inner_value: {:?}, is_array: {}",
+                                inner_key, inner_value, value.is_array
+                            );
                         }
-                        
+
                         // Handle Vec<HashMap<String, T>> case
                         if value.is_array && matches!(inner_key.field_type, FieldDefType::String) {
                             let inner_value_schema = match &inner_value.field_type {
-                                FieldDefType::U8 | FieldDefType::U16 | FieldDefType::U32 | FieldDefType::U64 
-                                    | FieldDefType::I8 | FieldDefType::I16 | FieldDefType::I32 | FieldDefType::I64 
-                                    | FieldDefType::Usize | FieldDefType::Isize => {
+                                FieldDefType::U8
+                                | FieldDefType::U16
+                                | FieldDefType::U32
+                                | FieldDefType::U64
+                                | FieldDefType::I8
+                                | FieldDefType::I16
+                                | FieldDefType::I32
+                                | FieldDefType::I64
+                                | FieldDefType::Usize
+                                | FieldDefType::Isize => {
                                     quote! { { "type": "integer" } }
                                 }
                                 FieldDefType::F32 | FieldDefType::F64 => {
@@ -810,6 +898,7 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
                                 FieldDefType::Boolean => {
                                     quote! { { "type": "boolean" } }
                                 }
+                                #[cfg(feature = "object_id")]
                                 FieldDefType::ObjectId => {
                                     quote! { {
                                         "type": "object",
@@ -824,7 +913,7 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
                                     quote! { true }
                                 }
                             };
-                            
+
                             quote! {
                                 properties.insert(#field_name_str.to_string(), {
                                     serde_json::json!({
@@ -853,9 +942,11 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
                     }
                     FieldDefType::SiblingType(value_type_name, value_args) => {
                         if env::var("RUST_LOG") == Ok(String::from("trace")) {
-                            println!("Map Value SiblingType => value_type_name: {value_type_name}, value_args: {value_args:?}");
+                            println!(
+                                "Map Value SiblingType => value_type_name: {value_type_name}, value_args: {value_args:?}"
+                            );
                         }
-                        
+
                         // Handle Vec<T> as map value
                         if value_type_name == "Vec" && value_args.len() == 1 {
                             let inner_type = &value_args[0];
@@ -865,9 +956,16 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
                                     match &inner_key.field_type {
                                         FieldDefType::String => {
                                             let inner_value_schema = match &inner_value.field_type {
-                                                FieldDefType::U8 | FieldDefType::U16 | FieldDefType::U32 | FieldDefType::U64 
-                                                    | FieldDefType::I8 | FieldDefType::I16 | FieldDefType::I32 | FieldDefType::I64 
-                                                    | FieldDefType::Usize | FieldDefType::Isize => {
+                                                FieldDefType::U8
+                                                | FieldDefType::U16
+                                                | FieldDefType::U32
+                                                | FieldDefType::U64
+                                                | FieldDefType::I8
+                                                | FieldDefType::I16
+                                                | FieldDefType::I32
+                                                | FieldDefType::I64
+                                                | FieldDefType::Usize
+                                                | FieldDefType::Isize => {
                                                     quote! { { "type": "integer" } }
                                                 }
                                                 FieldDefType::F32 | FieldDefType::F64 => {
@@ -883,7 +981,7 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
                                                     quote! { true }
                                                 }
                                             };
-                                            
+
                                             quote! {
                                                 properties.insert(#field_name_str.to_string(), {
                                                     serde_json::json!({
@@ -912,9 +1010,16 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
                                     }
                                 }
                                 // Vec<primitive>
-                                FieldDefType::U8 | FieldDefType::U16 | FieldDefType::U32 | FieldDefType::U64 
-                                    | FieldDefType::I8 | FieldDefType::I16 | FieldDefType::I32 | FieldDefType::I64 
-                                    | FieldDefType::Usize | FieldDefType::Isize => {
+                                FieldDefType::U8
+                                | FieldDefType::U16
+                                | FieldDefType::U32
+                                | FieldDefType::U64
+                                | FieldDefType::I8
+                                | FieldDefType::I16
+                                | FieldDefType::I32
+                                | FieldDefType::I64
+                                | FieldDefType::Usize
+                                | FieldDefType::Isize => {
                                     quote! {
                                         properties.insert(#field_name_str.to_string(), {
                                             serde_json::json!({
@@ -966,6 +1071,7 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
                                         });
                                     }
                                 }
+                                #[cfg(feature = "object_id")]
                                 FieldDefType::ObjectId => {
                                     quote! {
                                         properties.insert(#field_name_str.to_string(), {
@@ -1126,7 +1232,7 @@ fn write_field_type_and_schema(type_code: &mut String, schema_code: &mut String,
             panic!("Failed to write Zod schema: {err}");
         }
     }
-    
+
     #[cfg(not(feature = "zod"))]
     {
         // When zod feature is disabled, don't write to schema_code
@@ -1134,17 +1240,14 @@ fn write_field_type_and_schema(type_code: &mut String, schema_code: &mut String,
     }
 }
 
-/// Generates optional fields transformation code for Zod schema.
-/// In Zod v4, we use .or(z.undefined()) instead of .optional() + .transform()
-fn show_optionals(_opts: &[String]) -> String {
-    // No longer needed in Zod v4 - we use .or(z.undefined()) directly in field definitions
-    String::new()
-}
-
 /// Processes a field and returns its definition.
-fn process_field(serde_type_meta: &SerdeTypeMeta, field: &mut Field) -> FieldDef {
+fn process_field(rename_all: &Option<String>, field: &mut Field) -> FieldDef {
     let mut new_attrs = Vec::new();
-    let serde_field_meta = parse_serde_field_attributes(&field.attrs);
+
+    #[cfg(feature = "serde")]
+    let field_rename = parse_serde_field_attributes(&field.attrs).rename;
+    #[cfg(not(feature = "serde"))]
+    let field_rename = None;
 
     // Filter out model_schema_prop attributes
     for attr in &field.attrs {
@@ -1163,7 +1266,7 @@ fn process_field(serde_type_meta: &SerdeTypeMeta, field: &mut Field) -> FieldDef
         .into_iter()
         .collect::<String>();
 
-    let final_name = get_final_name(name, &serde_field_meta, serde_type_meta);
+    let final_name = get_final_name(name, &field_rename, rename_all);
     let field_docs = match get_field_docs(field) {
         Some(doc_lines) => doc_lines
             .into_iter()
@@ -1184,14 +1287,14 @@ fn process_field(serde_type_meta: &SerdeTypeMeta, field: &mut Field) -> FieldDef
 /// Gets the final name for a field or enum variant, considering serde attributes.
 fn get_final_name(
     name: String,
-    serde_field_meta: &SerdeFieldMeta,
-    serde_type_meta: &SerdeTypeMeta,
+    field_rename: &Option<String>,
+    rename_all: &Option<String>,
 ) -> String {
-    if let Some(rename) = &serde_field_meta.rename {
+    if let Some(rename) = &field_rename {
         rename.clone()
-    } else if serde_type_meta.rename_all == Some("camelCase".to_string()) {
+    } else if rename_all == &Some("camelCase".to_string()) {
         snake_to_camel(&name)
-    } else if serde_type_meta.rename_all == Some("lowercase".to_string()) {
+    } else if rename_all == &Some("lowercase".to_string()) {
         name.to_lowercase()
     } else {
         name
@@ -1222,21 +1325,12 @@ fn snake_to_camel(s: &str) -> String {
     result
 }
 
+#[cfg(feature = "jsonschema")]
 /// Generates the JSON schema method conditionally based on the jsonschema feature
-fn generate_json_schema_method(_json_schema_fields: &[proc_macro2::TokenStream]) -> proc_macro2::TokenStream {
-    #[cfg(feature = "jsonschema")]
-    {
-        crate::features::jsonschema::generate_struct_json_schema_method(_json_schema_fields)
-    }
-    
-    #[cfg(not(feature = "jsonschema"))]
-    {
-        quote::quote! {
-            // JSON schema method not available - jsonschema feature disabled
-            // To enable: add "jsonschema" to your features
-            // Example: tixschema = { features = ["jsonschema"] }
-        }
-    }
+fn generate_json_schema_method(
+    json_schema_fields: &[proc_macro2::TokenStream],
+) -> proc_macro2::TokenStream {
+    crate::features::jsonschema::generate_struct_json_schema_method(json_schema_fields)
 }
 
 #[cfg(feature = "typescript")]
@@ -1247,36 +1341,35 @@ fn generate_ts_definition_method(
     type_code: &str,
     fields_empty: bool,
 ) -> proc_macro2::TokenStream {
-    
-    
-        // TypeScript type generation (only available when typescript feature is enabled)
-        let typescript_type_gen = if fields_empty {
-            quote::quote! {
-                format!(r#"/**\n{}\n**/\nexport type {} = Record<string, never>;"#, docs, #item_name)
-            }
-        } else {
-            quote::quote! {
-                format!("/**\n{}\n**/\nexport type {} = {{\n{}\n}};", docs, #item_name, #type_code)
-            }
-        };
-
-        // Conditional JSON schema docs
-        let json_docs_gen = generate_json_docs_part();
-
+    // TypeScript type generation (only available when typescript feature is enabled)
+    let typescript_type_gen = if fields_empty {
         quote::quote! {
-            pub fn ts_definition() -> String {
-                let docs = #docs;
-                #json_docs_gen
-                #typescript_type_gen
-            }
+            format!(r#"/**\n{}\n**/\nexport type {} = Record<string, never>;"#, docs, #item_name)
         }
-    
-    
-    
+    } else {
+        quote::quote! {
+            format!("/**\n{}\n**/\nexport type {} = {{\n{}\n}};", docs, #item_name, #type_code)
+        }
+    };
+
+    #[cfg(all(feature = "jsonschema", feature = "typescript"))]
+    let json_docs_gen = generate_json_docs_part();
+
+    #[cfg(not(feature = "jsonschema"))]
+    let json_docs_gen = quote::quote! {
+        let docs = format!("/**\n{docs}\n **/\n");
+    };
+
+    quote::quote! {
+        pub fn ts_definition() -> String {
+            let docs = #docs;
+            #json_docs_gen
+            #typescript_type_gen
+        }
+    }
 }
 
-
-
+#[cfg(feature = "zod")]
 /// Generates the Zod schema method (Zod schemas only, no TypeScript types)
 fn generate_zod_schema_method(
     item_name: &str,
@@ -1296,7 +1389,7 @@ fn generate_zod_schema_method(
                 }
             }
         }
-        
+
         // When typescript feature is disabled, generate JavaScript-style Zod schema
         #[cfg(not(feature = "typescript"))]
         {
@@ -1309,7 +1402,7 @@ fn generate_zod_schema_method(
             }
         }
     }
-    
+
     #[cfg(not(feature = "zod"))]
     {
         quote::quote! {
@@ -1320,33 +1413,24 @@ fn generate_zod_schema_method(
     }
 }
 
-/// Generates JSON schema documentation part conditionally
+#[cfg(all(feature = "jsonschema", feature = "typescript"))]
 fn generate_json_docs_part() -> proc_macro2::TokenStream {
-    #[cfg(all(feature = "jsonschema", feature = "zod"))]
-    {
-        quote::quote! {
-            let prettified = serde_json::to_string_pretty(&Self::json_schema()).unwrap().lines().map(|l| format!(" * {l}")).collect::<Vec<_>>().join("\n");
-            let docs = format!("/**\n{docs}\n * JSON Schema:\n{prettified}\n **/\n");
-        }
-    }
-    
-    #[cfg(not(all(feature = "jsonschema", feature = "zod")))]
-    {
-        quote::quote! {
-            // No JSON schema docs when jsonschema feature is disabled
-            // To enable: add both "jsonschema" and "zod" features
-            // Example: tixschema = { features = ["jsonschema", "zod"] }
-        }
+    quote::quote! {
+        let prettified = serde_json::to_string_pretty(&Self::json_schema()).unwrap().lines().map(|l| format!(" * {l}")).collect::<Vec<_>>().join("\n");
+        let docs = format!("/**\n{docs}\n * JSON Schema:\n{prettified}\n **/\n");
     }
 }
 
+#[cfg(feature = "jsonschema")]
 /// Generates the JSON schema method for plain enums conditionally
-fn generate_plain_enum_json_schema_method(_enumerated: &[proc_macro2::TokenStream]) -> proc_macro2::TokenStream {
+fn generate_plain_enum_json_schema_method(
+    _enumerated: &[proc_macro2::TokenStream],
+) -> proc_macro2::TokenStream {
     #[cfg(feature = "jsonschema")]
     {
         crate::features::jsonschema::generate_plain_enum_json_schema_method()
     }
-    
+
     #[cfg(not(feature = "jsonschema"))]
     {
         let _ = _enumerated; // Suppress unused variable warning
@@ -1358,6 +1442,7 @@ fn generate_plain_enum_json_schema_method(_enumerated: &[proc_macro2::TokenStrea
     }
 }
 
+#[cfg(feature = "typescript")]
 /// Generates the TypeScript definition method for plain enums (TypeScript types only)
 fn generate_plain_enum_ts_definition_method(
     docs: &str,
@@ -1370,15 +1455,15 @@ fn generate_plain_enum_ts_definition_method(
         let typescript_type_gen = quote::quote! {
             format!(r#"/**\n{}\n**/\nexport type {} = {};"#, docs, #item_name, #type_code)
         };
-        
+
         // Conditional JSON schema docs
         let json_docs_gen = quote::quote! {
             #[cfg(all(feature = "jsonschema", feature = "zod"))]
             let prettified = serde_json::to_string_pretty(&Self::json_schema()).unwrap().lines().map(|l| format!(" * {l}")).collect::<Vec<_>>().join("\n");
-            
+
             #[cfg(all(feature = "jsonschema", feature = "zod"))]
             let docs = format!("/**\n{}\n * JSON Schema:\n{}\n **/\n", #docs, prettified);
-            
+
             #[cfg(not(all(feature = "jsonschema", feature = "zod")))]
             let docs = format!("/**\n{}\n**/\n", #docs);
         };
@@ -1390,7 +1475,7 @@ fn generate_plain_enum_ts_definition_method(
             }
         }
     }
-    
+
     #[cfg(not(feature = "typescript"))]
     {
         quote::quote! {
@@ -1401,6 +1486,7 @@ fn generate_plain_enum_ts_definition_method(
     }
 }
 
+#[cfg(feature = "zod")]
 /// Generates the Zod schema method for plain enums (Zod schemas only)
 fn generate_plain_enum_zod_schema_method(
     item_name: &str,
@@ -1417,7 +1503,7 @@ fn generate_plain_enum_zod_schema_method(
                 }
             }
         }
-        
+
         // When typescript feature is disabled, generate JavaScript-style Zod schema
         #[cfg(not(feature = "typescript"))]
         {
@@ -1428,7 +1514,7 @@ fn generate_plain_enum_zod_schema_method(
             }
         }
     }
-    
+
     #[cfg(not(feature = "zod"))]
     {
         quote::quote! {
@@ -1439,27 +1525,19 @@ fn generate_plain_enum_zod_schema_method(
     }
 }
 
+#[cfg(feature = "jsonschema")]
 /// Generates the JSON schema method for discriminated enums conditionally
-fn generate_discriminated_enum_json_schema_method(main_schema_code: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
-    #[cfg(feature = "jsonschema")]
-    {
-        quote::quote! {
-            pub fn json_schema() -> serde_json::Value {
-                #main_schema_code
-            }
-        }
-    }
-    
-    #[cfg(not(feature = "jsonschema"))]
-    {
-        quote::quote! {
-            // JSON schema method not available - jsonschema feature disabled
-            // To enable: add "jsonschema" to your features
-            // Example: tixschema = { features = ["jsonschema"] }
+fn generate_discriminated_enum_json_schema_method(
+    main_schema_code: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    quote::quote! {
+        pub fn json_schema() -> serde_json::Value {
+            #main_schema_code
         }
     }
 }
 
+#[cfg(feature = "typescript")]
 /// Generates the TypeScript definition method for discriminated enums (TypeScript types only)
 fn generate_discriminated_enum_ts_definition_method(
     docs: &str,
@@ -1472,10 +1550,10 @@ fn generate_discriminated_enum_ts_definition_method(
         let json_docs_gen = quote::quote! {
             #[cfg(all(feature = "jsonschema", feature = "zod"))]
             let prettified = serde_json::to_string_pretty(&Self::json_schema()).unwrap().lines().map(|l| format!(" * {l}")).collect::<Vec<_>>().join("\n");
-            
+
             #[cfg(all(feature = "jsonschema", feature = "zod"))]
             let docs = format!("/**\n{}\n * JSON Schema:\n{}\n **/\n", #docs, prettified);
-            
+
             #[cfg(not(all(feature = "jsonschema", feature = "zod")))]
             let docs = format!("/**\n{}\n**/\n", #docs);
         };
@@ -1488,7 +1566,7 @@ fn generate_discriminated_enum_ts_definition_method(
             }
         }
     }
-    
+
     #[cfg(not(feature = "typescript"))]
     {
         quote::quote! {
@@ -1499,6 +1577,7 @@ fn generate_discriminated_enum_ts_definition_method(
     }
 }
 
+#[cfg(feature = "zod")]
 /// Generates the Zod schema method for discriminated enums (Zod schemas only)
 fn generate_discriminated_enum_zod_schema_method(
     item_name: &str,
@@ -1515,7 +1594,7 @@ fn generate_discriminated_enum_zod_schema_method(
                 }
             }
         }
-        
+
         // When typescript feature is disabled, generate JavaScript-style Zod schema
         #[cfg(not(feature = "typescript"))]
         {
@@ -1526,7 +1605,7 @@ fn generate_discriminated_enum_zod_schema_method(
             }
         }
     }
-    
+
     #[cfg(not(feature = "zod"))]
     {
         quote::quote! {

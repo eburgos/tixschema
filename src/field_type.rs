@@ -1,6 +1,9 @@
 use syn::{
-    Attribute, Fields, GenericArgument, ItemEnum, PathArguments, Type,
+    Fields, GenericArgument, ItemEnum, PathArguments, Type,
 };
+
+#[cfg(feature = "serde")]
+use syn::Attribute;
 
 use crate::safe_type_name;
 
@@ -24,6 +27,8 @@ pub(crate) enum FieldDefType {
     Isize,
     F32,
     F64,
+
+    #[cfg(feature = "object_id")]
     ObjectId,
 }
 
@@ -41,20 +46,7 @@ pub(crate) struct FieldDef {
 #[cfg(feature = "serde")]
 pub(crate) use crate::features::serde::{SerdeTypeMeta, SerdeFieldMeta};
 
-// Provide fallback types when serde feature is disabled
-#[cfg(not(feature = "serde"))]
-#[derive(Clone, Debug, Default)]
-pub(crate) struct SerdeTypeMeta {
-    pub tag: Option<String>,
-    pub rename_all: Option<String>,
-}
 
-#[cfg(not(feature = "serde"))]
-#[derive(Clone, Debug, Default)]
-pub(crate) struct SerdeFieldMeta {
-    pub rename: Option<String>,
-    pub skip: bool,
-}
 
 impl FieldDef {
     pub fn typescript_typename(&self) -> String {
@@ -96,8 +88,6 @@ impl FieldDef {
             FieldDefType::F32 | FieldDefType::F64 => "number".to_string(),
             #[cfg(feature = "object_id")]
             FieldDefType::ObjectId => crate::features::object_id::get_object_id_typescript_type(),
-            #[cfg(not(feature = "object_id"))]
-            FieldDefType::ObjectId => "unknown".to_string(), // Fallback when feature disabled
         };
         let pre_result = if self.is_array {
             format!("Array<{result}>")
@@ -150,8 +140,6 @@ impl FieldDef {
             FieldDefType::F32 | FieldDefType::F64 => "z.number()".to_string(),
             #[cfg(feature = "object_id")]
             FieldDefType::ObjectId => crate::features::object_id::get_object_id_zod_schema(),
-            #[cfg(not(feature = "object_id"))]
-            FieldDefType::ObjectId => "z.unknown()".to_string(), // Fallback when feature disabled
         };
         let pre_result = if self.is_array {
             format!("z.array({result})")
@@ -166,12 +154,7 @@ impl FieldDef {
         }
     }
 
-    #[cfg(not(feature = "zod"))]
-    pub fn zod_type(&self) -> String {
-        // When zod feature is disabled, return empty string
-        // This method should not be called when zod feature is disabled
-        String::new()
-    }
+    
 }
 
 pub(crate) fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
@@ -357,37 +340,10 @@ pub(crate) fn parse_serde_type_attributes(attrs: &[Attribute]) -> SerdeTypeMeta 
     crate::features::serde::parse_serde_type_attributes(attrs)
 }
 
-#[cfg(not(feature = "serde"))]
-pub(crate) fn parse_serde_type_attributes(attrs: &[Attribute]) -> SerdeTypeMeta {
-    // Check for serde attributes and warn when serde feature is disabled
-    for attr in attrs {
-        if attr.path().is_ident("serde") {
-            eprintln!("warning: serde attribute detected but 'serde' feature is not enabled");
-            eprintln!("         Field names will not be transformed (camelCase, etc.)");
-            eprintln!("         Enable the serde feature: features = [\"serde\"]");
-            break; // Only warn once per struct/enum
-        }
-    }
-    SerdeTypeMeta::default()
-}
 /// Parses serde attributes from a field.
 #[cfg(feature = "serde")]
 pub(crate) fn parse_serde_field_attributes(attrs: &[Attribute]) -> SerdeFieldMeta {
     crate::features::serde::parse_serde_field_attributes(attrs)
-}
-
-#[cfg(not(feature = "serde"))]
-pub(crate) fn parse_serde_field_attributes(attrs: &[Attribute]) -> SerdeFieldMeta {
-    // Check for serde attributes and warn when serde feature is disabled
-    for attr in attrs {
-        if attr.path().is_ident("serde") {
-            eprintln!("warning: serde field attribute detected but 'serde' feature is not enabled");
-            eprintln!("         Field rename and skip attributes will be ignored");
-            eprintln!("         Enable the serde feature: features = [\"serde\"]");
-            break; // Only warn once per field
-        }
-    }
-    SerdeFieldMeta::default()
 }
 
 pub(crate) fn is_plain_enum(item_enum: &ItemEnum) -> bool {
