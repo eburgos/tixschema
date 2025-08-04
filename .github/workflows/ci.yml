@@ -192,7 +192,7 @@ jobs:
         echo "Job Status: $JOB_STATUS"
         echo "Failed Step: $FAILED_STEP"
         
-        RESPONSE=$(curl -s -w "HTTPSTATUS:%{http_code}" -H "Content-Type: application/json" -d "$JSON_PAYLOAD" https://discord.com/api/webhooks/1391549647381594152/q30qmcaFaQWf-_yPCP6d-82za6U9-BM9lKjyNgPL4Lp8fTmdtsYzgRpEBoN1qnNBPv8y)
+        RESPONSE=$(curl -s -w "HTTPSTATUS:%{http_code}" -H "Content-Type: application/json" -d "$JSON_PAYLOAD" "$DISCORD_WEBHOOK")
         
         # Extract HTTP status code
         HTTP_STATUS=$(echo $RESPONSE | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
