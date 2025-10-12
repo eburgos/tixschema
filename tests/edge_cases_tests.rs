@@ -5,13 +5,23 @@ mod tests {
 
     #[cfg(all(
         test,
-        any(feature = "typescript", feature = "jsonschema", feature = "zod", feature = "serde")
+        any(
+            feature = "typescript",
+            feature = "jsonschema",
+            feature = "zod",
+            feature = "serde"
+        )
     ))]
     use tixschema::model_schema;
 
     #[cfg(all(
         test,
-        any(feature = "typescript", feature = "jsonschema", feature = "zod", feature = "serde")
+        any(
+            feature = "typescript",
+            feature = "jsonschema",
+            feature = "zod",
+            feature = "serde"
+        )
     ))]
     use std::collections::HashMap;
 
@@ -238,14 +248,7 @@ mod tests {
         nested_map_of_arrays: HashMap<String, Vec<HashMap<String, u64>>>,
     }
 
-    #[cfg(all(
-        test,
-        any(
-            feature = "typescript",
-            feature = "zod",
-            feature = "serde"
-        )
-    ))]
+    #[cfg(all(test, any(feature = "typescript", feature = "zod", feature = "serde")))]
     // Now let's try the really complex case
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]

@@ -7,7 +7,12 @@ mod tests {
     use serde_json::Value;
     #[cfg(all(
         test,
-        any(feature = "typescript", feature = "jsonschema", feature = "zod", feature = "serde")
+        any(
+            feature = "typescript",
+            feature = "jsonschema",
+            feature = "zod",
+            feature = "serde"
+        )
     ))]
     use tixschema::model_schema;
 
@@ -158,8 +163,8 @@ mod tests {
         assert!(ts_definition.contains("nickname: string | undefined;"));
 
         // Should NOT contain Zod schema (now separated)
-        assert!(!ts_definition.contains("z.string().or(z.undefined())"));
-        assert!(!ts_definition.contains("z.number().int().or(z.undefined())"));
+        assert!(!ts_definition.contains("z.union([z.string(), z.undefined()])"));
+        assert!(!ts_definition.contains("z.union([z.number().int(), z.undefined()])"));
     }
 
     #[test]
@@ -168,9 +173,9 @@ mod tests {
         let zod_schema = UserWithOptionals::zod_schema();
 
         // Check Zod schema has optional fields
-        assert!(zod_schema.contains("email: z.string().or(z.undefined())"));
-        assert!(zod_schema.contains("age: z.number().int().or(z.undefined())"));
-        assert!(zod_schema.contains("nickname: z.string().or(z.undefined())"));
+        assert!(zod_schema.contains("email: z.union([z.string(), z.undefined()])"));
+        assert!(zod_schema.contains("age: z.union([z.number().int(), z.undefined()])"));
+        assert!(zod_schema.contains("nickname: z.union([z.string(), z.undefined()])"));
 
         // Should NOT contain TypeScript type definition
         assert!(!zod_schema.contains("email: string | undefined;"));

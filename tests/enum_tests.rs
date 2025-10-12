@@ -3,7 +3,12 @@ mod tests {
 
     #[cfg(all(
         test,
-        any(feature = "typescript", feature = "jsonschema", feature = "zod", feature = "serde")
+        any(
+            feature = "typescript",
+            feature = "jsonschema",
+            feature = "zod",
+            feature = "serde"
+        )
     ))]
     use tixschema::model_schema;
 
@@ -14,14 +19,7 @@ mod tests {
     #[cfg(all(test, feature = "jsonschema", feature = "serde"))]
     use serde_json::Value;
 
-    #[cfg(all(
-        test,
-        any(
-            feature = "typescript",
-            feature = "zod",
-            feature = "serde"
-        )
-    ))]
+    #[cfg(all(test, any(feature = "typescript", feature = "zod", feature = "serde")))]
     #[model_schema()]
     #[cfg_attr(
         feature = "serde",
@@ -146,16 +144,23 @@ mod tests {
     #[test]
     #[cfg(feature = "jsonschema")]
     fn test_payment_method_variants_json_schema() {
-        
-        let payment_method = PaymentMethod::PayPal { email: "test@test.com".to_string() };
-        assert_ne!(Some(payment_method), None);
-        
-        let payment_method = PaymentMethod::CreditCard { card_number: "1234567890".to_string(), expiry_date: "12/2025".to_string(), cvv: "123".to_string() };
+        let payment_method = PaymentMethod::PayPal {
+            email: "test@test.com".to_string(),
+        };
         assert_ne!(Some(payment_method), None);
 
-        let payment_method = PaymentMethod::BankTransfer { account_number: "1234567890".to_string(), routing_number: "1234567890".to_string() };
+        let payment_method = PaymentMethod::CreditCard {
+            card_number: "1234567890".to_string(),
+            expiry_date: "12/2025".to_string(),
+            cvv: "123".to_string(),
+        };
         assert_ne!(Some(payment_method), None);
 
+        let payment_method = PaymentMethod::BankTransfer {
+            account_number: "1234567890".to_string(),
+            routing_number: "1234567890".to_string(),
+        };
+        assert_ne!(Some(payment_method), None);
     }
 
     #[test]

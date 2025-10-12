@@ -46,7 +46,7 @@ npm install zod@^4.0.0
 yarn add zod@^4.0.0
 ```
 
-**Note**: Zod v3 is not supported. The generated schemas use Zod v4 syntax (`.or(z.undefined())`) which is incompatible with earlier versions.
+**Note**: Zod v3 is not supported. The generated schemas use Zod v4 syntax (`z.union([type, z.undefined()])`) which is incompatible with earlier versions.
 
 ## Usage
 
@@ -234,7 +234,7 @@ export const Document$Schema = z.strictObject({
   author_id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }),
   tags: z.array(z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) })),
   metadata: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) })),
-  parent_id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }).or(z.undefined()),
+  parent_id: z.union(z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }), z.undefined()]),
   related_docs: z.record(z.string(), z.array(z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }))),
 });
 ```
@@ -369,7 +369,7 @@ export const User$Schema: ZodType<User> = z.strictObject({
 
 4. **Array Types**: `Vec<T>` becomes `Array<T>` in TypeScript.
 
-5. **Optional Fields**: `Option<T>` becomes `T | undefined` in TypeScript and `.or(z.undefined())` in Zod (v4 syntax).
+5. **Optional Fields**: `Option<T>` becomes `T | undefined` in TypeScript and `z.union([type, z.undefined()])` in Zod (v4 syntax).
 
 6. **Supported Map Keys**: Currently only `HashMap<String, T>` is fully supported.
 
@@ -533,7 +533,7 @@ npm install zod@^4.0.0
 **Generated schemas use modern syntax:**
 ```typescript
 // ✅ Zod v4 compatible (generated)
-email: z.string().or(z.undefined()),
+email: z.union([z.string(), z.undefined()]),
 
 // ❌ Old v3 style (not generated)
 email: z.string().optional(),
@@ -630,7 +630,7 @@ If you encounter issues not covered here:
 
 ## Zod v4 Migration & JSON Schema Generation
 
-This library now generates **Zod v4 compatible schemas** using the modern `.or(z.undefined())` syntax for optional fields instead of the older `.optional()` + `.transform()` approach.
+This library now generates **Zod v4 compatible schemas** using the modern `z.union([type, z.undefined()])` syntax for optional fields instead of the older `.optional()` + `.transform()` approach.
 
 ### Benefits of Zod v4 Support:
 
@@ -646,8 +646,8 @@ This library now generates **Zod v4 compatible schemas** using the modern `.or(z
 export const User$Schema = z.strictObject({
   id: z.string(),
   name: z.string(),
-  email: z.string().or(z.undefined()),    // ✅ Modern v4 syntax
-  age: z.number().int().or(z.undefined()), // ✅ Works with JSON schema generation
+  email: z.union([z.string(), z.undefined()]),    // ✅ Modern v4 syntax
+  age: z.union([z.number().int(), z.undefined()]), // ✅ Works with JSON schema generation
 });
 ```
 

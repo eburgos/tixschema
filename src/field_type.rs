@@ -1,21 +1,47 @@
-use syn::{
-    Fields, GenericArgument, ItemEnum, PathArguments, Type,
-};
+use syn::{Fields, GenericArgument, ItemEnum, PathArguments, Type};
 
 #[cfg(feature = "serde")]
 use syn::Attribute;
 
 use crate::safe_type_name;
 
+/// Enum representing the possible types a field can have in the schema generation system.
+///
+/// This enum is central to tixschema's type mapping system. It categorizes Rust types into
+/// categories that can be translated to TypeScript types and Zod schemas. The variants cover
+/// primitive types, complex structures, and special cases like ObjectId (feature-dependent).
+///
+/// Key points from crate documentation:
+/// - Primitives map to TS equivalents (e.g., String -> string, numbers -> number)
+/// - Collections like Vec<T> become Array<T> (handled via FieldDef's is_array flag)
+/// - HashMap<String, T> becomes Partial<Record<string, T>> (Map variant)
+/// - Enums and nested structs use SiblingType
+/// - All types must follow naming conventions (e.g., end with Json suffix for structs)
+///
+/// Feature dependencies:
+/// - "object_id": Enables ObjectId variant for MongoDB support
+/// - Without features, falls back to basic mappings
 #[derive(Clone, Debug)]
 pub(crate) enum FieldDefType {
+    /// Unknown or unsupported type - generates 'unknown' in TS/Zod
     Unknown,
+    /// Reference to another struct/enum type, potentially with generics
+    /// First String is the type name (without Json suffix in TS)
+    /// Vec<FieldDef> holds generic parameters if any
     SiblingType(String, Vec<FieldDef>),
+    /// Map type (HashMap<K, V>) - only String keys supported per rules
+    /// Boxed for recursion. Generates Partial<Record<K, V>> in TS
     Map(Box<FieldDef>, Box<FieldDef>),
+    /// Tuple type - generates anonymous object in TS/Zod
     Tuple(Vec<FieldDef>),
+    /// Boolean primitive - maps to boolean
     Boolean,
+    /// String primitive - maps to string
     String,
-    StringLiteral(String),  // For string literal types like "Tixena"
+    /// String literal type - for fixed string values
+    /// Added via model_schema_prop(literal = "value")
+    /// Maps to "value" in TS, z.literal("value") in Zod
+    StringLiteral(String), // For string literal types like "Tixena"
     U8,
     U16,
     U32,
@@ -30,9 +56,37 @@ pub(crate) enum FieldDefType {
     F64,
 
     #[cfg(feature = "object_id")]
+    /// MongoDB ObjectId type - requires "object_id" feature
+    /// Maps to ObjectId interface in TS with $oid: string
+    /// Zod: z.object({ $oid: z.string().regex(...) })
+    /// JSON Schema: object with $oid string property
+    /// See README.md for serialization format and validation details
     ObjectId,
 }
 
+/// Struct representing a field's definition for schema generation.
+///
+/// This is the core data structure used to analyze and generate schemas for each field
+/// in a struct or enum variant. It's created by get_field_def() and used in
+/// model_schema.rs to build the full type definitions.
+///
+/// Fields:
+/// - is_optional: If true, adds | undefined in TS and z.union([type, z.undefined()]) in Zod (v4 syntax)
+/// - name: Safe field name (uses serde rename if feature enabled)
+/// - docs: Doc comments from Rust - included in generated TS as JSDoc
+/// - field_type: The core type classification (see FieldDefType)
+/// - is_array: If true, wraps type in Array<...> (for Vec<T>, slices, arrays)
+/// - array_num: Unused currently (future fixed-size array support?)
+/// - model_schema_prop_meta: Optional metadata from #[model_schema_prop] attribute
+///   - Used for overrides like literals, minLength, etc.
+///   - See Phase 5 in notes/20250707_field_features.md for minLength details
+///
+/// Usage notes:
+/// - Created recursively for nested types
+/// - Handles Option<T> by setting is_optional=true on inner type
+/// - For HashMap, only String keys allowed
+/// - Feature "serde" affects name (rename attributes)
+/// - Feature "zod" enables zod_type() method
 #[derive(Clone, Debug)]
 pub(crate) struct FieldDef {
     pub is_optional: bool,
@@ -46,11 +100,29 @@ pub(crate) struct FieldDef {
 
 // Re-export serde types conditionally based on feature
 #[cfg(feature = "serde")]
-pub(crate) use crate::features::serde::{SerdeTypeMeta, SerdeFieldMeta};
-
-
+/// Re-exports from features/serde.rs - only available with "serde" feature
+/// Provides metadata structures for serde attribute parsing
+pub(crate) use crate::features::serde::{SerdeFieldMeta, SerdeTypeMeta};
 
 impl FieldDef {
+    /// Generates the TypeScript type name for this field.
+    ///
+    /// This method is the core of TypeScript type generation. It recursively builds
+    /// the TS type string based on field_type, is_array, and is_optional.
+    ///
+    /// Process:
+    /// 1. Match on field_type to get base type
+    /// 2. If is_array, wrap in Array<...>
+    /// 3. If is_optional, add | undefined
+    ///
+    /// Feature notes:
+    /// - "object_id": Uses special ObjectId type
+    /// - Ignores model_schema_prop_meta currently (except implicitly through field_type)
+    /// - For StringLiteral, generates quoted string literal
+    /// - All Rust numbers map to 'number' in TS
+    ///
+    /// See generation/typescript.rs for how this is used in full type defs.
+    /// Examples in README.md show generated output.
     pub fn typescript_typename(&self) -> String {
         let result = match &self.field_type {
             FieldDefType::Unknown => "unknown".to_string(),
@@ -85,9 +157,16 @@ impl FieldDef {
             FieldDefType::Boolean => "boolean".to_string(),
             FieldDefType::String => "string".to_string(),
             FieldDefType::StringLiteral(literal) => format!("\"{literal}\""),
-            FieldDefType::U8 | FieldDefType::U16 | FieldDefType::U32 | FieldDefType::U64 
-                | FieldDefType::I8 | FieldDefType::I16 | FieldDefType::I32 | FieldDefType::I64 
-                | FieldDefType::Usize | FieldDefType::Isize => "number".to_string(),
+            FieldDefType::U8
+            | FieldDefType::U16
+            | FieldDefType::U32
+            | FieldDefType::U64
+            | FieldDefType::I8
+            | FieldDefType::I16
+            | FieldDefType::I32
+            | FieldDefType::I64
+            | FieldDefType::Usize
+            | FieldDefType::Isize => "number".to_string(),
             FieldDefType::F32 | FieldDefType::F64 => "number".to_string(),
             #[cfg(feature = "object_id")]
             FieldDefType::ObjectId => crate::features::object_id::get_object_id_typescript_type(),
@@ -106,6 +185,20 @@ impl FieldDef {
     }
 
     #[cfg(feature = "zod")]
+    /// Generates the Zod schema string for this field (requires "zod" feature).
+    ///
+    /// Similar to typescript_typename() but generates Zod validation schema.
+    /// Uses z.* functions appropriate to the type.
+    ///
+    /// Additional logic:
+    /// - For String: Adds .min(min_len) if model_schema_prop_meta has min_length
+    /// - For literals: Uses z.literal(...)
+    /// - For ObjectId: Uses regex validation for hex string
+    /// - Wraps with z.array() if is_array
+    /// - Adds z.union([type, z.undefined()]) if is_optional (Zod v4 syntax)
+    ///
+    /// Requires Zod v4 in frontend - generates v4-compatible syntax.
+    /// See notes/20250706_features.md for Zod feature details.
     pub fn zod_type(&self) -> String {
         let result = match &self.field_type {
             FieldDefType::Unknown => "z.unknown()".to_string(),
@@ -138,17 +231,23 @@ impl FieldDef {
                 let mut result = "z.string()".to_string();
                 // Add min length validation if specified
                 if let Some(ref meta) = self.model_schema_prop_meta
-                    && let Some(min_len) = meta.min_length {
-                        result = format!("{result}.min({min_len})");
-                    }
+                    && let Some(min_len) = meta.min_length
+                {
+                    result = format!("{result}.min({min_len})");
+                }
                 result
-            },
-            FieldDefType::StringLiteral(literal) => format!("z.literal(\"{literal}\")"),
-            FieldDefType::U8 | FieldDefType::U16 | FieldDefType::U32 | FieldDefType::U64 
-                | FieldDefType::I8 | FieldDefType::I16 | FieldDefType::I32 | FieldDefType::I64 
-                | FieldDefType::Usize | FieldDefType::Isize => {
-                "z.number().int()".to_string()
             }
+            FieldDefType::StringLiteral(literal) => format!("z.literal(\"{literal}\")"),
+            FieldDefType::U8
+            | FieldDefType::U16
+            | FieldDefType::U32
+            | FieldDefType::U64
+            | FieldDefType::I8
+            | FieldDefType::I16
+            | FieldDefType::I32
+            | FieldDefType::I64
+            | FieldDefType::Usize
+            | FieldDefType::Isize => "z.number().int()".to_string(),
             FieldDefType::F32 | FieldDefType::F64 => "z.number()".to_string(),
             #[cfg(feature = "object_id")]
             FieldDefType::ObjectId => crate::features::object_id::get_object_id_zod_schema(),
@@ -160,15 +259,34 @@ impl FieldDef {
         };
 
         if self.is_optional {
-            format!("{pre_result}.or(z.undefined())")
+            format!("z.union([{pre_result}, z.undefined()])")
         } else {
             pre_result
         }
     }
-
-    
 }
 
+/// Main function to create FieldDef from syn::Type.
+///
+/// This is the entry point for field analysis. It recursively parses the Rust type
+/// syntax tree to build the FieldDef structure.
+///
+/// Handles:
+/// - Primitives and simple types (via get_field_def_type_or_sibling)
+/// - Generics (Option<T>, Vec<T>, HashMap<K,V>)
+/// - Tuples, arrays, slices, references
+/// - Falls back to Unknown for unsupported types
+///
+/// Key behaviors:
+/// - Strips references (&T -> T)
+/// - Sets is_array for Vec, slices, arrays
+/// - Sets is_optional for Option
+/// - Only supports HashMap<String, T> (panics or errors otherwise per rules)
+/// - Uses safe_type_name() to strip Json suffix
+///
+/// Called from process_field() in model_schema.rs for each struct field.
+///
+/// Debug logging: Set RUST_LOG=trace to see HashMap/SiblingType creation.
 pub(crate) fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
     let safe_name = safe_type_name(name);
     match ty {
@@ -221,7 +339,10 @@ pub(crate) fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef
                         } else if arg_types.len() == 2 && &ident == "HashMap" {
                             // Debug print to see what's happening
                             if std::env::var("RUST_LOG") == Ok(String::from("trace")) {
-                                println!("Creating HashMap Map type - key: {:?}, value: {:?}", arg_types[0], arg_types[1]);
+                                println!(
+                                    "Creating HashMap Map type - key: {:?}, value: {:?}",
+                                    arg_types[0], arg_types[1]
+                                );
                             }
                             FieldDef {
                                 is_array: false,
@@ -238,7 +359,9 @@ pub(crate) fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef
                         } else {
                             // Debug print to see what's happening with SiblingType
                             if std::env::var("RUST_LOG") == Ok(String::from("trace")) {
-                                println!("Creating SiblingType - name: {ident}, arg_types: {arg_types:?}");
+                                println!(
+                                    "Creating SiblingType - name: {ident}, arg_types: {arg_types:?}"
+                                );
                             }
                             FieldDef {
                                 is_optional: false,
@@ -313,6 +436,19 @@ pub(crate) fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef
     }
 }
 
+/// Helper to map Rust type name strings to FieldDefType.
+///
+/// Used in get_field_def for types without generics.
+///
+/// Mapping rules:
+/// - Built-in primitives to their variants
+/// - Types ending with "Json" to SiblingType (strips suffix in TS)
+/// - Other types to SiblingType
+/// - ObjectId: Special handling if feature enabled, else SiblingType with warning
+///
+/// Feature "object_id":
+/// - Enables special ObjectId variant
+/// - Without: Prints compile-time warning and treats as custom type
 fn get_field_def_type_or_sibling(t_name: &str) -> FieldDefType {
     match t_name {
         "bool" => FieldDefType::Boolean,
@@ -341,7 +477,9 @@ fn get_field_def_type_or_sibling(t_name: &str) -> FieldDefType {
         "ObjectId" => {
             // When object_id feature is disabled, warn user and treat as regular type
             eprintln!("warning: ObjectId type detected but 'object_id' feature is not enabled");
-            eprintln!("         ObjectId will be treated as a custom type (may cause compilation errors)");
+            eprintln!(
+                "         ObjectId will be treated as a custom type (may cause compilation errors)"
+            );
             eprintln!("         Enable the object_id feature: features = [\"object_id\"]");
             eprintln!("         Or add the required ObjectId type definition to your code");
             FieldDefType::SiblingType(t_name.to_string(), vec![])
@@ -353,18 +491,35 @@ fn get_field_def_type_or_sibling(t_name: &str) -> FieldDefType {
     }
 }
 
-/// Parses serde attributes from a struct or enum.
+/// Parses serde attributes from struct/enum attributes (requires "serde" feature).
+///
+/// Delegates to features/serde.rs for actual parsing.
+/// Used in model_schema.rs to get type-level serde metadata like rename_all.
+///
+/// Without "serde" feature: No attribute processing, uses Rust names as-is.
 #[cfg(feature = "serde")]
 pub(crate) fn parse_serde_type_attributes(attrs: &[Attribute]) -> SerdeTypeMeta {
     crate::features::serde::parse_serde_type_attributes(attrs)
 }
 
-/// Parses serde attributes from a field.
+/// Parses serde attributes from field attributes (requires "serde" feature).
+///
+/// Similar to parse_serde_type_attributes but for individual fields.
+/// Handles field rename, skip_serializing_if, etc.
+///
+/// Integrates with FieldDef.name if rename present.
 #[cfg(feature = "serde")]
 pub(crate) fn parse_serde_field_attributes(attrs: &[Attribute]) -> SerdeFieldMeta {
     crate::features::serde::parse_serde_field_attributes(attrs)
 }
 
+/// Utility to check if an enum is a plain unit enum (no fields in variants).
+///
+/// Used in model_schema.rs to distinguish plain enums (union types) from
+/// tagged enums (discriminated unions).
+///
+/// Plain enums generate string unions in TS/Zod.
+/// See enum examples in README.md.
 pub(crate) fn is_plain_enum(item_enum: &ItemEnum) -> bool {
     item_enum
         .variants

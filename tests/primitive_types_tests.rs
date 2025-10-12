@@ -12,7 +12,12 @@ mod tests {
     use std::collections::HashMap;
     #[cfg(all(
         test,
-        any(feature = "typescript", feature = "jsonschema", feature = "zod", feature = "serde")
+        any(
+            feature = "typescript",
+            feature = "jsonschema",
+            feature = "zod",
+            feature = "serde"
+        )
     ))]
     use tixschema::model_schema;
 
@@ -92,8 +97,14 @@ mod tests {
         let zod_schema = LargeNumbersJson::zod_schema();
         assert!(zod_schema.contains("large_unsigned: z.number().int()"));
         assert!(zod_schema.contains("large_signed: z.number().int()"));
-        assert!(zod_schema.contains("optional_large_unsigned: z.number().int().or(z.undefined())"));
-        assert!(zod_schema.contains("optional_large_signed: z.number().int().or(z.undefined())"));
+        assert!(
+            zod_schema
+                .contains("optional_large_unsigned: z.union([z.number().int(), z.undefined()])")
+        );
+        assert!(
+            zod_schema
+                .contains("optional_large_signed: z.union([z.number().int(), z.undefined()])")
+        );
         assert!(zod_schema.contains("array_of_u64: z.array(z.number().int())"));
         assert!(zod_schema.contains("array_of_i64: z.array(z.number().int())"));
     }
@@ -363,9 +374,9 @@ mod tests {
         assert!(zod_schema.contains("float_double: z.number()")); // No .int() for floats
 
         // Optional Zod schemas
-        assert!(zod_schema.contains("opt_i8: z.number().int().or(z.undefined())"));
-        assert!(zod_schema.contains("opt_u64: z.number().int().or(z.undefined())"));
-        assert!(zod_schema.contains("opt_f64: z.number().or(z.undefined())")); // No .int() for float
+        assert!(zod_schema.contains("opt_i8: z.union([z.number().int(), z.undefined()])"));
+        assert!(zod_schema.contains("opt_u64: z.union([z.number().int(), z.undefined()])"));
+        assert!(zod_schema.contains("opt_f64: z.union([z.number(), z.undefined()])")); // No .int() for float
 
         // Array Zod schemas
         assert!(zod_schema.contains("array_i8: z.array(z.number().int())"));

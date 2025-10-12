@@ -1,5 +1,5 @@
 //! JSON Schema generation feature module
-//! 
+//!
 //! This module handles JSON schema generation when the "jsonschema" feature is enabled.
 
 /// Check if we should generate JSON schema methods
@@ -47,7 +47,6 @@ pub fn generate_plain_enum_json_schema_method() -> proc_macro2::TokenStream {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -62,10 +61,10 @@ mod tests {
         let fields = vec![];
         let method = generate_struct_json_schema_method(&fields);
         let method_str = method.to_string();
-        
+
         assert!(method_str.contains("json_schema"));
         assert!(method_str.contains("serde_json"));
         assert!(method_str.contains("properties"));
         assert!(method_str.contains("required"));
     }
-} 
+}

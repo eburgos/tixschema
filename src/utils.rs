@@ -1,7 +1,7 @@
 use syn::{Expr, Field, Lit, Meta, Variant};
 
 #[cfg(feature = "typescript")]
-use syn::{ItemStruct, ItemEnum};
+use syn::{ItemEnum, ItemStruct};
 
 pub fn safe_type_name(key: &str) -> String {
     if key.ends_with("Json") {
@@ -11,7 +11,6 @@ pub fn safe_type_name(key: &str) -> String {
         key.to_string()
     }
 }
-
 
 #[cfg(feature = "typescript")]
 /// Extracts and concatenates documentation comments from a syn::ItemStruct.
