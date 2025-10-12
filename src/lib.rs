@@ -1,8 +1,8 @@
+mod features;
 mod field_type;
+mod generation;
 mod model_schema;
 mod utils;
-mod features;
-mod generation;
 
 use model_schema::exec_model_schema;
 use proc_macro::TokenStream;
@@ -57,7 +57,7 @@ use utils::safe_type_name;
 /// //   id: z.string(),
 /// //   firstName: z.string(),
 /// //   lastName: z.string(),
-/// //   age: z.number().or(z.undefined()),
+/// //   age: z.union([z.number(), z.undefined()]),
 /// //   roles: z.array(z.string()),
 /// // });
 /// ```
@@ -120,7 +120,9 @@ use utils::safe_type_name;
 ///
 /// When the `object_id` feature is enabled, the macro provides first-class support for MongoDB ObjectId types:
 ///
-#[cfg_attr(feature = "object_id", doc = r##"
+#[cfg_attr(
+    feature = "object_id",
+    doc = r##"
 ```rust
 use tixschema::model_schema;
 use serde::{Deserialize, Serialize};
@@ -157,10 +159,11 @@ pub struct Document {
 //   author_id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }),
 //   tags: z.array(z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) })),
 //   metadata: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) })),
-//   parent_id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }).or(z.undefined()),
+//   parent_id: z.union([z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }), z.undefined()]),
 // });
 ```
-"##)]
+"##
+)]
 ///
 ///
 /// ObjectId fields are serialized using MongoDB's standard format: `{ "$oid": "hex_string" }`

@@ -1,5 +1,5 @@
 //! Serde integration feature module
-//! 
+//!
 //! This module handles serde attribute parsing and field name transformation
 //! when the "serde" feature is enabled.
 
@@ -161,15 +161,27 @@ mod tests {
     #[test]
     fn test_rename_all_transformations() {
         // Test camelCase
-        assert_eq!(apply_rename_all("user_name", &Some("camelCase".to_string())), "userName");
-        assert_eq!(apply_rename_all("first_name", &Some("camelCase".to_string())), "firstName");
-        
+        assert_eq!(
+            apply_rename_all("user_name", &Some("camelCase".to_string())),
+            "userName"
+        );
+        assert_eq!(
+            apply_rename_all("first_name", &Some("camelCase".to_string())),
+            "firstName"
+        );
+
         // Test PascalCase
-        assert_eq!(apply_rename_all("user_name", &Some("PascalCase".to_string())), "UserName");
-        
+        assert_eq!(
+            apply_rename_all("user_name", &Some("PascalCase".to_string())),
+            "UserName"
+        );
+
         // Test kebab-case
-        assert_eq!(apply_rename_all("user_name", &Some("kebab-case".to_string())), "user-name");
-        
+        assert_eq!(
+            apply_rename_all("user_name", &Some("kebab-case".to_string())),
+            "user-name"
+        );
+
         // Test no transformation
         assert_eq!(apply_rename_all("user_name", &None), "user_name");
     }
@@ -187,7 +199,11 @@ mod tests {
             skip: false,
         };
         assert_eq!(
-            get_final_field_name("field_name".to_string(), &field_meta_with_rename, &type_meta),
+            get_final_field_name(
+                "field_name".to_string(),
+                &field_meta_with_rename,
+                &type_meta
+            ),
             "customName"
         );
 
@@ -201,4 +217,4 @@ mod tests {
             "fieldName"
         );
     }
-} 
+}

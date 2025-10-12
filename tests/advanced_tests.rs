@@ -1,7 +1,7 @@
-use tixschema::model_schema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use tixschema::model_schema;
 
 #[cfg(test)]
 mod advanced_tests {
@@ -138,7 +138,10 @@ mod advanced_tests {
         // Verify array properties are correctly typed
         assert_eq!(company_properties["employees"]["type"], "array");
         assert_eq!(company_properties["department_names"]["type"], "array");
-        assert_eq!(company_properties["department_names"]["items"]["type"], "string");
+        assert_eq!(
+            company_properties["department_names"]["items"]["type"],
+            "string"
+        );
 
         // Verify RetirementPlan is a discriminated union
         assert!(retirement_schema.get("oneOf").is_some());
@@ -173,12 +176,12 @@ mod advanced_tests {
         // Check Zod schema references (without Json suffix) - now in separate method
         let company_zod_schema = CompanyJson::zod_schema();
         let employee_zod_schema = EmployeeJson::zod_schema();
-        
+
         assert!(company_zod_schema.contains("employees: z.array(Employee$Schema)"));
         assert!(company_zod_schema.contains("department_names: z.array(z.string())"));
         assert!(company_zod_schema.contains("headquarters: Address$Schema"));
         assert!(company_zod_schema.contains("settings: CompanySettings$Schema"));
-        assert!(employee_zod_schema.contains("manager: z.string().or(z.undefined())"));
+        assert!(employee_zod_schema.contains("manager: z.union([z.string(), z.undefined()])"));
     }
 
     // Test serialization consistency
@@ -219,19 +222,19 @@ mod advanced_tests {
         small_number: u16,
         medium_number: u32,
         float_number: f32,
-        
+
         // Collections with different types
         strings: Vec<String>,
         numbers: Vec<u32>,
         booleans: Vec<bool>,
-        
+
         // Optional collections
         optional_strings: Option<Vec<String>>,
         optional_numbers: Option<Vec<u32>>,
-        
+
         // Simple maps (only string keys and values supported)
         string_map: HashMap<String, String>,
-        
+
         // Nested optional structures
         nested_optional: Option<ContactInfoJson>,
         nested_array: Vec<ContactInfoJson>,
@@ -260,7 +263,10 @@ mod advanced_tests {
 
         // Check map types
         assert_eq!(properties["string_map"]["type"], "object");
-        assert_eq!(properties["string_map"]["additionalProperties"]["type"], "string");
+        assert_eq!(
+            properties["string_map"]["additionalProperties"]["type"],
+            "string"
+        );
 
         // Check required vs optional fields
         let required = schema["required"].as_array().unwrap();
@@ -309,12 +315,21 @@ mod advanced_tests {
         assert!(zod_schema.contains("strings: z.array(z.string())"));
         assert!(zod_schema.contains("numbers: z.array(z.number().int())"));
         assert!(zod_schema.contains("booleans: z.array(z.boolean())"));
-        assert!(zod_schema.contains("optional_strings: z.array(z.string()).or(z.undefined())"));
-        assert!(zod_schema.contains("optional_numbers: z.array(z.number().int()).or(z.undefined())"));
+        assert!(
+            zod_schema.contains("optional_strings: z.union([z.array(z.string()), z.undefined()])")
+        );
+        assert!(
+            zod_schema
+                .contains("optional_numbers: z.union([z.array(z.number().int()), z.undefined()])")
+        );
         assert!(zod_schema.contains("string_map: z.record(z.string(), z.string())"));
-        assert!(zod_schema.contains("nested_optional: ContactInfo$Schema.or(z.undefined())"));
+        assert!(
+            zod_schema.contains("nested_optional: z.union([ContactInfo$Schema, z.undefined()])")
+        );
         assert!(zod_schema.contains("nested_array: z.array(ContactInfo$Schema)"));
-        assert!(zod_schema.contains("optional_nested_array: z.array(ContactInfo$Schema).or(z.undefined())"));
+        assert!(zod_schema.contains(
+            "optional_nested_array: z.union([z.array(ContactInfo$Schema), z.undefined()])"
+        ));
     }
 
     // Test discriminated union with complex fields
@@ -355,7 +370,12 @@ mod advanced_tests {
     }
 
     #[test]
-    #[cfg(all(feature = "jsonschema", feature = "typescript", feature = "serde", feature = "zod"))]
+    #[cfg(all(
+        feature = "jsonschema",
+        feature = "typescript",
+        feature = "serde",
+        feature = "zod"
+    ))]
     fn test_complex_discriminated_union() {
         let schema = ComplexEventJson::json_schema();
         let ts_definition = ComplexEventJson::ts_definition();
@@ -378,7 +398,7 @@ mod advanced_tests {
         assert!(ts_definition.contains("eventType: \"userRegistered\""));
         assert!(ts_definition.contains("eventType: \"purchaseCompleted\""));
         assert!(ts_definition.contains("eventType: \"systemMaintenance\""));
-        
+
         // Check that field names are converted to camelCase
         assert!(ts_definition.contains("userId: string;"));
         assert!(ts_definition.contains("registrationSource: string;"));
@@ -454,27 +474,41 @@ mod advanced_tests {
 
         for (name, schema) in schemas {
             // All schemas should be objects
-            assert!(schema.is_object(), "Schema for {} should be an object", name);
-            
+            assert!(
+                schema.is_object(),
+                "Schema for {} should be an object",
+                name
+            );
+
             // Should have required fields
-            assert!(schema.get("type").is_some(), "Schema for {} should have a type", name);
-            
+            assert!(
+                schema.get("type").is_some(),
+                "Schema for {} should have a type",
+                name
+            );
+
             // Object schemas should have properties
             if schema["type"] == "object" {
                 if let Some(one_of) = schema.get("oneOf") {
                     // Discriminated union - check each variant
                     let variants = one_of.as_array().unwrap();
                     for variant in variants {
-                        assert!(variant.get("properties").is_some(), 
-                            "Discriminated union variant for {} should have properties", name);
+                        assert!(
+                            variant.get("properties").is_some(),
+                            "Discriminated union variant for {} should have properties",
+                            name
+                        );
                     }
                 } else {
                     // Regular object - should have properties
-                    assert!(schema.get("properties").is_some(), 
-                        "Object schema for {} should have properties", name);
+                    assert!(
+                        schema.get("properties").is_some(),
+                        "Object schema for {} should have properties",
+                        name
+                    );
                 }
             }
-            
+
             // Should be valid JSON
             let json_str = serde_json::to_string(&schema).unwrap();
             let _: Value = serde_json::from_str(&json_str).unwrap();
@@ -523,4 +557,4 @@ mod advanced_tests {
         assert_eq!(deserialized.contact.phone, Some("123-456-7890".to_string()));
         assert!(deserialized.contact.emergency_contact.is_some());
     }
-} 
+}

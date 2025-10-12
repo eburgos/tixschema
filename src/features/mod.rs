@@ -1,5 +1,5 @@
 //! Feature detection and conditional compilation utilities for tixschema
-//! 
+//!
 //! This module provides compile-time feature detection and utilities for handling
 //! different feature combinations in the macro expansion process.
 
@@ -52,7 +52,7 @@ impl Features {
     /// Get a description of enabled features for debugging
     pub fn enabled_features() -> Vec<&'static str> {
         let mut features = Vec::new();
-        
+
         if Self::has_serde() {
             features.push("serde");
         }
@@ -68,11 +68,11 @@ impl Features {
         if Self::has_typescript() {
             features.push("typescript");
         }
-        
+
         if features.is_empty() {
             features.push("minimal");
         }
-        
+
         features
     }
 }
@@ -89,9 +89,15 @@ mod tests {
         // Test that we can detect features at compile time
         let enabled = Features::enabled_features();
         println!("Enabled features: {:?}", enabled);
-        
+
         // In default configuration, all features should be enabled
-        #[cfg(all(feature = "serde", feature = "zod", feature = "jsonschema", feature = "object_id", feature = "typescript"))]
+        #[cfg(all(
+            feature = "serde",
+            feature = "zod",
+            feature = "jsonschema",
+            feature = "object_id",
+            feature = "typescript"
+        ))]
         {
             assert!(Features::has_serde());
             assert!(Features::has_zod());
@@ -100,4 +106,4 @@ mod tests {
             assert!(Features::has_typescript());
         }
     }
-} 
+}

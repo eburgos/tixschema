@@ -10,7 +10,6 @@ mod tests {
     #[cfg(all(test, feature = "object_id"))]
     use tixschema::model_schema;
 
-
     // Mock ObjectId type for testing - compatible with mongodb::bson::oid::ObjectId
     // The real MongoDB ObjectId serializes to { "$oid": "hex_string" } in JSON
     // and to a plain string in other contexts
@@ -192,7 +191,7 @@ mod tests {
         let zod_schema = UserJson::zod_schema();
         assert!(zod_schema.contains("id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }),"));
         assert!(zod_schema.contains("name: z.string(),"));
-        assert!(zod_schema.contains("email: z.string().or(z.undefined()),"));
+        assert!(zod_schema.contains("email: z.union([z.string(), z.undefined()]),"));
     }
 
     #[test]
@@ -224,7 +223,7 @@ mod tests {
 
         // Zod schema should use the MongoDB ObjectId structure with regex validation - now in separate method
         let zod_schema = UserWithOptionalIdJson::zod_schema();
-        assert!(zod_schema.contains("id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }).or(z.undefined()),"));
+        assert!(zod_schema.contains("id: z.union([z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }), z.undefined()]),"));
         assert!(zod_schema.contains("name: z.string(),"));
         assert!(zod_schema.contains("email: z.string(),"));
     }
@@ -235,7 +234,7 @@ mod tests {
         let zod_schema = UserWithOptionalIdJson::zod_schema();
 
         // Should handle optional ObjectId correctly
-        assert!(zod_schema.contains("id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }).or(z.undefined()),"));
+        assert!(zod_schema.contains("id: z.union([z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }), z.undefined()]),"));
         assert!(zod_schema.contains("name: z.string(),"));
         assert!(zod_schema.contains("email: z.string(),"));
     }
@@ -357,7 +356,7 @@ mod tests {
             regex_pattern
         )));
         assert!(zod_schema.contains(&format!(
-            "parent_id: z.object({{ $oid: {} }}).or(z.undefined()),",
+            "parent_id: z.union([z.object({{ $oid: {} }}), z.undefined()]),",
             regex_pattern
         )));
         assert!(zod_schema.contains(&format!(
@@ -422,7 +421,7 @@ mod tests {
         let zod_schema = PostJson::zod_schema();
 
         // Should handle optional ObjectId correctly
-        assert!(zod_schema.contains("parent_id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }).or(z.undefined()),"));
+        assert!(zod_schema.contains("parent_id: z.union([z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }), z.undefined()]),"));
     }
 
     #[test]

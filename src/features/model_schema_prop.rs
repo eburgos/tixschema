@@ -1,5 +1,5 @@
 //! Model schema property feature module
-//! 
+//!
 //! This module handles parsing of model_schema_prop attributes for field-level customization
 //! of TypeScript type and Zod schema generation.
 
@@ -8,9 +8,9 @@ use syn::{Attribute, LitStr, Type};
 /// Metadata for model_schema_prop attributes applied to a field.
 #[derive(Clone, Debug, Default)]
 pub struct ModelSchemaPropMeta {
-    pub as_type: Option<String>,    // e.g., "String" from as = String
-    pub literal: Option<String>,    // e.g., "Tixena" from literal = "Tixena"
-    pub min_length: Option<usize>,  // e.g., 1 from minLength = 1
+    pub as_type: Option<String>,   // e.g., "String" from as = String
+    pub literal: Option<String>,   // e.g., "Tixena" from literal = "Tixena"
+    pub min_length: Option<usize>, // e.g., 1 from minLength = 1
 }
 
 /// Parses model_schema_prop attributes from a field.
@@ -91,7 +91,8 @@ mod tests {
 
     #[test]
     fn test_parse_both_as_and_literal() {
-        let attr: Attribute = parse_quote! { #[model_schema_prop(as = String, literal = "Tixena")] };
+        let attr: Attribute =
+            parse_quote! { #[model_schema_prop(as = String, literal = "Tixena")] };
         let meta = parse_model_schema_prop_attributes(&[attr]);
         assert!(meta.as_type.is_some());
         assert_eq!(meta.as_type.unwrap(), "String");
@@ -123,7 +124,8 @@ mod tests {
 
     #[test]
     fn test_parse_all_attributes() {
-        let attr: Attribute = parse_quote! { #[model_schema_prop(as = String, literal = "test", minLength = 3)] };
+        let attr: Attribute =
+            parse_quote! { #[model_schema_prop(as = String, literal = "test", minLength = 3)] };
         let meta = parse_model_schema_prop_attributes(&[attr]);
         assert!(meta.as_type.is_some());
         assert_eq!(meta.as_type.unwrap(), "String");
@@ -132,4 +134,4 @@ mod tests {
         assert!(meta.min_length.is_some());
         assert_eq!(meta.min_length.unwrap(), 3);
     }
-} 
+}

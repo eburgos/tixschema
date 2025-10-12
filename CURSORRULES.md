@@ -180,7 +180,7 @@ export const Document$Schema = z.strictObject({
   author_id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }),
   tags: z.array(z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) })),
   metadata: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) })),
-  parent_id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }).or(z.undefined()),
+  parent_id: z.union([z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }), z.undefined()]),
   related: z.record(z.string(), z.array(z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }))),
 });
 
@@ -345,8 +345,8 @@ The generated schemas use **Zod v4 syntax**:
 export const User$Schema = z.strictObject({
   id: z.string(),
   name: z.string(),
-  email: z.string().or(z.undefined()),      // Modern v4 syntax
-  age: z.number().int().or(z.undefined()),  // Works with JSON schema generation
+  email: z.union([z.string(), z.undefined()]),      // Modern v4 syntax
+  age: z.union([z.number().int(), z.undefined()]),  // Works with JSON schema generation
 });
 
 // ❌ OLD FORMAT (no longer generated)
@@ -370,7 +370,7 @@ export const User$Schema = z.strictObject({
 
 1. **Type Name Transformation**: `UserJson` in Rust becomes `User` in TypeScript
 2. **Field Names**: Respect serde rename attributes
-3. **Optional Fields**: `Option<T>` becomes `T | undefined` and `.or(z.undefined())` in Zod
+3. **Optional Fields**: `Option<T>` becomes `T | undefined` and `z.union([type, z.undefined()])` in Zod
 4. **Arrays**: `Vec<T>` becomes `Array<T>`
 5. **Maps**: `HashMap<String, T>` becomes `Partial<Record<string, T>>`
 6. **Nested Types**: Reference other types without Json suffix

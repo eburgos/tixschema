@@ -1,12 +1,11 @@
 //! Code generation utilities and modules
-//! 
+//!
 //! This module contains the core code generation logic separated by functionality.
 
 pub mod typescript;
 
 #[cfg(test)]
 use crate::field_type::FieldDef;
-
 
 /// Common utilities for code generation
 #[cfg(test)]
@@ -80,4 +79,4 @@ mod tests {
         assert!(formatted.contains("string"));
         assert!(formatted.contains("Test documentation"));
     }
-} 
+}

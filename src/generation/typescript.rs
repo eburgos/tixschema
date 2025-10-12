@@ -1,5 +1,5 @@
 //! TypeScript type generation module
-//! 
+//!
 //! This module handles the core TypeScript type generation that is always available
 //! regardless of feature flags.
 #[cfg(test)]
@@ -15,14 +15,10 @@ pub struct TypeScriptGenerator;
 #[cfg(test)]
 impl TypeScriptGenerator {
     /// Generates TypeScript type definition for a struct
-    pub fn generate_struct_type(
-        type_name: &str,
-        fields: &[FieldDef],
-        docs: &str,
-    ) -> String {
+    pub fn generate_struct_type(type_name: &str, fields: &[FieldDef], docs: &str) -> String {
         let fields_empty = fields.is_empty();
         let item_name = GenerationUtils::safe_typescript_name(type_name);
-        
+
         if fields_empty {
             format!(
                 "/**\n{}\n**/\nexport type {} = Record<string, never>;",
@@ -35,7 +31,7 @@ impl TypeScriptGenerator {
                 .map(|fld| GenerationUtils::format_typescript_field(fld))
                 .collect::<Vec<_>>()
                 .join("\n");
-            
+
             format!(
                 "/**\n{}\n**/\nexport type {} = {{\n{}\n}};",
                 GenerationUtils::format_docs(docs),
@@ -74,7 +70,7 @@ impl TypeScriptGenerator {
     //     docs: &str,
     // ) -> String {
     //     let item_name = GenerationUtils::safe_typescript_name(type_name);
-        
+
     //     let type_code_items: Vec<String> = variants
     //         .iter()
     //         .map(|(variant_name, fields, variant_docs)| {
@@ -175,10 +171,11 @@ mod tests {
     #[test]
     fn test_generate_plain_enum_type() {
         let options = vec!["active".to_string(), "inactive".to_string()];
-        let result = TypeScriptGenerator::generate_plain_enum_type("StatusJson", &options, "Status enum");
-        
+        let result =
+            TypeScriptGenerator::generate_plain_enum_type("StatusJson", &options, "Status enum");
+
         assert!(result.contains("export type Status"));
         assert!(result.contains("\"active\" | \"inactive\""));
         assert!(result.contains("Status enum"));
     }
-} 
+}

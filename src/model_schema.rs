@@ -152,13 +152,7 @@ fn process_enum(item_enum: syn::ItemEnum) -> TokenStream {
         #[cfg(not(feature = "serde"))]
         let (tag_name, rename_all) = ("type".to_string(), None);
 
-        process_discriminated_enum(
-            item_enum,
-            &name,
-            &tag_name,
-            &rename_all,
-            &item_name,
-        )
+        process_discriminated_enum(item_enum, &name, &tag_name, &rename_all, &item_name)
     }
 }
 
@@ -1316,7 +1310,8 @@ fn process_field(rename_all: &Option<String>, field: &mut Field) -> FieldDef {
     let field_rename = None;
 
     // Parse model_schema_prop attributes before filtering them out
-    let model_schema_prop_meta = crate::features::model_schema_prop::parse_model_schema_prop_attributes(&field.attrs);
+    let model_schema_prop_meta =
+        crate::features::model_schema_prop::parse_model_schema_prop_attributes(&field.attrs);
 
     // Filter out model_schema_prop attributes
     for attr in &field.attrs {
@@ -1350,37 +1345,40 @@ fn process_field(rename_all: &Option<String>, field: &mut Field) -> FieldDef {
             .collect::<Vec<_>>()
             .join("\n"),
     };
-    
+
     // Create the field definition and apply any model_schema_prop overrides
     let mut field_def = get_field_def(&final_name, field_type, &field_docs);
-    field_def.model_schema_prop_meta = if model_schema_prop_meta.as_type.is_some() || 
-                                            model_schema_prop_meta.literal.is_some() || 
-                                            model_schema_prop_meta.min_length.is_some() {
+    field_def.model_schema_prop_meta = if model_schema_prop_meta.as_type.is_some()
+        || model_schema_prop_meta.literal.is_some()
+        || model_schema_prop_meta.min_length.is_some()
+    {
         Some(model_schema_prop_meta.clone())
     } else {
         None
     };
-    
+
     // Apply type overrides based on model_schema_prop attributes
     if let Some(ref meta) = field_def.model_schema_prop_meta
-        && let Some(ref literal) = meta.literal {
-            // If literal is specified, override the field type to StringLiteral
-            field_def.field_type = crate::field_type::FieldDefType::StringLiteral(literal.clone());
-        }
-        // TODO: Handle `as` parameter for type overrides in future implementation
-    
+        && let Some(ref literal) = meta.literal
+    {
+        // If literal is specified, override the field type to StringLiteral
+        field_def.field_type = crate::field_type::FieldDefType::StringLiteral(literal.clone());
+    }
+    // TODO: Handle `as` parameter for type overrides in future implementation
+
     // Update field docs to include minimum length information
     if let Some(ref meta) = field_def.model_schema_prop_meta
-        && let Some(min_len) = meta.min_length {
-            // Add minimum length information to the docs
-            let min_len_doc = format!(" * Minimum length: {min_len}");
-            field_def.docs = if field_def.docs.is_empty() {
-                format!(" * {final_name}\n * \n{min_len_doc}")
-            } else {
-                format!("{}\n{}", field_def.docs, min_len_doc)
-            };
-        }
-    
+        && let Some(min_len) = meta.min_length
+    {
+        // Add minimum length information to the docs
+        let min_len_doc = format!(" * Minimum length: {min_len}");
+        field_def.docs = if field_def.docs.is_empty() {
+            format!(" * {final_name}\n * \n{min_len_doc}")
+        } else {
+            format!("{}\n{}", field_def.docs, min_len_doc)
+        };
+    }
+
     field_def
 }
 
@@ -1483,9 +1481,11 @@ fn generate_zod_schema_method(
         {
             quote::quote! {
                 pub fn zod_schema() -> String {
-                    format!(r#"export const {}$Schema: ZodType<{}> = z.strictObject({{
+                    format!(r#"const {}$RawSchema = z.strictObject({{
 {}
-}}){};"#, #item_name, #item_name, #schema_code, #show_opts)
+}}){};
+
+export const {}$Schema: ZodType<{}> = {}$RawSchema;"#, #item_name, #schema_code, #show_opts, #item_name, #item_name, #item_name)
                 }
             }
         }
