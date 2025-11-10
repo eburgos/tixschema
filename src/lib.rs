@@ -1,3 +1,17 @@
+#![allow(clippy::match_same_arms)]
+#![expect(clippy::unwrap_used)]
+#![expect(clippy::min_ident_chars)]
+#![expect(clippy::std_instead_of_alloc)]
+#![expect(clippy::option_if_let_else)]
+#![expect(clippy::ref_option)]
+#![expect(clippy::shadow_unrelated)]
+#![expect(clippy::print_stdout)]
+#![expect(clippy::cognitive_complexity)]
+#![expect(clippy::too_many_lines)] //how many?
+#![expect(clippy::allow_attributes_without_reason)]
+#![expect(clippy::needless_pass_by_value)]
+#![allow(clippy::missing_docs_in_private_items)]
+
 mod features;
 mod field_type;
 mod generation;
@@ -23,8 +37,8 @@ use utils::safe_type_name;
 /// - Respects Serde attributes like `rename` and `rename_all`
 /// - Provides proper type mappings between Rust and TypeScript
 /// - Handles nested types, generics, optional fields, and collections
-/// - First-class MongoDB ObjectId support with proper serialization and validation
-/// - Supports complex nested structures including deeply nested HashMaps
+/// - First-class `MongoDB` `ObjectId` support with proper serialization and validation
+/// - Supports complex nested structures including deeply nested `HashMaps`
 ///
 /// ## Usage
 ///
@@ -116,19 +130,19 @@ use utils::safe_type_name;
 /// // };
 /// ```
 ///
-/// ## MongoDB ObjectId Support
+/// ## `MongoDB` `ObjectId` Support
 ///
-/// When the `object_id` feature is enabled, the macro provides first-class support for MongoDB ObjectId types:
+/// When the `object_id` feature is enabled, the macro provides first-class support for `MongoDB` `ObjectId` types:
 ///
 #[cfg_attr(
     feature = "object_id",
-    doc = r##"
+    doc = r#"
 ```rust
 use tixschema::model_schema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-// Dummy ObjectId for doctest (in real usage, use mongodb::bson::oid::ObjectId)
+// Dummy ObjectId for doc test (in real usage, use mongodb::bson::oid::ObjectId)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct ObjectId(String);
 
@@ -162,19 +176,19 @@ pub struct Document {
 //   parent_id: z.union([z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }), z.undefined()]),
 // });
 ```
-"##
+"#
 )]
 ///
 ///
-/// ObjectId fields are serialized using MongoDB's standard format: `{ "$oid": "hex_string" }`
-/// and include proper validation for 24-character hexadecimal ObjectId strings.
+/// `ObjectId` fields are serialized using `MongoDB`'s standard format: `{ "$oid": "hex_string" }`
+/// and include proper validation for 24-character hexadecimal `ObjectId` strings.
 ///
 #[proc_macro_attribute]
 pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
     exec_model_schema(args, input)
 }
 
-/// # model_schema_prop
+/// # `model_schema_prop`
 ///
 /// A field-level attribute for customizing the TypeScript type generation for specific fields
 /// within a struct or enum marked with `#[model_schema()]`.

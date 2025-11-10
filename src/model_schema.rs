@@ -1,32 +1,133 @@
-use std::fmt::Write;
+use core::fmt::Write;
 use std::{collections::HashMap, env};
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{Field, Item, parse_macro_input};
+use syn::parse::Parser;
+use syn::punctuated::Punctuated;
+use syn::{Field, Ident, Item, ItemType, MetaNameValue, Token, parse_macro_input};
+
+#[cfg(feature = "typescript")]
+use syn::GenericParam;
 
 use crate::{
     field_type::{FieldDef, FieldDefType, get_field_def, is_plain_enum},
     safe_type_name,
-    utils::{get_field_docs, get_variant_docs},
+    utils::{get_field_docs, get_variant_docs, lookup_alias_info},
 };
 
 #[cfg(feature = "serde")]
 use crate::field_type::{parse_serde_field_attributes, parse_serde_type_attributes};
 
-#[cfg(feature = "typescript")]
-use crate::utils::{get_enum_docs, get_struct_docs};
+#[cfg(any(feature = "typescript", feature = "zod"))]
+use crate::utils::{
+    compute_alias_export_name, format_docs_for_ts, get_enum_docs, get_item_docs, get_struct_docs,
+    register_alias_info, to_snake_case,
+};
 
-/// Executes the model_schema macro processing to generate TypeScript and Zod schema definitions.
+#[derive(Default, Clone)]
+struct ModelSchemaArgs {
+    name_override: Option<String>,
+}
+
+fn parse_model_schema_args(args: TokenStream) -> ModelSchemaArgs {
+    let mut result = ModelSchemaArgs::default();
+
+    if args.is_empty() {
+        return result;
+    }
+
+    let parser = Punctuated::<MetaNameValue, Token![,]>::parse_terminated;
+    if let Ok(parsed) = parser.parse(args) {
+        for meta in parsed {
+            if meta.path.is_ident("name")
+                && let syn::Expr::Lit(expr_lit) = meta.value
+                && let syn::Lit::Str(lit_str) = expr_lit.lit
+            {
+                result.name_override = Some(lit_str.value());
+            }
+        }
+    }
+
+    result
+}
+
+/// Executes the `model_schema` macro processing to generate TypeScript and Zod schema definitions.
 ///
-/// This function is the main entry point for the model_schema macro and handles both struct and enum types.
-pub(crate) fn exec_model_schema(_args: TokenStream, input: TokenStream) -> TokenStream {
+/// This function is the main entry point for the `model_schema` macro and handles both struct and enum types.
+pub fn exec_model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
+    let parsed_args = parse_model_schema_args(args);
     let item = parse_macro_input!(input as Item);
     match item {
         Item::Struct(item_struct) => process_struct(item_struct),
         Item::Enum(item_enum) => process_enum(item_enum),
+        Item::Type(item_type) => process_type_alias(item_type, &parsed_args),
         _ => panic!("Unsupported target for model_schema"),
     }
+}
+
+#[cfg(feature = "typescript")]
+fn process_type_alias(item_type: ItemType, args: &ModelSchemaArgs) -> TokenStream {
+    let mut alias = item_type;
+    alias
+        .attrs
+        .retain(|attr| !attr.path().is_ident("model_schema"));
+
+    let rust_ident = alias.ident.clone();
+    let rust_ident_str = rust_ident.to_string();
+    let export_name = compute_alias_export_name(&rust_ident_str, args.name_override.clone());
+    let module_name = format!("{}_schema", to_snake_case(&export_name));
+    let module_ident = Ident::new(&module_name, rust_ident.span());
+
+    let docs_vec =
+        get_item_docs(&alias.attrs).unwrap_or_else(|| vec![export_name.clone(), String::new()]);
+    let docs_formatted = format_docs_for_ts(&docs_vec, &export_name);
+
+    register_alias_info(&rust_ident_str, &export_name, module_name);
+
+    let generics: Vec<String> = alias
+        .generics
+        .params
+        .iter()
+        .filter_map(|param| match param {
+            GenericParam::Type(tp) => Some(crate::safe_type_name(&tp.ident.to_string())),
+            _ => None,
+        })
+        .collect();
+
+    let alias_field_def = get_field_def(export_name.as_str(), &alias.ty, "");
+
+    let ts_method =
+        generate_ts_alias_method(&docs_formatted, &export_name, &generics, &alias_field_def);
+    let json_schema_method = generate_alias_json_schema_stub();
+    let zod_method = generate_alias_zod_stub();
+
+    let output = quote! {
+        #alias
+
+        pub mod #module_ident {
+            use super::*;
+
+            pub struct Schema;
+
+            impl Schema {
+                #ts_method
+                #json_schema_method
+                #zod_method
+            }
+        }
+    };
+
+    TokenStream::from(output)
+}
+
+#[cfg(not(feature = "typescript"))]
+fn process_type_alias(item_type: ItemType, _args: &ModelSchemaArgs) -> TokenStream {
+    let mut alias = item_type;
+    alias
+        .attrs
+        .retain(|attr| !attr.path().is_ident("model_schema"));
+    TokenStream::from(quote! { #alias })
 }
 
 /// Processes a struct item and generates TypeScript and Zod schema definitions for it.
@@ -51,15 +152,18 @@ fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
     // Generate TypeScript type and Zod schema code
     let mut type_code = String::new();
     let mut schema_code = String::new();
-    let mut opts = Vec::new();
+
+    // TODO: Consider this when we add optionals to TypeScript instead of `| undefined`
+    // let mut opts = Vec::new();
+
     let mut json_schema_fields: Vec<proc_macro2::TokenStream> = Vec::new();
 
     for fld in field_defs {
         write_field_type_and_schema(&mut type_code, &mut schema_code, &fld);
 
-        if fld.is_optional {
-            opts.push(fld.name.to_string());
-        }
+        // if fld.is_optional {
+        //     opts.push(fld.name.to_string());
+        // }
 
         json_schema_fields.push(build_field_schema(&fld));
     }
@@ -74,12 +178,16 @@ fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
     let docs = match get_struct_docs(&item_struct) {
         Some(doc_lines) => doc_lines
             .into_iter()
-            .flat_map(|v| v.lines().map(|l| l.to_owned()).collect::<Vec<_>>())
-            .chain(vec!["".to_string()])
+            .flat_map(|v| {
+                v.lines()
+                    .map(std::borrow::ToOwned::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .chain(vec![String::new()])
             .map(|l| format!(" * {l}"))
             .collect::<Vec<_>>()
             .join("\n"),
-        None => [name.to_string(), "".to_string()]
+        None => [name.to_string(), String::new()]
             .into_iter()
             .map(|l| format!(" * {l}"))
             .collect::<Vec<_>>()
@@ -164,6 +272,8 @@ fn process_plain_enum(
     item_name: &str,
 ) -> TokenStream {
     let mut enum_options = Vec::new();
+    #[cfg(feature = "typescript")]
+    let mut enum_variant_docs = Vec::new();
 
     for item in &mut item_enum.variants {
         #[cfg(feature = "serde")]
@@ -173,14 +283,46 @@ fn process_plain_enum(
 
         let final_name = get_final_name(item.ident.to_string(), &field_rename, rename_all);
         enum_options.push(final_name);
+
+        // Collect variant documentation
+        #[cfg(feature = "typescript")]
+        {
+            let variant_docs = match get_variant_docs(item) {
+                Some(doc_lines) => doc_lines.join("\n"),
+                None => String::new(),
+            };
+            enum_variant_docs.push(variant_docs);
+        }
     }
 
     #[cfg(feature = "typescript")]
     let type_code = enum_options
         .iter()
-        .map(|v| format!("\"{v}\""))
+        .enumerate()
+        .map(|(idx, v)| {
+            let docs = &enum_variant_docs[idx];
+            if docs.is_empty() {
+                format!("  | \"{v}\"")
+            } else {
+                let formatted_docs = docs
+                    .lines()
+                    .map(|line| {
+                        let trimmed = line.trim();
+                        // Strip leading asterisk if present (from block comments)
+                        let content = trimmed.strip_prefix('*').unwrap_or(trimmed).trim();
+                        if content.is_empty() {
+                            "  *".to_string()
+                        } else {
+                            format!("  * {content}")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("  /*\n{formatted_docs}\n  */\n  | \"{v}\"")
+            }
+        })
         .collect::<Vec<_>>()
-        .join(" | ");
+        .join("\n");
 
     #[cfg(feature = "zod")]
     let schema_code = enum_options
@@ -197,20 +339,42 @@ fn process_plain_enum(
         })
         .collect();
 
-    #[cfg(feature = "typescript")]
-    let docs = match get_enum_docs(&item_enum) {
-        Some(doc_lines) => doc_lines
+    #[cfg(any(feature = "typescript", feature = "zod"))]
+    let (docs, plain_description) = if let Some(doc_lines) = get_enum_docs(&item_enum) {
+        let plain_lines: Vec<String> = doc_lines
+            .iter()
+            .flat_map(|v| {
+                v.lines()
+                    .map(|line| {
+                        // Strip leading asterisk from block-style doc comments
+                        let trimmed = line.trim();
+                        trimmed
+                            .strip_prefix('*')
+                            .unwrap_or(trimmed)
+                            .trim()
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let docs_formatted = plain_lines
+            .iter()
+            .map(|l| format!(" * {l}"))
+            .chain(vec![" * ".to_string()])
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let description = plain_lines.join("\\n");
+        (docs_formatted, description)
+    } else {
+        let docs_formatted = [name.to_string(), String::new()]
             .into_iter()
-            .flat_map(|v| v.lines().map(|l| l.to_owned()).collect::<Vec<_>>())
-            .chain(vec!["".to_string()])
             .map(|l| format!(" * {l}"))
             .collect::<Vec<_>>()
-            .join("\n"),
-        None => [name.to_string(), "".to_string()]
-            .into_iter()
-            .map(|l| format!(" * {l}"))
-            .collect::<Vec<_>>()
-            .join("\n"),
+            .join("\n");
+        (docs_formatted, name.to_string())
     };
 
     // Generate conditional methods
@@ -221,7 +385,8 @@ fn process_plain_enum(
     let ts_definition_method =
         generate_plain_enum_ts_definition_method(&docs, item_name, &type_code);
     #[cfg(feature = "zod")]
-    let zod_schema_method = generate_plain_enum_zod_schema_method(item_name, &schema_code);
+    let zod_schema_method =
+        generate_plain_enum_zod_schema_method(item_name, &schema_code, &plain_description);
 
     #[cfg(not(any(feature = "typescript", feature = "zod")))]
     let _ = item_name;
@@ -282,11 +447,11 @@ fn process_discriminated_enum(
         let final_name = get_final_name(item.ident.to_string(), &field_rename, rename_all);
 
         let mut field_defs: Vec<FieldDef> = Vec::new();
-        let mut json_schema_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+        // let mut json_schema_fields: Vec<proc_macro2::TokenStream> = Vec::new();
 
         for field in &mut item.fields {
             let f_def = process_field(rename_all, field);
-            json_schema_fields.push(build_field_schema(&f_def));
+            // json_schema_fields.push(build_field_schema(&f_def));
             field_defs.push(f_def);
         }
 
@@ -294,12 +459,16 @@ fn process_discriminated_enum(
         let discriminator_docs = match get_variant_docs(item) {
             Some(doc_lines) => doc_lines
                 .into_iter()
-                .flat_map(|v| v.lines().map(|l| l.to_owned()).collect::<Vec<_>>())
-                .chain(vec!["".to_string()])
+                .flat_map(|v| {
+                    v.lines()
+                        .map(std::borrow::ToOwned::to_owned)
+                        .collect::<Vec<_>>()
+                })
+                .chain(vec![String::new()])
                 .map(|l| format!(" * {l}"))
                 .collect::<Vec<_>>()
                 .join("\n"),
-            None => [final_name.to_string(), "".to_string()]
+            None => [final_name.to_string(), String::new()]
                 .into_iter()
                 .map(|l| format!(" * {l}"))
                 .collect::<Vec<_>>()
@@ -359,12 +528,16 @@ fn process_discriminated_enum(
     let docs = match get_enum_docs(&item_enum) {
         Some(doc_lines) => doc_lines
             .into_iter()
-            .flat_map(|v| v.lines().map(|l| l.to_owned()).collect::<Vec<_>>())
-            .chain(vec!["".to_string()])
+            .flat_map(|v| {
+                v.lines()
+                    .map(std::borrow::ToOwned::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .chain(vec![String::new()])
             .map(|l| format!(" * {l}"))
             .collect::<Vec<_>>()
             .join("\n"),
-        None => [name.to_string(), "".to_string()]
+        None => [name.to_string(), String::new()]
             .into_iter()
             .map(|l| format!(" * {l}"))
             .collect::<Vec<_>>()
@@ -756,13 +929,22 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
                     });
                 }
             } else if lst.is_empty() {
-                let name_ident = proc_macro2::Ident::new(
-                    format!("{name}Json").as_str(),
-                    proc_macro2::Span::call_site(),
-                );
-                let type_json_schema = quote! { #name_ident::json_schema() };
+                if let Some(alias) = lookup_alias_info(name) {
+                    let module_ident = proc_macro2::Ident::new(
+                        alias.module_name.as_str(),
+                        proc_macro2::Span::call_site(),
+                    );
+                    let type_json_schema = quote! { #module_ident::Schema::json_schema() };
+                    generate_type_schema(fld, &field_name_str, type_json_schema)
+                } else {
+                    let name_ident = proc_macro2::Ident::new(
+                        format!("{name}Json").as_str(),
+                        proc_macro2::Span::call_site(),
+                    );
+                    let type_json_schema = quote! { #name_ident::json_schema() };
 
-                generate_type_schema(fld, &field_name_str, type_json_schema)
+                    generate_type_schema(fld, &field_name_str, type_json_schema)
+                }
             } else {
                 panic!("Unsupported generic type: {name} - {lst:?}");
             }
@@ -1258,12 +1440,12 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
         }
     };
 
-    let required_code = if !fld.is_optional {
+    let required_code = if fld.is_optional {
+        quote! {}
+    } else {
         quote! {
             required.push(serde_json::Value::String(#field_name_str.to_string()));
         }
-    } else {
-        quote! {}
     };
 
     quote! {
@@ -1334,12 +1516,16 @@ fn process_field(rename_all: &Option<String>, field: &mut Field) -> FieldDef {
     let field_docs = match get_field_docs(field) {
         Some(doc_lines) => doc_lines
             .into_iter()
-            .flat_map(|v| v.lines().map(|l| l.to_owned()).collect::<Vec<_>>())
-            .chain(vec!["".to_string()])
+            .flat_map(|v| {
+                v.lines()
+                    .map(std::borrow::ToOwned::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .chain(vec![String::new()])
             .map(|l| format!(" * {l}"))
             .collect::<Vec<_>>()
             .join("\n"),
-        None => [final_name.to_string(), "".to_string()]
+        None => [final_name.to_string(), String::new()]
             .into_iter()
             .map(|l| format!(" * {l}"))
             .collect::<Vec<_>>()
@@ -1352,7 +1538,7 @@ fn process_field(rename_all: &Option<String>, field: &mut Field) -> FieldDef {
         || model_schema_prop_meta.literal.is_some()
         || model_schema_prop_meta.min_length.is_some()
     {
-        Some(model_schema_prop_meta.clone())
+        Some(model_schema_prop_meta)
     } else {
         None
     };
@@ -1399,7 +1585,7 @@ fn get_final_name(
     }
 }
 
-/// Converts a snake_case string to camelCase.
+/// Converts a `snake_case` string to camelCase.
 fn snake_to_camel(s: &str) -> String {
     let mut result = String::new();
     let mut capitalize_next = false;
@@ -1551,11 +1737,6 @@ fn generate_plain_enum_ts_definition_method(
 ) -> proc_macro2::TokenStream {
     #[cfg(feature = "typescript")]
     {
-        // TypeScript type generation (only available when typescript feature is enabled)
-        let typescript_type_gen = quote::quote! {
-            format!(r#"/**\n{}\n**/\nexport type {} = {};"#, docs, #item_name, #type_code)
-        };
-
         // Conditional JSON schema docs
         let json_docs_gen = quote::quote! {
             #[cfg(all(feature = "jsonschema", feature = "zod"))]
@@ -1566,6 +1747,11 @@ fn generate_plain_enum_ts_definition_method(
 
             #[cfg(not(all(feature = "jsonschema", feature = "zod")))]
             let docs = format!("/**\n{}\n**/\n", #docs);
+        };
+
+        // TypeScript type generation (only available when typescript feature is enabled)
+        let typescript_type_gen = quote::quote! {
+            format!("{}export type {} =\n{};", docs, #item_name, #type_code)
         };
 
         quote::quote! {
@@ -1591,6 +1777,7 @@ fn generate_plain_enum_ts_definition_method(
 fn generate_plain_enum_zod_schema_method(
     item_name: &str,
     schema_code: &str,
+    description: &str,
 ) -> proc_macro2::TokenStream {
     #[cfg(feature = "zod")]
     {
@@ -1599,7 +1786,7 @@ fn generate_plain_enum_zod_schema_method(
         {
             quote::quote! {
                 pub fn zod_schema() -> String {
-                    format!(r#"export const {}$Schema: ZodType<{}> = z.enum([{}]);"#, #item_name, #item_name, #schema_code)
+                    format!("export const {}$Schema: ZodType<{}> = z.enum([{}]).meta({{\n  description: \"{}\",\n}});", #item_name, #item_name, #schema_code, #description)
                 }
             }
         }
@@ -1609,7 +1796,7 @@ fn generate_plain_enum_zod_schema_method(
         {
             quote::quote! {
                 pub fn zod_schema() -> String {
-                    format!(r#"export const {}$Schema = z.enum([{}]);"#, #item_name, #schema_code)
+                    format!("export const {}$Schema = z.enum([{}]).meta({{\n  description: \"{}\",\n}});", #item_name, #schema_code, #description)
                 }
             }
         }
@@ -1617,6 +1804,7 @@ fn generate_plain_enum_zod_schema_method(
 
     #[cfg(not(feature = "zod"))]
     {
+        let _ = (item_name, schema_code, description);
         quote::quote! {
             // Zod schema method not available - zod feature disabled
             // To enable: add "zod" to your features
@@ -1712,6 +1900,56 @@ fn generate_discriminated_enum_zod_schema_method(
             // Zod schema method not available - zod feature disabled
             // To enable: add "zod" to your features
             // Example: tixschema = { features = ["zod"] }
+        }
+    }
+}
+
+#[cfg(feature = "typescript")]
+fn generate_ts_alias_method(
+    docs: &str,
+    export_name: &str,
+    generics: &[String],
+    field_def: &FieldDef,
+) -> proc_macro2::TokenStream {
+    let ts_generics = if generics.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", generics.join(", "))
+    };
+
+    let alias_name_ts = format!("{export_name}{ts_generics}");
+    let target_ts = field_def.typescript_typename();
+
+    let docs_block = docs.to_string();
+
+    quote! {
+        pub fn ts_definition() -> String {
+            format!(
+                "/**\n{}\n**/\nexport type {} = {};",
+                #docs_block,
+                #alias_name_ts,
+                #target_ts
+            )
+        }
+    }
+}
+
+fn generate_alias_json_schema_stub() -> proc_macro2::TokenStream {
+    quote! {
+        #[cfg(feature = "jsonschema")]
+        pub fn json_schema() -> serde_json::Value {
+            serde_json::json!({
+                "warning": "JSON schema generation for aliases is not yet supported"
+            })
+        }
+    }
+}
+
+fn generate_alias_zod_stub() -> proc_macro2::TokenStream {
+    quote! {
+        #[cfg(feature = "zod")]
+        pub fn zod_schema() -> String {
+            String::from("// Zod schema generation for aliases is not yet supported")
         }
     }
 }

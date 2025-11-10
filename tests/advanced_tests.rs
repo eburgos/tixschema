@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use tixschema::model_schema;
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "This is a test file")]
 mod advanced_tests {
     use super::*;
 
@@ -278,58 +279,79 @@ mod advanced_tests {
         assert!(!required.contains(&Value::String("optional_nested_array".to_string())));
     }
 
+    #[cfg(all(feature = "typescript", feature = "zod"))]
+    fn assert_ts_contains_fields(ts_definition: &str, assertions: &[(&str, &str)]) {
+        for (field, expected_type) in assertions {
+            let expected = format!("{field}: {expected_type};");
+            assert!(ts_definition.contains(&expected));
+        }
+    }
+
+    #[cfg(all(feature = "typescript", feature = "zod"))]
+    fn assert_zod_contains_fields(zod_schema: &str, assertions: &[(&str, &str)]) {
+        for (field, expected_pattern) in assertions {
+            let expected = format!("{field}: {expected_pattern}");
+            assert!(zod_schema.contains(&expected));
+        }
+    }
+
     #[test]
     #[cfg(all(feature = "typescript", feature = "zod"))]
     fn test_edge_cases_ts_definition() {
         let ts_definition = EdgeCasesJson::ts_definition();
 
-        // Check numeric types (all should be 'number' in TypeScript)
-        assert!(ts_definition.contains("tiny_number: number;"));
-        assert!(ts_definition.contains("small_number: number;"));
-        assert!(ts_definition.contains("medium_number: number;"));
-        assert!(ts_definition.contains("float_number: number;"));
+        // Check numeric types, arrays, optional arrays, maps, and nested types
+        assert_ts_contains_fields(
+            &ts_definition,
+            &[
+                ("tiny_number", "number"),
+                ("small_number", "number"),
+                ("medium_number", "number"),
+                ("float_number", "number"),
+                ("strings", "Array<string>"),
+                ("numbers", "Array<number>"),
+                ("booleans", "Array<boolean>"),
+                ("optional_strings", "Array<string> | undefined"),
+                ("optional_numbers", "Array<number> | undefined"),
+                ("string_map", "Partial<Record<string, string>>"),
+                ("nested_optional", "ContactInfo | undefined"),
+                ("nested_array", "Array<ContactInfo>"),
+                ("optional_nested_array", "Array<ContactInfo> | undefined"),
+            ],
+        );
 
-        // Check array types
-        assert!(ts_definition.contains("strings: Array<string>;"));
-        assert!(ts_definition.contains("numbers: Array<number>;"));
-        assert!(ts_definition.contains("booleans: Array<boolean>;"));
-
-        // Check optional arrays
-        assert!(ts_definition.contains("optional_strings: Array<string> | undefined;"));
-        assert!(ts_definition.contains("optional_numbers: Array<number> | undefined;"));
-
-        // Check maps (they become Partial<Record<...>> in the generated output)
-        assert!(ts_definition.contains("string_map: Partial<Record<string, string>>;"));
-
-        // Check nested types (without Json suffix)
-        assert!(ts_definition.contains("nested_optional: ContactInfo | undefined;"));
-        assert!(ts_definition.contains("nested_array: Array<ContactInfo>;"));
-        assert!(ts_definition.contains("optional_nested_array: Array<ContactInfo> | undefined;"));
-
-        // Check Zod schemas (without Json suffix) - now in separate method
+        // Check Zod schemas
         let zod_schema = EdgeCasesJson::zod_schema();
-        assert!(zod_schema.contains("tiny_number: z.number().int()"));
-        assert!(zod_schema.contains("small_number: z.number().int()"));
-        assert!(zod_schema.contains("medium_number: z.number().int()"));
-        assert!(zod_schema.contains("float_number: z.number()"));
-        assert!(zod_schema.contains("strings: z.array(z.string())"));
-        assert!(zod_schema.contains("numbers: z.array(z.number().int())"));
-        assert!(zod_schema.contains("booleans: z.array(z.boolean())"));
-        assert!(
-            zod_schema.contains("optional_strings: z.union([z.array(z.string()), z.undefined()])")
+        assert_zod_contains_fields(
+            &zod_schema,
+            &[
+                ("tiny_number", "z.number().int()"),
+                ("small_number", "z.number().int()"),
+                ("medium_number", "z.number().int()"),
+                ("float_number", "z.number()"),
+                ("strings", "z.array(z.string())"),
+                ("numbers", "z.array(z.number().int())"),
+                ("booleans", "z.array(z.boolean())"),
+                (
+                    "optional_strings",
+                    "z.union([z.array(z.string()), z.undefined()])",
+                ),
+                (
+                    "optional_numbers",
+                    "z.union([z.array(z.number().int()), z.undefined()])",
+                ),
+                ("string_map", "z.record(z.string(), z.string())"),
+                (
+                    "nested_optional",
+                    "z.union([ContactInfo$Schema, z.undefined()])",
+                ),
+                ("nested_array", "z.array(ContactInfo$Schema)"),
+                (
+                    "optional_nested_array",
+                    "z.union([z.array(ContactInfo$Schema), z.undefined()])",
+                ),
+            ],
         );
-        assert!(
-            zod_schema
-                .contains("optional_numbers: z.union([z.array(z.number().int()), z.undefined()])")
-        );
-        assert!(zod_schema.contains("string_map: z.record(z.string(), z.string())"));
-        assert!(
-            zod_schema.contains("nested_optional: z.union([ContactInfo$Schema, z.undefined()])")
-        );
-        assert!(zod_schema.contains("nested_array: z.array(ContactInfo$Schema)"));
-        assert!(zod_schema.contains(
-            "optional_nested_array: z.union([z.array(ContactInfo$Schema), z.undefined()])"
-        ));
     }
 
     // Test discriminated union with complex fields
@@ -474,17 +496,12 @@ mod advanced_tests {
 
         for (name, schema) in schemas {
             // All schemas should be objects
-            assert!(
-                schema.is_object(),
-                "Schema for {} should be an object",
-                name
-            );
+            assert!(schema.is_object(), "Schema for {name} should be an object");
 
             // Should have required fields
             assert!(
                 schema.get("type").is_some(),
-                "Schema for {} should have a type",
-                name
+                "Schema for {name} should have a type"
             );
 
             // Object schemas should have properties
@@ -495,16 +512,14 @@ mod advanced_tests {
                     for variant in variants {
                         assert!(
                             variant.get("properties").is_some(),
-                            "Discriminated union variant for {} should have properties",
-                            name
+                            "Discriminated union variant for {name} should have properties"
                         );
                     }
                 } else {
                     // Regular object - should have properties
                     assert!(
                         schema.get("properties").is_some(),
-                        "Object schema for {} should have properties",
-                        name
+                        "Object schema for {name} should have properties"
                     );
                 }
             }
@@ -535,7 +550,7 @@ mod advanced_tests {
             salary: 75000,
             manager: Some("mgr_456".to_string()),
             skills: vec!["Rust".to_string(), "TypeScript".to_string()],
-            contact: contact.clone(),
+            contact,
         };
 
         // Test serialization

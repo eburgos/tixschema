@@ -1,4 +1,5 @@
 #[cfg(all(test, feature = "object_id"))]
+#[expect(clippy::unwrap_used, reason = "This is a test file")]
 mod tests {
 
     #[cfg(all(test, feature = "serde"))]
@@ -13,7 +14,7 @@ mod tests {
     // Mock ObjectId type for testing - compatible with mongodb::bson::oid::ObjectId
     // The real MongoDB ObjectId serializes to { "$oid": "hex_string" } in JSON
     // and to a plain string in other contexts
-    #[derive(Debug, Clone, PartialEq)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct ObjectId(String);
 
     #[cfg(feature = "serde")]
@@ -41,7 +42,7 @@ mod tests {
             impl<'de> Visitor<'de> for ObjectIdVisitor {
                 type Value = ObjectId;
 
-                fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
                     formatter.write_str("an ObjectId with $oid field")
                 }
 
@@ -126,6 +127,21 @@ mod tests {
         nested_refs: HashMap<String, Vec<ObjectId>>,
     }
 
+    // Test that includes DocumentJson
+    #[test]
+    #[cfg(feature = "jsonschema")]
+    fn test_document_json() {
+        let schema = DocumentJson::json_schema();
+        let properties = schema["properties"].as_object().unwrap();
+        let metadata_prop = &properties["metadata"];
+        assert_eq!(metadata_prop["type"], "object");
+        assert_eq!(metadata_prop["additionalProperties"]["type"], "object");
+        assert_eq!(
+            metadata_prop["additionalProperties"]["properties"]["$oid"]["type"],
+            "string"
+        );
+    }
+
     // Test struct with HashMap<String, ObjectId>
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -134,6 +150,21 @@ mod tests {
         id: ObjectId,
         name: String,
         relationships: HashMap<String, ObjectId>,
+    }
+
+    // Test that includes UserWithHashMapObjectIdJson
+    #[test]
+    #[cfg(feature = "jsonschema")]
+    fn test_user_with_hashmap_object_id_json() {
+        let schema = UserWithHashMapObjectIdJson::json_schema();
+        let properties = schema["properties"].as_object().unwrap();
+        let relationships_prop = &properties["relationships"];
+        assert_eq!(relationships_prop["type"], "object");
+        assert_eq!(relationships_prop["additionalProperties"]["type"], "object");
+        assert_eq!(
+            relationships_prop["additionalProperties"]["properties"]["$oid"]["type"],
+            "string"
+        );
     }
 
     // Test struct with more complex ObjectId nesting
@@ -173,8 +204,23 @@ mod tests {
 
     impl ObjectId {
         fn new() -> Self {
-            ObjectId("507f1f77bcf86cd799439011".to_string())
+            Self("507f1f77bcf86cd799439011".to_string())
         }
+    }
+
+    // Test that includes UserWithOtherHashMapObjectIdJson
+    #[test]
+    #[cfg(feature = "jsonschema")]
+    fn test_user_with_other_hashmap_object_id_json() {
+        let schema = UserWithOtherHashMapObjectIdJson::json_schema();
+        let properties = schema["properties"].as_object().unwrap();
+        let metadata_prop = &properties["metadata"];
+        assert_eq!(metadata_prop["type"], "object");
+        assert_eq!(metadata_prop["additionalProperties"]["type"], "object");
+        assert_eq!(
+            metadata_prop["additionalProperties"]["properties"]["$oid"]["type"],
+            "string"
+        );
     }
 
     #[test]
@@ -342,26 +388,21 @@ mod tests {
         let zod_schema = ComplexDocumentJson::zod_schema();
         let regex_pattern =
             "z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" })";
-        assert!(zod_schema.contains(&format!("id: z.object({{ $oid: {} }}),", regex_pattern)));
+        assert!(zod_schema.contains(&format!("id: z.object({{ $oid: {regex_pattern} }}),")));
         assert!(zod_schema.contains(&format!(
-            "author_id: z.object({{ $oid: {} }}),",
-            regex_pattern
+            "author_id: z.object({{ $oid: {regex_pattern} }}),"
         )));
         assert!(zod_schema.contains(&format!(
-            "references: z.array(z.object({{ $oid: {} }})),",
-            regex_pattern
+            "references: z.array(z.object({{ $oid: {regex_pattern} }})),"
         )));
         assert!(zod_schema.contains(&format!(
-            "metadata: z.record(z.string(), z.object({{ $oid: {} }})),",
-            regex_pattern
+            "metadata: z.record(z.string(), z.object({{ $oid: {regex_pattern} }})),"
         )));
         assert!(zod_schema.contains(&format!(
-            "parent_id: z.union([z.object({{ $oid: {} }}), z.undefined()]),",
-            regex_pattern
+            "parent_id: z.union([z.object({{ $oid: {regex_pattern} }}), z.undefined()]),"
         )));
         assert!(zod_schema.contains(&format!(
-            "nested_refs: z.record(z.string(), z.array(z.object({{ $oid: {} }}))),",
-            regex_pattern
+            "nested_refs: z.record(z.string(), z.array(z.object({{ $oid: {regex_pattern} }}))),"
         )));
     }
 
@@ -392,8 +433,7 @@ mod tests {
         let regex_pattern =
             "z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" })";
         assert!(zod_schema.contains(&format!(
-            "nested_refs: z.record(z.string(), z.array(z.object({{ $oid: {} }}))),",
-            regex_pattern
+            "nested_refs: z.record(z.string(), z.array(z.object({{ $oid: {regex_pattern} }}))),"
         )));
     }
 
@@ -427,13 +467,13 @@ mod tests {
     #[test]
     fn test_object_id_compilation_smoke_test() {
         // This test ensures all ObjectId types compile without panics
-        let _user = UserJson {
+        let user = UserJson {
             id: ObjectId::new(),
             name: "Test User".to_string(),
             email: Some("test@example.com".to_string()),
         };
 
         // If we get here without panics, ObjectId support is working at compile time
-        assert!(true);
+        assert_eq!(user.name, "Test User");
     }
 }

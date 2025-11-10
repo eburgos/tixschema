@@ -1,9 +1,10 @@
 #[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "This is a test file")]
 mod tests {
 
     #[cfg(all(test, feature = "serde"))]
     use serde::{Deserialize, Serialize};
-    #[cfg(all(test, any(feature = "jsonschema")))]
+    #[cfg(all(test, feature = "jsonschema"))]
     use serde_json::Value;
     #[cfg(all(
         test,
@@ -230,90 +231,118 @@ mod tests {
         map_to_f64_array: HashMap<String, Vec<f64>>,
     }
 
+    #[cfg(feature = "jsonschema")]
+    fn assert_property_type(
+        properties: &serde_json::Map<String, serde_json::Value>,
+        field_name: &str,
+        expected_type: &str,
+    ) {
+        assert_eq!(properties[field_name]["type"], expected_type);
+    }
+
+    #[cfg(feature = "jsonschema")]
+    fn assert_array_property(
+        properties: &serde_json::Map<String, serde_json::Value>,
+        field_name: &str,
+        item_type: &str,
+    ) {
+        assert_eq!(properties[field_name]["type"], "array");
+        assert_eq!(properties[field_name]["items"]["type"], item_type);
+    }
+
+    #[cfg(feature = "jsonschema")]
+    fn assert_hashmap_property(
+        properties: &serde_json::Map<String, serde_json::Value>,
+        field_name: &str,
+        value_type: &str,
+    ) {
+        assert_eq!(properties[field_name]["type"], "object");
+        assert_eq!(
+            properties[field_name]["additionalProperties"]["type"],
+            value_type
+        );
+    }
+
+    #[cfg(feature = "jsonschema")]
+    fn assert_hashmap_array_property(
+        properties: &serde_json::Map<String, serde_json::Value>,
+        field_name: &str,
+        item_type: &str,
+    ) {
+        assert_eq!(properties[field_name]["type"], "object");
+        assert_eq!(
+            properties[field_name]["additionalProperties"]["type"],
+            "array"
+        );
+        assert_eq!(
+            properties[field_name]["additionalProperties"]["items"]["type"],
+            item_type
+        );
+    }
+
     #[test]
     #[cfg(feature = "jsonschema")]
     fn test_primitive_types_json_schema_details() {
         let schema = PrimitiveTypesShowcaseJson::json_schema();
-
         let properties = schema["properties"].as_object().unwrap();
 
         // All integer types should map to "integer" in JSON Schema
-        assert_eq!(properties["tiny_signed"]["type"], "integer");
-        assert_eq!(properties["tiny_unsigned"]["type"], "integer");
-        assert_eq!(properties["small_signed"]["type"], "integer");
-        assert_eq!(properties["small_unsigned"]["type"], "integer");
-        assert_eq!(properties["medium_signed"]["type"], "integer");
-        assert_eq!(properties["medium_unsigned"]["type"], "integer");
-        assert_eq!(properties["large_signed"]["type"], "integer");
-        assert_eq!(properties["large_unsigned"]["type"], "integer");
-        assert_eq!(properties["arch_signed"]["type"], "integer");
-        assert_eq!(properties["arch_unsigned"]["type"], "integer");
+        let integer_fields = [
+            "tiny_signed",
+            "tiny_unsigned",
+            "small_signed",
+            "small_unsigned",
+            "medium_signed",
+            "medium_unsigned",
+            "large_signed",
+            "large_unsigned",
+            "arch_signed",
+            "arch_unsigned",
+        ];
+        for field in &integer_fields {
+            assert_property_type(properties, field, "integer");
+        }
 
         // Float types should map to "number" in JSON Schema
-        assert_eq!(properties["float_single"]["type"], "number");
-        assert_eq!(properties["float_double"]["type"], "number");
+        assert_property_type(properties, "float_single", "number");
+        assert_property_type(properties, "float_double", "number");
 
         // Optional fields should not be in required array
         let required = schema["required"].as_array().unwrap();
-        assert!(!required.contains(&serde_json::Value::String("opt_i8".to_string())));
-        assert!(!required.contains(&serde_json::Value::String("opt_u64".to_string())));
-        assert!(!required.contains(&serde_json::Value::String("opt_f64".to_string())));
+        for opt_field in &["opt_i8", "opt_u64", "opt_f64"] {
+            assert!(!required.contains(&serde_json::Value::String((*opt_field).to_string())));
+        }
 
         // Arrays should have proper structure
-        assert_eq!(properties["array_i8"]["type"], "array");
-        assert_eq!(properties["array_i8"]["items"]["type"], "integer");
-        assert_eq!(properties["array_u64"]["type"], "array");
-        assert_eq!(properties["array_u64"]["items"]["type"], "integer");
-        assert_eq!(properties["array_f64"]["type"], "array");
-        assert_eq!(properties["array_f64"]["items"]["type"], "number");
+        assert_array_property(properties, "array_i8", "integer");
+        assert_array_property(properties, "array_u64", "integer");
+        assert_array_property(properties, "array_f64", "number");
 
         // HashMap with primitive values
-        assert_eq!(properties["map_to_i8"]["type"], "object");
-        assert_eq!(
-            properties["map_to_i8"]["additionalProperties"]["type"],
-            "integer"
-        );
-        assert_eq!(properties["map_to_u64"]["type"], "object");
-        assert_eq!(
-            properties["map_to_u64"]["additionalProperties"]["type"],
-            "integer"
-        );
-        assert_eq!(properties["map_to_f64"]["type"], "object");
-        assert_eq!(
-            properties["map_to_f64"]["additionalProperties"]["type"],
-            "number"
-        );
+        assert_hashmap_property(properties, "map_to_i8", "integer");
+        assert_hashmap_property(properties, "map_to_u64", "integer");
+        assert_hashmap_property(properties, "map_to_f64", "number");
 
         // HashMap with array values
-        assert_eq!(properties["map_to_i8_array"]["type"], "object");
-        assert_eq!(
-            properties["map_to_i8_array"]["additionalProperties"]["type"],
-            "array"
-        );
-        assert_eq!(
-            properties["map_to_i8_array"]["additionalProperties"]["items"]["type"],
-            "integer"
-        );
+        assert_hashmap_array_property(properties, "map_to_i8_array", "integer");
+        assert_hashmap_array_property(properties, "map_to_u64_array", "integer");
+        assert_hashmap_array_property(properties, "map_to_f64_array", "number");
+    }
 
-        assert_eq!(properties["map_to_u64_array"]["type"], "object");
-        assert_eq!(
-            properties["map_to_u64_array"]["additionalProperties"]["type"],
-            "array"
-        );
-        assert_eq!(
-            properties["map_to_u64_array"]["additionalProperties"]["items"]["type"],
-            "integer"
-        );
+    #[cfg(all(feature = "typescript", feature = "zod"))]
+    fn assert_ts_fields_contain(ts_definition: &str, fields: &[&str], expected_suffix: &str) {
+        for field in fields {
+            let expected = format!("{field}: {expected_suffix};");
+            assert!(ts_definition.contains(&expected));
+        }
+    }
 
-        assert_eq!(properties["map_to_f64_array"]["type"], "object");
-        assert_eq!(
-            properties["map_to_f64_array"]["additionalProperties"]["type"],
-            "array"
-        );
-        assert_eq!(
-            properties["map_to_f64_array"]["additionalProperties"]["items"]["type"],
-            "number"
-        );
+    #[cfg(all(feature = "typescript", feature = "zod"))]
+    fn assert_zod_fields_contain(zod_schema: &str, fields: &[&str], expected_pattern: &str) {
+        for field in fields {
+            let expected = format!("{field}: {expected_pattern}");
+            assert!(zod_schema.contains(&expected));
+        }
     }
 
     #[test]
@@ -322,80 +351,105 @@ mod tests {
         let ts_definition = PrimitiveTypesShowcaseJson::ts_definition();
 
         // All integer and float types should map to "number" in TypeScript
-        assert!(ts_definition.contains("tiny_signed: number;"));
-        assert!(ts_definition.contains("tiny_unsigned: number;"));
-        assert!(ts_definition.contains("small_signed: number;"));
-        assert!(ts_definition.contains("small_unsigned: number;"));
-        assert!(ts_definition.contains("medium_signed: number;"));
-        assert!(ts_definition.contains("medium_unsigned: number;"));
-        assert!(ts_definition.contains("large_signed: number;"));
-        assert!(ts_definition.contains("large_unsigned: number;"));
-        assert!(ts_definition.contains("arch_signed: number;"));
-        assert!(ts_definition.contains("arch_unsigned: number;"));
-        assert!(ts_definition.contains("float_single: number;"));
-        assert!(ts_definition.contains("float_double: number;"));
+        let numeric_fields = [
+            "tiny_signed",
+            "tiny_unsigned",
+            "small_signed",
+            "small_unsigned",
+            "medium_signed",
+            "medium_unsigned",
+            "large_signed",
+            "large_unsigned",
+            "arch_signed",
+            "arch_unsigned",
+            "float_single",
+            "float_double",
+        ];
+        assert_ts_fields_contain(&ts_definition, &numeric_fields, "number");
 
         // Optional types should include "| undefined"
-        assert!(ts_definition.contains("opt_i8: number | undefined;"));
-        assert!(ts_definition.contains("opt_u64: number | undefined;"));
-        assert!(ts_definition.contains("opt_f64: number | undefined;"));
+        assert_ts_fields_contain(
+            &ts_definition,
+            &["opt_i8", "opt_u64", "opt_f64"],
+            "number | undefined",
+        );
 
         // Arrays should use Array<number> syntax
-        assert!(ts_definition.contains("array_i8: Array<number>;"));
-        assert!(ts_definition.contains("array_u64: Array<number>;"));
-        assert!(ts_definition.contains("array_f64: Array<number>;"));
+        assert_ts_fields_contain(
+            &ts_definition,
+            &["array_i8", "array_u64", "array_f64"],
+            "Array<number>",
+        );
 
         // Optional arrays should include "| undefined"
-        assert!(ts_definition.contains("opt_array_i8: Array<number> | undefined;"));
-        assert!(ts_definition.contains("opt_array_u64: Array<number> | undefined;"));
-        assert!(ts_definition.contains("opt_array_f64: Array<number> | undefined;"));
+        assert_ts_fields_contain(
+            &ts_definition,
+            &["opt_array_i8", "opt_array_u64", "opt_array_f64"],
+            "Array<number> | undefined",
+        );
 
         // HashMap with primitive values
-        assert!(ts_definition.contains("map_to_i8: Partial<Record<string, number>>;"));
-        assert!(ts_definition.contains("map_to_u64: Partial<Record<string, number>>;"));
-        assert!(ts_definition.contains("map_to_f64: Partial<Record<string, number>>;"));
+        assert_ts_fields_contain(
+            &ts_definition,
+            &["map_to_i8", "map_to_u64", "map_to_f64"],
+            "Partial<Record<string, number>>",
+        );
 
         // HashMap with array values
-        assert!(ts_definition.contains("map_to_i8_array: Partial<Record<string, Array<number>>>;"));
-        assert!(
-            ts_definition.contains("map_to_u64_array: Partial<Record<string, Array<number>>>;")
-        );
-        assert!(
-            ts_definition.contains("map_to_f64_array: Partial<Record<string, Array<number>>>;")
+        assert_ts_fields_contain(
+            &ts_definition,
+            &["map_to_i8_array", "map_to_u64_array", "map_to_f64_array"],
+            "Partial<Record<string, Array<number>>>",
         );
 
         // Check Zod schema - now in separate method
         let zod_schema = PrimitiveTypesShowcaseJson::zod_schema();
-        assert!(zod_schema.contains("tiny_signed: z.number().int()"));
-        assert!(zod_schema.contains("tiny_unsigned: z.number().int()"));
-        assert!(zod_schema.contains("large_signed: z.number().int()"));
-        assert!(zod_schema.contains("large_unsigned: z.number().int()"));
-        assert!(zod_schema.contains("float_single: z.number()")); // No .int() for floats
-        assert!(zod_schema.contains("float_double: z.number()")); // No .int() for floats
+
+        // Integer Zod schemas
+        assert_zod_fields_contain(
+            &zod_schema,
+            &[
+                "tiny_signed",
+                "tiny_unsigned",
+                "large_signed",
+                "large_unsigned",
+            ],
+            "z.number().int()",
+        );
+
+        // Float Zod schemas (no .int())
+        assert_zod_fields_contain(&zod_schema, &["float_single", "float_double"], "z.number()");
 
         // Optional Zod schemas
-        assert!(zod_schema.contains("opt_i8: z.union([z.number().int(), z.undefined()])"));
-        assert!(zod_schema.contains("opt_u64: z.union([z.number().int(), z.undefined()])"));
-        assert!(zod_schema.contains("opt_f64: z.union([z.number(), z.undefined()])")); // No .int() for float
+        assert_zod_fields_contain(
+            &zod_schema,
+            &["opt_i8", "opt_u64"],
+            "z.union([z.number().int(), z.undefined()])",
+        );
+        assert!(zod_schema.contains("opt_f64: z.union([z.number(), z.undefined()])"));
 
         // Array Zod schemas
-        assert!(zod_schema.contains("array_i8: z.array(z.number().int())"));
-        assert!(zod_schema.contains("array_u64: z.array(z.number().int())"));
-        assert!(zod_schema.contains("array_f64: z.array(z.number())")); // No .int() for float
+        assert_zod_fields_contain(
+            &zod_schema,
+            &["array_i8", "array_u64"],
+            "z.array(z.number().int())",
+        );
+        assert!(zod_schema.contains("array_f64: z.array(z.number())"));
 
         // HashMap Zod schemas
-        assert!(zod_schema.contains("map_to_i8: z.record(z.string(), z.number().int())"));
-        assert!(zod_schema.contains("map_to_u64: z.record(z.string(), z.number().int())"));
-        assert!(zod_schema.contains("map_to_f64: z.record(z.string(), z.number())")); // No .int() for float
+        assert_zod_fields_contain(
+            &zod_schema,
+            &["map_to_i8", "map_to_u64"],
+            "z.record(z.string(), z.number().int())",
+        );
+        assert!(zod_schema.contains("map_to_f64: z.record(z.string(), z.number())"));
 
         // HashMap with array Zod schemas
-        assert!(
-            zod_schema.contains("map_to_i8_array: z.record(z.string(), z.array(z.number().int()))")
+        assert_zod_fields_contain(
+            &zod_schema,
+            &["map_to_i8_array", "map_to_u64_array"],
+            "z.record(z.string(), z.array(z.number().int()))",
         );
-        assert!(
-            zod_schema
-                .contains("map_to_u64_array: z.record(z.string(), z.array(z.number().int()))")
-        );
-        assert!(zod_schema.contains("map_to_f64_array: z.record(z.string(), z.array(z.number()))")); // No .int() for float
+        assert!(zod_schema.contains("map_to_f64_array: z.record(z.string(), z.array(z.number()))"));
     }
 }

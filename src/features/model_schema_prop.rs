@@ -5,7 +5,7 @@
 
 use syn::{Attribute, LitStr, Type};
 
-/// Metadata for model_schema_prop attributes applied to a field.
+/// Metadata for `model_schema_prop` attributes applied to a field.
 #[derive(Clone, Debug, Default)]
 pub struct ModelSchemaPropMeta {
     pub as_type: Option<String>,   // e.g., "String" from as = String
@@ -13,7 +13,7 @@ pub struct ModelSchemaPropMeta {
     pub min_length: Option<usize>, // e.g., 1 from minLength = 1
 }
 
-/// Parses model_schema_prop attributes from a field.
+/// Parses `model_schema_prop` attributes from a field.
 pub fn parse_model_schema_prop_attributes(attrs: &[Attribute]) -> ModelSchemaPropMeta {
     let mut meta = ModelSchemaPropMeta::default();
 

@@ -39,7 +39,7 @@ impl Features {
         cfg!(feature = "jsonschema")
     }
 
-    /// Check if object_id feature is enabled
+    /// Check if `object_id` feature is enabled
     pub const fn has_object_id() -> bool {
         cfg!(feature = "object_id")
     }
@@ -88,7 +88,7 @@ mod tests {
     fn test_feature_detection() {
         // Test that we can detect features at compile time
         let enabled = Features::enabled_features();
-        println!("Enabled features: {:?}", enabled);
+        println!("Enabled features: {enabled:?}");
 
         // In default configuration, all features should be enabled
         #[cfg(all(

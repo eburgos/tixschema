@@ -19,7 +19,7 @@ impl GenerationUtils {
             String::new()
         } else {
             docs.lines()
-                .map(|line| format!(" * {}", line))
+                .map(|line| format!(" * {line}"))
                 .collect::<Vec<_>>()
                 .join("\n")
         }

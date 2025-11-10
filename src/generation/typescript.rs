@@ -28,7 +28,7 @@ impl TypeScriptGenerator {
         } else {
             let type_code = fields
                 .iter()
-                .map(|fld| GenerationUtils::format_typescript_field(fld))
+                .map(GenerationUtils::format_typescript_field)
                 .collect::<Vec<_>>()
                 .join("\n");
 
@@ -50,7 +50,7 @@ impl TypeScriptGenerator {
         let item_name = GenerationUtils::safe_typescript_name(type_name);
         let type_code = enum_options
             .iter()
-            .map(|v| format!("\"{}\"", v))
+            .map(|v| format!("\"{v}\""))
             .collect::<Vec<_>>()
             .join(" | ");
 

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use tixschema::model_schema;
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "This is a test file")]
 mod tests {
     use super::*;
 
@@ -59,6 +60,7 @@ mod tests {
     // Test comprehensive HashMap scenarios with various value types
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+    #[expect(clippy::struct_field_names, reason = "This is a test file")]
     struct ComprehensiveHashMapTestJson {
         // Simple primitives as values
         string_to_string: HashMap<String, String>,
@@ -79,94 +81,55 @@ mod tests {
         string_to_optional_u64_array: HashMap<String, Option<Vec<u64>>>,
     }
 
+    #[cfg(feature = "jsonschema")]
+    fn assert_hashmap_primitive_type(
+        properties: &serde_json::Map<String, serde_json::Value>,
+        field_name: &str,
+        expected_type: &str,
+    ) {
+        assert_eq!(properties[field_name]["type"], "object");
+        assert_eq!(
+            properties[field_name]["additionalProperties"]["type"],
+            expected_type
+        );
+    }
+
+    #[cfg(feature = "jsonschema")]
+    fn assert_hashmap_array_type(
+        properties: &serde_json::Map<String, serde_json::Value>,
+        field_name: &str,
+        expected_item_type: &str,
+    ) {
+        assert_eq!(properties[field_name]["type"], "object");
+        assert_eq!(
+            properties[field_name]["additionalProperties"]["type"],
+            "array"
+        );
+        assert_eq!(
+            properties[field_name]["additionalProperties"]["items"]["type"],
+            expected_item_type
+        );
+    }
+
     #[test]
     #[cfg(feature = "jsonschema")]
     fn test_comprehensive_hashmap_json_schema() {
         let schema = ComprehensiveHashMapTestJson::json_schema();
-
         let properties = schema["properties"].as_object().unwrap();
 
         // Test simple primitive values
-        assert_eq!(properties["string_to_string"]["type"], "object");
-        assert_eq!(
-            properties["string_to_string"]["additionalProperties"]["type"],
-            "string"
-        );
+        assert_hashmap_primitive_type(properties, "string_to_string", "string");
+        assert_hashmap_primitive_type(properties, "string_to_u64", "integer");
+        assert_hashmap_primitive_type(properties, "string_to_i64", "integer");
+        assert_hashmap_primitive_type(properties, "string_to_f64", "number");
+        assert_hashmap_primitive_type(properties, "string_to_bool", "boolean");
 
-        assert_eq!(properties["string_to_u64"]["type"], "object");
-        assert_eq!(
-            properties["string_to_u64"]["additionalProperties"]["type"],
-            "integer"
-        );
-
-        assert_eq!(properties["string_to_i64"]["type"], "object");
-        assert_eq!(
-            properties["string_to_i64"]["additionalProperties"]["type"],
-            "integer"
-        );
-
-        assert_eq!(properties["string_to_f64"]["type"], "object");
-        assert_eq!(
-            properties["string_to_f64"]["additionalProperties"]["type"],
-            "number"
-        );
-
-        assert_eq!(properties["string_to_bool"]["type"], "object");
-        assert_eq!(
-            properties["string_to_bool"]["additionalProperties"]["type"],
-            "boolean"
-        );
-
-        // Test array values - these should have "type": "array" with proper "items"
-        assert_eq!(properties["string_to_string_array"]["type"], "object");
-        assert_eq!(
-            properties["string_to_string_array"]["additionalProperties"]["type"],
-            "array"
-        );
-        assert_eq!(
-            properties["string_to_string_array"]["additionalProperties"]["items"]["type"],
-            "string"
-        );
-
-        assert_eq!(properties["string_to_u64_array"]["type"], "object");
-        assert_eq!(
-            properties["string_to_u64_array"]["additionalProperties"]["type"],
-            "array"
-        );
-        assert_eq!(
-            properties["string_to_u64_array"]["additionalProperties"]["items"]["type"],
-            "integer"
-        );
-
-        assert_eq!(properties["string_to_i64_array"]["type"], "object");
-        assert_eq!(
-            properties["string_to_i64_array"]["additionalProperties"]["type"],
-            "array"
-        );
-        assert_eq!(
-            properties["string_to_i64_array"]["additionalProperties"]["items"]["type"],
-            "integer"
-        );
-
-        assert_eq!(properties["string_to_f64_array"]["type"], "object");
-        assert_eq!(
-            properties["string_to_f64_array"]["additionalProperties"]["type"],
-            "array"
-        );
-        assert_eq!(
-            properties["string_to_f64_array"]["additionalProperties"]["items"]["type"],
-            "number"
-        );
-
-        assert_eq!(properties["string_to_bool_array"]["type"], "object");
-        assert_eq!(
-            properties["string_to_bool_array"]["additionalProperties"]["type"],
-            "array"
-        );
-        assert_eq!(
-            properties["string_to_bool_array"]["additionalProperties"]["items"]["type"],
-            "boolean"
-        );
+        // Test array values
+        assert_hashmap_array_type(properties, "string_to_string_array", "string");
+        assert_hashmap_array_type(properties, "string_to_u64_array", "integer");
+        assert_hashmap_array_type(properties, "string_to_i64_array", "integer");
+        assert_hashmap_array_type(properties, "string_to_f64_array", "number");
+        assert_hashmap_array_type(properties, "string_to_bool_array", "boolean");
     }
 
     #[test]
