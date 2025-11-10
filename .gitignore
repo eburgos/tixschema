@@ -30,6 +30,8 @@ Cargo.lock
 node_modules
 tsconfig.tsbuildinfo
 
+.beads/
+
 # Just and pre-commit
 .cache/
 .pytest_cache/

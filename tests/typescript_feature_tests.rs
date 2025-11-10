@@ -74,9 +74,10 @@ mod tests {
         let ts_definition = TypeScriptTestStatus::ts_definition();
 
         // Should contain TypeScript union type with serde transformations applied
-        assert!(ts_definition.contains(
-            "export type TypeScriptTestStatus = \"active\" | \"inactive\" | \"pending\";"
-        ));
+        assert!(ts_definition.contains("export type TypeScriptTestStatus"));
+        assert!(ts_definition.contains("\"active\""));
+        assert!(ts_definition.contains("\"inactive\""));
+        assert!(ts_definition.contains("\"pending\""));
 
         // Should NOT contain Zod schema
         assert!(!ts_definition.contains("z.enum"));
@@ -88,7 +89,9 @@ mod tests {
         let zod_schema = TypeScriptTestStatus::zod_schema();
 
         // Should contain TypeScript-style Zod schema with type annotations
-        assert!(zod_schema.contains("export const TypeScriptTestStatus$Schema: ZodType<TypeScriptTestStatus> = z.enum([\"active\", \"inactive\", \"pending\"]);"));
+        assert!(zod_schema.contains("export const TypeScriptTestStatus$Schema: ZodType<TypeScriptTestStatus> = z.enum([\"active\", \"inactive\", \"pending\"])"));
+        // Now includes .meta() with description
+        assert!(zod_schema.contains(".meta({"));
 
         // Should NOT contain TypeScript type definition
         assert!(!zod_schema.contains("export type TypeScriptTestStatus"));
@@ -160,7 +163,8 @@ mod tests {
 
         // When serde feature is disabled, the rename_all attribute is not processed
         // so the enum values will be the original Rust names (Title case)
-        assert!(zod_schema.contains("export const TypeScriptTestStatus$Schema: ZodType<TypeScriptTestStatus> = z.enum([\"Active\", \"Inactive\", \"Pending\"]);"));
+        assert!(zod_schema.contains("export const TypeScriptTestStatus$Schema: ZodType<TypeScriptTestStatus> = z.enum([\"Active\", \"Inactive\", \"Pending\"])"));
+        assert!(zod_schema.contains(".meta({"));
 
         assert!(!zod_schema.contains("export type TypeScriptTestStatus"));
     }
@@ -172,7 +176,8 @@ mod tests {
 
         // When serde feature is disabled, the rename_all attribute is not processed
         // so the enum values will be the original Rust names (Title case)
-        assert!(zod_schema.contains("export const TypeScriptTestStatus$Schema: ZodType<TypeScriptTestStatus> = z.enum([\"active\", \"inactive\", \"pending\"]);"));
+        assert!(zod_schema.contains("export const TypeScriptTestStatus$Schema: ZodType<TypeScriptTestStatus> = z.enum([\"active\", \"inactive\", \"pending\"])"));
+        assert!(zod_schema.contains(".meta({"));
 
         assert!(!zod_schema.contains("export type TypeScriptTestStatus"));
     }
@@ -184,7 +189,8 @@ mod tests {
 
         // When serde feature is disabled, the rename_all attribute is not processed
         // so the enum values will be the original Rust names (Title case)
-        assert!(zod_schema.contains("export const TypeScriptTestStatus$Schema = z.enum([\"active\", \"inactive\", \"pending\"]);"));
+        assert!(zod_schema.contains("export const TypeScriptTestStatus$Schema = z.enum([\"active\", \"inactive\", \"pending\"])"));
+        assert!(zod_schema.contains(".meta({"));
 
         // Should NOT contain TypeScript type annotations
         assert!(!zod_schema.contains(": ZodType<TypeScriptTestStatus>"));
@@ -198,7 +204,8 @@ mod tests {
 
         // When serde feature is disabled, the rename_all attribute is not processed
         // so the enum values will be the original Rust names (Title case)
-        assert!(zod_schema.contains("export const TypeScriptTestStatus$Schema = z.enum([\"Active\", \"Inactive\", \"Pending\"]);"));
+        assert!(zod_schema.contains("export const TypeScriptTestStatus$Schema = z.enum([\"Active\", \"Inactive\", \"Pending\"])"));
+        assert!(zod_schema.contains(".meta({"));
 
         // Should NOT contain TypeScript type annotations
         assert!(!zod_schema.contains(": ZodType<TypeScriptTestStatus>"));

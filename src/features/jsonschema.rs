@@ -4,7 +4,7 @@
 
 /// Check if we should generate JSON schema methods
 #[cfg(test)]
-pub fn should_generate_json_schema() -> bool {
+pub const fn should_generate_json_schema() -> bool {
     true // Always true when this module is compiled (feature is enabled)
 }
 

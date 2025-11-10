@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "This is a test file")]
 mod tests {
     #[cfg(all(test, feature = "serde"))]
     use serde::{Deserialize, Serialize};

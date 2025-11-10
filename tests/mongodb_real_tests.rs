@@ -3,6 +3,7 @@
 // correctly with real MongoDB ObjectIds
 
 #[cfg(all(test, feature = "object_id"))]
+#[expect(clippy::unwrap_used, reason = "This is a test file")]
 mod tests {
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
@@ -109,26 +110,21 @@ mod tests {
         let zod_schema = RealDocumentJson::zod_schema();
         let regex_pattern =
             "z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" })";
-        assert!(zod_schema.contains(&format!("id: z.object({{ $oid: {} }}),", regex_pattern)));
+        assert!(zod_schema.contains(&format!("id: z.object({{ $oid: {regex_pattern} }}),")));
         assert!(zod_schema.contains(&format!(
-            "author_id: z.object({{ $oid: {} }}),",
-            regex_pattern
+            "author_id: z.object({{ $oid: {regex_pattern} }}),"
         )));
         assert!(zod_schema.contains(&format!(
-            "references: z.array(z.object({{ $oid: {} }})),",
-            regex_pattern
+            "references: z.array(z.object({{ $oid: {regex_pattern} }})),"
         )));
         assert!(zod_schema.contains(&format!(
-            "metadata: z.record(z.string(), z.object({{ $oid: {} }})),",
-            regex_pattern
+            "metadata: z.record(z.string(), z.object({{ $oid: {regex_pattern} }})),"
         )));
         assert!(zod_schema.contains(&format!(
-            "parent_id: z.union([z.object({{ $oid: {} }}), z.undefined()]),",
-            regex_pattern
+            "parent_id: z.union([z.object({{ $oid: {regex_pattern} }}), z.undefined()]),"
         )));
         assert!(zod_schema.contains(&format!(
-            "nested_refs: z.record(z.string(), z.array(z.object({{ $oid: {} }}))),",
-            regex_pattern
+            "nested_refs: z.record(z.string(), z.array(z.object({{ $oid: {regex_pattern} }}))),"
         )));
     }
 
@@ -165,8 +161,8 @@ mod tests {
         // Test serialization
         let serialized = serde_json::to_string_pretty(&document).unwrap();
 
-        println!("=== REAL MONGODB OBJECTID SERIALIZATION ===");
-        println!("{}", serialized);
+        // println!("=== REAL MONGODB OBJECTID SERIALIZATION ===");
+        // println!("{serialized}");
 
         // Should contain all the ObjectId hex values in $oid format
         assert!(serialized.contains(&doc_id.to_hex()));
@@ -232,8 +228,7 @@ mod tests {
         let regex = regex::Regex::new(r"^[a-f\d]{24}$").unwrap();
         assert!(
             regex.is_match(&hex_string),
-            "Real ObjectId hex '{}' should match our validation regex",
-            hex_string
+            "Real ObjectId hex '{hex_string}' should match our validation regex"
         );
 
         // Test with multiple ObjectIds to ensure consistency
@@ -243,8 +238,7 @@ mod tests {
             assert_eq!(hex.len(), 24);
             assert!(
                 regex.is_match(&hex),
-                "ObjectId hex '{}' should match regex",
-                hex
+                "ObjectId hex '{hex}' should match regex"
             );
         }
     }
@@ -253,13 +247,13 @@ mod tests {
     #[cfg(all(feature = "object_id", feature = "jsonschema", feature = "typescript"))]
     fn test_real_objectid_compilation_smoke_test() {
         // This test ensures all ObjectId types compile without panics with real MongoDB ObjectIds
-        let _user_schema = RealUserJson::json_schema();
+        let user_schema = RealUserJson::json_schema();
         let _document_schema = RealDocumentJson::json_schema();
 
         let _user_ts = RealUserJson::ts_definition();
         let _document_ts = RealDocumentJson::ts_definition();
 
         // If we get here without panics, real MongoDB ObjectId support is working
-        assert!(true);
+        assert!(!user_schema.is_null());
     }
 }

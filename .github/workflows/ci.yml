@@ -69,6 +69,12 @@ jobs:
     - name: Send Discord notification
       if: always()
       run: |
+        # Validate repository to prevent forks from sending notifications
+        if [[ "${{ github.repository }}" != "tixena/tixschema" ]]; then
+          echo "⏭️ Skipping Discord notification (repository is ${{ github.repository }}, not tixena/tixschema)"
+          exit 0
+        fi
+
         # Determine overall job status
         JOB_STATUS="success"
         if [[ "${{ steps.build.outcome }}" == "failure" || "${{ steps.check.outcome }}" == "failure" || "${{ steps.test-basic.outcome }}" == "failure" || "${{ steps.test-extensive.outcome }}" == "failure" ]]; then

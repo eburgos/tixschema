@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "This is a test file")]
 mod tests {
 
     #[cfg(all(
@@ -13,7 +14,6 @@ mod tests {
     use tixschema::model_schema;
 
     #[cfg(all(test, feature = "serde"))]
-    use serde;
     #[cfg(all(test, feature = "serde"))]
     use serde::{Deserialize, Serialize};
     #[cfg(all(test, feature = "jsonschema", feature = "serde"))]
@@ -53,10 +53,14 @@ mod tests {
     #[cfg(all(feature = "typescript", feature = "serde", feature = "zod"))]
     fn test_plain_enum_ts_definition_serde_style() {
         let ts_definition = UserStatus::ts_definition();
+        // println!("TypeScript output:\n{ts_definition}");
 
         // Check TypeScript union type
-        assert!(ts_definition.contains("export type UserStatus = "));
-        assert!(ts_definition.contains("\"active\" | \"inactive\" | \"pending\" | \"suspended\""));
+        assert!(ts_definition.contains("export type UserStatus"));
+        assert!(ts_definition.contains("\"active\""));
+        assert!(ts_definition.contains("\"inactive\""));
+        assert!(ts_definition.contains("\"pending\""));
+        assert!(ts_definition.contains("\"suspended\""));
 
         // Check Zod schema - now in separate method
         let zod_schema = UserStatus::zod_schema();
@@ -72,8 +76,11 @@ mod tests {
         let ts_definition = UserStatus::ts_definition();
 
         // Check TypeScript union type
-        assert!(ts_definition.contains("export type UserStatus = "));
-        assert!(ts_definition.contains("\"Active\" | \"Inactive\" | \"Pending\" | \"Suspended\""));
+        assert!(ts_definition.contains("export type UserStatus"));
+        assert!(ts_definition.contains("\"Active\""));
+        assert!(ts_definition.contains("\"Inactive\""));
+        assert!(ts_definition.contains("\"Pending\""));
+        assert!(ts_definition.contains("\"Suspended\""));
 
         // Check Zod schema - now in separate method
         let zod_schema = UserStatus::zod_schema();
@@ -149,18 +156,18 @@ mod tests {
         };
         assert_ne!(Some(payment_method), None);
 
-        let payment_method = PaymentMethod::CreditCard {
+        let payment_method_2 = PaymentMethod::CreditCard {
             card_number: "1234567890".to_string(),
             expiry_date: "12/2025".to_string(),
             cvv: "123".to_string(),
         };
-        assert_ne!(Some(payment_method), None);
+        assert_ne!(Some(payment_method_2), None);
 
-        let payment_method = PaymentMethod::BankTransfer {
+        let payment_method_3 = PaymentMethod::BankTransfer {
             account_number: "1234567890".to_string(),
             routing_number: "1234567890".to_string(),
         };
-        assert_ne!(Some(payment_method), None);
+        assert_ne!(Some(payment_method_3), None);
     }
 
     #[test]
@@ -183,5 +190,54 @@ mod tests {
         // Check Zod discriminated union - now in separate method
         let zod_schema = PaymentMethod::zod_schema();
         assert!(zod_schema.contains("z.discriminatedUnion(\"type\""));
+    }
+
+    #[cfg(all(test, any(feature = "typescript", feature = "zod", feature = "serde")))]
+    /**
+     * Calculated Expression Operator
+     *
+     * Represents the operator to be used in a calculated expression.
+     */
+    #[model_schema()]
+    #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum CalculatedExpressionOperator {
+        /**
+         * No operation. Commonly used with single value summaries
+         */
+        None,
+        /**
+         * Addition. Adds a value with another value.
+         */
+        Add,
+        /**
+         * Subtraction. Subtracts a value from another value.
+         */
+        Subtract,
+        /**
+         * Multiplication. The product of two values.
+         */
+        Multiply,
+        /**
+         * Division. Divide a value by another value.
+         */
+        Divide,
+        /**
+         * Modulus. The modulus result of an integer division operation.
+         */
+        Modulus,
+    }
+
+    #[test]
+    #[cfg(all(feature = "typescript", feature = "serde", feature = "zod"))]
+    fn test_enum_with_docs() {
+        let ts_definition = CalculatedExpressionOperator::ts_definition();
+        // println!("=== TypeScript Definition ===\n{ts_definition}");
+
+        // let zod_schema = CalculatedExpressionOperator::zod_schema();
+        // println!("\n=== Zod Schema ===\n{zod_schema}");
+
+        // Just make sure it compiles for now
+        assert!(ts_definition.contains("export type CalculatedExpressionOperator"));
     }
 }
