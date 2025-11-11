@@ -89,7 +89,8 @@ just ci
 2. **Macro Execution** ([model_schema.rs](src/model_schema.rs))
    - `exec_model_schema()` routes to `process_struct()`, `process_enum()`, or `process_type_alias()`
    - Parses Serde attributes when `serde` feature enabled
-   - Generates methods: `ts_definition()` and optionally `json_schema()`
+   - Extracts example code from doc comments (` ```rust example` fences)
+   - Generates methods: `ts_definition()`, optionally `json_schema()`, and optionally `schema_example()`
 
 3. **Type Analysis** ([field_type.rs](src/field_type.rs))
    - `FieldDef`: Core data structure representing a field's type, optionality, docs, etc.
@@ -99,7 +100,7 @@ just ci
 
 4. **Feature Modules** ([features/](src/features/))
    - `serde.rs`: Parses Serde attributes (`rename`, `rename_all`, `tag`, etc.)
-   - `zod.rs`: Generates Zod v4 schema strings (`z.string()`, `z.union()`, etc.)
+   - `zod.rs`: Generates Zod v4 schema strings (`z.string()`, `z.union()`, etc.), embeds examples in `.meta()`
    - `jsonschema.rs`: Generates JSON schema objects
    - `object_id.rs`: MongoDB ObjectId type detection and schema generation
    - `model_schema_prop.rs`: Parses field-level customization attributes
@@ -108,6 +109,13 @@ just ci
    - `typescript.rs`: Generates TypeScript type definitions and Zod schemas
    - Combines FieldDef trees into complete type/schema strings
    - Handles discriminated unions, generics, nested types
+   - Calls `schema_example()` method to embed examples in Zod `.meta()` when available
+
+6. **Example Extraction** ([utils.rs](src/utils.rs))
+   - `extract_example_from_docs()`: Parses ` ```rust example` code fences from doc comments
+   - Returns first example found (if multiple exist)
+   - Example code is inserted into generated `schema_example()` method
+   - Compiler validates example code at compile time
 
 ### Key Data Structures
 
@@ -250,6 +258,41 @@ pub struct UserProfileJson {
     pub email: String,    // → emailAddress in TypeScript
 }
 ```
+
+### Adding Examples to Types
+
+To add examples to your types for inclusion in Zod schemas:
+
+```rust
+/// User profile description
+/// ```rust example
+/// UserJson {
+///     name: "John Doe".to_string(),
+///     email: "john@example.com".to_string(),
+///     age: 25,
+/// }
+/// ```
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UserJson {
+    pub name: String,
+    pub email: String,
+    pub age: u32,
+}
+```
+
+**Key Points:**
+- Use the exact syntax: ` ```rust example` (note the space and `example` keyword)
+- The example code must type-check at compile time
+- The last expression in the block should evaluate to the type
+- Examples are **optional** - if not provided, no `schema_example()` method is generated
+- If multiple examples exist, only the first one is used
+- Examples respect Serde attributes (field names are serialized correctly)
+
+**Generated Code:**
+- A `schema_example()` method is generated that returns `serde_json::Value`
+- The Zod schema includes `.meta({ example: <serialized_json> })`
+- The example is serialized using Serde, so it matches your API's JSON format
 
 ## Common Development Tasks
 

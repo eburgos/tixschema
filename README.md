@@ -194,6 +194,104 @@ pub struct ApiConfigJson {
 }
 ```
 
+### Examples
+
+You can provide compiler-validated example values for your types that will be embedded in the generated Zod schemas' `.meta()` field. Examples are written in Rust code blocks and fully type-checked at compile time.
+
+#### Basic Usage
+
+```rust
+/// User profile
+/// ```rust example
+/// UserJson {
+///     name: "John Doe".to_string(),
+///     email: "john@example.com".to_string(),
+///     age: 25,
+/// }
+/// ```
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UserJson {
+    pub name: String,
+    pub email: String,
+    pub age: u32,
+}
+```
+
+**Generated Zod Schema:**
+```typescript
+export const User$Schema: ZodType<User> = z.strictObject({
+  name: z.string(),
+  email: z.string(),
+  age: z.number().int(),
+}).meta({
+  example: { name: "John Doe", email: "john@example.com", age: 25 }
+});
+```
+
+#### Complex Examples with Setup Logic
+
+You can include arbitrary setup code before the example value:
+
+```rust
+/// User with tags
+/// ```rust example
+/// let user_id = "usr_123".to_string();
+/// let tags = vec!["admin".to_string(), "active".to_string()];
+/// UserJson {
+///     id: user_id,
+///     tags,
+///     age: 30,
+/// }
+/// ```
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UserJson {
+    pub id: String,
+    pub tags: Vec<String>,
+    pub age: u32,
+}
+```
+
+#### Enum Examples
+
+```rust
+/// Data type enumeration
+/// ```rust example
+/// DataTypeJson::Numeric
+/// ```
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum DataTypeJson {
+    Alphanumeric,
+    Numeric,
+    Date,
+}
+```
+
+**Generated:**
+```typescript
+export const DataType$Schema: ZodType<DataType> = z.enum(["Alphanumeric", "Numeric", "Date"]).meta({
+  description: "Data type enumeration",
+  example: "Numeric",
+});
+```
+
+#### Benefits
+
+- **Compiler-Validated**: Examples must match the type exactly or compilation fails
+- **Auto-Serialized**: Uses Serde to match your API's JSON format (respects `rename`, `rename_all`, etc.)
+- **AI-Friendly**: Helps AI assistants understand your API
+- **Type-Safe**: Wrong types = compile errors
+
+#### Important Notes
+
+- Examples are **optional** - if not provided, no example is generated
+- Use the exact syntax: ` ```rust example` (note the space and `example` keyword)
+- If multiple examples are present, only the **first one** is used
+- Examples respect Serde attributes (field renaming, etc.)
+- The example code is executed at compile time and serialized to JSON
+
 ### MongoDB ObjectId Support
 
 The crate provides first-class support for MongoDB ObjectId types with proper serialization and validation:
