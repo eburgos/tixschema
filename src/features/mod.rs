@@ -15,6 +15,9 @@ pub mod jsonschema;
 #[cfg(feature = "object_id")]
 pub mod object_id;
 
+#[cfg(feature = "chrono")]
+pub mod chrono;
+
 /// Module for parsing model_schema_prop attributes
 pub mod model_schema_prop;
 
@@ -49,6 +52,11 @@ impl Features {
         cfg!(feature = "typescript")
     }
 
+    /// Check if `chrono` feature is enabled
+    pub const fn has_chrono() -> bool {
+        cfg!(feature = "chrono")
+    }
+
     /// Get a description of enabled features for debugging
     pub fn enabled_features() -> Vec<&'static str> {
         let mut features = Vec::new();
@@ -67,6 +75,9 @@ impl Features {
         }
         if Self::has_typescript() {
             features.push("typescript");
+        }
+        if Self::has_chrono() {
+            features.push("chrono");
         }
 
         if features.is_empty() {

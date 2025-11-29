@@ -215,7 +215,8 @@ fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
     let has_example = example_code.is_some();
 
     #[cfg(feature = "zod")]
-    let zod_schema_method = generate_zod_schema_method(&item_name, &schema_code, show_opts, has_example);
+    let zod_schema_method =
+        generate_zod_schema_method(&item_name, &schema_code, show_opts, has_example);
 
     #[cfg(feature = "zod")]
     let example_method = example_code.as_ref().map(|code| {
@@ -439,8 +440,12 @@ fn process_plain_enum(
     let has_example = example_code.is_some();
 
     #[cfg(feature = "zod")]
-    let zod_schema_method =
-        generate_plain_enum_zod_schema_method(item_name, &schema_code, &plain_description, has_example);
+    let zod_schema_method = generate_plain_enum_zod_schema_method(
+        item_name,
+        &schema_code,
+        &plain_description,
+        has_example,
+    );
 
     #[cfg(feature = "zod")]
     let example_method = example_code.as_ref().map(|code| {
@@ -644,7 +649,8 @@ fn process_discriminated_enum(
     let has_example = example_code.is_some();
 
     #[cfg(feature = "zod")]
-    let zod_schema_method = generate_discriminated_enum_zod_schema_method(item_name, &schema_code, has_example);
+    let zod_schema_method =
+        generate_discriminated_enum_zod_schema_method(item_name, &schema_code, has_example);
 
     #[cfg(feature = "zod")]
     let example_method = example_code.as_ref().map(|code| {
@@ -1014,6 +1020,94 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
                             },
                             "required": ["$oid"],
                             "additionalProperties": false
+                        })
+                    });
+                }
+            }
+        }
+        #[cfg(feature = "chrono")]
+        FieldDefType::NaiveDate => {
+            if fld.is_array {
+                quote! {
+                    properties.insert(#field_name_str.to_string(), {
+                        serde_json::json!({
+                            "type": "array",
+                            "items": { "type": "string", "format": "date" }
+                        })
+                    });
+                }
+            } else {
+                quote! {
+                    properties.insert(#field_name_str.to_string(), {
+                        serde_json::json!({
+                            "type": "string",
+                            "format": "date"
+                        })
+                    });
+                }
+            }
+        }
+        #[cfg(feature = "chrono")]
+        FieldDefType::NaiveTime => {
+            if fld.is_array {
+                quote! {
+                    properties.insert(#field_name_str.to_string(), {
+                        serde_json::json!({
+                            "type": "array",
+                            "items": { "type": "string", "format": "time" }
+                        })
+                    });
+                }
+            } else {
+                quote! {
+                    properties.insert(#field_name_str.to_string(), {
+                        serde_json::json!({
+                            "type": "string",
+                            "format": "time"
+                        })
+                    });
+                }
+            }
+        }
+        #[cfg(feature = "chrono")]
+        FieldDefType::NaiveDateTime => {
+            if fld.is_array {
+                quote! {
+                    properties.insert(#field_name_str.to_string(), {
+                        serde_json::json!({
+                            "type": "array",
+                            "items": { "type": "string", "format": "date-time" }
+                        })
+                    });
+                }
+            } else {
+                quote! {
+                    properties.insert(#field_name_str.to_string(), {
+                        serde_json::json!({
+                            "type": "string",
+                            "format": "date-time"
+                        })
+                    });
+                }
+            }
+        }
+        #[cfg(feature = "chrono")]
+        FieldDefType::DateTime => {
+            if fld.is_array {
+                quote! {
+                    properties.insert(#field_name_str.to_string(), {
+                        serde_json::json!({
+                            "type": "array",
+                            "items": { "type": "string", "format": "date-time" }
+                        })
+                    });
+                }
+            } else {
+                quote! {
+                    properties.insert(#field_name_str.to_string(), {
+                        serde_json::json!({
+                            "type": "string",
+                            "format": "date-time"
                         })
                     });
                 }

@@ -329,10 +329,7 @@ mod tests {
 
     #[test]
     fn test_extract_example_none() {
-        let docs = vec![
-            "User profile".to_string(),
-            "No examples here".to_string(),
-        ];
+        let docs = vec!["User profile".to_string(), "No examples here".to_string()];
 
         let example = extract_example_from_docs(&docs);
         assert!(example.is_none());
@@ -449,10 +446,7 @@ println!("data_type: {:?}", data_type);"#;
 
     #[test]
     fn test_strip_examples_no_examples() {
-        let docs = vec![
-            "User profile".to_string(),
-            "Some description".to_string(),
-        ];
+        let docs = vec!["User profile".to_string(), "Some description".to_string()];
 
         let result = strip_examples_from_docs(&docs);
         assert_eq!(result.len(), 2);

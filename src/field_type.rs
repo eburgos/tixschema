@@ -62,6 +62,35 @@ pub enum FieldDefType {
     /// JSON Schema: object with $oid string property
     /// See README.md for serialization format and validation details
     ObjectId,
+
+    #[cfg(feature = "chrono")]
+    /// Chrono `NaiveDate` type - requires "`chrono`" feature
+    /// Maps to `string` in TS (ISO 8601 date format: "2025-11-29")
+    /// Zod: z.string().date()
+    /// JSON Schema: string with format "date"
+    NaiveDate,
+
+    #[cfg(feature = "chrono")]
+    /// Chrono `NaiveTime` type - requires "`chrono`" feature
+    /// Maps to `string` in TS (format: "14:30:00")
+    /// Zod: z.string().time()
+    /// JSON Schema: string with format "time"
+    NaiveTime,
+
+    #[cfg(feature = "chrono")]
+    /// Chrono `NaiveDateTime` type - requires "`chrono`" feature
+    /// Maps to `string` in TS (ISO 8601 format: "2025-11-29T14:30:00")
+    /// Zod: z.string().datetime({ local: true })
+    /// JSON Schema: string with format "date-time"
+    NaiveDateTime,
+
+    #[cfg(feature = "chrono")]
+    /// Chrono `DateTime<Tz>` type - requires "`chrono`" feature
+    /// Maps to `string` in TS (ISO 8601 format: "2025-11-29T14:30:00Z")
+    /// Zod: z.string().datetime()
+    /// JSON Schema: string with format "date-time"
+    /// Note: The timezone type parameter is ignored for schema generation
+    DateTime,
 }
 
 /// Struct representing a field's definition for schema generation.
@@ -183,6 +212,16 @@ impl FieldDef {
             FieldDefType::F32 | FieldDefType::F64 => "number".to_string(),
             #[cfg(feature = "object_id")]
             FieldDefType::ObjectId => crate::features::object_id::get_object_id_typescript_type(),
+            #[cfg(feature = "chrono")]
+            FieldDefType::NaiveDate => crate::features::chrono::get_naive_date_typescript_type(),
+            #[cfg(feature = "chrono")]
+            FieldDefType::NaiveTime => crate::features::chrono::get_naive_time_typescript_type(),
+            #[cfg(feature = "chrono")]
+            FieldDefType::NaiveDateTime => {
+                crate::features::chrono::get_naive_datetime_typescript_type()
+            }
+            #[cfg(feature = "chrono")]
+            FieldDefType::DateTime => crate::features::chrono::get_datetime_typescript_type(),
         };
         let pre_result = if self.is_array {
             format!("Array<{result}>")
@@ -279,6 +318,14 @@ impl FieldDef {
             FieldDefType::F32 | FieldDefType::F64 => "z.number()".to_string(),
             #[cfg(feature = "object_id")]
             FieldDefType::ObjectId => crate::features::object_id::get_object_id_zod_schema(),
+            #[cfg(feature = "chrono")]
+            FieldDefType::NaiveDate => crate::features::chrono::get_naive_date_zod_schema(),
+            #[cfg(feature = "chrono")]
+            FieldDefType::NaiveTime => crate::features::chrono::get_naive_time_zod_schema(),
+            #[cfg(feature = "chrono")]
+            FieldDefType::NaiveDateTime => crate::features::chrono::get_naive_datetime_zod_schema(),
+            #[cfg(feature = "chrono")]
+            FieldDefType::DateTime => crate::features::chrono::get_datetime_zod_schema(),
         };
         let pre_result = if self.is_array {
             format!("z.array({result})")
@@ -384,7 +431,12 @@ pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
                                 docs: field_docs.to_string(),
                                 model_schema_prop_meta: None,
                             }
-                        } else {
+                        } else if arg_types.len() == 1 && is_datetime_generic_type(&ident) {
+                            // Handle DateTime<Tz> - the timezone type parameter is ignored
+                            handle_datetime_generic_type(safe_name, field_docs)
+                        }
+                        // Fall through to SiblingType for other generic types
+                        else {
                             // Debug print to see what's happening with SiblingType
                             if std::env::var("RUST_LOG") == Ok(String::from("trace")) {
                                 println!(
@@ -515,6 +567,12 @@ fn get_field_def_type_or_sibling(t_name: &str) -> FieldDefType {
             eprintln!("         Or add the required ObjectId type definition to your code");
             FieldDefType::SiblingType(t_name.to_string(), vec![])
         }
+        #[cfg(feature = "chrono")]
+        "NaiveDate" => FieldDefType::NaiveDate,
+        #[cfg(feature = "chrono")]
+        "NaiveTime" => FieldDefType::NaiveTime,
+        #[cfg(feature = "chrono")]
+        "NaiveDateTime" => FieldDefType::NaiveDateTime,
         type_name_json if type_name_json.ends_with("Json") => {
             FieldDefType::SiblingType(safe_type_name(type_name_json), vec![])
         }
@@ -556,4 +614,45 @@ pub fn is_plain_enum(item_enum: &ItemEnum) -> bool {
         .variants
         .iter()
         .all(|variant| matches!(variant.fields, Fields::Unit))
+}
+
+/// Check if a type name is a DateTime generic type (chrono feature)
+/// Returns true only when chrono feature is enabled and type is DateTime
+#[cfg(feature = "chrono")]
+fn is_datetime_generic_type(type_name: &str) -> bool {
+    type_name == "DateTime"
+}
+
+#[cfg(not(feature = "chrono"))]
+fn is_datetime_generic_type(_type_name: &str) -> bool {
+    false
+}
+
+/// Handle DateTime<Tz> generic type (chrono feature)
+/// Creates a FieldDef with DateTime type, ignoring the timezone parameter
+#[cfg(feature = "chrono")]
+fn handle_datetime_generic_type(safe_name: String, field_docs: &str) -> FieldDef {
+    FieldDef {
+        is_optional: false,
+        name: safe_name,
+        field_type: FieldDefType::DateTime,
+        is_array: false,
+        array_num: None,
+        docs: field_docs.to_string(),
+        model_schema_prop_meta: None,
+    }
+}
+
+#[cfg(not(feature = "chrono"))]
+fn handle_datetime_generic_type(safe_name: String, field_docs: &str) -> FieldDef {
+    // Fallback - should never be called since is_datetime_generic_type returns false
+    FieldDef {
+        is_optional: false,
+        name: safe_name,
+        field_type: FieldDefType::SiblingType("DateTime".to_string(), vec![]),
+        is_array: false,
+        array_num: None,
+        docs: field_docs.to_string(),
+        model_schema_prop_meta: None,
+    }
 }
