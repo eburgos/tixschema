@@ -13,24 +13,27 @@ keywords = ["macros", "proc-macro", "typescript", "zod", "codegen", "tixschema"]
 proc-macro = true
 
 [dependencies]
-syn = { version = "2.0.104", features = ["full", "parsing", "extra-traits"] }
-quote = "1.0"
-proc-macro2 = "1.0"
-log = "0.4.27"
-regex = "1.11.1"
+syn = { version = "2", features = ["full", "parsing", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"
+log = "0.4"
+regex = "1"
 
 [dev-dependencies]
-mongodb = "3.2.4"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0.140"
+mongodb = "3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
 
 
 [features]
-default = ["serde", "zod", "jsonschema", "object_id", "typescript"]
+default = ["serde", "zod", "jsonschema", "typescript"]
 
 # Core features
-serde = []          # Serde integration for attribute parsing and field renaming
-zod = []            # Zod schema generation alongside TypeScript types
-jsonschema = []     # JSON schema generation methods
-object_id = []      # MongoDB ObjectId type support
-typescript = []     # TypeScript type generation and TypeScript-style Zod schemas
+serde = [] # Serde integration for attribute parsing and field renaming
+zod = [] # Zod schema generation alongside TypeScript types
+jsonschema = [] # JSON schema generation methods
+object_id = [] # MongoDB ObjectId type support
+typescript = [] # TypeScript type generation and TypeScript-style Zod schemas
+chrono = [
+] # Chrono date/time type support (NaiveDate, NaiveTime, NaiveDateTime, DateTime)

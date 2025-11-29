@@ -54,7 +54,7 @@ mod tests {
     /// Generic type alias with single type parameter
     #[cfg(all(test, feature = "typescript"))]
     #[model_schema(name = "Wrapper")]
-    
+
     pub type WrapperJson<T> = Option<T>;
 
     /// Generic type alias with two type parameters

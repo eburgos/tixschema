@@ -261,7 +261,10 @@ fn test_serde_attributes_in_example() {
     let example = UserWithSerdeJson::schema_example();
     // The example should have camelCase keys
     assert!(example.get("userId").is_some());
-    assert_eq!(example["emailAddress"].as_str().unwrap(), "test@example.com");
+    assert_eq!(
+        example["emailAddress"].as_str().unwrap(),
+        "test@example.com"
+    );
 
     let zod = UserWithSerdeJson::zod_schema();
     assert!(zod.contains("example:"));
