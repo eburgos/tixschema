@@ -216,7 +216,7 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 ///
 /// - `as`: Specifies an explicit type to use for the field in TypeScript
 ///
-/// ## Example
+/// ## Example with literal override
 ///
 /// ```rust
 /// use tixschema::model_schema_prop;
@@ -226,24 +226,11 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 /// #[model_schema()]
 /// #[derive(Serialize, Deserialize)]
 /// pub struct UsagePricingJson {
-///     // This will be rendered as "string" in TypeScript, potentially
-///     // overriding a different default mapping
+///     // Override the TypeScript type for this field
 ///     #[model_schema_prop(as = String)]
 ///     pub metric: String,
 ///
-///     pub free_units: Vec<FreeUnitsJson>,
-/// }
-///
-/// #[model_schema()]
-/// #[derive(Serialize, Deserialize)]
-/// pub enum FreeUnitsJson {
-///     Fixed {
-///         value: u32,
-///     },
-///     PerEntity {
-///         entity_type: String,
-///         amount_per_entity: u32,
-///     },
+///     pub quantity: u32,
 /// }
 /// ```
 #[proc_macro_attribute]
