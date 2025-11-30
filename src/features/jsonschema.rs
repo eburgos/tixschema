@@ -35,12 +35,16 @@ pub fn generate_struct_json_schema_method(
 }
 
 /// Generates the JSON schema method implementation for plain enums
-pub fn generate_plain_enum_json_schema_method() -> proc_macro2::TokenStream {
+pub fn generate_plain_enum_json_schema_method(
+    enumerated: &[proc_macro2::TokenStream],
+) -> proc_macro2::TokenStream {
     quote::quote! {
         pub fn json_schema() -> serde_json::Value {
             let mut schema_obj = serde_json::Map::new();
             schema_obj.insert("type".to_string(), serde_json::Value::String("string".to_string()));
-            schema_obj.insert("enum".to_string(), serde_json::Value::Array(Self::enum_members().into_iter().map(|v| serde_json::Value::String(v)).collect()));
+            schema_obj.insert("enum".to_string(), serde_json::Value::Array(
+                [#(#enumerated),*].into_iter().map(|v: &str| serde_json::Value::String(v.to_string())).collect()
+            ));
 
             serde_json::Value::Object(schema_obj)
         }

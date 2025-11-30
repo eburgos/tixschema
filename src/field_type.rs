@@ -265,10 +265,8 @@ impl FieldDef {
             FieldDefType::SiblingType(name, lst) => {
                 if let Some(info) = lookup_alias_info(name) {
                     if lst.is_empty() {
-                        format!(
-                            "{}_schema::Schema::zod_schema()",
-                            info.export_name.to_lowercase()
-                        )
+                        // Use the exported schema name (e.g., "ContactInfo$Schema")
+                        format!("{}$Schema", info.export_name)
                     } else {
                         format!(
                             "{name}<{}>",
