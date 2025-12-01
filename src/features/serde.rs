@@ -9,6 +9,7 @@ use syn::{Attribute, LitStr};
 #[derive(Clone, Debug, Default)]
 pub struct SerdeTypeMeta {
     pub tag: Option<String>,        // e.g., "behaviorType"
+    pub content: Option<String>,    // e.g., "value" for adjacently tagged enums
     pub rename_all: Option<String>, // e.g., "camelCase"
 }
 
@@ -31,6 +32,12 @@ pub fn parse_serde_type_attributes(attrs: &[Attribute]) -> SerdeTypeMeta {
                     let value = nested.value()?;
                     let lit: LitStr = value.parse()?;
                     meta.tag = Some(lit.value());
+                }
+                // Handle `content = "value"` for adjacently tagged enums
+                else if nested.path.is_ident("content") {
+                    let value = nested.value()?;
+                    let lit: LitStr = value.parse()?;
+                    meta.content = Some(lit.value());
                 }
                 // Handle `rename_all = "value"`
                 else if nested.path.is_ident("rename_all") {
@@ -190,6 +197,7 @@ mod tests {
     fn test_final_field_name() {
         let type_meta = SerdeTypeMeta {
             tag: None,
+            content: None,
             rename_all: Some("camelCase".to_string()),
         };
 

@@ -228,8 +228,8 @@ mod tests {
     fn test_naive_date_zod() {
         let zod = EventWithDateJson::zod_schema();
         assert!(
-            zod.contains("date: z.string().date(),"),
-            "NaiveDate should use z.string().date(). Got: {zod}"
+            zod.contains("date: z.iso.date(),"),
+            "NaiveDate should use z.iso.date(). Got: {zod}"
         );
     }
 
@@ -238,8 +238,8 @@ mod tests {
     fn test_naive_time_zod() {
         let zod = ScheduleJson::zod_schema();
         assert!(
-            zod.contains("start_time: z.string().time(),"),
-            "NaiveTime should use z.string().time(). Got: {zod}"
+            zod.contains("start_time: z.iso.time(),"),
+            "NaiveTime should use z.iso.time(). Got: {zod}"
         );
     }
 
@@ -248,8 +248,8 @@ mod tests {
     fn test_naive_datetime_zod() {
         let zod = LocalEventJson::zod_schema();
         assert!(
-            zod.contains("local_datetime: z.string().datetime({ local: true }),"),
-            "NaiveDateTime should use z.string().datetime({{ local: true }}). Got: {zod}"
+            zod.contains("local_datetime: z.iso.datetime({ local: true }),"),
+            "NaiveDateTime should use z.iso.datetime({{ local: true }}). Got: {zod}"
         );
     }
 
@@ -258,8 +258,8 @@ mod tests {
     fn test_datetime_utc_zod() {
         let zod = TimestampedRecordJson::zod_schema();
         assert!(
-            zod.contains("created_at: z.string().datetime(),"),
-            "DateTime<Utc> should use z.string().datetime(). Got: {zod}"
+            zod.contains("created_at: z.iso.datetime(),"),
+            "DateTime<Utc> should use z.iso.datetime(). Got: {zod}"
         );
     }
 
@@ -268,8 +268,8 @@ mod tests {
     fn test_datetime_local_zod() {
         let zod = LocalTimestampJson::zod_schema();
         assert!(
-            zod.contains("local_time: z.string().datetime(),"),
-            "DateTime<Local> should use z.string().datetime(). Got: {zod}"
+            zod.contains("local_time: z.iso.datetime(),"),
+            "DateTime<Local> should use z.iso.datetime(). Got: {zod}"
         );
     }
 
@@ -278,7 +278,7 @@ mod tests {
     fn test_optional_datetime_zod() {
         let zod = OptionalTimestampJson::zod_schema();
         assert!(
-            zod.contains("updated_at: z.union([z.string().datetime(), z.undefined()]),"),
+            zod.contains("updated_at: z.union([z.iso.datetime(), z.undefined()]),"),
             "Option<DateTime<Utc>> should use z.union([...datetime(), z.undefined()]). Got: {zod}"
         );
     }
@@ -288,8 +288,8 @@ mod tests {
     fn test_vec_date_zod() {
         let zod = DateListJson::zod_schema();
         assert!(
-            zod.contains("dates: z.array(z.string().date()),"),
-            "Vec<NaiveDate> should use z.array(z.string().date()). Got: {zod}"
+            zod.contains("dates: z.array(z.iso.date()),"),
+            "Vec<NaiveDate> should use z.array(z.iso.date()). Got: {zod}"
         );
     }
 
@@ -298,8 +298,8 @@ mod tests {
     fn test_hashmap_datetime_zod() {
         let zod = DateMapJson::zod_schema();
         assert!(
-            zod.contains("events: z.record(z.string(), z.string().datetime()),"),
-            "HashMap<String, DateTime<Utc>> should use z.record(z.string(), z.string().datetime()). Got: {zod}"
+            zod.contains("events: z.record(z.string(), z.iso.datetime()),"),
+            "HashMap<String, DateTime<Utc>> should use z.record(z.string(), z.iso.datetime()). Got: {zod}"
         );
     }
 
