@@ -11,7 +11,7 @@ use syn::{Field, Ident, Item, ItemType, MetaNameValue, Token, parse_macro_input}
 use syn::GenericParam;
 
 use crate::{
-    field_type::{FieldDef, FieldDefType, get_field_def, is_plain_enum},
+    field_type::{FieldDef, FieldDefType, VariantKind, classify_variant, get_field_def, is_plain_enum},
     safe_type_name,
     utils::{extract_example_from_docs, get_field_docs, get_variant_docs, lookup_alias_info},
 };
@@ -189,7 +189,11 @@ fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
     let fields_empty = field_defs.is_empty();
 
     for fld in field_defs {
-        write_field_type_and_schema(&mut type_code, &mut schema_code, &fld);
+        #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+        write_field_type_and_schema(&mut type_code, &mut schema_code, &fld, Some(&item_name));
+
+        #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+        write_field_type_and_schema(&mut type_code, &mut schema_code, &fld, None);
 
         // if fld.is_optional {
         //     opts.push(fld.name.to_string());
@@ -412,18 +416,22 @@ fn process_enum(item_enum: syn::ItemEnum) -> TokenStream {
         process_plain_enum(item_enum, &name, rename_all, &item_name)
     } else {
         #[cfg(feature = "serde")]
-        let (tag_name, rename_all) = (
+        let (tag_name, content_name, rename_all) = (
             serde_type_meta
                 .tag
                 .as_ref()
                 .map_or_else(|| "type".to_string(), Clone::clone),
+            serde_type_meta
+                .content
+                .as_ref()
+                .map_or_else(|| "value".to_string(), Clone::clone),
             serde_type_meta.rename_all,
         );
 
         #[cfg(not(feature = "serde"))]
-        let (tag_name, rename_all) = ("type".to_string(), None);
+        let (tag_name, content_name, rename_all) = ("type".to_string(), "value".to_string(), None);
 
-        process_discriminated_enum(item_enum, &name, &tag_name, &rename_all, &item_name)
+        process_discriminated_enum(item_enum, &name, &tag_name, &content_name, &rename_all, &item_name)
     }
 }
 
@@ -760,6 +768,7 @@ fn process_discriminated_enum(
     mut item_enum: syn::ItemEnum,
     name: &syn::Ident,
     tag_name: &str,
+    content_name: &str,
     rename_all: &Option<String>,
     item_name: &str,
 ) -> TokenStream {
@@ -784,6 +793,7 @@ fn process_discriminated_enum(
 
     let mut discriminator_field_defs: HashMap<String, Vec<FieldDef>> = HashMap::new();
     let mut discriminator_field_docs: HashMap<String, String> = HashMap::new();
+    let mut discriminator_variant_kinds: HashMap<String, VariantKind> = HashMap::new();
     #[cfg(feature = "jsonschema")]
     let mut json_schema_variants: Vec<proc_macro2::TokenStream> = Vec::new();
 
@@ -796,6 +806,9 @@ fn process_discriminated_enum(
 
         let final_name = get_final_name(item.ident.to_string(), &field_rename, rename_all);
 
+        // Classify the variant type (Unit, Named, TupleSingle, TupleMultiple)
+        let variant_kind = classify_variant(item);
+
         let mut field_defs: Vec<FieldDef> = Vec::new();
         // let mut json_schema_fields: Vec<proc_macro2::TokenStream> = Vec::new();
 
@@ -806,6 +819,7 @@ fn process_discriminated_enum(
         }
 
         discriminator_field_defs.insert(final_name.clone(), field_defs);
+        discriminator_variant_kinds.insert(final_name.clone(), variant_kind);
         let discriminator_docs = match get_variant_docs(item) {
             Some(doc_lines) => doc_lines
                 .into_iter()
@@ -832,22 +846,30 @@ fn process_discriminated_enum(
 
     // Generate TypeScript and Zod schema for each variant
     for (discriminator_value, field_defs) in discriminator_field_defs {
+        let variant_kind = &discriminator_variant_kinds[&discriminator_value];
+
         #[cfg(feature = "jsonschema")]
         let (variant_type_code, variant_schema_code, optional_fields, json_schema_variant) =
             generate_variant_code(
                 tag_name,
+                content_name,
                 &discriminator_value,
                 field_defs,
+                variant_kind,
                 &discriminator_field_docs[&discriminator_value],
+                item_name,
             );
 
         #[cfg(not(feature = "jsonschema"))]
         let (variant_type_code, variant_schema_code, optional_fields, _json_schema_variant) =
             generate_variant_code(
                 tag_name,
+                content_name,
                 &discriminator_value,
                 field_defs,
+                variant_kind,
                 &discriminator_field_docs[&discriminator_value],
+                item_name,
             );
 
         type_code_items.push(variant_type_code);
@@ -1099,59 +1121,233 @@ fn generate_type_schema(
 }
 
 /// Generates TypeScript and Zod schema code for a discriminated enum variant.
+///
+/// Handles different variant kinds:
+/// - Unit: `{ type: "Variant" }` (no content field)
+/// - Named: `{ type: "Variant", field1: T1, field2: T2 }` (individual named fields)
+/// - TupleSingle: `{ type: "Variant", value: T }` (single value flattened)
+/// - TupleMultiple: `{ type: "Variant", value: [T1, T2, ...] }` (tuple array)
+///
+/// The `self_type_name` is used to detect recursive type references and use getter syntax.
 fn generate_variant_code(
     tag_name: &str,
+    content_name: &str,
     discriminator_value: &str,
     field_defs: Vec<FieldDef>,
+    variant_kind: &VariantKind,
     discriminator_docs: &str,
+    self_type_name: &str,
 ) -> (String, String, Vec<String>, proc_macro2::TokenStream) {
-    // Generate TypeScript type code
+    // Generate TypeScript type code - start with discriminator
     let mut variant_type_code =
         format!("{{  /**\n{discriminator_docs}\n**/\n  {tag_name}: \"{discriminator_value}\";\n");
 
-    // Generate Zod schema code
+    // Generate Zod schema code - start with discriminator
     let mut variant_schema_code =
         format!("{{\n  {tag_name}: z.literal(\"{discriminator_value}\"),\n");
 
     let mut optional_fields = Vec::new();
     #[cfg(feature = "jsonschema")]
-    let mut json_schema_variant_fields = Vec::new();
+    let mut json_schema_variant_fields: Vec<proc_macro2::TokenStream> = Vec::new();
 
-    // Process each field in the variant
-    for fld in &field_defs {
-        // Add TypeScript type definition
-        if let Err(err) = writeln!(
-            variant_type_code,
-            "  /**\n{}\n**/\n  {}: {};",
-            fld.docs,
-            fld.name,
-            fld.typescript_typename()
-        ) {
-            panic!("Failed to write TypeScript type: {err}");
+    match variant_kind {
+        VariantKind::Unit => {
+            // Unit variant: no additional fields beyond the discriminator
+            // TypeScript: { type: "Variant" }
+            // Zod: { type: z.literal("Variant") }
         }
+        VariantKind::Named => {
+            // Named struct variant: keep current behavior with individual named fields
+            // TypeScript: { type: "Variant", field1: T1, field2: T2 }
+            for fld in &field_defs {
+                // Add TypeScript type definition
+                if let Err(err) = writeln!(
+                    variant_type_code,
+                    "  /**\n{}\n**/\n  {}: {};",
+                    fld.docs,
+                    fld.name,
+                    fld.typescript_typename()
+                ) {
+                    panic!("Failed to write TypeScript type: {err}");
+                }
 
-        // Add Zod schema definition - conditionally
-        #[cfg(feature = "zod")]
-        {
-            let zod_field_type = fld.zod_type();
-            if let Err(err) = writeln!(variant_schema_code, "  {}: {},", fld.name, zod_field_type) {
-                panic!("Failed to write Zod schema: {err}");
+                // Add Zod schema definition
+                #[cfg(feature = "zod")]
+                {
+                    let zod_field_type = fld.zod_type();
+                    let is_recursive = fld.contains_type_reference(self_type_name);
+
+                    if is_recursive {
+                        // Use getter syntax to defer the reference
+                        if let Err(err) = writeln!(
+                            variant_schema_code,
+                            "  get {}() {{ return {}; }},",
+                            fld.name, zod_field_type
+                        ) {
+                            panic!("Failed to write Zod schema: {err}");
+                        }
+                    } else {
+                        if let Err(err) =
+                            writeln!(variant_schema_code, "  {}: {},", fld.name, zod_field_type)
+                        {
+                            panic!("Failed to write Zod schema: {err}");
+                        }
+                    }
+                }
+
+                #[cfg(not(feature = "zod"))]
+                {
+                    let _ = &variant_schema_code;
+                }
+
+                #[cfg(feature = "jsonschema")]
+                if fld.name != tag_name {
+                    json_schema_variant_fields.push(build_field_schema(fld));
+                }
+
+                if fld.is_optional {
+                    optional_fields.push(fld.name.to_string());
+                }
             }
         }
+        VariantKind::TupleSingle => {
+            // Single-element tuple: flatten to `value: T`
+            // TypeScript: { type: "Variant", value: T }
+            if let Some(fld) = field_defs.first() {
+                // Add TypeScript type definition with JSDoc comment
+                if let Err(err) = writeln!(
+                    variant_type_code,
+                    "  /** Tuple value */\n  {}: {};",
+                    content_name,
+                    fld.typescript_typename()
+                ) {
+                    panic!("Failed to write TypeScript type: {err}");
+                }
 
-        #[cfg(not(feature = "zod"))]
-        {
-            // When zod feature is disabled, don't write to variant_schema_code
-            let _ = &variant_schema_code; // Suppress unused variable warning
+                // Add Zod schema definition
+                #[cfg(feature = "zod")]
+                {
+                    let zod_field_type = fld.zod_type();
+                    let is_recursive = fld.contains_type_reference(self_type_name);
+
+                    if is_recursive {
+                        // Use getter syntax to defer the reference
+                        if let Err(err) = writeln!(
+                            variant_schema_code,
+                            "  get {}() {{ return {}; }},",
+                            content_name, zod_field_type
+                        ) {
+                            panic!("Failed to write Zod schema: {err}");
+                        }
+                    } else {
+                        if let Err(err) =
+                            writeln!(variant_schema_code, "  {}: {},", content_name, zod_field_type)
+                        {
+                            panic!("Failed to write Zod schema: {err}");
+                        }
+                    }
+                }
+
+                #[cfg(not(feature = "zod"))]
+                {
+                    let _ = &variant_schema_code;
+                }
+
+                // JSON Schema for single tuple value
+                #[cfg(feature = "jsonschema")]
+                {
+                    let content_name_str = content_name.to_string();
+                    let field_schema = build_tuple_element_json_schema(fld);
+                    json_schema_variant_fields.push(quote! {
+                        properties.insert(#content_name_str.to_string(), #field_schema);
+                        required.push(serde_json::Value::String(#content_name_str.to_string()));
+                    });
+                }
+
+                if fld.is_optional {
+                    optional_fields.push(content_name.to_string());
+                }
+            }
         }
+        VariantKind::TupleMultiple => {
+            // Multi-element tuple: use TypeScript tuple type `value: [T1, T2, ...]`
+            // TypeScript: { type: "Variant", value: [T1, T2, ...] }
+            let ts_tuple_types: Vec<String> = field_defs
+                .iter()
+                .map(|fld| fld.typescript_typename())
+                .collect();
+            let ts_tuple = format!("[{}]", ts_tuple_types.join(", "));
 
-        #[cfg(feature = "jsonschema")]
-        if fld.name != tag_name {
-            json_schema_variant_fields.push(build_field_schema(fld));
-        }
+            // Add TypeScript type definition with JSDoc comment explaining tuple structure
+            let tuple_desc: Vec<String> = field_defs
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format!("element {}", i))
+                .collect();
+            if let Err(err) = writeln!(
+                variant_type_code,
+                "  /** Tuple: [{}] */\n  {}: {};",
+                tuple_desc.join(", "),
+                content_name,
+                ts_tuple
+            ) {
+                panic!("Failed to write TypeScript type: {err}");
+            }
 
-        if fld.is_optional {
-            optional_fields.push(fld.name.to_string());
+            // Add Zod schema definition using z.tuple()
+            #[cfg(feature = "zod")]
+            {
+                let zod_tuple_types: Vec<String> =
+                    field_defs.iter().map(|fld| fld.zod_type()).collect();
+                let zod_tuple = format!("z.tuple([{}])", zod_tuple_types.join(", "));
+
+                // Check if any field in the tuple contains a recursive reference
+                let is_recursive = field_defs
+                    .iter()
+                    .any(|fld| fld.contains_type_reference(self_type_name));
+
+                if is_recursive {
+                    // Use getter syntax to defer the reference
+                    if let Err(err) = writeln!(
+                        variant_schema_code,
+                        "  get {}() {{ return {}; }},",
+                        content_name, zod_tuple
+                    ) {
+                        panic!("Failed to write Zod schema: {err}");
+                    }
+                } else {
+                    if let Err(err) =
+                        writeln!(variant_schema_code, "  {}: {},", content_name, zod_tuple)
+                    {
+                        panic!("Failed to write Zod schema: {err}");
+                    }
+                }
+            }
+
+            #[cfg(not(feature = "zod"))]
+            {
+                let _ = &variant_schema_code;
+            }
+
+            // JSON Schema for tuple (using prefixItems)
+            #[cfg(feature = "jsonschema")]
+            {
+                let content_name_str = content_name.to_string();
+                let tuple_schemas: Vec<proc_macro2::TokenStream> = field_defs
+                    .iter()
+                    .map(|fld| build_tuple_element_json_schema(fld))
+                    .collect();
+                json_schema_variant_fields.push(quote! {
+                    properties.insert(#content_name_str.to_string(), {
+                        serde_json::json!({
+                            "type": "array",
+                            "prefixItems": [#(#tuple_schemas),*],
+                            "items": false
+                        })
+                    });
+                    required.push(serde_json::Value::String(#content_name_str.to_string()));
+                });
+            }
         }
     }
 
@@ -1207,6 +1403,110 @@ fn generate_variant_code(
         optional_fields,
         json_schema_variant,
     )
+}
+
+/// Builds JSON schema for a tuple element (used for single tuple and multi-tuple variants).
+#[cfg(feature = "jsonschema")]
+fn build_tuple_element_json_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
+    let field_type = &fld.field_type;
+
+    match field_type {
+        FieldDefType::String => {
+            if fld.is_array {
+                quote! { serde_json::json!({ "type": "array", "items": { "type": "string" } }) }
+            } else {
+                quote! { serde_json::json!({ "type": "string" }) }
+            }
+        }
+        FieldDefType::StringLiteral(literal) => {
+            if fld.is_array {
+                quote! { serde_json::json!({ "type": "array", "items": { "type": "string", "const": #literal } }) }
+            } else {
+                quote! { serde_json::json!({ "type": "string", "const": #literal }) }
+            }
+        }
+        FieldDefType::U8
+        | FieldDefType::U16
+        | FieldDefType::U32
+        | FieldDefType::U64
+        | FieldDefType::I8
+        | FieldDefType::I16
+        | FieldDefType::I32
+        | FieldDefType::I64
+        | FieldDefType::Usize
+        | FieldDefType::Isize => {
+            if fld.is_array {
+                quote! { serde_json::json!({ "type": "array", "items": { "type": "integer" } }) }
+            } else {
+                quote! { serde_json::json!({ "type": "integer" }) }
+            }
+        }
+        FieldDefType::F32 | FieldDefType::F64 => {
+            if fld.is_array {
+                quote! { serde_json::json!({ "type": "array", "items": { "type": "number" } }) }
+            } else {
+                quote! { serde_json::json!({ "type": "number" }) }
+            }
+        }
+        FieldDefType::Boolean => {
+            if fld.is_array {
+                quote! { serde_json::json!({ "type": "array", "items": { "type": "boolean" } }) }
+            } else {
+                quote! { serde_json::json!({ "type": "boolean" }) }
+            }
+        }
+        #[cfg(feature = "chrono")]
+        FieldDefType::NaiveDate => {
+            if fld.is_array {
+                quote! { serde_json::json!({ "type": "array", "items": { "type": "string", "format": "date" } }) }
+            } else {
+                quote! { serde_json::json!({ "type": "string", "format": "date" }) }
+            }
+        }
+        #[cfg(feature = "chrono")]
+        FieldDefType::NaiveTime => {
+            if fld.is_array {
+                quote! { serde_json::json!({ "type": "array", "items": { "type": "string", "format": "time" } }) }
+            } else {
+                quote! { serde_json::json!({ "type": "string", "format": "time" }) }
+            }
+        }
+        #[cfg(feature = "chrono")]
+        FieldDefType::NaiveDateTime | FieldDefType::DateTime => {
+            if fld.is_array {
+                quote! { serde_json::json!({ "type": "array", "items": { "type": "string", "format": "date-time" } }) }
+            } else {
+                quote! { serde_json::json!({ "type": "string", "format": "date-time" }) }
+            }
+        }
+        #[cfg(feature = "object_id")]
+        FieldDefType::ObjectId => {
+            if fld.is_array {
+                quote! { serde_json::json!({
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "$oid": { "type": "string", "pattern": "^[a-f\\d]{24}$" }
+                        },
+                        "required": ["$oid"]
+                    }
+                }) }
+            } else {
+                quote! { serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "$oid": { "type": "string", "pattern": "^[a-f\\d]{24}$" }
+                    },
+                    "required": ["$oid"]
+                }) }
+            }
+        }
+        _ => {
+            // For unknown/sibling types, use a generic object schema
+            quote! { serde_json::json!({ "type": "object" }) }
+        }
+    }
 }
 
 /// Builds JSON schema for a field.
@@ -2060,7 +2360,16 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
 }
 
 /// Writes the TypeScript type and conditionally Zod schema for a field to the provided buffers.
-fn write_field_type_and_schema(type_code: &mut String, schema_code: &mut String, fld: &FieldDef) {
+///
+/// The `self_type_name` parameter is used to detect recursive type references.
+/// When a field references the type being defined, we use JavaScript getter syntax
+/// to defer the reference and avoid "use before declaration" errors.
+fn write_field_type_and_schema(
+    type_code: &mut String,
+    schema_code: &mut String,
+    fld: &FieldDef,
+    self_type_name: Option<&str>,
+) {
     // Always write TypeScript type
     if let Err(err) = writeln!(
         type_code,
@@ -2075,8 +2384,25 @@ fn write_field_type_and_schema(type_code: &mut String, schema_code: &mut String,
     // Conditionally write Zod schema
     #[cfg(feature = "zod")]
     {
-        if let Err(err) = writeln!(schema_code, "  {}: {},", fld.name, fld.zod_type()) {
-            panic!("Failed to write Zod schema: {err}");
+        let zod_type = fld.zod_type();
+
+        // Check if this field contains a recursive reference to self
+        let is_recursive = self_type_name.is_some_and(|name| fld.contains_type_reference(name));
+
+        if is_recursive {
+            // Use getter syntax to defer the reference
+            if let Err(err) = writeln!(
+                schema_code,
+                "  get {}() {{ return {}; }},",
+                fld.name, zod_type
+            ) {
+                panic!("Failed to write Zod schema: {err}");
+            }
+        } else {
+            // Normal property syntax
+            if let Err(err) = writeln!(schema_code, "  {}: {},", fld.name, zod_type) {
+                panic!("Failed to write Zod schema: {err}");
+            }
         }
     }
 
@@ -2084,6 +2410,7 @@ fn write_field_type_and_schema(type_code: &mut String, schema_code: &mut String,
     {
         // When zod feature is disabled, don't write to schema_code
         let _ = schema_code; // Suppress unused variable warning
+        let _ = self_type_name; // Suppress unused variable warning
     }
 }
 

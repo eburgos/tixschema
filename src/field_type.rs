@@ -1,9 +1,53 @@
-use syn::{Fields, GenericArgument, ItemEnum, PathArguments, Type};
+use syn::{Fields, GenericArgument, ItemEnum, PathArguments, Type, Variant};
 
 #[cfg(feature = "serde")]
 use syn::Attribute;
 
 use crate::utils::{lookup_alias_info, safe_type_name};
+
+/// Classifies how an enum variant stores its data.
+///
+/// This is used to determine the correct TypeScript/Zod generation strategy
+/// for discriminated union variants.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VariantKind {
+    /// Unit variant with no fields: `Status::Active`
+    /// Generates: `{ type: "Active" }`
+    Unit,
+    /// Named struct fields: `Payment::Card { number: String }`
+    /// Generates: `{ type: "Card", number: string }`
+    Named,
+    /// Single tuple element: `Value::Text(String)`
+    /// Generates: `{ type: "Text", value: string }`
+    TupleSingle,
+    /// Multiple tuple elements: `Value::Complex(String, i64)`
+    /// Generates: `{ type: "Complex", value: [string, number] }`
+    TupleMultiple,
+}
+
+/// Classifies a syn::Variant into its VariantKind.
+///
+/// This determines how the variant should be rendered in TypeScript/Zod:
+/// - Unit → no content field
+/// - Named → individual named fields
+/// - TupleSingle → flattened `value: T`
+/// - TupleMultiple → tuple `value: [T1, T2, ...]`
+pub fn classify_variant(variant: &Variant) -> VariantKind {
+    match &variant.fields {
+        Fields::Unit => VariantKind::Unit,
+        Fields::Named(_) => VariantKind::Named,
+        Fields::Unnamed(fields) => {
+            if fields.unnamed.is_empty() {
+                // Empty tuple like `Foo()` - treat as unit
+                VariantKind::Unit
+            } else if fields.unnamed.len() == 1 {
+                VariantKind::TupleSingle
+            } else {
+                VariantKind::TupleMultiple
+            }
+        }
+    }
+}
 
 /// Enum representing the possible types a field can have in the schema generation system.
 ///
@@ -335,6 +379,40 @@ impl FieldDef {
             format!("z.union([{pre_result}, z.undefined()])")
         } else {
             pre_result
+        }
+    }
+
+    #[cfg(feature = "zod")]
+    /// Checks if this field contains a reference to the given type name.
+    ///
+    /// This is used to detect recursive types where a type references itself.
+    /// For example, `Vec<DynamicValue>` inside `DynamicValue` would return true.
+    ///
+    /// The check is recursive, looking into:
+    /// - `SiblingType` direct references
+    /// - `Map` key and value types
+    /// - `Tuple` element types
+    /// - `is_array` wrappers (Vec<T>)
+    /// - `is_optional` wrappers (Option<T>)
+    pub fn contains_type_reference(&self, type_name: &str) -> bool {
+        match &self.field_type {
+            FieldDefType::SiblingType(name, generics) => {
+                // Direct match (check both original name and stripped name)
+                let stripped_name = crate::utils::safe_type_name(name);
+                if name == type_name || stripped_name == type_name {
+                    return true;
+                }
+                // Also check generic arguments
+                generics.iter().any(|g| g.contains_type_reference(type_name))
+            }
+            FieldDefType::Map(k, v) => {
+                k.contains_type_reference(type_name) || v.contains_type_reference(type_name)
+            }
+            FieldDefType::Tuple(elements) => {
+                elements.iter().any(|e| e.contains_type_reference(type_name))
+            }
+            // Primitive types can't contain recursive references
+            _ => false,
         }
     }
 }

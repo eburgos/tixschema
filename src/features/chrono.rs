@@ -53,27 +53,31 @@ pub fn get_datetime_typescript_type() -> String {
 }
 
 /// Generates Zod schema for `NaiveDate` (date validation)
+/// Uses Zod v4's `z.iso.date()` syntax (z.string().date() is deprecated)
 #[cfg(any(test, feature = "zod"))]
 pub fn get_naive_date_zod_schema() -> String {
-    "z.string().date()".to_string()
+    "z.iso.date()".to_string()
 }
 
 /// Generates Zod schema for `NaiveTime` (time validation)
+/// Uses Zod v4's `z.iso.time()` syntax (z.string().time() is deprecated)
 #[cfg(any(test, feature = "zod"))]
 pub fn get_naive_time_zod_schema() -> String {
-    "z.string().time()".to_string()
+    "z.iso.time()".to_string()
 }
 
 /// Generates Zod schema for `NaiveDateTime` (local datetime validation)
+/// Uses Zod v4's `z.iso.datetime()` syntax (z.string().datetime() is deprecated)
 #[cfg(any(test, feature = "zod"))]
 pub fn get_naive_datetime_zod_schema() -> String {
-    "z.string().datetime({ local: true })".to_string()
+    "z.iso.datetime({ local: true })".to_string()
 }
 
 /// Generates Zod schema for `DateTime<Tz>` (datetime with timezone validation)
+/// Uses Zod v4's `z.iso.datetime()` syntax (z.string().datetime() is deprecated)
 #[cfg(any(test, feature = "zod"))]
 pub fn get_datetime_zod_schema() -> String {
-    "z.string().datetime()".to_string()
+    "z.iso.datetime()".to_string()
 }
 
 #[cfg(test)]
@@ -118,12 +122,12 @@ mod tests {
 
     #[test]
     fn test_zod_schemas() {
-        assert_eq!(get_naive_date_zod_schema(), "z.string().date()");
-        assert_eq!(get_naive_time_zod_schema(), "z.string().time()");
+        assert_eq!(get_naive_date_zod_schema(), "z.iso.date()");
+        assert_eq!(get_naive_time_zod_schema(), "z.iso.time()");
         assert_eq!(
             get_naive_datetime_zod_schema(),
-            "z.string().datetime({ local: true })"
+            "z.iso.datetime({ local: true })"
         );
-        assert_eq!(get_datetime_zod_schema(), "z.string().datetime()");
+        assert_eq!(get_datetime_zod_schema(), "z.iso.datetime()");
     }
 }
