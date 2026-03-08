@@ -8,9 +8,11 @@ use syn::{Attribute, LitStr, Type};
 /// Metadata for `model_schema_prop` attributes applied to a field.
 #[derive(Clone, Debug, Default)]
 pub struct ModelSchemaPropMeta {
-    pub as_type: Option<String>,   // e.g., "String" from as = String
-    pub literal: Option<String>,   // e.g., "Tixena" from literal = "Tixena"
-    pub min_length: Option<usize>, // e.g., 1 from minLength = 1
+    pub as_type: Option<String>,    // e.g., "String" from as = String
+    pub literal: Option<String>,    // e.g., "Tixena" from literal = "Tixena"
+    pub min_length: Option<usize>,  // e.g., 1 from minLength = 1
+    pub pattern: Option<String>,    // e.g., "^[0-9a-fA-F]{24}$" from pattern = "^[0-9a-fA-F]{24}$"
+    pub preprocess: Vec<String>,    // e.g., ["epoch_to_date", "trim"] from preprocess = ["epoch_to_date", "trim"]
 }
 
 /// Parses `model_schema_prop` attributes from a field.
@@ -41,6 +43,30 @@ pub fn parse_model_schema_prop_attributes(attrs: &[Attribute]) -> ModelSchemaPro
                     if let Ok(min_len) = lit.base10_parse::<usize>() {
                         meta.min_length = Some(min_len);
                     }
+                }
+                // Handle `pattern = "regex"`
+                else if nested.path.is_ident("pattern") {
+                    let value = nested.value()?;
+                    let lit: LitStr = value.parse()?;
+                    meta.pattern = Some(lit.value());
+                }
+                // Handle `preprocess = ["fn1", "fn2"]`
+                else if nested.path.is_ident("preprocess") {
+                    let value = nested.value()?;
+                    let arr: syn::ExprArray = value.parse()?;
+                    let fns: Vec<String> = arr
+                        .elems
+                        .iter()
+                        .filter_map(|elem| {
+                            if let syn::Expr::Lit(expr_lit) = elem
+                                && let syn::Lit::Str(s) = &expr_lit.lit
+                            {
+                                return Some(s.value());
+                            }
+                            None
+                        })
+                        .collect();
+                    meta.preprocess = fns;
                 }
                 Ok(())
             })

@@ -136,8 +136,37 @@ fn process_type_alias(item_type: ItemType, _args: &ModelSchemaArgs) -> TokenStre
     TokenStream::from(quote! { #alias })
 }
 
+fn has_serde_transparent(attrs: &[syn::Attribute]) -> bool {
+    for attr in attrs {
+        if attr.path().is_ident("serde") {
+            let mut found = false;
+            let _ = attr.parse_nested_meta(|nested| {
+                if nested.path.is_ident("transparent") {
+                    found = true;
+                }
+                Ok(())
+            });
+            if found {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Processes a struct item and generates TypeScript and Zod schema definitions for it.
 fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
+    // Check if this is a branded newtype (transparent single-field tuple struct)
+    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+    {
+        let is_transparent = has_serde_transparent(&item_struct.attrs);
+        let is_single_tuple =
+            matches!(&item_struct.fields, syn::Fields::Unnamed(f) if f.unnamed.len() == 1);
+        if is_transparent && is_single_tuple {
+            return process_branded_newtype(item_struct);
+        }
+    }
+
     let name = &item_struct.ident;
 
     #[cfg(feature = "serde")]
@@ -156,7 +185,7 @@ fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
 
     // Register struct in alias registry so other types can find it
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    register_alias_info(&name.to_string(), &item_name, module_name);
+    register_alias_info(&name.to_string(), &item_name, module_name.clone());
 
     // Extract docs early for example extraction
     #[cfg(any(feature = "typescript", feature = "zod"))]
@@ -169,8 +198,15 @@ fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
 
     // Process all fields in the struct
     let mut field_defs = Vec::new();
+    let mut validation_fns: Vec<proc_macro2::TokenStream> = Vec::new();
     for field in &mut item_struct.fields {
-        let f_def = process_field(&rename_all, field);
+        #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+        let (f_def, validation_fn) = process_field(&rename_all, field, Some(&module_name));
+        #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+        let (f_def, validation_fn) = process_field(&rename_all, field, None);
+        if let Some(vfn) = validation_fn {
+            validation_fns.push(vfn);
+        }
         field_defs.push(f_def);
     }
 
@@ -327,7 +363,7 @@ fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
         delegate_zod_schema,
     ]
     .into_iter()
-    .chain(schema_example_method.into_iter())
+    .chain(schema_example_method)
     .collect();
 
     #[cfg(all(feature = "zod", feature = "typescript", not(feature = "jsonschema")))]
@@ -336,7 +372,7 @@ fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
         delegate_zod_schema,
     ]
     .into_iter()
-    .chain(schema_example_method.into_iter())
+    .chain(schema_example_method)
     .collect();
 
     #[cfg(all(feature = "zod", not(feature = "typescript"), feature = "jsonschema"))]
@@ -345,14 +381,14 @@ fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
         delegate_zod_schema,
     ]
     .into_iter()
-    .chain(schema_example_method.into_iter())
+    .chain(schema_example_method)
     .collect();
 
     #[cfg(all(feature = "zod", not(feature = "typescript"), not(feature = "jsonschema")))]
     let delegate_impl_items: Vec<proc_macro2::TokenStream> =
         vec![delegate_zod_schema]
             .into_iter()
-            .chain(schema_example_method.into_iter())
+            .chain(schema_example_method)
             .collect();
 
     #[cfg(all(not(feature = "zod"), feature = "typescript", feature = "jsonschema"))]
@@ -377,6 +413,8 @@ fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
             impl Schema {
                 #(#schema_impl_items)*
             }
+
+            #(#validation_fns)*
         }
 
         impl #name {
@@ -387,6 +425,195 @@ fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
     #[cfg(not(any(feature = "zod", feature = "typescript", feature = "jsonschema")))]
     let output = quote! {
         #item_struct
+    };
+
+    if env::var("RUST_LOG") == Ok(String::from("trace")) {
+        let output_str = output.to_string();
+        println!("{output_str}");
+    }
+
+    TokenStream::from(output)
+}
+
+/// Processes a branded newtype (transparent single-field tuple struct) and generates
+/// TypeScript branded type definitions and Zod brand schemas.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn process_branded_newtype(item_struct: syn::ItemStruct) -> TokenStream {
+    let name = &item_struct.ident;
+    let item_name = safe_type_name(&name.to_string());
+    let module_name = format!("{}_schema", to_snake_case(&item_name));
+    let module_ident = Ident::new(&module_name, name.span());
+
+    register_alias_info(&name.to_string(), &item_name, module_name);
+
+    // Get generic type parameters from the struct
+    let generic_params: Vec<String> = item_struct
+        .generics
+        .params
+        .iter()
+        .filter_map(|p| match p {
+            syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+            _ => None,
+        })
+        .collect();
+
+    let is_generic = !generic_params.is_empty();
+
+    // Get inner field type info
+    let inner_field = item_struct.fields.iter().next().unwrap();
+    let inner_ty = &inner_field.ty;
+
+    #[cfg(any(feature = "typescript", feature = "zod"))]
+    let ts_inner_type = if is_generic {
+        generic_params[0].clone()
+    } else {
+        get_field_def("_inner", inner_ty, "").typescript_typename()
+    };
+
+    #[cfg(not(any(feature = "typescript", feature = "zod")))]
+    let _ = inner_ty;
+
+    #[cfg(feature = "zod")]
+    let zod_inner = if is_generic {
+        "z.string()".to_string()
+    } else {
+        get_field_def("_inner", inner_ty, "").zod_type()
+    };
+
+    #[cfg(any(feature = "typescript", feature = "zod"))]
+    let ts_generics = if is_generic {
+        format!("<{}>", generic_params.join(", "))
+    } else {
+        String::new()
+    };
+
+    // --- Generate ts_definition method ---
+
+    #[cfg(all(feature = "typescript", feature = "zod"))]
+    let ts_definition_method = {
+        let type_str = format!(
+            "export type {}{} = {} & z.$brand<\"{}\">;",
+            item_name, ts_generics, ts_inner_type, item_name
+        );
+        quote! {
+            pub fn ts_definition() -> String {
+                #type_str.to_string()
+            }
+        }
+    };
+
+    #[cfg(all(feature = "typescript", not(feature = "zod")))]
+    let ts_definition_method = {
+        let unique_symbol = format!("declare const __brand_{}: unique symbol;", item_name);
+        let type_str = format!(
+            "export type {}{} = {} & {{ readonly [__brand_{}]: true }};",
+            item_name, ts_generics, ts_inner_type, item_name
+        );
+        let assert_fn = if is_generic {
+            format!(
+                "export function assert{item_name}{ts_generics}(value: {ts_inner_type}): asserts value is {item_name}{ts_generics} {{\n}}",
+            )
+        } else {
+            format!(
+                "export function assert{item_name}(value: {ts_inner_type}): asserts value is {item_name} {{\n}}",
+            )
+        };
+        quote! {
+            pub fn ts_definition() -> String {
+                format!("{}\n{}\n\n{}", #unique_symbol, #type_str, #assert_fn)
+            }
+        }
+    };
+
+    // --- Generate zod_schema method ---
+
+    #[cfg(all(feature = "zod", feature = "typescript"))]
+    let zod_schema_method = {
+        let zod_type_annotation = if is_generic {
+            format!("{}<string>", item_name)
+        } else {
+            item_name.clone()
+        };
+        quote! {
+            pub fn zod_schema() -> String {
+                format!(
+                    "const {0}$RawSchema = {1}.brand::<\"{0}\">();\nexport const {0}$Schema: ZodType<{2}> = {0}$RawSchema;",
+                    #item_name, #zod_inner, #zod_type_annotation
+                )
+            }
+        }
+    };
+
+    #[cfg(all(feature = "zod", not(feature = "typescript")))]
+    let zod_schema_method = {
+        quote! {
+            pub fn zod_schema() -> String {
+                format!(
+                    "export const {}$Schema = {}.brand::<\"{}\">();",
+                    #item_name, #zod_inner, #item_name
+                )
+            }
+        }
+    };
+
+    // --- Build schema module impl items ---
+    let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![
+        #[cfg(feature = "typescript")]
+        ts_definition_method,
+        #[cfg(feature = "zod")]
+        zod_schema_method,
+    ];
+
+    // --- Generate delegate methods ---
+
+    #[cfg(feature = "typescript")]
+    let delegate_ts = {
+        let mi = module_ident.clone();
+        quote! {
+            pub fn ts_definition() -> String {
+                #mi::Schema::ts_definition()
+            }
+        }
+    };
+
+    #[cfg(feature = "zod")]
+    let delegate_zod = {
+        let mi = module_ident.clone();
+        quote! {
+            pub fn zod_schema() -> String {
+                #mi::Schema::zod_schema()
+            }
+        }
+    };
+
+    // --- Build delegate_impl_items ---
+    let delegate_impl_items: Vec<proc_macro2::TokenStream> = vec![
+        #[cfg(feature = "typescript")]
+        delegate_ts,
+        #[cfg(feature = "zod")]
+        delegate_zod,
+    ];
+
+    // --- Use generics for the impl block so it works with generic structs ---
+    let generics = &item_struct.generics;
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+
+    let output = quote! {
+        #item_struct
+
+        pub mod #module_ident {
+            use super::*;
+
+            pub struct Schema;
+
+            impl Schema {
+                #(#schema_impl_items)*
+            }
+        }
+
+        impl #impl_generics #name #ty_generics #where_clause {
+            #(#delegate_impl_items)*
+        }
     };
 
     if env::var("RUST_LOG") == Ok(String::from("trace")) {
@@ -676,7 +903,7 @@ fn process_plain_enum(
         delegate_zod_schema,
     ]
     .into_iter()
-    .chain(schema_example_method.into_iter())
+    .chain(schema_example_method)
     .collect();
 
     #[cfg(all(feature = "zod", feature = "typescript", not(feature = "jsonschema")))]
@@ -685,7 +912,7 @@ fn process_plain_enum(
         delegate_zod_schema,
     ]
     .into_iter()
-    .chain(schema_example_method.into_iter())
+    .chain(schema_example_method)
     .collect();
 
     #[cfg(all(feature = "zod", not(feature = "typescript"), feature = "jsonschema"))]
@@ -694,14 +921,14 @@ fn process_plain_enum(
         delegate_zod_schema,
     ]
     .into_iter()
-    .chain(schema_example_method.into_iter())
+    .chain(schema_example_method)
     .collect();
 
     #[cfg(all(feature = "zod", not(feature = "typescript"), not(feature = "jsonschema")))]
     let delegate_impl_items: Vec<proc_macro2::TokenStream> =
         vec![delegate_zod_schema]
             .into_iter()
-            .chain(schema_example_method.into_iter())
+            .chain(schema_example_method)
             .collect();
 
     #[cfg(all(not(feature = "zod"), feature = "typescript", feature = "jsonschema"))]
@@ -797,6 +1024,10 @@ fn process_discriminated_enum(
     #[cfg(feature = "jsonschema")]
     let mut json_schema_variants: Vec<proc_macro2::TokenStream> = Vec::new();
 
+    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+    let enum_module_name = format!("{}_schema", to_snake_case(item_name));
+    let mut enum_validation_fns: Vec<proc_macro2::TokenStream> = Vec::new();
+
     // Process each variant in the enum
     for item in &mut item_enum.variants {
         #[cfg(feature = "serde")]
@@ -813,7 +1044,13 @@ fn process_discriminated_enum(
         // let mut json_schema_fields: Vec<proc_macro2::TokenStream> = Vec::new();
 
         for field in &mut item.fields {
-            let f_def = process_field(rename_all, field);
+            #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+            let (f_def, validation_fn) = process_field(rename_all, field, Some(&enum_module_name));
+            #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+            let (f_def, validation_fn) = process_field(rename_all, field, None);
+            if let Some(vfn) = validation_fn {
+                enum_validation_fns.push(vfn);
+            }
             // json_schema_fields.push(build_field_schema(&f_def));
             field_defs.push(f_def);
         }
@@ -1029,7 +1266,7 @@ fn process_discriminated_enum(
         delegate_zod_schema,
     ]
     .into_iter()
-    .chain(schema_example_method.into_iter())
+    .chain(schema_example_method)
     .collect();
 
     #[cfg(all(feature = "zod", feature = "typescript", not(feature = "jsonschema")))]
@@ -1038,7 +1275,7 @@ fn process_discriminated_enum(
         delegate_zod_schema,
     ]
     .into_iter()
-    .chain(schema_example_method.into_iter())
+    .chain(schema_example_method)
     .collect();
 
     #[cfg(all(feature = "zod", not(feature = "typescript"), feature = "jsonschema"))]
@@ -1047,14 +1284,14 @@ fn process_discriminated_enum(
         delegate_zod_schema,
     ]
     .into_iter()
-    .chain(schema_example_method.into_iter())
+    .chain(schema_example_method)
     .collect();
 
     #[cfg(all(feature = "zod", not(feature = "typescript"), not(feature = "jsonschema")))]
     let delegate_impl_items: Vec<proc_macro2::TokenStream> =
         vec![delegate_zod_schema]
             .into_iter()
-            .chain(schema_example_method.into_iter())
+            .chain(schema_example_method)
             .collect();
 
     #[cfg(all(not(feature = "zod"), feature = "typescript", feature = "jsonschema"))]
@@ -1079,6 +1316,8 @@ fn process_discriminated_enum(
             impl Schema {
                 #(#schema_impl_items)*
             }
+
+            #(#enum_validation_fns)*
         }
 
         impl #name {
@@ -1335,7 +1574,7 @@ fn generate_variant_code(
                 let content_name_str = content_name.to_string();
                 let tuple_schemas: Vec<proc_macro2::TokenStream> = field_defs
                     .iter()
-                    .map(|fld| build_tuple_element_json_schema(fld))
+                    .map(build_tuple_element_json_schema)
                     .collect();
                 json_schema_variant_fields.push(quote! {
                     properties.insert(#content_name_str.to_string(), {
@@ -1551,34 +1790,42 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
                     }
                 }
             } else {
-                // Check if minLength is specified
-                if let Some(ref meta) = fld.model_schema_prop_meta {
-                    if let Some(min_len) = meta.min_length {
-                        quote! {
-                            properties.insert(#field_name_str.to_string(), {
-                                serde_json::json!({
-                                    "type": "string",
-                                    "minLength": #min_len
-                                })
-                            });
-                        }
-                    } else {
-                        quote! {
-                            properties.insert(#field_name_str.to_string(), {
-                                serde_json::json!({
-                                    "type": "string",
-                                })
-                            });
-                        }
-                    }
-                } else {
-                    quote! {
+                let min_len_opt = fld.model_schema_prop_meta.as_ref().and_then(|m| m.min_length);
+                let pattern_opt = fld.model_schema_prop_meta.as_ref().and_then(|m| m.pattern.as_deref().map(ToString::to_string));
+
+                match (min_len_opt, pattern_opt) {
+                    (Some(min_len), Some(pattern)) => quote! {
+                        properties.insert(#field_name_str.to_string(), {
+                            serde_json::json!({
+                                "type": "string",
+                                "minLength": #min_len,
+                                "pattern": #pattern
+                            })
+                        });
+                    },
+                    (Some(min_len), None) => quote! {
+                        properties.insert(#field_name_str.to_string(), {
+                            serde_json::json!({
+                                "type": "string",
+                                "minLength": #min_len
+                            })
+                        });
+                    },
+                    (None, Some(pattern)) => quote! {
+                        properties.insert(#field_name_str.to_string(), {
+                            serde_json::json!({
+                                "type": "string",
+                                "pattern": #pattern
+                            })
+                        });
+                    },
+                    (None, None) => quote! {
                         properties.insert(#field_name_str.to_string(), {
                             serde_json::json!({
                                 "type": "string",
                             })
                         });
-                    }
+                    },
                 }
             }
         }
@@ -2414,8 +2661,43 @@ fn write_field_type_and_schema(
     }
 }
 
-/// Processes a field and returns its definition.
-fn process_field(rename_all: &Option<String>, field: &mut Field) -> FieldDef {
+/// Generates a serde `deserialize_with` validation function for a field with a pattern constraint.
+#[cfg(feature = "serde")]
+fn generate_validate_fn(
+    field_ident: &str,
+    pattern: &str,
+) -> proc_macro2::TokenStream {
+    let fn_name = format!("validate_{field_ident}");
+    let fn_ident = proc_macro2::Ident::new(&fn_name, proc_macro2::Span::call_site());
+    let pattern_lit = pattern.to_string();
+
+    quote! {
+        pub fn #fn_ident<'de, D>(deserializer: D) -> Result<String, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            use std::sync::LazyLock;
+            use serde::Deserialize;
+            static RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+                regex::Regex::new(#pattern_lit).unwrap()
+            });
+            let s = String::deserialize(deserializer)?;
+            if !RE.is_match(&s) {
+                return Err(serde::de::Error::custom(
+                    format!("value '{}' does not match pattern '{}'", s, #pattern_lit)
+                ));
+            }
+            Ok(s)
+        }
+    }
+}
+
+/// Processes a field and returns its definition plus an optional validation function TokenStream.
+fn process_field(
+    rename_all: &Option<String>,
+    field: &mut Field,
+    schema_module_name: Option<&str>,
+) -> (FieldDef, Option<proc_macro2::TokenStream>) {
     let mut new_attrs = Vec::new();
 
     #[cfg(feature = "serde")]
@@ -2423,26 +2705,54 @@ fn process_field(rename_all: &Option<String>, field: &mut Field) -> FieldDef {
     #[cfg(not(feature = "serde"))]
     let field_rename = None;
 
+    // Get raw field ident (before renaming) for validation function name
+    let raw_field_ident = field
+        .ident
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+
     // Parse model_schema_prop attributes before filtering them out
     let model_schema_prop_meta =
         crate::features::model_schema_prop::parse_model_schema_prop_attributes(&field.attrs);
 
-    // Filter out model_schema_prop attributes
+    // Validate: cannot use both `as` and `preprocess` on the same field
+    if model_schema_prop_meta.as_type.is_some() && !model_schema_prop_meta.preprocess.is_empty() {
+        panic!("Cannot use both `as` and `preprocess` on the same field in model_schema_prop");
+    }
+
+    // Filter out model_schema_prop attributes, and optionally inject serde deserialize_with
     for attr in &field.attrs {
         if !attr.path().is_ident("model_schema_prop") {
             new_attrs.push(attr.clone());
         }
     }
 
+    // If pattern is set and serde feature is enabled, inject serde deserialize_with attribute
+    #[cfg(feature = "serde")]
+    let validation_fn: Option<proc_macro2::TokenStream> =
+        if let (Some(module_name), Some(pattern)) =
+            (schema_module_name, &model_schema_prop_meta.pattern)
+        {
+            let deserialize_with_path =
+                format!("{module_name}::validate_{raw_field_ident}");
+            let path_lit = syn::LitStr::new(&deserialize_with_path, proc_macro2::Span::call_site());
+            let serde_attr: syn::Attribute = syn::parse_quote! {
+                #[serde(deserialize_with = #path_lit)]
+            };
+            new_attrs.push(serde_attr);
+            Some(generate_validate_fn(&raw_field_ident, pattern))
+        } else {
+            None
+        };
+
+    #[cfg(not(feature = "serde"))]
+    let validation_fn: Option<proc_macro2::TokenStream> = None;
+
     field.attrs = new_attrs;
 
     let field_type: &syn::Type = &field.ty;
-    let name = field
-        .ident
-        .as_ref()
-        .map(ToString::to_string)
-        .into_iter()
-        .collect::<String>();
+    let name = raw_field_ident;
 
     let final_name = get_final_name(name, &field_rename, rename_all);
     let field_docs = match get_field_docs(field) {
@@ -2469,6 +2779,8 @@ fn process_field(rename_all: &Option<String>, field: &mut Field) -> FieldDef {
     field_def.model_schema_prop_meta = if model_schema_prop_meta.as_type.is_some()
         || model_schema_prop_meta.literal.is_some()
         || model_schema_prop_meta.min_length.is_some()
+        || model_schema_prop_meta.pattern.is_some()
+        || !model_schema_prop_meta.preprocess.is_empty()
     {
         Some(model_schema_prop_meta)
     } else {
@@ -2497,7 +2809,7 @@ fn process_field(rename_all: &Option<String>, field: &mut Field) -> FieldDef {
         };
     }
 
-    field_def
+    (field_def, validation_fn)
 }
 
 /// Gets the final name for a field or enum variant, considering serde attributes.

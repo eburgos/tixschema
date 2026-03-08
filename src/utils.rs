@@ -216,19 +216,19 @@ fn transform_example_code(code: &str) -> String {
     // Pattern 1: println!("...", variable); → variable
     // Matches: println!("anything", value); or println!("format {}", value);
     let re = regex::Regex::new(r#"println!\s*\([^,)]+,\s*([^)]+)\)\s*;?\s*$"#).unwrap();
-    if let Some(captures) = re.captures(&result) {
-        if let Some(variable) = captures.get(1) {
-            result = re.replace(&result, variable.as_str()).to_string();
-        }
+    if let Some(captures) = re.captures(&result)
+        && let Some(variable) = captures.get(1)
+    {
+        result = re.replace(&result, variable.as_str()).to_string();
     }
 
     // Pattern 2: let _: Type = value; → value
     // Matches: let _: SomeType = value; or let _ = value;
     let re2 = regex::Regex::new(r#"let\s+_(?:\s*:\s*[^=]+)?\s*=\s*([^;]+)\s*;?\s*$"#).unwrap();
-    if let Some(captures) = re2.captures(&result) {
-        if let Some(variable) = captures.get(1) {
-            result = re2.replace(&result, variable.as_str()).to_string();
-        }
+    if let Some(captures) = re2.captures(&result)
+        && let Some(variable) = captures.get(1)
+    {
+        result = re2.replace(&result, variable.as_str()).to_string();
     }
 
     result.trim().to_string()
