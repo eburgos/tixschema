@@ -240,4 +240,84 @@ mod tests {
         // Just make sure it compiles for now
         assert!(ts_definition.contains("export type CalculatedExpressionOperator"));
     }
+
+    // =============================================
+    // Single-value enum as literal type alternative
+    // =============================================
+    // Tests the recommended pattern of using single-value enums
+    // instead of #[model_schema_prop(literal = "value")] on String fields.
+    // This provides type safety in Rust while generating identical TypeScript output.
+
+    #[cfg(all(
+        test,
+        any(feature = "typescript", feature = "zod", feature = "serde")
+    ))]
+    #[model_schema()]
+    #[cfg_attr(
+        feature = "serde",
+        derive(Serialize, Deserialize),
+        serde(rename_all = "lowercase")
+    )]
+    #[derive(Debug, Clone, PartialEq)]
+    enum DocumentLiteralValue {
+        Document,
+    }
+
+    #[test]
+    #[cfg(all(feature = "typescript", feature = "serde", feature = "zod"))]
+    fn test_single_value_enum_ts_definition() {
+        let ts_definition = DocumentLiteralValue::ts_definition();
+
+        // A single-value enum should generate a literal union type
+        assert!(ts_definition.contains("export type DocumentLiteralValue"));
+        assert!(ts_definition.contains("\"document\""));
+    }
+
+    #[test]
+    #[cfg(all(feature = "typescript", feature = "serde", feature = "zod"))]
+    fn test_single_value_enum_zod_schema() {
+        let zod_schema = DocumentLiteralValue::zod_schema();
+
+        // Should generate z.enum(["document"]) which is equivalent to z.literal("document")
+        assert!(zod_schema.contains("export const DocumentLiteralValue$Schema"));
+        assert!(zod_schema.contains("z.enum([\"document\"])"));
+    }
+
+    // Test single-value enum used as a field in a discriminated union
+    #[cfg(all(
+        test,
+        any(feature = "typescript", feature = "zod", feature = "serde")
+    ))]
+    #[model_schema()]
+    #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+    #[derive(Debug, Clone, PartialEq)]
+    #[cfg_attr(feature = "serde", serde(tag = "source"))]
+    enum ActionWithLiteralEnum {
+        #[cfg_attr(feature = "serde", serde(rename = "generate"))]
+        Generate { value: DocumentLiteralValue },
+        #[cfg_attr(feature = "serde", serde(rename = "upload"))]
+        Upload { value: String },
+    }
+
+    #[test]
+    #[cfg(all(feature = "typescript", feature = "serde", feature = "zod"))]
+    fn test_single_value_enum_in_tagged_union_ts() {
+        let ts_definition = ActionWithLiteralEnum::ts_definition();
+
+        // The generate variant should have value typed as DocumentLiteralValue
+        assert!(ts_definition.contains("value: DocumentLiteralValue;"));
+        // The upload variant should have value typed as string
+        assert!(ts_definition.contains("value: string;"));
+    }
+
+    #[test]
+    #[cfg(all(feature = "typescript", feature = "serde", feature = "zod"))]
+    fn test_single_value_enum_in_tagged_union_zod() {
+        let zod_schema = ActionWithLiteralEnum::zod_schema();
+
+        // The generate variant should reference DocumentLiteralValue$Schema
+        assert!(zod_schema.contains("DocumentLiteralValue$Schema"));
+        // The upload variant should use z.string()
+        assert!(zod_schema.contains("z.string()"));
+    }
 }

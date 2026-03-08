@@ -194,6 +194,78 @@ pub struct ApiConfigJson {
 }
 ```
 
+### Literal Values
+
+You can constrain a `String` field to a specific literal value using `model_schema_prop(literal = "value")`. This generates `z.literal("value")` in the Zod schema and a literal type in TypeScript, while the Rust field remains a `String`.
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ActionJson {
+    Generate {
+        #[model_schema_prop(literal = "document")]
+        value: String,
+    },
+}
+```
+
+This generates:
+```typescript
+export type Action = {
+  type: "generate";
+  value: "document";
+};
+
+export const Action$Schema = z.discriminatedUnion("type", [
+  z.strictObject({
+    type: z.literal("generate"),
+    value: z.literal("document"),
+  }),
+]);
+```
+
+#### Recommended: Single-Value Enums over Literal Strings
+
+While `model_schema_prop(literal = ...)` works, we recommend using a **single-value enum** instead. This provides type safety in Rust — the field can only hold the correct value at compile time, whereas a `String` with a literal annotation can hold any string in Rust (the constraint only applies in the generated TypeScript/Zod output).
+
+```rust
+// ✅ Recommended: single-value enum
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+pub enum DocumentLiteralValue {
+    #[serde(rename = "document")]
+    Document,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ActionJson {
+    Generate {
+        value: DocumentLiteralValue,  // Type-safe in Rust
+    },
+}
+
+// ❌ Still supported, but not recommended:
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ActionAltJson {
+    Generate {
+        #[model_schema_prop(literal = "document")]
+        value: String,  // Any string value accepted in Rust
+    },
+}
+```
+
+Both approaches produce identical TypeScript and Zod output. The single-value enum is preferred because:
+
+- **Type safety in Rust** — impossible to construct with a wrong value
+- **Self-documenting** — the enum name makes the intent clear
+- **Pattern matching** — match on `DocumentLiteralValue::Document` instead of checking string equality
+- **Naming convention**: Use the `<Something>LiteralValue` naming pattern (e.g., `DocumentLiteralValue`, `ProDoctivityLiteralValue`)
+
 ### Examples
 
 You can provide compiler-validated example values for your types that will be embedded in the generated Zod schemas' `.meta()` field. Examples are written in Rust code blocks and fully type-checked at compile time.
