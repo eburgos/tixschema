@@ -344,6 +344,12 @@ impl FieldDef {
                 {
                     result = format!("{result}.min({min_len})");
                 }
+                // Add pattern validation if specified
+                if let Some(ref meta) = self.model_schema_prop_meta
+                    && let Some(ref pattern) = meta.pattern
+                {
+                    result = format!("{result}.check(z.regex(/{pattern}/))");
+                }
                 result
             }
             FieldDefType::StringLiteral(literal) => format!("z.literal(\"{literal}\")"),
@@ -373,6 +379,19 @@ impl FieldDef {
             format!("z.array({result})")
         } else {
             result
+        };
+
+        // Wrap with preprocess if specified
+        let pre_result = if let Some(ref meta) = self.model_schema_prop_meta
+            && !meta.preprocess.is_empty()
+        {
+            let mut wrapped = pre_result;
+            for fn_name in meta.preprocess.iter().rev() {
+                wrapped = format!("z.preprocess({fn_name}, {wrapped})");
+            }
+            wrapped
+        } else {
+            pre_result
         };
 
         if self.is_optional {
