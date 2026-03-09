@@ -24,7 +24,7 @@ mod tests {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
     #[serde(rename_all = "camelCase")]
-    struct UserWithSerdeJson {
+    struct UserWithSerde {
         user_id: String,
         first_name: String,
         last_name: String,
@@ -37,7 +37,7 @@ mod tests {
     #[test]
     #[cfg(feature = "jsonschema")]
     fn test_serde_rename_all_camel_case_json_schema() {
-        let schema = UserWithSerdeJson::json_schema();
+        let schema = UserWithSerde::json_schema();
 
         let properties = schema["properties"].as_object().unwrap();
 
@@ -69,7 +69,7 @@ mod tests {
     #[test]
     #[cfg(feature = "typescript")]
     fn test_serde_rename_all_camel_case_typescript() {
-        let ts_definition = UserWithSerdeJson::ts_definition();
+        let ts_definition = UserWithSerde::ts_definition();
 
         // Check that field names are converted in TypeScript
         assert!(ts_definition.contains("userId: string;"));
@@ -83,7 +83,7 @@ mod tests {
     #[test]
     #[cfg(feature = "zod")]
     fn test_serde_rename_all_camel_case_zod() {
-        let zod_schema = UserWithSerdeJson::zod_schema();
+        let zod_schema = UserWithSerde::zod_schema();
 
         assert!(zod_schema.contains("userId: z.string()"));
         assert!(zod_schema.contains("firstName: z.string()"));
@@ -102,7 +102,7 @@ mod tests {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
     #[serde(rename_all = "lowercase")]
-    struct LowercaseJson {
+    struct Lowercase {
         field_one: String,
         field_two: String,
     }
@@ -110,7 +110,7 @@ mod tests {
     #[test]
     #[cfg(feature = "typescript")]
     fn test_rename_all_lowercase() {
-        let ts = LowercaseJson::ts_definition();
+        let ts = Lowercase::ts_definition();
 
         // lowercase converts to lowercase but keeps underscores
         assert!(ts.contains("field_one: string;"));
@@ -124,7 +124,7 @@ mod tests {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
     #[serde(rename_all = "camelCase")]
-    struct OptionalFieldsJson {
+    struct OptionalFields {
         required_field: String,
         optional_field: Option<String>,
         #[serde(rename = "customOptional")]
@@ -134,7 +134,7 @@ mod tests {
     #[test]
     #[cfg(feature = "typescript")]
     fn test_serde_with_optional_fields_typescript() {
-        let ts = OptionalFieldsJson::ts_definition();
+        let ts = OptionalFields::ts_definition();
 
         assert!(ts.contains("requiredField: string;"));
         assert!(ts.contains("optionalField: string | undefined;"));
@@ -144,7 +144,7 @@ mod tests {
     #[test]
     #[cfg(feature = "zod")]
     fn test_serde_with_optional_fields_zod() {
-        let zod = OptionalFieldsJson::zod_schema();
+        let zod = OptionalFields::zod_schema();
 
         assert!(zod.contains("requiredField: z.string()"));
         assert!(zod.contains("optionalField: z.union([z.string(), z.undefined()])"));
@@ -154,7 +154,7 @@ mod tests {
     #[test]
     #[cfg(feature = "jsonschema")]
     fn test_serde_with_optional_fields_json_schema() {
-        let schema = OptionalFieldsJson::json_schema();
+        let schema = OptionalFields::json_schema();
 
         let properties = schema["properties"].as_object().unwrap();
         assert!(properties.contains_key("requiredField"));
@@ -174,7 +174,7 @@ mod tests {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
     #[serde(rename_all = "lowercase")]
-    enum StatusJson {
+    enum Status {
         Active,
         Inactive,
         Pending,
@@ -183,7 +183,7 @@ mod tests {
     #[test]
     #[cfg(feature = "typescript")]
     fn test_enum_rename_all_lowercase() {
-        let ts = StatusJson::ts_definition();
+        let ts = Status::ts_definition();
 
         assert!(ts.contains("\"active\""));
         assert!(ts.contains("\"inactive\""));
@@ -193,7 +193,7 @@ mod tests {
     #[test]
     #[cfg(feature = "zod")]
     fn test_enum_rename_all_zod() {
-        let zod = StatusJson::zod_schema();
+        let zod = Status::zod_schema();
 
         assert!(zod.contains("\"active\""));
         assert!(zod.contains("\"inactive\""));
@@ -202,7 +202,7 @@ mod tests {
 
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    enum ColorJson {
+    enum Color {
         Red,
         #[serde(rename = "dark_green")]
         Green,
@@ -212,7 +212,7 @@ mod tests {
     #[test]
     #[cfg(feature = "typescript")]
     fn test_enum_field_rename() {
-        let ts = ColorJson::ts_definition();
+        let ts = Color::ts_definition();
 
         assert!(ts.contains("\"Red\""));
         assert!(ts.contains("\"dark_green\""));
@@ -227,7 +227,7 @@ mod tests {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
     #[serde(tag = "type", rename_all = "camelCase")]
-    enum EventJson {
+    enum Event {
         UserCreated {
             user_id: String,
             user_name: String,
@@ -245,7 +245,7 @@ mod tests {
     #[test]
     #[cfg(feature = "typescript")]
     fn test_discriminated_union_with_serde_typescript() {
-        let ts = EventJson::ts_definition();
+        let ts = Event::ts_definition();
 
         // Check discriminator field with camelCase applied to variant names
         assert!(ts.contains("type: \"userCreated\""));
@@ -261,7 +261,7 @@ mod tests {
     #[test]
     #[cfg(feature = "zod")]
     fn test_discriminated_union_with_serde_zod() {
-        let zod = EventJson::zod_schema();
+        let zod = Event::zod_schema();
 
         assert!(zod.contains("z.discriminatedUnion"));
         assert!(zod.contains("\"type\""));

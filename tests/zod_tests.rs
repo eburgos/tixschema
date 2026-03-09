@@ -28,7 +28,7 @@ mod tests {
 
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    struct BasicStructJson {
+    struct BasicStruct {
         name: String,
         age: u32,
         score: f64,
@@ -37,7 +37,7 @@ mod tests {
 
     #[test]
     fn test_basic_struct_generates_zod_schema() {
-        let zod = BasicStructJson::zod_schema();
+        let zod = BasicStruct::zod_schema();
 
         assert!(
             zod.contains("z.strictObject({"),
@@ -64,7 +64,7 @@ mod tests {
     #[test]
     #[cfg(feature = "typescript")]
     fn test_zod_with_typescript_feature_includes_type_annotations() {
-        let zod = BasicStructJson::zod_schema();
+        let zod = BasicStruct::zod_schema();
 
         assert!(
             zod.contains("const BasicStruct$RawSchema = z.strictObject({"),
@@ -84,7 +84,7 @@ mod tests {
 
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    struct OptionalFieldsJson {
+    struct OptionalFields {
         required: String,
         optional_string: Option<String>,
         optional_number: Option<i32>,
@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn test_optional_fields_use_union_with_undefined() {
-        let zod = OptionalFieldsJson::zod_schema();
+        let zod = OptionalFields::zod_schema();
 
         assert!(
             zod.contains("required: z.string()"),
@@ -119,7 +119,7 @@ mod tests {
 
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    struct ArrayFieldsJson {
+    struct ArrayFields {
         tags: Vec<String>,
         numbers: Vec<i32>,
         optional_array: Option<Vec<String>>,
@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn test_vec_fields_use_z_array() {
-        let zod = ArrayFieldsJson::zod_schema();
+        let zod = ArrayFields::zod_schema();
 
         assert!(
             zod.contains("tags: z.array(z.string())"),
@@ -149,14 +149,14 @@ mod tests {
 
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    struct MapFieldsJson {
+    struct MapFields {
         metadata: std::collections::HashMap<String, String>,
         counts: std::collections::HashMap<String, i32>,
     }
 
     #[test]
     fn test_hashmap_uses_z_record() {
-        let zod = MapFieldsJson::zod_schema();
+        let zod = MapFields::zod_schema();
 
         assert!(
             zod.contains("metadata: z.record(z.string(), z.string())"),
@@ -174,22 +174,22 @@ mod tests {
 
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    struct AddressJson {
+    struct Address {
         street: String,
         city: String,
     }
 
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    struct PersonJson {
+    struct Person {
         name: String,
-        address: AddressJson,
-        previous_addresses: Vec<AddressJson>,
+        address: Address,
+        previous_addresses: Vec<Address>,
     }
 
     #[test]
     fn test_nested_structs_reference_schema() {
-        let zod = PersonJson::zod_schema();
+        let zod = Person::zod_schema();
 
         assert!(
             zod.contains("address: Address$Schema"),
@@ -207,7 +207,7 @@ mod tests {
 
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    enum StatusJson {
+    enum Status {
         Active,
         Inactive,
         Pending,
@@ -215,7 +215,7 @@ mod tests {
 
     #[test]
     fn test_plain_enum_uses_z_enum() {
-        let zod = StatusJson::zod_schema();
+        let zod = Status::zod_schema();
 
         assert!(
             zod.contains("z.enum(["),
@@ -238,11 +238,15 @@ mod tests {
     #[test]
     #[cfg(feature = "typescript")]
     fn test_plain_enum_with_typescript_has_type_annotation() {
-        let zod = StatusJson::zod_schema();
+        let zod = Status::zod_schema();
 
         assert!(
-            zod.contains("export const Status$Schema: ZodType<Status> = z.enum(["),
-            "Plain enum with typescript should have type annotation. Got: {zod}"
+            zod.contains("const Status$RawSchema = z.enum(["),
+            "Plain enum with typescript should have $RawSchema. Got: {zod}"
+        );
+        assert!(
+            zod.contains("export const Status$Schema: ZodType<Status> = Status$RawSchema;"),
+            "Plain enum with typescript should have typed $Schema. Got: {zod}"
         );
     }
 
@@ -253,7 +257,7 @@ mod tests {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
     #[serde(tag = "type")]
-    enum PaymentJson {
+    enum Payment {
         Cash { amount: f64 },
         CreditCard { card_number: String, amount: f64 },
         BankTransfer { account: String },
@@ -261,7 +265,7 @@ mod tests {
 
     #[test]
     fn test_discriminated_union_uses_z_discriminated_union() {
-        let zod = PaymentJson::zod_schema();
+        let zod = Payment::zod_schema();
 
         assert!(
             zod.contains("z.discriminatedUnion"),
@@ -279,7 +283,7 @@ mod tests {
 
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    struct AllNumericTypesJson {
+    struct AllNumericTypes {
         u8_val: u8,
         u16_val: u16,
         u32_val: u32,
@@ -296,7 +300,7 @@ mod tests {
 
     #[test]
     fn test_integer_types_use_int_modifier() {
-        let zod = AllNumericTypesJson::zod_schema();
+        let zod = AllNumericTypes::zod_schema();
 
         // All integer types should use .int()
         assert!(
@@ -319,7 +323,7 @@ mod tests {
 
     #[test]
     fn test_float_types_do_not_use_int_modifier() {
-        let zod = AllNumericTypesJson::zod_schema();
+        let zod = AllNumericTypes::zod_schema();
 
         // Float types should not use .int()
         assert!(
@@ -340,7 +344,7 @@ mod tests {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
     #[serde(rename_all = "camelCase")]
-    struct RenamedFieldsJson {
+    struct RenamedFields {
         user_name: String,
         user_email: String,
     }
@@ -348,7 +352,7 @@ mod tests {
     #[test]
     #[cfg(feature = "serde")]
     fn test_serde_rename_all_affects_field_names() {
-        let zod = RenamedFieldsJson::zod_schema();
+        let zod = RenamedFields::zod_schema();
 
         assert!(
             zod.contains("userName: z.string()"),
@@ -367,7 +371,7 @@ mod tests {
     #[cfg(feature = "serde")]
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    struct CustomFieldRenameJson {
+    struct CustomFieldRename {
         #[serde(rename = "customName")]
         field_name: String,
     }
@@ -375,7 +379,7 @@ mod tests {
     #[test]
     #[cfg(feature = "serde")]
     fn test_serde_field_rename() {
-        let zod = CustomFieldRenameJson::zod_schema();
+        let zod = CustomFieldRename::zod_schema();
 
         assert!(
             zod.contains("customName: z.string()"),
@@ -393,7 +397,7 @@ mod tests {
 
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    struct ComplexCollectionsJson {
+    struct ComplexCollections {
         map_of_arrays: std::collections::HashMap<String, Vec<String>>,
         optional_map: Option<std::collections::HashMap<String, i32>>,
         array_of_maps: Vec<std::collections::HashMap<String, String>>,
@@ -401,7 +405,7 @@ mod tests {
 
     #[test]
     fn test_complex_nested_collections() {
-        let zod = ComplexCollectionsJson::zod_schema();
+        let zod = ComplexCollections::zod_schema();
 
         assert!(
             zod.contains("map_of_arrays: z.record(z.string(), z.array(z.string()))"),
@@ -430,13 +434,13 @@ mod tests {
 
         #[model_schema()]
         #[derive(Serialize, Deserialize, Debug, Clone)]
-        struct DocumentJson {
+        struct Document {
             id: ObjectId,
             author_id: Option<ObjectId>,
             tag_ids: Vec<ObjectId>,
         }
 
-        let zod = DocumentJson::zod_schema();
+        let zod = Document::zod_schema();
 
         assert!(
             zod.contains("z.object({ $oid: z.string().regex("),
@@ -462,11 +466,11 @@ mod tests {
 
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    struct EmptyStructJson {}
+    struct EmptyStruct {}
 
     #[test]
     fn test_empty_struct_generates_valid_schema() {
-        let zod = EmptyStructJson::zod_schema();
+        let zod = EmptyStruct::zod_schema();
 
         assert!(
             zod.contains("z.strictObject({"),
@@ -487,11 +491,11 @@ mod tests {
     fn test_zod_without_typescript_uses_simple_export() {
         #[model_schema()]
         #[derive(Serialize, Deserialize, Debug, Clone)]
-        struct SimpleJson {
+        struct Simple {
             field: String,
         }
 
-        let zod = SimpleJson::zod_schema();
+        let zod = Simple::zod_schema();
 
         assert!(
             zod.contains("export const Simple$Schema = z.strictObject({"),

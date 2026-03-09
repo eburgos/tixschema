@@ -44,7 +44,6 @@ pub fn safe_type_name(key: &str) -> String {
 pub fn compute_alias_export_name(rust_ident: &str, override_name: Option<String>) -> String {
     match override_name {
         Some(name) if name.trim().is_empty() => format!("{rust_ident}Type"),
-        Some(name) if name == rust_ident => format!("{rust_ident}Type"),
         Some(name) => name,
         None => format!("{}Type", safe_type_name(rust_ident)),
     }
@@ -278,7 +277,7 @@ mod tests {
         let docs = vec![
             "User profile".to_string(),
             "```rust example".to_string(),
-            "UserJson { name: \"John\".to_string(), age: 25 }".to_string(),
+            "User { name: \"John\".to_string(), age: 25 }".to_string(),
             "```".to_string(),
         ];
 
@@ -286,7 +285,7 @@ mod tests {
         assert!(example.is_some());
         assert_eq!(
             example.unwrap(),
-            "UserJson { name: \"John\".to_string(), age: 25 }"
+            "User { name: \"John\".to_string(), age: 25 }"
         );
     }
 
@@ -297,7 +296,7 @@ mod tests {
             "```rust example".to_string(),
             "let x = 5;".to_string(),
             "let y = 10;".to_string(),
-            "UserJson { age: x + y }".to_string(),
+            "User { age: x + y }".to_string(),
             "```".to_string(),
         ];
 
@@ -306,7 +305,7 @@ mod tests {
         let code = example.unwrap();
         assert!(code.contains("let x = 5;"));
         assert!(code.contains("let y = 10;"));
-        assert!(code.contains("UserJson { age: x + y }"));
+        assert!(code.contains("User { age: x + y }"));
     }
 
     #[test]
@@ -314,17 +313,17 @@ mod tests {
         let docs = vec![
             "Multiple examples".to_string(),
             "```rust example".to_string(),
-            "UserJson { age: 25 }".to_string(),
+            "User { age: 25 }".to_string(),
             "```".to_string(),
             "Another description".to_string(),
             "```rust example".to_string(),
-            "UserJson { age: 30 }".to_string(),
+            "User { age: 30 }".to_string(),
             "```".to_string(),
         ];
 
         let example = extract_example_from_docs(&docs);
         assert!(example.is_some());
-        assert_eq!(example.unwrap(), "UserJson { age: 25 }");
+        assert_eq!(example.unwrap(), "User { age: 25 }");
     }
 
     #[test]
@@ -347,7 +346,7 @@ mod tests {
         let docs = vec![
             "Example with regular fence".to_string(),
             "```rust".to_string(),
-            "UserJson { age: 25 }".to_string(),
+            "User { age: 25 }".to_string(),
             "```".to_string(),
         ];
 
@@ -411,7 +410,7 @@ println!("data_type: {:?}", data_type);"#;
             "User profile".to_string(),
             "Some description".to_string(),
             "```rust example".to_string(),
-            "UserJson { name: \"John\".to_string() }".to_string(),
+            "User { name: \"John\".to_string() }".to_string(),
             "```".to_string(),
             "More description".to_string(),
         ];

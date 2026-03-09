@@ -17,14 +17,14 @@ mod tests {
     fn test_single_tuple_variant_typescript() {
         #[model_schema()]
         #[derive(Serialize, Deserialize, Debug, Clone)]
-        pub enum SingleTupleJson {
+        pub enum SingleTuple {
             Text(String),
             Number(i64),
             Flag(bool),
             Decimal(f64),
         }
 
-        let ts = SingleTupleJson::ts_definition();
+        let ts = SingleTuple::ts_definition();
         println!("Generated TypeScript:\n{}", ts);
 
         // Verify discriminator field
@@ -45,13 +45,13 @@ mod tests {
     fn test_single_tuple_variant_zod() {
         #[model_schema()]
         #[derive(Serialize, Deserialize, Debug, Clone)]
-        pub enum SingleTupleZodJson {
+        pub enum SingleTupleZod {
             Text(String),
             Number(i64),
             Flag(bool),
         }
 
-        let zod = SingleTupleZodJson::zod_schema();
+        let zod = SingleTupleZod::zod_schema();
         println!("Generated Zod:\n{}", zod);
 
         // Verify Zod schema structure
@@ -81,13 +81,13 @@ mod tests {
     fn test_multi_tuple_variant_typescript() {
         #[model_schema()]
         #[derive(Serialize, Deserialize, Debug, Clone)]
-        pub enum MultiTupleJson {
+        pub enum MultiTuple {
             Pair(String, i64),
             Triple(String, i64, bool),
             Quad(String, i64, bool, f64),
         }
 
-        let ts = MultiTupleJson::ts_definition();
+        let ts = MultiTuple::ts_definition();
         println!("Generated TypeScript:\n{}", ts);
 
         // Verify tuple syntax
@@ -111,12 +111,12 @@ mod tests {
     fn test_multi_tuple_variant_zod() {
         #[model_schema()]
         #[derive(Serialize, Deserialize, Debug, Clone)]
-        pub enum MultiTupleZodJson {
+        pub enum MultiTupleZod {
             Pair(String, i64),
             Triple(String, i64, bool),
         }
 
-        let zod = MultiTupleZodJson::zod_schema();
+        let zod = MultiTupleZod::zod_schema();
         println!("Generated Zod:\n{}", zod);
 
         // Verify z.tuple() is used
@@ -137,7 +137,7 @@ mod tests {
     fn test_plain_enum_string_union() {
         #[model_schema()]
         #[derive(Serialize, Deserialize, Debug, Clone)]
-        pub enum DataTypeJson {
+        pub enum DataType {
             Alphanumeric,
             Image,
             Decimal,
@@ -145,7 +145,7 @@ mod tests {
             Boolean,
         }
 
-        let ts = DataTypeJson::ts_definition();
+        let ts = DataType::ts_definition();
         println!("Generated TypeScript:\n{}", ts);
 
         // Should be a string union, not discriminated union
@@ -169,13 +169,13 @@ mod tests {
     fn test_plain_enum_zod() {
         #[model_schema()]
         #[derive(Serialize, Deserialize, Debug, Clone)]
-        pub enum PlainEnumZodJson {
+        pub enum PlainEnumZod {
             Active,
             Inactive,
             Pending,
         }
 
-        let zod = PlainEnumZodJson::zod_schema();
+        let zod = PlainEnumZod::zod_schema();
         println!("Generated Zod:\n{}", zod);
 
         // Should use z.enum, not z.discriminatedUnion
@@ -192,7 +192,7 @@ mod tests {
     fn test_mixed_variants_typescript() {
         #[model_schema()]
         #[derive(Serialize, Deserialize, Debug, Clone)]
-        pub enum MixedJson {
+        pub enum Mixed {
             // Unit variant
             Empty,
             // Single tuple
@@ -203,7 +203,7 @@ mod tests {
             Named { field_a: String, field_b: bool },
         }
 
-        let ts = MixedJson::ts_definition();
+        let ts = Mixed::ts_definition();
         println!("Generated TypeScript:\n{}", ts);
 
         // Unit variant should only have discriminator
@@ -232,14 +232,14 @@ mod tests {
     fn test_mixed_variants_zod() {
         #[model_schema()]
         #[derive(Serialize, Deserialize, Debug, Clone)]
-        pub enum MixedZodJson {
+        pub enum MixedZod {
             Empty,
             Text(String),
             Pair(String, i64),
             Named { field_a: String, field_b: bool },
         }
 
-        let zod = MixedZodJson::zod_schema();
+        let zod = MixedZod::zod_schema();
         println!("Generated Zod:\n{}", zod);
 
         // Should use discriminatedUnion since not all variants are unit
@@ -271,12 +271,12 @@ mod tests {
     fn test_tuple_json_schema() {
         #[model_schema()]
         #[derive(Serialize, Deserialize, Debug, Clone)]
-        pub enum TupleSchemaJson {
+        pub enum TupleSchema {
             Single(String),
             Double(String, i64),
         }
 
-        let schema = TupleSchemaJson::json_schema();
+        let schema = TupleSchema::json_schema();
         let schema_str = serde_json::to_string_pretty(&schema).unwrap();
         println!("Generated JSON Schema:\n{}", schema_str);
 
@@ -299,12 +299,12 @@ mod tests {
         #[model_schema()]
         #[derive(Serialize, Deserialize, Debug, Clone)]
         #[serde(tag = "kind", content = "data")]
-        pub enum CustomContentJson {
+        pub enum CustomContent {
             Text(String),
             Number(i64),
         }
 
-        let ts = CustomContentJson::ts_definition();
+        let ts = CustomContent::ts_definition();
         println!("Generated TypeScript:\n{}", ts);
 
         // Should use "kind" instead of "type"
@@ -329,12 +329,12 @@ mod tests {
         #[model_schema()]
         #[derive(Serialize, Deserialize, Debug, Clone)]
         #[serde(tag = "kind", content = "data")]
-        pub enum CustomContentZodJson {
+        pub enum CustomContentZod {
             Text(String),
             Number(i64),
         }
 
-        let zod = CustomContentZodJson::zod_schema();
+        let zod = CustomContentZod::zod_schema();
         println!("Generated Zod:\n{}", zod);
 
         // Should use "kind" in discriminatedUnion
@@ -359,13 +359,13 @@ mod tests {
     fn test_tuple_with_vec() {
         #[model_schema()]
         #[derive(Serialize, Deserialize, Debug, Clone)]
-        pub enum TupleWithVecJson {
+        pub enum TupleWithVec {
             // This was the original problem case: Image(String, Vec<u8>)
             Image(String, Vec<u8>),
             Data(Vec<String>),
         }
 
-        let ts = TupleWithVecJson::ts_definition();
+        let ts = TupleWithVec::ts_definition();
         println!("Generated TypeScript:\n{}", ts);
 
         // Image should have tuple with string and array
@@ -387,12 +387,12 @@ mod tests {
     fn test_tuple_with_vec_zod() {
         #[model_schema()]
         #[derive(Serialize, Deserialize, Debug, Clone)]
-        pub enum TupleWithVecZodJson {
+        pub enum TupleWithVecZod {
             Image(String, Vec<u8>),
             Data(Vec<String>),
         }
 
-        let zod = TupleWithVecZodJson::zod_schema();
+        let zod = TupleWithVecZod::zod_schema();
         println!("Generated Zod:\n{}", zod);
 
         // Image tuple
@@ -413,7 +413,7 @@ mod tests {
     fn test_named_struct_regression() {
         #[model_schema()]
         #[derive(Serialize, Deserialize, Debug, Clone)]
-        pub enum PaymentMethodJson {
+        pub enum PaymentMethod {
             CreditCard {
                 card_number: String,
                 expiry: String,
@@ -424,7 +424,7 @@ mod tests {
             },
         }
 
-        let ts = PaymentMethodJson::ts_definition();
+        let ts = PaymentMethod::ts_definition();
         println!("Generated TypeScript:\n{}", ts);
 
         // Should still work as before
@@ -454,12 +454,12 @@ mod tests {
     fn test_optional_in_tuple() {
         #[model_schema()]
         #[derive(Serialize, Deserialize, Debug, Clone)]
-        pub enum OptionalTupleJson {
+        pub enum OptionalTuple {
             Maybe(Option<String>),
             MaybePair(String, Option<i64>),
         }
 
-        let ts = OptionalTupleJson::ts_definition();
+        let ts = OptionalTuple::ts_definition();
         println!("Generated TypeScript:\n{}", ts);
 
         // Single optional tuple
@@ -480,18 +480,18 @@ mod tests {
     fn test_tuple_with_custom_type() {
         #[model_schema()]
         #[derive(Serialize, Deserialize, Debug, Clone)]
-        pub struct InnerJson {
+        pub struct Inner {
             pub field: String,
         }
 
         #[model_schema()]
         #[derive(Serialize, Deserialize, Debug, Clone)]
-        pub enum OuterJson {
-            Wrapped(InnerJson),
-            Paired(InnerJson, i64),
+        pub enum Outer {
+            Wrapped(Inner),
+            Paired(Inner, i64),
         }
 
-        let ts = OuterJson::ts_definition();
+        let ts = Outer::ts_definition();
         println!("Generated TypeScript:\n{}", ts);
 
         // Should reference the inner type
@@ -512,24 +512,24 @@ mod tests {
         #[model_schema()]
         #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
         #[serde(tag = "type", content = "value")]
-        pub enum SerdeCompatJson {
+        pub enum SerdeCompat {
             Text(String),
             Number(i64),
             Pair(String, i64),
         }
 
         // Test serialization produces expected format
-        let text = SerdeCompatJson::Text("hello".to_string());
+        let text = SerdeCompat::Text("hello".to_string());
         let json = serde_json::to_value(&text).unwrap();
         assert_eq!(json["type"], "Text");
         assert_eq!(json["value"], "hello");
 
-        let number = SerdeCompatJson::Number(42);
+        let number = SerdeCompat::Number(42);
         let json = serde_json::to_value(&number).unwrap();
         assert_eq!(json["type"], "Number");
         assert_eq!(json["value"], 42);
 
-        let pair = SerdeCompatJson::Pair("hello".to_string(), 42);
+        let pair = SerdeCompat::Pair("hello".to_string(), 42);
         let json = serde_json::to_value(&pair).unwrap();
         assert_eq!(json["type"], "Pair");
         assert!(json["value"].is_array());
@@ -543,7 +543,7 @@ mod tests {
     fn test_fixed_value_original_issue() {
         #[model_schema()]
         #[derive(Serialize, Deserialize, Debug, Clone)]
-        pub enum FixedValueJson {
+        pub enum FixedValue {
             Alphanumeric(String),
             Image(String, Vec<u8>),
             Decimal(f64),
@@ -551,7 +551,7 @@ mod tests {
             Boolean(bool),
         }
 
-        let ts = FixedValueJson::ts_definition();
+        let ts = FixedValue::ts_definition();
         println!("Generated TypeScript:\n{}", ts);
 
         // Verify NO empty field names (the original bug)
@@ -590,7 +590,7 @@ mod tests {
     fn test_fixed_value_ext_comprehensive() {
         #[model_schema()]
         #[derive(Serialize, Deserialize, Debug, Clone)]
-        pub enum FixedValueExtJson {
+        pub enum FixedValueExt {
             Alphanumeric(String),
             Image(String, Vec<u8>),
             Decimal(f64),
@@ -601,7 +601,7 @@ mod tests {
             Complex { a: String, b: bool },
         }
 
-        let ts = FixedValueExtJson::ts_definition();
+        let ts = FixedValueExt::ts_definition();
         println!("Generated TypeScript:\n{}", ts);
 
         // Single tuple variants
@@ -637,14 +637,14 @@ mod tests {
     fn test_empty_tuple_variant() {
         #[model_schema()]
         #[derive(Serialize, Deserialize, Debug, Clone)]
-        pub enum EmptyTupleJson {
+        pub enum EmptyTuple {
             Normal(String),
             // Note: Rust doesn't allow `Empty()` syntax directly, but we test the logic anyway
             // by having a unit variant alongside tuple variants
             Unit,
         }
 
-        let ts = EmptyTupleJson::ts_definition();
+        let ts = EmptyTuple::ts_definition();
         println!("Generated TypeScript:\n{}", ts);
 
         // Both should be in discriminated union
@@ -661,12 +661,12 @@ mod tests {
     fn test_jsdoc_comments() {
         #[model_schema()]
         #[derive(Serialize, Deserialize, Debug, Clone)]
-        pub enum JsDocJson {
+        pub enum JsDoc {
             Single(String),
             Multi(String, i64),
         }
 
-        let ts = JsDocJson::ts_definition();
+        let ts = JsDoc::ts_definition();
         println!("Generated TypeScript:\n{}", ts);
 
         // Should have JSDoc comments

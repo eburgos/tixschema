@@ -29,52 +29,52 @@ mod tests {
     /// Simple string-based type alias
     #[cfg(all(test, feature = "typescript"))]
     #[model_schema(name = "DocumentId")]
-    pub type DocumentIdJson = String;
+    pub type DocumentId = String;
 
     /// Numeric type alias (i64)
     #[cfg(all(test, feature = "typescript"))]
     #[model_schema(name = "Revision")]
-    pub type RevisionJson = i64;
+    pub type Revision = i64;
 
     /// Floating-point type alias
     #[cfg(all(test, feature = "typescript"))]
     #[model_schema(name = "Score")]
-    pub type ScoreJson = f32;
+    pub type Score = f32;
 
     /// Boolean type alias
     #[cfg(all(test, feature = "typescript"))]
     #[model_schema(name = "IsActive")]
-    pub type IsActiveJson = bool;
+    pub type IsActive = bool;
 
     /// Optional type alias
     #[cfg(all(test, feature = "typescript"))]
     #[model_schema(name = "OptionalNote")]
-    pub type OptionalNoteJson = Option<String>;
+    pub type OptionalNote = Option<String>;
 
     /// Generic type alias with single type parameter
     #[cfg(all(test, feature = "typescript"))]
     #[model_schema(name = "Wrapper")]
 
-    pub type WrapperJson<T> = Option<T>;
+    pub type Wrapper<T> = Option<T>;
 
     /// Generic type alias with two type parameters
     #[cfg(all(test, feature = "typescript"))]
     #[model_schema(name = "Pair")]
-    pub type PairJson<T, U> = (T, U);
+    pub type Pair<T, U> = (T, U);
 
     /// Type alias referencing another type alias (nested)
     #[cfg(all(test, feature = "typescript"))]
     #[model_schema(name = "OrderId")]
-    pub type OrderIdJson = String;
+    pub type OrderId = String;
 
     #[cfg(all(test, feature = "typescript"))]
     #[model_schema(name = "AuditId")]
-    pub type AuditIdJson = OrderIdJson;
+    pub type AuditId = OrderId;
 
     /// Vec type alias
     #[cfg(all(test, feature = "typescript"))]
     #[model_schema(name = "Tags")]
-    pub type TagsJson = Vec<String>;
+    pub type Tags = Vec<String>;
 
     // ========================================================================
     // Basic Type Alias Tests - TypeScript Generation
@@ -212,18 +212,18 @@ mod tests {
     #[cfg(all(test, feature = "typescript", feature = "serde"))]
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    struct DocumentRecordJson {
-        document_id: DocumentIdJson,
-        revision: RevisionJson,
-        score: ScoreJson,
-        is_active: IsActiveJson,
-        note: OptionalNoteJson,
+    struct DocumentRecord {
+        document_id: DocumentId,
+        revision: Revision,
+        score: Score,
+        is_active: IsActive,
+        note: OptionalNote,
     }
 
     #[test]
     #[cfg(all(feature = "typescript", feature = "serde"))]
     fn test_struct_with_alias_fields_typescript() {
-        let ts = DocumentRecordJson::ts_definition();
+        let ts = DocumentRecord::ts_definition();
 
         assert!(
             ts.contains("document_id: DocumentId;"),
@@ -250,16 +250,16 @@ mod tests {
     #[cfg(all(test, feature = "typescript", feature = "serde"))]
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    struct NestedAliasStructJson {
-        user_id: DocumentIdJson,
-        order_id: OrderIdJson,
-        audit_id: AuditIdJson,
+    struct NestedAliasStruct {
+        user_id: DocumentId,
+        order_id: OrderId,
+        audit_id: AuditId,
     }
 
     #[test]
     #[cfg(all(feature = "typescript", feature = "serde"))]
     fn test_struct_with_nested_alias_fields() {
-        let ts = NestedAliasStructJson::ts_definition();
+        let ts = NestedAliasStruct::ts_definition();
 
         assert!(
             ts.contains("user_id: DocumentId;"),
@@ -282,15 +282,15 @@ mod tests {
     #[cfg(all(test, feature = "typescript", feature = "serde"))]
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    struct CollectionAliasJson {
-        document_ids: Vec<DocumentIdJson>,
-        tags: TagsJson,
+    struct CollectionAlias {
+        document_ids: Vec<DocumentId>,
+        tags: Tags,
     }
 
     #[test]
     #[cfg(all(feature = "typescript", feature = "serde"))]
     fn test_alias_in_vec() {
-        let ts = CollectionAliasJson::ts_definition();
+        let ts = CollectionAlias::ts_definition();
 
         assert!(
             ts.contains("document_ids: Array<DocumentId>;"),
@@ -305,14 +305,14 @@ mod tests {
     #[cfg(all(test, feature = "typescript", feature = "serde"))]
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    struct MapAliasJson {
-        metadata: std::collections::HashMap<String, DocumentIdJson>,
+    struct MapAlias {
+        metadata: std::collections::HashMap<String, DocumentId>,
     }
 
     #[test]
     #[cfg(all(feature = "typescript", feature = "serde"))]
     fn test_alias_in_hashmap() {
-        let ts = MapAliasJson::ts_definition();
+        let ts = MapAlias::ts_definition();
 
         assert!(
             ts.contains("metadata: Partial<Record<string, DocumentId>>;"),
@@ -340,7 +340,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "zod", feature = "typescript", feature = "serde"))]
     fn test_struct_with_alias_zod_schema() {
-        let zod = DocumentRecordJson::zod_schema();
+        let zod = DocumentRecord::zod_schema();
 
         // The struct should generate a proper Zod schema
         assert!(
@@ -369,7 +369,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "jsonschema", feature = "typescript", feature = "serde"))]
     fn test_struct_with_alias_json_schema() {
-        let schema = DocumentRecordJson::json_schema();
+        let schema = DocumentRecord::json_schema();
 
         // The struct should generate a proper JSON schema
         assert_eq!(
@@ -421,16 +421,16 @@ mod tests {
     #[cfg(all(test, feature = "typescript", feature = "serde"))]
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    struct ComplexAliasStructJson {
-        optional_id: Option<DocumentIdJson>,
-        nested_ids: Vec<Vec<DocumentIdJson>>,
-        mapped_scores: std::collections::HashMap<String, Vec<ScoreJson>>,
+    struct ComplexAliasStruct {
+        optional_id: Option<DocumentId>,
+        nested_ids: Vec<Vec<DocumentId>>,
+        mapped_scores: std::collections::HashMap<String, Vec<Score>>,
     }
 
     #[test]
     #[cfg(all(feature = "typescript", feature = "serde"))]
     fn test_complex_alias_usage() {
-        let ts = ComplexAliasStructJson::ts_definition();
+        let ts = ComplexAliasStruct::ts_definition();
 
         assert!(
             ts.contains("optional_id: DocumentId | undefined;"),
@@ -454,7 +454,7 @@ mod tests {
 
     #[cfg(all(test, feature = "typescript"))]
     #[model_schema(name = "CustomName")]
-    pub type SomeTypeJson = String;
+    pub type SomeType = String;
 
     #[test]
     #[cfg(feature = "typescript")]
@@ -479,7 +479,7 @@ mod tests {
     /// It should appear in the generated TypeScript
     #[cfg(all(test, feature = "typescript"))]
     #[model_schema(name = "DocumentedId")]
-    pub type DocumentedIdJson = String;
+    pub type DocumentedId = String;
 
     #[test]
     #[cfg(feature = "typescript")]

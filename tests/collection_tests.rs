@@ -61,7 +61,7 @@ mod tests {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
     #[expect(clippy::struct_field_names, reason = "This is a test file")]
-    struct ComprehensiveHashMapTestJson {
+    struct ComprehensiveHashMapTest {
         // Simple primitives as values
         string_to_string: HashMap<String, String>,
         string_to_u64: HashMap<String, u64>,
@@ -114,7 +114,7 @@ mod tests {
     #[test]
     #[cfg(feature = "jsonschema")]
     fn test_comprehensive_hashmap_json_schema() {
-        let schema = ComprehensiveHashMapTestJson::json_schema();
+        let schema = ComprehensiveHashMapTest::json_schema();
         let properties = schema["properties"].as_object().unwrap();
 
         // Test simple primitive values
@@ -135,7 +135,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "typescript", feature = "zod"))]
     fn test_comprehensive_hashmap_typescript_generation() {
-        let ts_definition = ComprehensiveHashMapTestJson::ts_definition();
+        let ts_definition = ComprehensiveHashMapTest::ts_definition();
 
         // Test TypeScript type generation for simple values
         assert!(ts_definition.contains("string_to_string: Partial<Record<string, string>>;"));
@@ -164,7 +164,7 @@ mod tests {
         );
 
         // Test Zod schema generation for simple values - now in separate method
-        let zod_schema = ComprehensiveHashMapTestJson::zod_schema();
+        let zod_schema = ComprehensiveHashMapTest::zod_schema();
         assert!(zod_schema.contains("string_to_string: z.record(z.string(), z.string())"));
         assert!(zod_schema.contains("string_to_u64: z.record(z.string(), z.number().int())"));
         assert!(zod_schema.contains("string_to_i64: z.record(z.string(), z.number().int())"));
@@ -195,7 +195,7 @@ mod tests {
     // Test potential edge case with HashMap containing 64-bit integers
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-    struct HashMapWith64BitJson {
+    struct HashMapWith64Bit {
         id: String,
         u64_map: HashMap<String, u64>,
         i64_map: HashMap<String, i64>,
@@ -205,7 +205,7 @@ mod tests {
     #[test]
     #[cfg(feature = "jsonschema")]
     fn test_hashmap_with_64bit_json_schema() {
-        let schema = HashMapWith64BitJson::json_schema();
+        let schema = HashMapWith64Bit::json_schema();
 
         let properties = schema["properties"].as_object().unwrap();
 
@@ -238,7 +238,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "typescript", feature = "zod"))]
     fn test_hashmap_with_64bit_ts_definition() {
-        let ts_definition = HashMapWith64BitJson::ts_definition();
+        let ts_definition = HashMapWith64Bit::ts_definition();
 
         // Check TypeScript HashMap types
         assert!(ts_definition.contains("u64_map: Partial<Record<string, number>>;"));
@@ -246,7 +246,7 @@ mod tests {
         assert!(ts_definition.contains("mixed_map: Partial<Record<string, Array<number>>>;"));
 
         // Check Zod schema - now in separate method
-        let zod_schema = HashMapWith64BitJson::zod_schema();
+        let zod_schema = HashMapWith64Bit::zod_schema();
         assert!(zod_schema.contains("u64_map: z.record(z.string(), z.number().int())"));
         assert!(zod_schema.contains("i64_map: z.record(z.string(), z.number().int())"));
         assert!(zod_schema.contains("mixed_map: z.record(z.string(), z.array(z.number().int()))"));

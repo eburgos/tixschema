@@ -18,7 +18,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct EventWithDateJson {
+    struct EventWithDate {
         name: String,
         date: NaiveDate,
     }
@@ -27,7 +27,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct ScheduleJson {
+    struct Schedule {
         task: String,
         start_time: NaiveTime,
     }
@@ -36,7 +36,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct LocalEventJson {
+    struct LocalEvent {
         title: String,
         local_datetime: NaiveDateTime,
     }
@@ -45,7 +45,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct TimestampedRecordJson {
+    struct TimestampedRecord {
         id: String,
         created_at: DateTime<Utc>,
     }
@@ -54,7 +54,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct LocalTimestampJson {
+    struct LocalTimestamp {
         id: String,
         local_time: DateTime<Local>,
     }
@@ -63,7 +63,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct OptionalTimestampJson {
+    struct OptionalTimestamp {
         id: String,
         updated_at: Option<DateTime<Utc>>,
     }
@@ -72,7 +72,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct DateListJson {
+    struct DateList {
         name: String,
         dates: Vec<NaiveDate>,
     }
@@ -81,7 +81,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct DateMapJson {
+    struct DateMap {
         name: String,
         events: HashMap<String, DateTime<Utc>>,
     }
@@ -90,7 +90,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct AllChronoTypesJson {
+    struct AllChronoTypes {
         date: NaiveDate,
         time: NaiveTime,
         local_datetime: NaiveDateTime,
@@ -103,7 +103,7 @@ mod tests {
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
     #[cfg_attr(feature = "serde", serde(tag = "type"))]
-    pub enum FixedValueJson {
+    pub enum FixedValue {
         Alphanumeric(String),
         Decimal(f64),
         Integer(i64),
@@ -118,7 +118,7 @@ mod tests {
     #[test]
     #[cfg(feature = "typescript")]
     fn test_naive_date_typescript() {
-        let ts = EventWithDateJson::ts_definition();
+        let ts = EventWithDate::ts_definition();
         assert!(
             ts.contains("date: string;"),
             "NaiveDate should map to string. Got: {ts}"
@@ -128,7 +128,7 @@ mod tests {
     #[test]
     #[cfg(feature = "typescript")]
     fn test_naive_time_typescript() {
-        let ts = ScheduleJson::ts_definition();
+        let ts = Schedule::ts_definition();
         assert!(
             ts.contains("start_time: string;"),
             "NaiveTime should map to string. Got: {ts}"
@@ -138,7 +138,7 @@ mod tests {
     #[test]
     #[cfg(feature = "typescript")]
     fn test_naive_datetime_typescript() {
-        let ts = LocalEventJson::ts_definition();
+        let ts = LocalEvent::ts_definition();
         assert!(
             ts.contains("local_datetime: string;"),
             "NaiveDateTime should map to string. Got: {ts}"
@@ -148,7 +148,7 @@ mod tests {
     #[test]
     #[cfg(feature = "typescript")]
     fn test_datetime_utc_typescript() {
-        let ts = TimestampedRecordJson::ts_definition();
+        let ts = TimestampedRecord::ts_definition();
         assert!(
             ts.contains("created_at: string;"),
             "DateTime<Utc> should map to string. Got: {ts}"
@@ -158,7 +158,7 @@ mod tests {
     #[test]
     #[cfg(feature = "typescript")]
     fn test_datetime_local_typescript() {
-        let ts = LocalTimestampJson::ts_definition();
+        let ts = LocalTimestamp::ts_definition();
         assert!(
             ts.contains("local_time: string;"),
             "DateTime<Local> should map to string. Got: {ts}"
@@ -168,7 +168,7 @@ mod tests {
     #[test]
     #[cfg(feature = "typescript")]
     fn test_optional_datetime_typescript() {
-        let ts = OptionalTimestampJson::ts_definition();
+        let ts = OptionalTimestamp::ts_definition();
         assert!(
             ts.contains("updated_at: string | undefined;"),
             "Option<DateTime<Utc>> should map to string | undefined. Got: {ts}"
@@ -178,7 +178,7 @@ mod tests {
     #[test]
     #[cfg(feature = "typescript")]
     fn test_vec_date_typescript() {
-        let ts = DateListJson::ts_definition();
+        let ts = DateList::ts_definition();
         assert!(
             ts.contains("dates: Array<string>;"),
             "Vec<NaiveDate> should map to Array<string>. Got: {ts}"
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     #[cfg(feature = "typescript")]
     fn test_hashmap_datetime_typescript() {
-        let ts = DateMapJson::ts_definition();
+        let ts = DateMap::ts_definition();
         assert!(
             ts.contains("events: Partial<Record<string, string>>;"),
             "HashMap<String, DateTime<Utc>> should map to Partial<Record<string, string>>. Got: {ts}"
@@ -198,7 +198,7 @@ mod tests {
     #[test]
     #[cfg(feature = "typescript")]
     fn test_all_chrono_types_typescript() {
-        let ts = AllChronoTypesJson::ts_definition();
+        let ts = AllChronoTypes::ts_definition();
         assert!(
             ts.contains("date: string;"),
             "NaiveDate should be string. Got: {ts}"
@@ -226,7 +226,7 @@ mod tests {
     #[test]
     #[cfg(feature = "zod")]
     fn test_naive_date_zod() {
-        let zod = EventWithDateJson::zod_schema();
+        let zod = EventWithDate::zod_schema();
         assert!(
             zod.contains("date: z.iso.date(),"),
             "NaiveDate should use z.iso.date(). Got: {zod}"
@@ -236,7 +236,7 @@ mod tests {
     #[test]
     #[cfg(feature = "zod")]
     fn test_naive_time_zod() {
-        let zod = ScheduleJson::zod_schema();
+        let zod = Schedule::zod_schema();
         assert!(
             zod.contains("start_time: z.iso.time(),"),
             "NaiveTime should use z.iso.time(). Got: {zod}"
@@ -246,7 +246,7 @@ mod tests {
     #[test]
     #[cfg(feature = "zod")]
     fn test_naive_datetime_zod() {
-        let zod = LocalEventJson::zod_schema();
+        let zod = LocalEvent::zod_schema();
         assert!(
             zod.contains("local_datetime: z.iso.datetime({ local: true }),"),
             "NaiveDateTime should use z.iso.datetime({{ local: true }}). Got: {zod}"
@@ -256,7 +256,7 @@ mod tests {
     #[test]
     #[cfg(feature = "zod")]
     fn test_datetime_utc_zod() {
-        let zod = TimestampedRecordJson::zod_schema();
+        let zod = TimestampedRecord::zod_schema();
         assert!(
             zod.contains("created_at: z.iso.datetime(),"),
             "DateTime<Utc> should use z.iso.datetime(). Got: {zod}"
@@ -266,7 +266,7 @@ mod tests {
     #[test]
     #[cfg(feature = "zod")]
     fn test_datetime_local_zod() {
-        let zod = LocalTimestampJson::zod_schema();
+        let zod = LocalTimestamp::zod_schema();
         assert!(
             zod.contains("local_time: z.iso.datetime(),"),
             "DateTime<Local> should use z.iso.datetime(). Got: {zod}"
@@ -276,7 +276,7 @@ mod tests {
     #[test]
     #[cfg(feature = "zod")]
     fn test_optional_datetime_zod() {
-        let zod = OptionalTimestampJson::zod_schema();
+        let zod = OptionalTimestamp::zod_schema();
         assert!(
             zod.contains("updated_at: z.union([z.iso.datetime(), z.undefined()]),"),
             "Option<DateTime<Utc>> should use z.union([...datetime(), z.undefined()]). Got: {zod}"
@@ -286,7 +286,7 @@ mod tests {
     #[test]
     #[cfg(feature = "zod")]
     fn test_vec_date_zod() {
-        let zod = DateListJson::zod_schema();
+        let zod = DateList::zod_schema();
         assert!(
             zod.contains("dates: z.array(z.iso.date()),"),
             "Vec<NaiveDate> should use z.array(z.iso.date()). Got: {zod}"
@@ -296,7 +296,7 @@ mod tests {
     #[test]
     #[cfg(feature = "zod")]
     fn test_hashmap_datetime_zod() {
-        let zod = DateMapJson::zod_schema();
+        let zod = DateMap::zod_schema();
         assert!(
             zod.contains("events: z.record(z.string(), z.iso.datetime()),"),
             "HashMap<String, DateTime<Utc>> should use z.record(z.string(), z.iso.datetime()). Got: {zod}"
@@ -308,7 +308,7 @@ mod tests {
     #[test]
     #[cfg(feature = "jsonschema")]
     fn test_naive_date_json_schema() {
-        let schema = EventWithDateJson::json_schema();
+        let schema = EventWithDate::json_schema();
         let properties = schema["properties"].as_object().unwrap();
         let date_prop = &properties["date"];
         assert_eq!(date_prop["type"], "string");
@@ -318,7 +318,7 @@ mod tests {
     #[test]
     #[cfg(feature = "jsonschema")]
     fn test_naive_time_json_schema() {
-        let schema = ScheduleJson::json_schema();
+        let schema = Schedule::json_schema();
         let properties = schema["properties"].as_object().unwrap();
         let time_prop = &properties["start_time"];
         assert_eq!(time_prop["type"], "string");
@@ -328,7 +328,7 @@ mod tests {
     #[test]
     #[cfg(feature = "jsonschema")]
     fn test_naive_datetime_json_schema() {
-        let schema = LocalEventJson::json_schema();
+        let schema = LocalEvent::json_schema();
         let properties = schema["properties"].as_object().unwrap();
         let datetime_prop = &properties["local_datetime"];
         assert_eq!(datetime_prop["type"], "string");
@@ -338,7 +338,7 @@ mod tests {
     #[test]
     #[cfg(feature = "jsonschema")]
     fn test_datetime_utc_json_schema() {
-        let schema = TimestampedRecordJson::json_schema();
+        let schema = TimestampedRecord::json_schema();
         let properties = schema["properties"].as_object().unwrap();
         let datetime_prop = &properties["created_at"];
         assert_eq!(datetime_prop["type"], "string");
@@ -348,7 +348,7 @@ mod tests {
     #[test]
     #[cfg(feature = "jsonschema")]
     fn test_vec_date_json_schema() {
-        let schema = DateListJson::json_schema();
+        let schema = DateList::json_schema();
         let properties = schema["properties"].as_object().unwrap();
         let dates_prop = &properties["dates"];
         assert_eq!(dates_prop["type"], "array");
@@ -361,7 +361,7 @@ mod tests {
     #[test]
     #[cfg(feature = "typescript")]
     fn test_enum_with_datetime_typescript() {
-        let ts = FixedValueJson::ts_definition();
+        let ts = FixedValue::ts_definition();
         // The enum should compile and generate TypeScript
         assert!(
             ts.contains("FixedValue"),
@@ -377,7 +377,7 @@ mod tests {
     #[test]
     #[cfg(feature = "zod")]
     fn test_enum_with_datetime_zod() {
-        let zod = FixedValueJson::zod_schema();
+        let zod = FixedValue::zod_schema();
         // The enum should compile and generate Zod schema
         assert!(
             zod.contains("FixedValue$Schema"),
@@ -390,17 +390,17 @@ mod tests {
     #[test]
     fn test_chrono_compilation_smoke_test() {
         // This test ensures all chrono types compile without panics
-        let event = EventWithDateJson {
+        let event = EventWithDate {
             name: "Test Event".to_string(),
             date: NaiveDate::from_ymd_opt(2025, 11, 29).unwrap(),
         };
 
-        let schedule = ScheduleJson {
+        let schedule = Schedule {
             task: "Meeting".to_string(),
             start_time: NaiveTime::from_hms_opt(14, 30, 0).unwrap(),
         };
 
-        let timestamp = TimestampedRecordJson {
+        let timestamp = TimestampedRecord {
             id: "123".to_string(),
             created_at: Utc::now(),
         };

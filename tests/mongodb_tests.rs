@@ -77,7 +77,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct UserJson {
+    struct User {
         id: ObjectId,
         name: String,
         email: Option<String>,
@@ -87,7 +87,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct UserWithOptionalIdJson {
+    struct UserWithOptionalId {
         id: Option<ObjectId>,
         name: String,
         email: String,
@@ -97,7 +97,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct UserWithObjectIdArrayJson {
+    struct UserWithObjectIdArray {
         id: ObjectId,
         name: String,
         friend_ids: Vec<ObjectId>,
@@ -107,7 +107,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct UserWithObjectIdMapJson {
+    struct UserWithObjectIdMap {
         id: ObjectId,
         name: String,
         relationships: HashMap<String, ObjectId>,
@@ -117,7 +117,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct DocumentJson {
+    struct Document {
         id: ObjectId,
         title: String,
         author_id: ObjectId,
@@ -127,11 +127,11 @@ mod tests {
         nested_refs: HashMap<String, Vec<ObjectId>>,
     }
 
-    // Test that includes DocumentJson
+    // Test that includes Document
     #[test]
     #[cfg(feature = "jsonschema")]
     fn test_document_json() {
-        let schema = DocumentJson::json_schema();
+        let schema = Document::json_schema();
         let properties = schema["properties"].as_object().unwrap();
         let metadata_prop = &properties["metadata"];
         assert_eq!(metadata_prop["type"], "object");
@@ -146,17 +146,17 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct UserWithHashMapObjectIdJson {
+    struct UserWithHashMapObjectId {
         id: ObjectId,
         name: String,
         relationships: HashMap<String, ObjectId>,
     }
 
-    // Test that includes UserWithHashMapObjectIdJson
+    // Test that includes UserWithHashMapObjectId
     #[test]
     #[cfg(feature = "jsonschema")]
     fn test_user_with_hashmap_object_id_json() {
-        let schema = UserWithHashMapObjectIdJson::json_schema();
+        let schema = UserWithHashMapObjectId::json_schema();
         let properties = schema["properties"].as_object().unwrap();
         let relationships_prop = &properties["relationships"];
         assert_eq!(relationships_prop["type"], "object");
@@ -171,7 +171,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct ComplexDocumentJson {
+    struct ComplexDocument {
         id: ObjectId,
         title: String,
         author_id: ObjectId,
@@ -185,7 +185,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct PostJson {
+    struct Post {
         id: ObjectId,
         title: String,
         author_id: ObjectId,
@@ -196,7 +196,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct UserWithOtherHashMapObjectIdJson {
+    struct UserWithOtherHashMapObjectId {
         id: ObjectId,
         name: String,
         metadata: HashMap<String, ObjectId>,
@@ -208,11 +208,11 @@ mod tests {
         }
     }
 
-    // Test that includes UserWithOtherHashMapObjectIdJson
+    // Test that includes UserWithOtherHashMapObjectId
     #[test]
     #[cfg(feature = "jsonschema")]
     fn test_user_with_other_hashmap_object_id_json() {
-        let schema = UserWithOtherHashMapObjectIdJson::json_schema();
+        let schema = UserWithOtherHashMapObjectId::json_schema();
         let properties = schema["properties"].as_object().unwrap();
         let metadata_prop = &properties["metadata"];
         assert_eq!(metadata_prop["type"], "object");
@@ -226,7 +226,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "object_id", feature = "typescript", feature = "zod"))]
     fn test_basic_object_id_types() {
-        let ts_definition = UserJson::ts_definition();
+        let ts_definition = User::ts_definition();
 
         // TypeScript should use ObjectId type
         assert!(ts_definition.contains("id: ObjectId;"));
@@ -234,7 +234,7 @@ mod tests {
         assert!(ts_definition.contains("email: string | undefined;"));
 
         // Zod schema should use the MongoDB ObjectId structure with regex validation - now in separate method
-        let zod_schema = UserJson::zod_schema();
+        let zod_schema = User::zod_schema();
         assert!(zod_schema.contains("id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }),"));
         assert!(zod_schema.contains("name: z.string(),"));
         assert!(zod_schema.contains("email: z.union([z.string(), z.undefined()]),"));
@@ -243,7 +243,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "object_id", feature = "jsonschema"))]
     fn test_object_id_json_schema() {
-        let schema = UserJson::json_schema();
+        let schema = User::json_schema();
         let properties = schema["properties"].as_object().unwrap();
 
         // Check basic ObjectId field
@@ -260,7 +260,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "object_id", feature = "typescript", feature = "zod"))]
     fn test_optional_object_id() {
-        let ts_definition = UserWithOptionalIdJson::ts_definition();
+        let ts_definition = UserWithOptionalId::ts_definition();
 
         // TypeScript should use ObjectId type
         assert!(ts_definition.contains("id: ObjectId | undefined;"));
@@ -268,7 +268,7 @@ mod tests {
         assert!(ts_definition.contains("email: string;"));
 
         // Zod schema should use the MongoDB ObjectId structure with regex validation - now in separate method
-        let zod_schema = UserWithOptionalIdJson::zod_schema();
+        let zod_schema = UserWithOptionalId::zod_schema();
         assert!(zod_schema.contains("id: z.union([z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }), z.undefined()]),"));
         assert!(zod_schema.contains("name: z.string(),"));
         assert!(zod_schema.contains("email: z.string(),"));
@@ -277,7 +277,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "object_id", feature = "zod"))]
     fn test_optional_object_id_zod_schema() {
-        let zod_schema = UserWithOptionalIdJson::zod_schema();
+        let zod_schema = UserWithOptionalId::zod_schema();
 
         // Should handle optional ObjectId correctly
         assert!(zod_schema.contains("id: z.union([z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }), z.undefined()]),"));
@@ -288,7 +288,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "object_id", feature = "typescript", feature = "zod"))]
     fn test_object_id_arrays() {
-        let ts_definition = UserWithObjectIdArrayJson::ts_definition();
+        let ts_definition = UserWithObjectIdArray::ts_definition();
 
         // TypeScript should use ObjectId type
         assert!(ts_definition.contains("id: ObjectId;"));
@@ -296,7 +296,7 @@ mod tests {
         assert!(ts_definition.contains("friend_ids: Array<ObjectId>;"));
 
         // Zod schema should use the MongoDB ObjectId structure with regex validation - now in separate method
-        let zod_schema = UserWithObjectIdArrayJson::zod_schema();
+        let zod_schema = UserWithObjectIdArray::zod_schema();
         assert!(zod_schema.contains("id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }),"));
         assert!(zod_schema.contains("name: z.string(),"));
         assert!(zod_schema.contains("friend_ids: z.array(z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) })),"));
@@ -305,7 +305,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "object_id", feature = "jsonschema"))]
     fn test_object_id_arrays_json_schema() {
-        let schema = UserWithObjectIdArrayJson::json_schema();
+        let schema = UserWithObjectIdArray::json_schema();
         let properties = schema["properties"].as_object().unwrap();
 
         // Check array of ObjectId
@@ -322,7 +322,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "object_id", feature = "zod"))]
     fn test_object_id_arrays_zod_schema() {
-        let zod_schema = UserWithObjectIdArrayJson::zod_schema();
+        let zod_schema = UserWithObjectIdArray::zod_schema();
 
         // Should handle array of ObjectId correctly
         assert!(zod_schema.contains("friend_ids: z.array(z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) })),"));
@@ -331,7 +331,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "object_id", feature = "typescript", feature = "zod"))]
     fn test_hashmap_with_object_id_values() {
-        let ts_definition = UserWithObjectIdMapJson::ts_definition();
+        let ts_definition = UserWithObjectIdMap::ts_definition();
 
         // TypeScript should use ObjectId type
         assert!(ts_definition.contains("id: ObjectId;"));
@@ -339,7 +339,7 @@ mod tests {
         assert!(ts_definition.contains("relationships: Partial<Record<string, ObjectId>>;"));
 
         // Zod schema should use the MongoDB ObjectId structure with regex validation - now in separate method
-        let zod_schema = UserWithObjectIdMapJson::zod_schema();
+        let zod_schema = UserWithObjectIdMap::zod_schema();
         assert!(zod_schema.contains("id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }),"));
         assert!(zod_schema.contains("name: z.string(),"));
         assert!(zod_schema.contains("relationships: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) })),"));
@@ -348,7 +348,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "object_id", feature = "jsonschema"))]
     fn test_hashmap_object_id_json_schema() {
-        let schema = UserWithObjectIdMapJson::json_schema();
+        let schema = UserWithObjectIdMap::json_schema();
         let properties = schema["properties"].as_object().unwrap();
 
         // Check HashMap<String, ObjectId>
@@ -365,7 +365,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "object_id", feature = "zod"))]
     fn test_hashmap_object_id_zod_schema() {
-        let zod_schema = UserWithObjectIdMapJson::zod_schema();
+        let zod_schema = UserWithObjectIdMap::zod_schema();
 
         // Should handle HashMap<String, ObjectId> correctly
         assert!(zod_schema.contains("relationships: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) })),"));
@@ -374,7 +374,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "object_id", feature = "typescript", feature = "zod"))]
     fn test_complex_nested_object_id_structures() {
-        let ts_definition = ComplexDocumentJson::ts_definition();
+        let ts_definition = ComplexDocument::ts_definition();
 
         // TypeScript should handle all ObjectId variations
         assert!(ts_definition.contains("id: ObjectId;"));
@@ -385,7 +385,7 @@ mod tests {
         assert!(ts_definition.contains("nested_refs: Partial<Record<string, Array<ObjectId>>>;"));
 
         // Zod schema should handle all ObjectId variations with regex validation - now in separate method
-        let zod_schema = ComplexDocumentJson::zod_schema();
+        let zod_schema = ComplexDocument::zod_schema();
         let regex_pattern =
             "z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" })";
         assert!(zod_schema.contains(&format!("id: z.object({{ $oid: {regex_pattern} }}),")));
@@ -409,7 +409,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "object_id", feature = "jsonschema"))]
     fn test_complex_object_id_json_schema() {
-        let schema = ComplexDocumentJson::json_schema();
+        let schema = ComplexDocument::json_schema();
         let properties = schema["properties"].as_object().unwrap();
 
         // Test nested_refs: HashMap<String, Vec<ObjectId>>
@@ -427,7 +427,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "object_id", feature = "zod"))]
     fn test_complex_object_id_zod_schema() {
-        let zod_schema = ComplexDocumentJson::zod_schema();
+        let zod_schema = ComplexDocument::zod_schema();
 
         // Test that complex nested ObjectId structures work
         let regex_pattern =
@@ -440,7 +440,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "object_id", feature = "jsonschema"))]
     fn test_json_schema_optional_parent() {
-        let schema = PostJson::json_schema();
+        let schema = Post::json_schema();
         let properties = schema["properties"].as_object().unwrap();
 
         // parent_id should be optional
@@ -458,7 +458,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "object_id", feature = "zod"))]
     fn test_object_id_zod_schema() {
-        let zod_schema = PostJson::zod_schema();
+        let zod_schema = Post::zod_schema();
 
         // Should handle optional ObjectId correctly
         assert!(zod_schema.contains("parent_id: z.union([z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }), z.undefined()]),"));
@@ -467,7 +467,7 @@ mod tests {
     #[test]
     fn test_object_id_compilation_smoke_test() {
         // This test ensures all ObjectId types compile without panics
-        let user = UserJson {
+        let user = User {
             id: ObjectId::new(),
             name: "Test User".to_string(),
             email: Some("test@example.com".to_string()),

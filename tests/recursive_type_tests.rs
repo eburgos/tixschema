@@ -16,33 +16,33 @@ mod tests {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
     #[serde(tag = "type", content = "value")]
-    pub enum RecursiveVecEnumJson {
+    pub enum RecursiveVecEnum {
         Text(String),
-        Array(Vec<RecursiveVecEnumJson>),
+        Array(Vec<RecursiveVecEnum>),
     }
 
     /// Recursive enum with HashMap of self
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
     #[serde(tag = "type", content = "value")]
-    pub enum RecursiveMapEnumJson {
+    pub enum RecursiveMapEnum {
         Number(i64),
-        Object(HashMap<String, RecursiveMapEnumJson>),
+        Object(HashMap<String, RecursiveMapEnum>),
     }
 
     /// Recursive struct with Vec of self
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub struct TreeNodeJson {
+    pub struct TreeNode {
         pub val: String,
-        pub children: Vec<TreeNodeJson>,
+        pub children: Vec<TreeNode>,
     }
 
     /// Complex DynamicValue-like enum with multiple recursive variants
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
     #[serde(tag = "type", content = "value")]
-    pub enum DynamicValueTestJson {
+    pub enum DynamicValueTest {
         #[serde(rename = "string")]
         String(String),
         #[serde(rename = "integer")]
@@ -52,16 +52,16 @@ mod tests {
         #[serde(rename = "decimal")]
         Decimal(f64),
         #[serde(rename = "array")]
-        Array(Vec<DynamicValueTestJson>),
+        Array(Vec<DynamicValueTest>),
         #[serde(rename = "object")]
-        Object(HashMap<String, DynamicValueTestJson>),
+        Object(HashMap<String, DynamicValueTest>),
     }
 
     /// Non-recursive enum for comparison
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
     #[serde(tag = "type", content = "value")]
-    pub enum SimpleEnumJson {
+    pub enum SimpleEnum {
         Text(String),
         Number(i64),
         Flag(bool),
@@ -70,7 +70,7 @@ mod tests {
     /// Non-recursive struct for comparison
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub struct SimpleStructJson {
+    pub struct SimpleStruct {
         pub name: String,
         pub age: u32,
         pub active: bool,
@@ -79,7 +79,7 @@ mod tests {
     /// Address struct for sibling reference test
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub struct AddressJson {
+    pub struct Address {
         pub street: String,
         pub city: String,
     }
@@ -87,18 +87,18 @@ mod tests {
     /// Person struct referencing Address (not recursive)
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub struct PersonJson {
+    pub struct Person {
         pub name: String,
-        pub address: AddressJson,
+        pub address: Address,
     }
 
     /// Recursive enum with named struct variant
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
     #[serde(tag = "type")]
-    pub enum TreeEnumJson {
+    pub enum TreeEnum {
         Leaf { text: String },
-        Branch { nodes: Vec<TreeEnumJson> },
+        Branch { nodes: Vec<TreeEnum> },
     }
 
     // ========== Tests ==========
@@ -106,7 +106,7 @@ mod tests {
     /// Test 1: Recursive enum with Vec of self
     #[test]
     fn test_recursive_enum_with_vec() {
-        let zod = RecursiveVecEnumJson::zod_schema();
+        let zod = RecursiveVecEnum::zod_schema();
         println!("Generated Zod:\n{}", zod);
 
         // Should contain getter syntax for Array variant (recursive)
@@ -125,7 +125,7 @@ mod tests {
     /// Test 2: Recursive enum with HashMap of self
     #[test]
     fn test_recursive_enum_with_hashmap() {
-        let zod = RecursiveMapEnumJson::zod_schema();
+        let zod = RecursiveMapEnum::zod_schema();
         println!("Generated Zod:\n{}", zod);
 
         // Should contain getter syntax for Object variant (recursive)
@@ -144,7 +144,7 @@ mod tests {
     /// Test 3: Recursive struct with Vec of self
     #[test]
     fn test_recursive_struct() {
-        let zod = TreeNodeJson::zod_schema();
+        let zod = TreeNode::zod_schema();
         println!("Generated Zod:\n{}", zod);
 
         // Should contain getter syntax for children (recursive)
@@ -163,7 +163,7 @@ mod tests {
     /// Test 4: Complex DynamicValue-like enum with multiple recursive variants
     #[test]
     fn test_complex_dynamic_value() {
-        let zod = DynamicValueTestJson::zod_schema();
+        let zod = DynamicValueTest::zod_schema();
         println!("Generated Zod:\n{}", zod);
 
         // Count getter occurrences - should have exactly 2 (array and object)
@@ -191,7 +191,7 @@ mod tests {
     /// Test 5: Non-recursive types should not use getter syntax
     #[test]
     fn test_non_recursive_enum_no_getter() {
-        let zod = SimpleEnumJson::zod_schema();
+        let zod = SimpleEnum::zod_schema();
         println!("Generated Zod:\n{}", zod);
 
         // Should NOT contain getter syntax
@@ -204,7 +204,7 @@ mod tests {
     /// Test 6: Non-recursive struct should not use getter syntax
     #[test]
     fn test_non_recursive_struct_no_getter() {
-        let zod = SimpleStructJson::zod_schema();
+        let zod = SimpleStruct::zod_schema();
         println!("Generated Zod:\n{}", zod);
 
         // Should NOT contain getter syntax
@@ -217,7 +217,7 @@ mod tests {
     /// Test 7: Struct referencing other types (not self) should not use getter
     #[test]
     fn test_struct_with_sibling_type_no_getter() {
-        let zod = PersonJson::zod_schema();
+        let zod = Person::zod_schema();
         println!("Generated Zod:\n{}", zod);
 
         // Should NOT contain getter syntax (Address is a different type, not self)
@@ -230,7 +230,7 @@ mod tests {
     /// Test 8: Named struct variant with recursive field
     #[test]
     fn test_recursive_named_struct_variant() {
-        let zod = TreeEnumJson::zod_schema();
+        let zod = TreeEnum::zod_schema();
         println!("Generated Zod:\n{}", zod);
 
         // Should contain getter syntax for nodes field in Branch variant

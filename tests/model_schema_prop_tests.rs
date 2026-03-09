@@ -27,7 +27,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct AccountContextJson {
+    struct AccountContext {
         pub aud: String,
         pub exp: i64,
         pub iat: i64,
@@ -43,7 +43,7 @@ mod tests {
     #[test]
     #[cfg(feature = "typescript")]
     fn test_string_literal_typescript() {
-        let ts_definition = AccountContextJson::ts_definition();
+        let ts_definition = AccountContext::ts_definition();
 
         // Check that the literal field generates the correct TypeScript type
         assert!(ts_definition.contains("iss: \"Tixena\";"));
@@ -65,7 +65,7 @@ mod tests {
     #[test]
     #[cfg(feature = "zod")]
     fn test_string_literal_zod() {
-        let zod_schema = AccountContextJson::zod_schema();
+        let zod_schema = AccountContext::zod_schema();
 
         // Check that the literal field generates the correct Zod schema
         assert!(zod_schema.contains("iss: z.literal(\"Tixena\")"));
@@ -86,7 +86,7 @@ mod tests {
     #[test]
     #[cfg(feature = "jsonschema")]
     fn test_string_literal_json_schema() {
-        let schema = AccountContextJson::json_schema();
+        let schema = AccountContext::json_schema();
         let properties = schema["properties"].as_object().unwrap();
 
         // Check that the literal field has the correct JSON schema
@@ -125,7 +125,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct MultipleLiteralsJson {
+    struct MultipleLiterals {
         pub id: String,
         #[model_schema_prop(literal = "fixed_type")]
         pub type_field: String,
@@ -137,7 +137,7 @@ mod tests {
     #[test]
     #[cfg(feature = "typescript")]
     fn test_multiple_literals_typescript() {
-        let ts_definition = MultipleLiteralsJson::ts_definition();
+        let ts_definition = MultipleLiterals::ts_definition();
 
         // Check multiple literals
         assert!(ts_definition.contains("type_field: \"fixed_type\";"));
@@ -151,7 +151,7 @@ mod tests {
     #[test]
     #[cfg(feature = "zod")]
     fn test_multiple_literals_zod() {
-        let zod_schema = MultipleLiteralsJson::zod_schema();
+        let zod_schema = MultipleLiterals::zod_schema();
 
         // Check multiple literals
         assert!(zod_schema.contains("type_field: z.literal(\"fixed_type\")"));
@@ -175,7 +175,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct OptionalLiteralJson {
+    struct OptionalLiteral {
         pub id: String,
         #[model_schema_prop(literal = "optional_literal")]
         pub optional_type: Option<String>,
@@ -184,7 +184,7 @@ mod tests {
     #[test]
     #[cfg(feature = "typescript")]
     fn test_optional_literal_typescript() {
-        let ts_definition = OptionalLiteralJson::ts_definition();
+        let ts_definition = OptionalLiteral::ts_definition();
 
         // Check that optional literal works correctly
         assert!(ts_definition.contains("optional_type: \"optional_literal\" | undefined;"));
@@ -194,7 +194,7 @@ mod tests {
     #[test]
     #[cfg(feature = "zod")]
     fn test_optional_literal_zod() {
-        let zod_schema = OptionalLiteralJson::zod_schema();
+        let zod_schema = OptionalLiteral::zod_schema();
 
         // Check that optional literal works correctly
         assert!(
@@ -218,7 +218,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct ArrayLiteralJson {
+    struct ArrayLiteral {
         pub id: String,
         #[model_schema_prop(literal = "array_item")]
         pub literal_array: Vec<String>,
@@ -227,7 +227,7 @@ mod tests {
     #[test]
     #[cfg(feature = "typescript")]
     fn test_array_literal_typescript() {
-        let ts_definition = ArrayLiteralJson::ts_definition();
+        let ts_definition = ArrayLiteral::ts_definition();
 
         // Check that array of literals works correctly
         assert!(ts_definition.contains("literal_array: Array<\"array_item\">;"));
@@ -237,7 +237,7 @@ mod tests {
     #[test]
     #[cfg(feature = "zod")]
     fn test_array_literal_zod() {
-        let zod_schema = ArrayLiteralJson::zod_schema();
+        let zod_schema = ArrayLiteral::zod_schema();
 
         // Check that array of literals works correctly
         assert!(zod_schema.contains("literal_array: z.array(z.literal(\"array_item\"))"));
@@ -247,7 +247,7 @@ mod tests {
     #[test]
     #[cfg(feature = "jsonschema")]
     fn test_array_literal_json_schema() {
-        let schema = ArrayLiteralJson::json_schema();
+        let schema = ArrayLiteral::json_schema();
         let properties = schema["properties"].as_object().unwrap();
 
         // Check that array of literals has correct JSON schema
@@ -270,7 +270,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct MinLengthTestJson {
+    struct MinLengthTest {
         #[model_schema_prop(as = String, minLength = 1)]
         pub name: String,
         #[model_schema_prop(as = String, minLength = 5)]
@@ -290,7 +290,7 @@ mod tests {
     #[test]
     #[cfg(feature = "typescript")]
     fn test_min_length_typescript() {
-        let ts_definition = MinLengthTestJson::ts_definition();
+        let ts_definition = MinLengthTest::ts_definition();
 
         // Check that all fields have correct TypeScript types
         assert!(ts_definition.contains("name: string;"));
@@ -311,7 +311,7 @@ mod tests {
     #[test]
     #[cfg(feature = "zod")]
     fn test_min_length_zod() {
-        let zod_schema = MinLengthTestJson::zod_schema();
+        let zod_schema = MinLengthTest::zod_schema();
 
         // Check that minLength fields have correct validation
         assert!(zod_schema.contains("name: z.string().min(1)"));
@@ -329,7 +329,7 @@ mod tests {
     #[test]
     #[cfg(feature = "jsonschema")]
     fn test_min_length_json_schema() {
-        let schema = MinLengthTestJson::json_schema();
+        let schema = MinLengthTest::json_schema();
         let properties = schema["properties"].as_object().unwrap();
 
         // Check that minLength fields have the correct JSON schema
@@ -374,7 +374,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct CombinedTestJson {
+    struct CombinedTest {
         #[model_schema_prop(as = String, literal = "fixed", minLength = 10)]
         pub fixed_field: String,
         #[model_schema_prop(as = String, minLength = 1)]
@@ -384,7 +384,7 @@ mod tests {
     #[test]
     #[cfg(feature = "typescript")]
     fn test_combined_literal_minlength_typescript() {
-        let ts_definition = CombinedTestJson::ts_definition();
+        let ts_definition = CombinedTest::ts_definition();
 
         // Literal should take precedence - should be a literal type, not a string with minLength
         assert!(ts_definition.contains("fixed_field: \"fixed\";"));
@@ -397,7 +397,7 @@ mod tests {
     #[test]
     #[cfg(feature = "zod")]
     fn test_combined_literal_minlength_zod() {
-        let zod_schema = CombinedTestJson::zod_schema();
+        let zod_schema = CombinedTest::zod_schema();
 
         // Literal should take precedence - should be a literal, not a string with minLength
         assert!(zod_schema.contains("fixed_field: z.literal(\"fixed\")"));
@@ -407,7 +407,7 @@ mod tests {
     #[test]
     #[cfg(feature = "jsonschema")]
     fn test_combined_literal_minlength_json_schema() {
-        let schema = CombinedTestJson::json_schema();
+        let schema = CombinedTest::json_schema();
         let properties = schema["properties"].as_object().unwrap();
 
         // Literal should take precedence

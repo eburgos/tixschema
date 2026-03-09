@@ -39,7 +39,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct AddressJson {
+    struct Address {
         street: String,
         city: String,
         zip_code: String,
@@ -57,18 +57,18 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct UserWithAddressJson {
+    struct UserWithAddress {
         id: String,
         name: String,
-        address: AddressJson,
-        backup_addresses: Vec<AddressJson>,
+        address: Address,
+        backup_addresses: Vec<Address>,
     }
 
     #[test]
     #[cfg(feature = "jsonschema")]
     fn test_nested_struct_json_schema() {
-        let user_schema = UserWithAddressJson::json_schema();
-        let address_schema = AddressJson::json_schema();
+        let user_schema = UserWithAddress::json_schema();
+        let address_schema = Address::json_schema();
 
         let properties = user_schema["properties"].as_object().unwrap();
 
@@ -90,8 +90,8 @@ mod tests {
     #[test]
     #[cfg(all(feature = "typescript", feature = "zod"))]
     fn test_nested_struct_ts_definition() {
-        let user_definition = UserWithAddressJson::ts_definition();
-        let address_definition = AddressJson::ts_definition();
+        let user_definition = UserWithAddress::ts_definition();
+        let address_definition = Address::ts_definition();
 
         // Check that nested types are referenced properly (without Json suffix)
         assert!(user_definition.contains("address: Address;"));
@@ -104,7 +104,7 @@ mod tests {
         assert!(address_definition.contains("zip_code: string;"));
 
         // Check Zod schema references (without Json suffix) - now in separate method
-        let user_zod_schema = UserWithAddressJson::zod_schema();
+        let user_zod_schema = UserWithAddress::zod_schema();
         assert!(user_zod_schema.contains("address: Address$Schema"));
         assert!(user_zod_schema.contains("backup_addresses: z.array(Address$Schema)"));
     }
@@ -122,7 +122,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct OriginalBugReproductionJson {
+    struct OriginalBugReproduction {
         // This was the original failing case
         problematic_map: HashMap<String, Vec<u64>>,
 
@@ -139,7 +139,7 @@ mod tests {
     #[test]
     #[cfg(feature = "jsonschema")]
     fn test_original_bug_reproduction_json_schema() {
-        let schema = OriginalBugReproductionJson::json_schema();
+        let schema = OriginalBugReproduction::json_schema();
 
         let properties = schema["properties"].as_object().unwrap();
 
@@ -195,7 +195,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "typescript", feature = "zod"))]
     fn test_original_bug_reproduction_typescript() {
-        let ts_definition = OriginalBugReproductionJson::ts_definition();
+        let ts_definition = OriginalBugReproduction::ts_definition();
 
         // TypeScript should use Array<T> syntax for the HashMap values
         assert!(ts_definition.contains("problematic_map: Partial<Record<string, Array<number>>>;"));
@@ -213,7 +213,7 @@ mod tests {
         );
 
         // Zod schemas should use z.array(...) for the HashMap values - now in separate method
-        let zod_schema = OriginalBugReproductionJson::zod_schema();
+        let zod_schema = OriginalBugReproduction::zod_schema();
         assert!(
             zod_schema.contains("problematic_map: z.record(z.string(), z.array(z.number().int()))")
         );
@@ -245,7 +245,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct SimpleComplexTestJson {
+    struct SimpleComplexTest {
         // Start with just triple-nested to see what fails
         nested_map_of_arrays: HashMap<String, Vec<HashMap<String, u64>>>,
     }
@@ -255,7 +255,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct ReallyComplexTestJson {
+    struct ReallyComplexTest {
         // The quadruple nested case that was causing issues
         quadruple_nested: HashMap<String, Vec<HashMap<String, Vec<HashMap<String, u64>>>>>,
 
@@ -266,7 +266,7 @@ mod tests {
     #[test]
     #[cfg(feature = "jsonschema")]
     fn test_complex_nested_maps_json_schema() {
-        let schema = SimpleComplexTestJson::json_schema();
+        let schema = SimpleComplexTest::json_schema();
         let properties = schema["properties"].as_object().unwrap();
 
         // Test the triple-nested structure: HashMap<String, Vec<HashMap<String, u64>>>
@@ -288,7 +288,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "typescript", feature = "zod"))]
     fn test_complex_nested_maps_typescript() {
-        let ts_definition = SimpleComplexTestJson::ts_definition();
+        let ts_definition = SimpleComplexTest::ts_definition();
 
         // TypeScript should use the correct nested structure
         assert!(ts_definition.contains(
@@ -296,7 +296,7 @@ mod tests {
         ));
 
         // Zod schema should use the correct nested structure - now in separate method
-        let zod_schema = SimpleComplexTestJson::zod_schema();
+        let zod_schema = SimpleComplexTest::zod_schema();
         assert!(zod_schema.contains("nested_map_of_arrays: z.record(z.string(), z.array(z.record(z.string(), z.number().int()))),"));
     }
 
@@ -304,8 +304,8 @@ mod tests {
     #[cfg(all(feature = "jsonschema", feature = "typescript"))]
     fn test_quadruple_nested_maps_compilation() {
         // If this compiles without panic, it's a huge success!
-        let schema = ReallyComplexTestJson::json_schema();
-        let ts_definition = ReallyComplexTestJson::ts_definition();
+        let schema = ReallyComplexTest::json_schema();
+        let ts_definition = ReallyComplexTest::ts_definition();
 
         // Check that the schema contains our fields
         let properties = schema["properties"].as_object().unwrap();
@@ -324,8 +324,8 @@ mod tests {
     #[cfg(all(feature = "jsonschema", feature = "typescript", feature = "serde"))]
     fn test_quadruple_nested_maps_compilation_serde() {
         // If this compiles without panic, it's a huge success!
-        let schema = ReallyComplexTestJson::json_schema();
-        let ts_definition = ReallyComplexTestJson::ts_definition();
+        let schema = ReallyComplexTest::json_schema();
+        let ts_definition = ReallyComplexTest::ts_definition();
 
         // Check that the schema contains our fields
         let properties = schema["properties"].as_object().unwrap();

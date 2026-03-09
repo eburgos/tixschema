@@ -34,7 +34,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct LargeNumbersJson {
+    struct LargeNumbers {
         id: String,
         large_unsigned: u64,
         large_signed: i64,
@@ -47,7 +47,7 @@ mod tests {
     #[test]
     #[cfg(feature = "jsonschema")]
     fn test_64bit_integers_json_schema() {
-        let schema = LargeNumbersJson::json_schema();
+        let schema = LargeNumbers::json_schema();
 
         let properties = schema["properties"].as_object().unwrap();
 
@@ -84,7 +84,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "typescript", feature = "zod"))]
     fn test_64bit_integers_ts_definition() {
-        let ts_definition = LargeNumbersJson::ts_definition();
+        let ts_definition = LargeNumbers::ts_definition();
 
         // Check TypeScript type mapping - should be number
         assert!(ts_definition.contains("large_unsigned: number;"));
@@ -95,7 +95,7 @@ mod tests {
         assert!(ts_definition.contains("array_of_i64: Array<number>;"));
 
         // Check Zod schema - now in separate method
-        let zod_schema = LargeNumbersJson::zod_schema();
+        let zod_schema = LargeNumbers::zod_schema();
         assert!(zod_schema.contains("large_unsigned: z.number().int()"));
         assert!(zod_schema.contains("large_signed: z.number().int()"));
         assert!(
@@ -118,7 +118,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct MixedIntegersJson {
+    struct MixedIntegers {
         small_u8: u8,
         small_i8: i8,
         medium_u16: u16,
@@ -134,7 +134,7 @@ mod tests {
     #[test]
     #[cfg(feature = "jsonschema")]
     fn test_mixed_integers_json_schema() {
-        let schema = MixedIntegersJson::json_schema();
+        let schema = MixedIntegers::json_schema();
 
         let properties = schema["properties"].as_object().unwrap();
 
@@ -154,7 +154,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "typescript", feature = "zod"))]
     fn test_mixed_integers_ts_definition() {
-        let ts_definition = MixedIntegersJson::ts_definition();
+        let ts_definition = MixedIntegers::ts_definition();
 
         // All integer types should map to number in TypeScript
         assert!(ts_definition.contains("small_u8: number;"));
@@ -169,7 +169,7 @@ mod tests {
         assert!(ts_definition.contains("isize_type: number;"));
 
         // All should use z.number().int() in Zod - now in separate method
-        let zod_schema = MixedIntegersJson::zod_schema();
+        let zod_schema = MixedIntegers::zod_schema();
         assert!(zod_schema.contains("small_u8: z.number().int()"));
         assert!(zod_schema.contains("small_i8: z.number().int()"));
         assert!(zod_schema.contains("medium_u16: z.number().int()"));
@@ -190,7 +190,7 @@ mod tests {
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
-    struct PrimitiveTypesShowcaseJson {
+    struct PrimitiveTypesShowcase {
         // Single values
         tiny_signed: i8,
         tiny_unsigned: u8,
@@ -283,7 +283,7 @@ mod tests {
     #[test]
     #[cfg(feature = "jsonschema")]
     fn test_primitive_types_json_schema_details() {
-        let schema = PrimitiveTypesShowcaseJson::json_schema();
+        let schema = PrimitiveTypesShowcase::json_schema();
         let properties = schema["properties"].as_object().unwrap();
 
         // All integer types should map to "integer" in JSON Schema
@@ -348,7 +348,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "typescript", feature = "zod"))]
     fn test_primitive_types_typescript_generation_details() {
-        let ts_definition = PrimitiveTypesShowcaseJson::ts_definition();
+        let ts_definition = PrimitiveTypesShowcase::ts_definition();
 
         // All integer and float types should map to "number" in TypeScript
         let numeric_fields = [
@@ -403,7 +403,7 @@ mod tests {
         );
 
         // Check Zod schema - now in separate method
-        let zod_schema = PrimitiveTypesShowcaseJson::zod_schema();
+        let zod_schema = PrimitiveTypesShowcase::zod_schema();
 
         // Integer Zod schemas
         assert_zod_fields_contain(

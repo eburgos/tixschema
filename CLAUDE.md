@@ -87,10 +87,11 @@ just ci
    - `model_schema_prop` is for field-level customization
 
 2. **Macro Execution** ([model_schema.rs](src/model_schema.rs))
-   - `exec_model_schema()` routes to `process_struct()`, `process_enum()`, or `process_type_alias()`
+   - `exec_model_schema()` routes to `process_struct()`, `process_enum()`, `process_type_alias()`, or `process_branded_newtype()`
    - Parses Serde attributes when `serde` feature enabled
    - Extracts example code from doc comments (` ```rust example` fences)
-   - Generates methods: `ts_definition()`, optionally `json_schema()`, and optionally `schema_example()`
+   - Generates methods: `ts_definition()`, optionally `json_schema()`, optionally `schema_example()`, and optionally `validate()`
+   - `process_branded_newtype()`: handles `#[serde(transparent)]` single-field tuple structs, generating Zod brand schemas or `unique symbol` branded TypeScript types
 
 3. **Type Analysis** ([field_type.rs](src/field_type.rs))
    - `FieldDef`: Core data structure representing a field's type, optionality, docs, etc.
@@ -103,7 +104,7 @@ just ci
    - `zod.rs`: Generates Zod v4 schema strings (`z.string()`, `z.union()`, etc.), embeds examples in `.meta()`
    - `jsonschema.rs`: Generates JSON schema objects
    - `object_id.rs`: MongoDB ObjectId type detection and schema generation
-   - `model_schema_prop.rs`: Parses field-level customization attributes
+   - `model_schema_prop.rs`: Parses field-level customization attributes (`pattern`, `minLength`, `maxLength`, `minimum`, `maximum`, `literal`, `as`, `preprocess`)
 
 5. **Code Generation** ([generation/](src/generation/))
    - `typescript.rs`: Generates TypeScript type definitions and Zod schemas
@@ -155,19 +156,18 @@ The crate uses 5 optional features for minimal dependencies:
 
 ### 1. Type Naming Convention
 
-**ALWAYS** use `Json` suffix for Rust types:
+The `Json` suffix is **optional** on Rust type names. If present, it is stripped from the generated TypeScript name. If absent, the Rust name is used as-is.
 
 ```rust
-// ✅ CORRECT
+// Both are valid:
 #[model_schema()]
-pub struct UserJson { ... }
+pub struct User { ... }     // → TypeScript: User
 
-// ❌ WRONG - will not follow convention
 #[model_schema()]
-pub struct User { ... }
+pub struct UserJson { ... } // → TypeScript: User (suffix stripped)
 ```
 
-TypeScript output automatically strips the `Json` suffix: `UserJson` → `User`
+The codebase convention is to use type names WITHOUT the `Json` suffix.
 
 ### 2. Required Derives and Imports
 
@@ -177,7 +177,7 @@ use serde::{Deserialize, Serialize};
 
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct MyTypeJson { ... }
+pub struct MyType { ... }
 ```
 
 ### 3. HashMap Key Restriction
@@ -186,12 +186,12 @@ pub struct MyTypeJson { ... }
 
 ```rust
 // ✅ Supported
-pub struct ConfigJson {
+pub struct Config {
     pub settings: HashMap<String, String>,
 }
 
 // ❌ NOT supported - will fail
-pub struct BadConfigJson {
+pub struct BadConfig {
     pub settings: HashMap<i32, String>,
 }
 ```
@@ -204,7 +204,7 @@ pub struct BadConfigJson {
 - `Option<T>` → `T | undefined`
 - `Vec<T>` → `Array<T>`
 - `HashMap<String, T>` → `Partial<Record<string, T>>`
-- Custom types → Reference by name (without Json suffix)
+- Custom types → Reference by name (Json suffix stripped if present)
 - `ObjectId` → `ObjectId` (with $oid validation)
 
 ### 5. Zod v4 Requirements
@@ -252,12 +252,91 @@ The macro respects Serde attributes when the `serde` feature is enabled:
 #[model_schema()]
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct UserProfileJson {
+pub struct UserProfile {
     pub user_id: String,  // → userId in TypeScript
     #[serde(rename = "emailAddress")]
     pub email: String,    // → emailAddress in TypeScript
 }
 ```
+
+### 7. Field Validation Attributes (`#[model_schema_prop(...)]`)
+
+All validation constraints generate checks in **Zod (frontend), JSON Schema, and Rust (Serde deserialization)**:
+
+| Attribute | Field Type | Zod | JSON Schema | Rust serde |
+|-----------|------------|-----|-------------|------------|
+| `pattern = "regex"` | `String` | `.check(z.regex(/regex/))` | `"pattern"` | validator + deserializer |
+| `minLength = N` | `String` | `.min(N)` | `"minLength"` | validator + deserializer |
+| `maxLength = N` | `String` | `.max(N)` | `"maxLength"` | validator + deserializer |
+| `minimum = N` | numeric | `.min(N)` | `"minimum"` | validator + deserializer |
+| `maximum = N` | numeric | `.max(N)` | `"maximum"` | validator + deserializer |
+| `literal = "val"` | `String` | `z.literal("val")` | `"const"` | — |
+| `preprocess = ["fn"]` | any | `z.preprocess(fn, ...)` | — | — (Zod-only) |
+
+Multiple constraints on one field are combined. Multiple `preprocess` functions nest:
+`z.preprocess(fn1, z.preprocess(fn2, innerSchema))`.
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+pub struct User {
+    #[model_schema_prop(minLength = 3, maxLength = 50, pattern = "^[a-z0-9_]+$")]
+    pub username: String,
+
+    #[model_schema_prop(minimum = 0, maximum = 120)]
+    pub age: u32,
+
+    #[model_schema_prop(preprocess = ["epoch_to_date"])]
+    pub date_value: NaiveDate,
+}
+```
+
+#### Generated `validate()` method
+
+When any field has constraints, the macro generates a `validate(&self) -> Result<(), Vec<String>>` method that aggregates all per-field errors. This is useful when constructing instances in code rather than through serde (serde validates automatically):
+
+```rust
+let result = my_instance.validate();
+match result {
+    Ok(()) => println!("Valid"),
+    Err(errors) => println!("Errors: {:?}", errors),
+}
+```
+
+The macro also generates into the type's schema module:
+- `validate_{field}_value(&FieldType) -> Result<(), String>` — pure static validator per field
+- `deserialize_{field}(D) -> Result<FieldType, E>` — serde hook that calls the static validator
+
+### 8. Branded Newtypes
+
+Single-field tuple structs with `#[serde(transparent)]` are treated as branded/opaque types. If the Rust name has a `Json` suffix, it is stripped from the TypeScript name.
+
+```rust
+#[model_schema()]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct UserId<ID_TYPE>(pub ID_TYPE);
+```
+
+With `zod` + `typescript` features:
+```typescript
+export type UserId<ID_TYPE> = ID_TYPE & z.$brand<"UserId">;
+const UserId$RawSchema = z.string().brand<"UserId">();
+export const UserId$Schema: ZodType<UserId<string>> = UserId$RawSchema;
+```
+
+With `typescript` only (no `zod`):
+```typescript
+declare const __brand_UserId: unique symbol;
+export type UserId<ID_TYPE> = ID_TYPE & { readonly [__brand_UserId]: true };
+export function assertUserId<ID_TYPE>(value: ID_TYPE): asserts value is UserId<ID_TYPE> {}
+```
+
+Rules:
+- Generic parameter names are preserved exactly (`ID_TYPE` stays `ID_TYPE` in TypeScript)
+- Non-generic: `struct CorrelationId(pub String)` generates `string & z.$brand<"CorrelationId">`
+- Generic newtypes always use `z.string()` as the Zod base (inner type cannot be resolved at macro-expansion time)
+- Serde transparent serialization works normally — the newtype is invisible in JSON
 
 ### Adding Examples to Types
 
@@ -266,7 +345,7 @@ To add examples to your types for inclusion in Zod schemas:
 ```rust
 /// User profile description
 /// ```rust example
-/// UserJson {
+/// User {
 ///     name: "John Doe".to_string(),
 ///     email: "john@example.com".to_string(),
 ///     age: 25,
@@ -274,7 +353,7 @@ To add examples to your types for inclusion in Zod schemas:
 /// ```
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct UserJson {
+pub struct User {
     pub name: String,
     pub email: String,
     pub age: u32,
@@ -330,9 +409,9 @@ Tests are organized by category in [tests/](tests/):
 fn test_my_feature() {
     #[model_schema()]
     #[derive(Serialize, Deserialize)]
-    pub struct TestJson { ... }
+    pub struct Test { ... }
 
-    let ts = TestJson::ts_definition();
+    let ts = Test::ts_definition();
     assert!(ts.contains("expected output"));
 }
 ```
@@ -363,8 +442,8 @@ impl MyEntities {
         (
             "Generated Types".to_string(),
             vec![
-                UserJson::ts_definition(),
-                AddressJson::ts_definition(),
+                User::ts_definition(),
+                Address::ts_definition(),
                 // Add all types here
             ],
         )
@@ -395,12 +474,12 @@ fn test_generate_typescript() {
 
 The macro transforms Rust types to TypeScript following these rules:
 
-1. **Type Name Transformation**: `UserJson` in Rust becomes `User` in TypeScript
+1. **Type Name Transformation**: If the Rust type name ends with `Json`, the suffix is stripped (e.g., `UserJson` → `User`). Otherwise, the name is used as-is (e.g., `User` → `User`).
 2. **Field Names**: Respect serde rename attributes (`#[serde(rename = "...")]`, `#[serde(rename_all = "...")]`)
 3. **Optional Fields**: `Option<T>` becomes `T | undefined` in TypeScript and `z.union([type, z.undefined()])` in Zod
 4. **Arrays**: `Vec<T>` becomes `Array<T>` in TypeScript
 5. **Maps**: `HashMap<String, T>` becomes `Partial<Record<string, T>>` in TypeScript
-6. **Nested Types**: Reference other types without the `Json` suffix
+6. **Nested Types**: Reference other types by name (Json suffix stripped if present)
 7. **MongoDB ObjectId**: `ObjectId` becomes `ObjectId` in TypeScript with proper JSON schema validation
 8. **ObjectId Serialization**: Uses MongoDB format `{ "$oid": "hex_string" }`
 9. **ObjectId Validation**: Includes regex validation for 24-character hexadecimal strings
@@ -426,7 +505,7 @@ When using the `jsonschema` feature, test that generated schemas are valid:
 #[cfg(feature = "jsonschema")]
 #[test]
 fn test_json_schema_validity() {
-    let schema = MyTypeJson::json_schema();
+    let schema = MyType::json_schema();
     assert!(schema.get("type").is_some());
 }
 ```
@@ -438,9 +517,9 @@ Ensure serde serialization/deserialization works correctly:
 ```rust
 #[test]
 fn test_serde_roundtrip() {
-    let original = MyTypeJson { /* ... */ };
+    let original = MyType { /* ... */ };
     let json = serde_json::to_string(&original).unwrap();
-    let deserialized: MyTypeJson = serde_json::from_str(&json).unwrap();
+    let deserialized: MyType = serde_json::from_str(&json).unwrap();
     assert_eq!(original, deserialized);
 }
 ```
@@ -463,13 +542,13 @@ The crate includes comprehensive ObjectId tests with real MongoDB library integr
 fn test_objectid_types() {
     #[model_schema()]
     #[derive(Serialize, Deserialize)]
-    pub struct TestJson {
+    pub struct Test {
         pub id: ObjectId,
         pub tags: Vec<ObjectId>,
         pub metadata: HashMap<String, ObjectId>,
     }
 
-    let ts = TestJson::ts_definition();
+    let ts = Test::ts_definition();
     assert!(ts.contains("ObjectId"));
 }
 ```
@@ -483,11 +562,11 @@ Test deeply nested structures and edge cases to ensure macro robustness:
 fn test_complex_nested() {
     #[model_schema()]
     #[derive(Serialize, Deserialize)]
-    pub struct ComplexJson {
-        pub nested: Vec<HashMap<String, Vec<OtherJson>>>,
+    pub struct Complex {
+        pub nested: Vec<HashMap<String, Vec<Other>>>,
     }
 
-    let ts = ComplexJson::ts_definition();
+    let ts = Complex::ts_definition();
     // Verify correct nesting
 }
 ```
@@ -521,7 +600,7 @@ use mongodb::bson::oid::ObjectId;
 
 #[model_schema()]
 #[derive(Serialize, Deserialize)]
-pub struct DocumentJson {
+pub struct Document {
     pub id: ObjectId,                           // Scalar ObjectId
     pub author_id: ObjectId,
     pub tags: Vec<ObjectId>,                    // Array of ObjectIds
@@ -628,7 +707,7 @@ tixschema/
 
 ## Common Pitfalls
 
-1. **Forgetting `Json` suffix** → TypeScript naming won't follow convention
+1. **Type name ambiguity** → Ensure Rust type names and TypeScript output names don't collide with built-in types
 2. **Missing required derives** → Compilation errors
 3. **Non-string HashMap keys** → Compilation errors
 4. **Forgetting to add types to entities enum** → Types not included in generated output
@@ -639,12 +718,12 @@ tixschema/
 
 ```rust
 // Print generated TypeScript during tests
-let ts = MyTypeJson::ts_definition();
+let ts = MyType::ts_definition();
 println!("Generated:\n{}", ts);
 
 // Print JSON schema
 #[cfg(feature = "jsonschema")]
-println!("{}", serde_json::to_string_pretty(&MyTypeJson::json_schema())?);
+println!("{}", serde_json::to_string_pretty(&MyType::json_schema())?);
 
 // Check which features are enabled
 #[cfg(test)]
