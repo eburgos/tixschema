@@ -190,47 +190,131 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 
 /// # `model_schema_prop`
 ///
-/// A field-level attribute for customizing the TypeScript type generation for specific fields
-/// within a struct or enum marked with `#[model_schema()]`.
+/// Field-level attribute for customizing schema generation. Apply to fields inside
+/// a struct or enum variant marked with `#[model_schema()]`.
 ///
-/// ## Usage
+/// ## Validation Constraints
+///
+/// These generate matching validation in Zod, JSON Schema, and Rust serde deserialization.
+///
+/// ### String Constraints
+///
+/// - `minLength = N` — minimum string length
+/// - `maxLength = N` — maximum string length
+/// - `pattern = "regex"` — regex the value must match
 ///
 /// ```rust
-/// use tixschema::model_schema;
-/// use tixschema::model_schema_prop;
+/// use tixschema::{model_schema, model_schema_prop};
 /// use serde::{Deserialize, Serialize};
 ///
 /// #[model_schema()]
 /// #[derive(Serialize, Deserialize)]
-/// pub struct ApiConfig {
-///     // Override the TypeScript type for this field
+/// pub struct UserJson {
+///     #[model_schema_prop(minLength = 3, maxLength = 50, pattern = "^[a-z0-9_]+$")]
+///     pub username: String,
+///
+///     #[model_schema_prop(maxLength = 200)]
+///     pub bio: String,
+/// }
+/// ```
+///
+/// Generated Zod: `z.string().min(3).max(50).check(z.regex(/^[a-z0-9_]+$/))`
+///
+/// Generated JSON Schema: `{ "type": "string", "minLength": 3, "maxLength": 50, "pattern": "^[a-z0-9_]+$" }`
+///
+/// ### Numeric Constraints
+///
+/// - `minimum = N` — minimum value (integers and floats)
+/// - `maximum = N` — maximum value
+///
+/// ```rust
+/// use tixschema::{model_schema, model_schema_prop};
+/// use serde::{Deserialize, Serialize};
+///
+/// #[model_schema()]
+/// #[derive(Serialize, Deserialize)]
+/// pub struct ProductJson {
+///     #[model_schema_prop(minimum = 0, maximum = 120)]
+///     pub age_restriction: u32,
+///
+///     #[model_schema_prop(minimum = 0.0)]
+///     pub price: f64,
+/// }
+/// ```
+///
+/// ### The `validate()` Method
+///
+/// When any field has constraints, the macro also generates a `validate(&self) -> Result<(), Vec<String>>`
+/// method for validating instances constructed in code. Serde deserialization validates automatically.
+///
+/// ```rust
+/// use tixschema::{model_schema, model_schema_prop};
+/// use serde::{Deserialize, Serialize};
+///
+/// #[model_schema()]
+/// #[derive(Serialize, Deserialize)]
+/// pub struct RegistrationJson {
+///     #[model_schema_prop(minLength = 3, maxLength = 30)]
+///     pub username: String,
+///
+///     #[model_schema_prop(minimum = 0, maximum = 120)]
+///     pub age: u32,
+/// }
+/// ```
+///
+/// When a schema output feature is active (`zod`, `typescript`, or `jsonschema`), the macro also
+/// generates a `validate(&self) -> Result<(), Vec<String>>` method:
+///
+/// ```text
+/// let reg = RegistrationJson { username: "ab".to_string(), age: 150 };
+/// match reg.validate() {
+///     Ok(()) => println!("valid"),
+///     Err(errors) => {
+///         for e in &errors {
+///             println!("Error: {e}");
+///         }
+///         // "username: too short (minimum length 3, got 2)"
+///         // "age: too large (maximum 120, got 150)"
+///     }
+/// }
+/// ```
+///
+/// ## Type Overrides
+///
+/// - `as = Type` — override the TypeScript/Zod type for this field
+/// - `literal = "value"` — emit as a string literal type in TypeScript and Zod
+///
+/// ```rust
+/// use tixschema::{model_schema, model_schema_prop};
+/// use serde::{Deserialize, Serialize};
+///
+/// #[model_schema()]
+/// #[derive(Serialize, Deserialize)]
+/// pub struct ApiConfigJson {
 ///     #[model_schema_prop(as = String)]
 ///     pub metric: String,
 ///
-///     // Regular fields without customization
 ///     pub enabled: bool,
 /// }
 /// ```
 ///
-/// ## Parameters
+/// ## Zod Preprocessing
 ///
-/// - `as`: Specifies an explicit type to use for the field in TypeScript
+/// - `preprocess = ["fn1", "fn2"]` — wrap the Zod schema with `z.preprocess()` calls
+///   (Zod-only, no effect on Rust types or serde deserialization)
 ///
-/// ## Example with literal override
+/// Multiple preprocessors are applied as nested calls, innermost first:
 ///
 /// ```rust
-/// use tixschema::model_schema_prop;
+/// use tixschema::{model_schema, model_schema_prop};
 /// use serde::{Deserialize, Serialize};
-/// use tixschema::model_schema;
 ///
 /// #[model_schema()]
 /// #[derive(Serialize, Deserialize)]
-/// pub struct UsagePricingJson {
-///     // Override the TypeScript type for this field
-///     #[model_schema_prop(as = String)]
-///     pub metric: String,
-///
-///     pub quantity: u32,
+/// pub struct EventJson {
+///     // → z.preprocess(trim, z.preprocess(normalize, z.string()))
+///     #[model_schema_prop(preprocess = ["trim", "normalize"])]
+///     pub name: String,
 /// }
 /// ```
 #[proc_macro_attribute]

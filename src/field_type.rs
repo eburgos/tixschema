@@ -344,6 +344,12 @@ impl FieldDef {
                 {
                     result = format!("{result}.min({min_len})");
                 }
+                // Add max length validation if specified
+                if let Some(ref meta) = self.model_schema_prop_meta
+                    && let Some(max_len) = meta.max_length
+                {
+                    result = format!("{result}.max({max_len})");
+                }
                 // Add pattern validation if specified
                 if let Some(ref meta) = self.model_schema_prop_meta
                     && let Some(ref pattern) = meta.pattern
@@ -362,8 +368,30 @@ impl FieldDef {
             | FieldDefType::I32
             | FieldDefType::I64
             | FieldDefType::Usize
-            | FieldDefType::Isize => "z.number().int()".to_string(),
-            FieldDefType::F32 | FieldDefType::F64 => "z.number()".to_string(),
+            | FieldDefType::Isize => {
+                let mut result = "z.number().int()".to_string();
+                if let Some(ref meta) = self.model_schema_prop_meta {
+                    if let Some(min) = meta.minimum {
+                        result = format!("{result}.min({min})");
+                    }
+                    if let Some(max) = meta.maximum {
+                        result = format!("{result}.max({max})");
+                    }
+                }
+                result
+            }
+            FieldDefType::F32 | FieldDefType::F64 => {
+                let mut result = "z.number()".to_string();
+                if let Some(ref meta) = self.model_schema_prop_meta {
+                    if let Some(min) = meta.minimum {
+                        result = format!("{result}.min({min})");
+                    }
+                    if let Some(max) = meta.maximum {
+                        result = format!("{result}.max({max})");
+                    }
+                }
+                result
+            }
             #[cfg(feature = "object_id")]
             FieldDefType::ObjectId => crate::features::object_id::get_object_id_zod_schema(),
             #[cfg(feature = "chrono")]

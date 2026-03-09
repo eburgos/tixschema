@@ -15,7 +15,7 @@ mod tests {
     // Basic struct with real ObjectId
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-    struct RealUserJson {
+    struct RealUser {
         id: ObjectId,
         name: String,
         email: Option<String>,
@@ -24,7 +24,7 @@ mod tests {
     // Complex struct with various ObjectId usages
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-    struct RealDocumentJson {
+    struct RealDocument {
         id: ObjectId,
         title: String,
         author_id: ObjectId,
@@ -37,7 +37,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "object_id", feature = "typescript", feature = "zod"))]
     fn test_real_objectid_basic_types() {
-        let ts_definition = RealUserJson::ts_definition();
+        let ts_definition = RealUser::ts_definition();
 
         // TypeScript should use ObjectId type
         assert!(ts_definition.contains("id: ObjectId;"));
@@ -45,7 +45,7 @@ mod tests {
         assert!(ts_definition.contains("email: string | undefined;"));
 
         // Zod schema should use the MongoDB ObjectId structure with regex validation - now in separate method
-        let zod_schema = RealUserJson::zod_schema();
+        let zod_schema = RealUser::zod_schema();
         assert!(zod_schema.contains("id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }),"));
         assert!(zod_schema.contains("name: z.string(),"));
         assert!(zod_schema.contains("email: z.union([z.string(), z.undefined()]),"));
@@ -54,7 +54,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "object_id", feature = "jsonschema"))]
     fn test_real_objectid_json_schema() {
-        let schema = RealUserJson::json_schema();
+        let schema = RealUser::json_schema();
         let properties = schema["properties"].as_object().unwrap();
 
         // Check basic ObjectId field
@@ -73,7 +73,7 @@ mod tests {
         // Create a real ObjectId
         let real_oid = ObjectId::new();
 
-        let user = RealUserJson {
+        let user = RealUser {
             id: real_oid,
             name: "Test User".to_string(),
             email: Some("test@example.com".to_string()),
@@ -87,7 +87,7 @@ mod tests {
         assert!(serialized.contains(&real_oid.to_hex()));
 
         // Test deserialization
-        let deserialized: RealUserJson = serde_json::from_str(&serialized).unwrap();
+        let deserialized: RealUser = serde_json::from_str(&serialized).unwrap();
         assert_eq!(deserialized.id, real_oid);
         assert_eq!(deserialized.name, "Test User");
         assert_eq!(deserialized.email, Some("test@example.com".to_string()));
@@ -96,7 +96,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "object_id", feature = "typescript", feature = "zod"))]
     fn test_real_objectid_complex_structures() {
-        let ts_definition = RealDocumentJson::ts_definition();
+        let ts_definition = RealDocument::ts_definition();
 
         // TypeScript should handle all ObjectId variations
         assert!(ts_definition.contains("id: ObjectId;"));
@@ -107,7 +107,7 @@ mod tests {
         assert!(ts_definition.contains("nested_refs: Partial<Record<string, Array<ObjectId>>>;"));
 
         // Zod schema should handle all ObjectId variations with regex validation - now in separate method
-        let zod_schema = RealDocumentJson::zod_schema();
+        let zod_schema = RealDocument::zod_schema();
         let regex_pattern =
             "z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" })";
         assert!(zod_schema.contains(&format!("id: z.object({{ $oid: {regex_pattern} }}),")));
@@ -140,7 +140,7 @@ mod tests {
         let nested_oid1 = ObjectId::new();
         let nested_oid2 = ObjectId::new();
 
-        let document = RealDocumentJson {
+        let document = RealDocument {
             id: doc_id,
             title: "Test Document".to_string(),
             author_id,
@@ -178,7 +178,7 @@ mod tests {
         assert!(serialized.contains("\"$oid\""));
 
         // Test round-trip deserialization
-        let deserialized: RealDocumentJson = serde_json::from_str(&serialized).unwrap();
+        let deserialized: RealDocument = serde_json::from_str(&serialized).unwrap();
         assert_eq!(deserialized.id, doc_id);
         assert_eq!(deserialized.author_id, author_id);
         assert_eq!(deserialized.references, vec![ref1, ref2]);
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "object_id", feature = "jsonschema"))]
     fn test_real_objectid_json_schema_structure() {
-        let schema = RealDocumentJson::json_schema();
+        let schema = RealDocument::json_schema();
         let properties = schema["properties"].as_object().unwrap();
 
         // Test nested_refs: HashMap<String, Vec<ObjectId>>
@@ -247,11 +247,11 @@ mod tests {
     #[cfg(all(feature = "object_id", feature = "jsonschema", feature = "typescript"))]
     fn test_real_objectid_compilation_smoke_test() {
         // This test ensures all ObjectId types compile without panics with real MongoDB ObjectIds
-        let user_schema = RealUserJson::json_schema();
-        let _document_schema = RealDocumentJson::json_schema();
+        let user_schema = RealUser::json_schema();
+        let _document_schema = RealDocument::json_schema();
 
-        let _user_ts = RealUserJson::ts_definition();
-        let _document_ts = RealDocumentJson::ts_definition();
+        let _user_ts = RealUser::ts_definition();
+        let _document_ts = RealDocument::ts_definition();
 
         // If we get here without panics, real MongoDB ObjectId support is working
         assert!(!user_schema.is_null());

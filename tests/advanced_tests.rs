@@ -11,34 +11,34 @@ mod advanced_tests {
     // Test complex nested structures (fixed to work with actual macro)
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-    struct CompanyJson {
+    struct Company {
         id: String,
         name: String,
-        employees: Vec<EmployeeJson>,
+        employees: Vec<Employee>,
         // Changed to string keys only - HashMap<String, Department> not supported
         department_names: Vec<String>,
-        headquarters: AddressJson,
-        settings: CompanySettingsJson,
+        headquarters: Address,
+        settings: CompanySettings,
     }
 
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-    struct EmployeeJson {
+    struct Employee {
         id: String,
         name: String,
         position: String,
         salary: u32,
         manager: Option<String>, // Manager ID
         skills: Vec<String>,
-        contact: ContactInfoJson,
+        contact: ContactInfo,
     }
 
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-    struct ProjectJson {
+    struct Project {
         id: String,
         name: String,
-        status: ProjectStatusJson,
+        status: ProjectStatus,
         assigned_employees: Vec<String>,
         deadline: Option<String>,
         budget: Option<u32>,
@@ -47,7 +47,7 @@ mod advanced_tests {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
     #[serde(rename_all = "camelCase")]
-    enum ProjectStatusJson {
+    enum ProjectStatus {
         NotStarted,
         InProgress,
         OnHold,
@@ -57,15 +57,15 @@ mod advanced_tests {
 
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-    struct ContactInfoJson {
+    struct ContactInfo {
         email: String,
         phone: Option<String>,
-        emergency_contact: Option<EmergencyContactJson>,
+        emergency_contact: Option<EmergencyContact>,
     }
 
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-    struct EmergencyContactJson {
+    struct EmergencyContact {
         name: String,
         relationship: String,
         phone: String,
@@ -73,7 +73,7 @@ mod advanced_tests {
 
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-    struct AddressJson {
+    struct Address {
         street: String,
         city: String,
         state: String,
@@ -84,17 +84,17 @@ mod advanced_tests {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
     #[serde(rename_all = "camelCase")]
-    struct CompanySettingsJson {
+    struct CompanySettings {
         allow_remote_work: bool,
         max_vacation_days: u32,
         health_insurance_provider: Option<String>,
-        retirement_plan: Option<RetirementPlanJson>,
+        retirement_plan: Option<RetirementPlan>,
     }
 
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
     #[serde(tag = "type", rename_all = "camelCase")]
-    enum RetirementPlanJson {
+    enum RetirementPlan {
         Option401k {
             employer_match_percentage: f32,
             vesting_schedule: String,
@@ -112,12 +112,12 @@ mod advanced_tests {
     #[test]
     #[cfg(feature = "jsonschema")]
     fn test_complex_nested_json_schema() {
-        let company_schema = CompanyJson::json_schema();
-        let employee_schema = EmployeeJson::json_schema();
-        let project_schema = ProjectJson::json_schema();
-        let contact_schema = ContactInfoJson::json_schema();
-        let settings_schema = CompanySettingsJson::json_schema();
-        let retirement_schema = RetirementPlanJson::json_schema();
+        let company_schema = Company::json_schema();
+        let employee_schema = Employee::json_schema();
+        let project_schema = Project::json_schema();
+        let contact_schema = ContactInfo::json_schema();
+        let settings_schema = CompanySettings::json_schema();
+        let retirement_schema = RetirementPlan::json_schema();
 
         // Verify all schemas are objects
         assert_eq!(company_schema["type"], "object");
@@ -153,9 +153,9 @@ mod advanced_tests {
     #[test]
     #[cfg(all(feature = "typescript", feature = "serde", feature = "zod"))]
     fn test_complex_nested_ts_definition() {
-        let company_definition = CompanyJson::ts_definition();
-        let employee_definition = EmployeeJson::ts_definition();
-        let retirement_definition = RetirementPlanJson::ts_definition();
+        let company_definition = Company::ts_definition();
+        let employee_definition = Employee::ts_definition();
+        let retirement_definition = RetirementPlan::ts_definition();
 
         // Check that nested types are properly referenced (without Json suffix)
         assert!(company_definition.contains("employees: Array<Employee>;"));
@@ -175,8 +175,8 @@ mod advanced_tests {
         assert!(retirement_definition.contains("contributionLimit: number;"));
 
         // Check Zod schema references (without Json suffix) - now in separate method
-        let company_zod_schema = CompanyJson::zod_schema();
-        let employee_zod_schema = EmployeeJson::zod_schema();
+        let company_zod_schema = Company::zod_schema();
+        let employee_zod_schema = Employee::zod_schema();
 
         assert!(company_zod_schema.contains("employees: z.array(Employee$Schema)"));
         assert!(company_zod_schema.contains("department_names: z.array(z.string())"));
@@ -188,10 +188,10 @@ mod advanced_tests {
     // Test serialization consistency
     #[test]
     fn test_serialization_consistency() {
-        let project = ProjectJson {
+        let project = Project {
             id: "proj_123".to_string(),
             name: "New Website".to_string(),
-            status: ProjectStatusJson::InProgress,
+            status: ProjectStatus::InProgress,
             assigned_employees: vec!["emp_1".to_string(), "emp_2".to_string()],
             deadline: Some("2024-12-31".to_string()),
             budget: Some(50000),
@@ -202,7 +202,7 @@ mod advanced_tests {
         let json_value: Value = serde_json::from_str(&json_str).unwrap();
 
         // Deserialize back
-        let deserialized: ProjectJson = serde_json::from_value(json_value.clone()).unwrap();
+        let deserialized: Project = serde_json::from_value(json_value.clone()).unwrap();
         assert_eq!(project, deserialized);
 
         // Check that the JSON matches expected structure
@@ -217,7 +217,7 @@ mod advanced_tests {
     // Test edge cases with various field types (simplified)
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-    struct EdgeCasesJson {
+    struct EdgeCases {
         // Different numeric types
         tiny_number: u8,
         small_number: u16,
@@ -237,15 +237,15 @@ mod advanced_tests {
         string_map: HashMap<String, String>,
 
         // Nested optional structures
-        nested_optional: Option<ContactInfoJson>,
-        nested_array: Vec<ContactInfoJson>,
-        optional_nested_array: Option<Vec<ContactInfoJson>>,
+        nested_optional: Option<ContactInfo>,
+        nested_array: Vec<ContactInfo>,
+        optional_nested_array: Option<Vec<ContactInfo>>,
     }
 
     #[test]
     #[cfg(feature = "jsonschema")]
     fn test_edge_cases_json_schema() {
-        let schema = EdgeCasesJson::json_schema();
+        let schema = EdgeCases::json_schema();
         let properties = schema["properties"].as_object().unwrap();
 
         // Check numeric types
@@ -298,7 +298,7 @@ mod advanced_tests {
     #[test]
     #[cfg(all(feature = "typescript", feature = "zod"))]
     fn test_edge_cases_ts_definition() {
-        let ts_definition = EdgeCasesJson::ts_definition();
+        let ts_definition = EdgeCases::ts_definition();
 
         // Check numeric types, arrays, optional arrays, maps, and nested types
         assert_ts_contains_fields(
@@ -321,7 +321,7 @@ mod advanced_tests {
         );
 
         // Check Zod schemas
-        let zod_schema = EdgeCasesJson::zod_schema();
+        let zod_schema = EdgeCases::zod_schema();
         assert_zod_contains_fields(
             &zod_schema,
             &[
@@ -358,7 +358,7 @@ mod advanced_tests {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
     #[serde(tag = "eventType", rename_all = "camelCase")]
-    enum ComplexEventJson {
+    enum ComplexEvent {
         UserRegistered {
             user_id: String,
             email: String,
@@ -369,10 +369,10 @@ mod advanced_tests {
         PurchaseCompleted {
             user_id: String,
             order_id: String,
-            items: Vec<PurchaseItemJson>,
+            items: Vec<PurchaseItem>,
             total_amount: u32,
             payment_method: String,
-            shipping_address: Option<AddressJson>,
+            shipping_address: Option<Address>,
         },
         SystemMaintenance {
             scheduled_start: String,
@@ -384,7 +384,7 @@ mod advanced_tests {
 
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-    struct PurchaseItemJson {
+    struct PurchaseItem {
         product_id: String,
         quantity: u32,
         unit_price: u32,
@@ -399,8 +399,8 @@ mod advanced_tests {
         feature = "zod"
     ))]
     fn test_complex_discriminated_union() {
-        let schema = ComplexEventJson::json_schema();
-        let ts_definition = ComplexEventJson::ts_definition();
+        let schema = ComplexEvent::json_schema();
+        let ts_definition = ComplexEvent::ts_definition();
 
         // Check that it's a discriminated union
         assert_eq!(schema["type"], "object");
@@ -435,7 +435,7 @@ mod advanced_tests {
         assert!(ts_definition.contains("notificationSent: boolean;"));
 
         // Check Zod discriminated union - now in separate method
-        let zod_schema = ComplexEventJson::zod_schema();
+        let zod_schema = ComplexEvent::zod_schema();
         assert!(zod_schema.contains("z.discriminatedUnion(\"eventType\""));
     }
 
@@ -443,7 +443,7 @@ mod advanced_tests {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
     /// A user account in the system
-    struct DocumentedUserJson {
+    struct DocumentedUser {
         /// The unique identifier for the user
         id: String,
         /// The user's full name
@@ -459,8 +459,8 @@ mod advanced_tests {
     #[test]
     #[cfg(all(feature = "jsonschema", feature = "typescript"))]
     fn test_documented_struct() {
-        let schema = DocumentedUserJson::json_schema();
-        let ts_definition = DocumentedUserJson::ts_definition();
+        let schema = DocumentedUser::json_schema();
+        let ts_definition = DocumentedUser::ts_definition();
 
         // Schema should still be valid
         assert_eq!(schema["type"], "object");
@@ -486,12 +486,12 @@ mod advanced_tests {
     #[cfg(feature = "jsonschema")]
     fn test_json_schema_validation() {
         let schemas = vec![
-            ("CompanyJson", CompanyJson::json_schema()),
-            ("EmployeeJson", EmployeeJson::json_schema()),
-            ("ProjectStatusJson", ProjectStatusJson::json_schema()),
-            ("RetirementPlanJson", RetirementPlanJson::json_schema()),
-            ("EdgeCasesJson", EdgeCasesJson::json_schema()),
-            ("ComplexEventJson", ComplexEventJson::json_schema()),
+            ("Company", Company::json_schema()),
+            ("Employee", Employee::json_schema()),
+            ("ProjectStatus", ProjectStatus::json_schema()),
+            ("RetirementPlan", RetirementPlan::json_schema()),
+            ("EdgeCases", EdgeCases::json_schema()),
+            ("ComplexEvent", ComplexEvent::json_schema()),
         ];
 
         for (name, schema) in schemas {
@@ -533,17 +533,17 @@ mod advanced_tests {
     // Test actual serialization and deserialization roundtrip
     #[test]
     fn test_roundtrip_serialization() {
-        let contact = ContactInfoJson {
+        let contact = ContactInfo {
             email: "test@example.com".to_string(),
             phone: Some("123-456-7890".to_string()),
-            emergency_contact: Some(EmergencyContactJson {
+            emergency_contact: Some(EmergencyContact {
                 name: "John Doe".to_string(),
                 relationship: "Brother".to_string(),
                 phone: "098-765-4321".to_string(),
             }),
         };
 
-        let employee = EmployeeJson {
+        let employee = Employee {
             id: "emp_123".to_string(),
             name: "Jane Smith".to_string(),
             position: "Software Engineer".to_string(),
@@ -558,7 +558,7 @@ mod advanced_tests {
         let json_value: Value = serde_json::from_str(&json_str).unwrap();
 
         // Test deserialization
-        let deserialized: EmployeeJson = serde_json::from_value(json_value).unwrap();
+        let deserialized: Employee = serde_json::from_value(json_value).unwrap();
         assert_eq!(employee, deserialized);
 
         // Test individual field serialization

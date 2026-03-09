@@ -34,6 +34,15 @@ use crate::utils::to_snake_case;
 #[derive(Default, Clone)]
 struct ModelSchemaArgs {
     name_override: Option<String>,
+    pattern: Option<String>,
+    min_length: Option<usize>,
+    max_length: Option<usize>,
+}
+
+impl ModelSchemaArgs {
+    fn has_string_constraints(&self) -> bool {
+        self.pattern.is_some() || self.min_length.is_some() || self.max_length.is_some()
+    }
 }
 
 fn parse_model_schema_args(args: TokenStream) -> ModelSchemaArgs {
@@ -47,10 +56,25 @@ fn parse_model_schema_args(args: TokenStream) -> ModelSchemaArgs {
     if let Ok(parsed) = parser.parse(args) {
         for meta in parsed {
             if meta.path.is_ident("name")
-                && let syn::Expr::Lit(expr_lit) = meta.value
-                && let syn::Lit::Str(lit_str) = expr_lit.lit
+                && let syn::Expr::Lit(expr_lit) = &meta.value
+                && let syn::Lit::Str(lit_str) = &expr_lit.lit
             {
                 result.name_override = Some(lit_str.value());
+            } else if meta.path.is_ident("pattern")
+                && let syn::Expr::Lit(expr_lit) = &meta.value
+                && let syn::Lit::Str(lit_str) = &expr_lit.lit
+            {
+                result.pattern = Some(lit_str.value());
+            } else if meta.path.is_ident("minLength")
+                && let syn::Expr::Lit(expr_lit) = &meta.value
+                && let syn::Lit::Int(lit_int) = &expr_lit.lit
+            {
+                result.min_length = Some(lit_int.base10_parse::<usize>().unwrap());
+            } else if meta.path.is_ident("maxLength")
+                && let syn::Expr::Lit(expr_lit) = &meta.value
+                && let syn::Lit::Int(lit_int) = &expr_lit.lit
+            {
+                result.max_length = Some(lit_int.base10_parse::<usize>().unwrap());
             }
         }
     }
@@ -65,7 +89,7 @@ pub fn exec_model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
     let parsed_args = parse_model_schema_args(args);
     let item = parse_macro_input!(input as Item);
     match item {
-        Item::Struct(item_struct) => process_struct(item_struct),
+        Item::Struct(item_struct) => process_struct(item_struct, &parsed_args),
         Item::Enum(item_enum) => process_enum(item_enum),
         Item::Type(item_type) => process_type_alias(item_type, &parsed_args),
         _ => panic!("Unsupported target for model_schema"),
@@ -155,7 +179,7 @@ fn has_serde_transparent(attrs: &[syn::Attribute]) -> bool {
 }
 
 /// Processes a struct item and generates TypeScript and Zod schema definitions for it.
-fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
+fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> TokenStream {
     // Check if this is a branded newtype (transparent single-field tuple struct)
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     {
@@ -163,8 +187,13 @@ fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
         let is_single_tuple =
             matches!(&item_struct.fields, syn::Fields::Unnamed(f) if f.unnamed.len() == 1);
         if is_transparent && is_single_tuple {
-            return process_branded_newtype(item_struct);
+            return process_branded_newtype(item_struct, args);
         }
+    }
+
+    // String constraints (pattern, minLength, maxLength) are only valid on branded newtypes
+    if args.has_string_constraints() {
+        panic!("model_schema constraints (pattern, minLength, maxLength) are only supported on branded newtype structs (#[serde(transparent)] single-field tuple structs)");
     }
 
     let name = &item_struct.ident;
@@ -199,13 +228,17 @@ fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
     // Process all fields in the struct
     let mut field_defs = Vec::new();
     let mut validation_fns: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut validate_bodies: Vec<proc_macro2::TokenStream> = Vec::new();
     for field in &mut item_struct.fields {
         #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-        let (f_def, validation_fn) = process_field(&rename_all, field, Some(&module_name));
+        let (f_def, validation_fn, validate_body) = process_field(&rename_all, field, Some(&module_name));
         #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
-        let (f_def, validation_fn) = process_field(&rename_all, field, None);
+        let (f_def, validation_fn, validate_body) = process_field(&rename_all, field, None);
         if let Some(vfn) = validation_fn {
             validation_fns.push(vfn);
+        }
+        if let Some(vb) = validate_body {
+            validate_bodies.push(vb);
         }
         field_defs.push(f_def);
     }
@@ -355,6 +388,42 @@ fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
         }
     };
 
+    // Generate the type-level validate() method if there are constrained fields.
+    //
+    // Architecture:
+    //   - validate_{field}_value(&FieldType) -> Result<(), String>  — pure static validator per
+    //     field; checks all constraints (pattern, minLength, maxLength, minimum, maximum) and
+    //     returns a single combined error message.
+    //   - deserialize_{field}(D) -> Result<FieldType, E>            — serde hook that calls the
+    //     static validator so constraints are enforced during deserialization.
+    //   - validate(&self) -> Result<(), Vec<String>>                — type-level aggregator that
+    //     calls every per-field validator and collects all errors.
+    //
+    // This ensures the same validation rules apply during serde deserialization AND when calling
+    // validate() on an already-constructed instance (e.g., built programmatically in tests).
+    //
+    // Only generated when serde feature is enabled AND at least one schema output feature is active.
+    #[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+    let validate_method: Option<proc_macro2::TokenStream> = if !validate_bodies.is_empty() {
+        let module_name_ident = module_ident.clone();
+        let validate_body_items = &validate_bodies;
+        Some(quote! {
+            /// Validates all constrained fields and returns all validation errors.
+            ///
+            /// Returns `Ok(())` if all constraints pass, or `Err(Vec<String>)` with all errors.
+            pub fn validate(&self) -> Result<(), Vec<String>> {
+                use #module_name_ident::*;
+                let mut errors: Vec<String> = Vec::new();
+                #(#validate_body_items)*
+                if errors.is_empty() { Ok(()) } else { Err(errors) }
+            }
+        })
+    } else {
+        None
+    };
+    #[cfg(not(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema"))))]
+    let validate_method: Option<proc_macro2::TokenStream> = None;
+
     // Build delegating impl items (schema_example is added directly, not as a delegate)
     #[cfg(all(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     let delegate_impl_items: Vec<proc_macro2::TokenStream> = vec![
@@ -364,6 +433,7 @@ fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
     ]
     .into_iter()
     .chain(schema_example_method)
+    .chain(validate_method)
     .collect();
 
     #[cfg(all(feature = "zod", feature = "typescript", not(feature = "jsonschema")))]
@@ -373,6 +443,7 @@ fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
     ]
     .into_iter()
     .chain(schema_example_method)
+    .chain(validate_method)
     .collect();
 
     #[cfg(all(feature = "zod", not(feature = "typescript"), feature = "jsonschema"))]
@@ -382,6 +453,7 @@ fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
     ]
     .into_iter()
     .chain(schema_example_method)
+    .chain(validate_method)
     .collect();
 
     #[cfg(all(feature = "zod", not(feature = "typescript"), not(feature = "jsonschema")))]
@@ -389,17 +461,29 @@ fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
         vec![delegate_zod_schema]
             .into_iter()
             .chain(schema_example_method)
+            .chain(validate_method)
             .collect();
 
     #[cfg(all(not(feature = "zod"), feature = "typescript", feature = "jsonschema"))]
     let delegate_impl_items: Vec<proc_macro2::TokenStream> =
-        vec![delegate_json_schema, delegate_ts_definition];
+        vec![delegate_json_schema, delegate_ts_definition]
+            .into_iter()
+            .chain(validate_method)
+            .collect();
 
     #[cfg(all(not(feature = "zod"), feature = "typescript", not(feature = "jsonschema")))]
-    let delegate_impl_items: Vec<proc_macro2::TokenStream> = vec![delegate_ts_definition];
+    let delegate_impl_items: Vec<proc_macro2::TokenStream> =
+        vec![delegate_ts_definition]
+            .into_iter()
+            .chain(validate_method)
+            .collect();
 
     #[cfg(all(not(feature = "zod"), not(feature = "typescript"), feature = "jsonschema"))]
-    let delegate_impl_items: Vec<proc_macro2::TokenStream> = vec![delegate_json_schema];
+    let delegate_impl_items: Vec<proc_macro2::TokenStream> =
+        vec![delegate_json_schema]
+            .into_iter()
+            .chain(validate_method)
+            .collect();
 
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     let output = quote! {
@@ -437,14 +521,60 @@ fn process_struct(mut item_struct: syn::ItemStruct) -> TokenStream {
 
 /// Processes a branded newtype (transparent single-field tuple struct) and generates
 /// TypeScript branded type definitions and Zod brand schemas.
+///
+/// A branded newtype is detected when a struct has **both** `#[serde(transparent)]` and exactly
+/// one unnamed field. The generated output depends on the active features:
+///
+/// - With `zod` + `typescript`: emits a Zod `.brand<"Name">()` schema and a
+///   `type Name<T> = T & z.$brand<"Name">` alias.
+/// - With `typescript` only (no `zod`): emits a `unique symbol` brand pattern and an
+///   `assertName()` type-assertion helper function.
+///
+/// Generic parameters on the struct are preserved in the TypeScript output. For non-generic
+/// newtypes, the inner field's Rust type is resolved to its TypeScript equivalent. For generic
+/// newtypes, the Zod schema always uses `z.string()` as the base because the generic parameter
+/// cannot be resolved at macro-expansion time.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-fn process_branded_newtype(item_struct: syn::ItemStruct) -> TokenStream {
-    let name = &item_struct.ident;
+fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> TokenStream {
+    let name = item_struct.ident.clone();
     let item_name = safe_type_name(&name.to_string());
     let module_name = format!("{}_schema", to_snake_case(&item_name));
     let module_ident = Ident::new(&module_name, name.span());
 
-    register_alias_info(&name.to_string(), &item_name, module_name);
+    register_alias_info(&name.to_string(), &item_name, module_name.clone());
+
+    // Extract docs and example
+    #[cfg(any(feature = "typescript", feature = "zod"))]
+    let docs_vec = get_struct_docs(&item_struct);
+
+    #[cfg(feature = "zod")]
+    let example_code = docs_vec
+        .as_ref()
+        .and_then(|docs| extract_example_from_docs(docs));
+
+    #[cfg(any(feature = "typescript", feature = "zod"))]
+    let plain_description = if let Some(ref doc_lines) = docs_vec {
+        let doc_lines_without_examples = strip_examples_from_docs(doc_lines);
+        let plain_lines: Vec<String> = doc_lines_without_examples
+            .iter()
+            .flat_map(|v| {
+                v.lines()
+                    .map(|line| {
+                        let trimmed = line.trim();
+                        trimmed
+                            .strip_prefix('*')
+                            .unwrap_or(trimmed)
+                            .trim()
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .filter(|s| !s.is_empty())
+            .collect();
+        plain_lines.join("\\n").replace('"', "\\\"")
+    } else {
+        item_name.clone()
+    };
 
     // Get generic type parameters from the struct
     let generic_params: Vec<String> = item_struct
@@ -463,6 +593,7 @@ fn process_branded_newtype(item_struct: syn::ItemStruct) -> TokenStream {
     let inner_field = item_struct.fields.iter().next().unwrap();
     let inner_ty = &inner_field.ty;
 
+
     #[cfg(any(feature = "typescript", feature = "zod"))]
     let ts_inner_type = if is_generic {
         generic_params[0].clone()
@@ -474,10 +605,24 @@ fn process_branded_newtype(item_struct: syn::ItemStruct) -> TokenStream {
     let _ = inner_ty;
 
     #[cfg(feature = "zod")]
-    let zod_inner = if is_generic {
-        "z.string()".to_string()
-    } else {
-        get_field_def("_inner", inner_ty, "").zod_type()
+    let zod_inner = {
+        let base = if is_generic {
+            "z.string()".to_string()
+        } else {
+            get_field_def("_inner", inner_ty, "").zod_type()
+        };
+        // Apply string constraints to the zod base type
+        let mut result = base;
+        if let Some(min_len) = args.min_length {
+            result = format!("{result}.min({min_len})");
+        }
+        if let Some(max_len) = args.max_length {
+            result = format!("{result}.max({max_len})");
+        }
+        if let Some(ref pattern) = args.pattern {
+            result = format!("{result}.check(z.regex(/{pattern}/))");
+        }
+        result
     };
 
     #[cfg(any(feature = "typescript", feature = "zod"))]
@@ -492,12 +637,21 @@ fn process_branded_newtype(item_struct: syn::ItemStruct) -> TokenStream {
     #[cfg(all(feature = "typescript", feature = "zod"))]
     let ts_definition_method = {
         let type_str = format!(
-            "export type {}{} = {} & z.$brand<\"{}\">;",
+            "export type {}{} = {} & $brand<\"{}\">;",
             item_name, ts_generics, ts_inner_type, item_name
         );
+        let helpers = if is_generic {
+            format!(
+                "\n\nfunction is{item_name}<T>(_value: T): _value is {item_name}<T> {{\n  return true;\n}}\n\nexport function create{item_name}<T>(value: T): {item_name}<T> {{\n  if (is{item_name}(value)) {{\n    return value;\n  }}\n  throw new Error(\"create{item_name} error\");\n}}"
+            )
+        } else {
+            format!(
+                "\n\nfunction is{item_name}(_value: {ts_inner_type}): _value is {item_name} {{\n  return true;\n}}\n\nexport function create{item_name}(value: {ts_inner_type}): {item_name} {{\n  if (is{item_name}(value)) {{\n    return value;\n  }}\n  throw new Error(\"create{item_name} error\");\n}}"
+            )
+        };
         quote! {
             pub fn ts_definition() -> String {
-                #type_str.to_string()
+                format!("{}{}", #type_str, #helpers)
             }
         }
     };
@@ -518,9 +672,18 @@ fn process_branded_newtype(item_struct: syn::ItemStruct) -> TokenStream {
                 "export function assert{item_name}(value: {ts_inner_type}): asserts value is {item_name} {{\n}}",
             )
         };
+        let helpers = if is_generic {
+            format!(
+                "function is{item_name}<T>(_value: T): _value is {item_name}<T> {{\n  return true;\n}}\n\nexport function create{item_name}<T>(value: T): {item_name}<T> {{\n  if (is{item_name}(value)) {{\n    return value;\n  }}\n  throw new Error(\"create{item_name} error\");\n}}"
+            )
+        } else {
+            format!(
+                "function is{item_name}(_value: {ts_inner_type}): _value is {item_name} {{\n  return true;\n}}\n\nexport function create{item_name}(value: {ts_inner_type}): {item_name} {{\n  if (is{item_name}(value)) {{\n    return value;\n  }}\n  throw new Error(\"create{item_name} error\");\n}}"
+            )
+        };
         quote! {
             pub fn ts_definition() -> String {
-                format!("{}\n{}\n\n{}", #unique_symbol, #type_str, #assert_fn)
+                format!("{}\n{}\n\n{}\n\n{}", #unique_symbol, #type_str, #assert_fn, #helpers)
             }
         }
     };
@@ -529,16 +692,21 @@ fn process_branded_newtype(item_struct: syn::ItemStruct) -> TokenStream {
 
     #[cfg(all(feature = "zod", feature = "typescript"))]
     let zod_schema_method = {
-        let zod_type_annotation = if is_generic {
-            format!("{}<string>", item_name)
+        let zod_type_name = if is_generic {
+            "ZodString".to_string()
         } else {
-            item_name.clone()
+            match ts_inner_type.as_str() {
+                "number" => "ZodNumber".to_string(),
+                "boolean" => "ZodBoolean".to_string(),
+                _ => "ZodString".to_string(),
+            }
         };
+        let zod_type_annotation = format!("$ZodBranded<{}, \"{}\">", zod_type_name, item_name);
         quote! {
             pub fn zod_schema() -> String {
                 format!(
-                    "const {0}$RawSchema = {1}.brand::<\"{0}\">();\nexport const {0}$Schema: ZodType<{2}> = {0}$RawSchema;",
-                    #item_name, #zod_inner, #zod_type_annotation
+                    "const {0}$RawSchema = {1}.brand<\"{0}\">().meta({{\n  description: \"{3}\",\n}});\n\nexport const {0}$Schema: {2} = {0}$RawSchema;",
+                    #item_name, #zod_inner, #zod_type_annotation, #plain_description
                 )
             }
         }
@@ -549,11 +717,94 @@ fn process_branded_newtype(item_struct: syn::ItemStruct) -> TokenStream {
         quote! {
             pub fn zod_schema() -> String {
                 format!(
-                    "export const {}$Schema = {}.brand::<\"{}\">();",
-                    #item_name, #zod_inner, #item_name
+                    "export const {0}$Schema = {1}.brand<\"{0}\">().meta({{\n  description: \"{2}\",\n}});",
+                    #item_name, #zod_inner, #plain_description
                 )
             }
         }
+    };
+
+    // --- Generate validation code for constrained branded newtypes ---
+    // Uses ToString so it works for String, ObjectId, and any generic ID_TYPE that implements ToString
+    #[cfg(feature = "serde")]
+    let branded_validation = if args.has_string_constraints() {
+        let mut checks: Vec<proc_macro2::TokenStream> = Vec::new();
+
+        if let Some(min_len) = args.min_length {
+            checks.push(quote! {
+                if value.len() < #min_len {
+                    return Err(format!(
+                        "value is too short: minimum length is {}, got {}",
+                        #min_len, value.len()
+                    ));
+                }
+            });
+        }
+        if let Some(max_len) = args.max_length {
+            checks.push(quote! {
+                if value.len() > #max_len {
+                    return Err(format!(
+                        "value is too long: maximum length is {}, got {}",
+                        #max_len, value.len()
+                    ));
+                }
+            });
+        }
+        if let Some(ref pattern) = args.pattern {
+            let pattern_lit = pattern.clone();
+            checks.push(quote! {
+                {
+                    use std::sync::LazyLock;
+                    static RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+                        regex::Regex::new(#pattern_lit).unwrap()
+                    });
+                    if !RE.is_match(value) {
+                        return Err(format!(
+                            "value does not match pattern '{}'",
+                            #pattern_lit
+                        ));
+                    }
+                }
+            });
+        }
+
+        let validate_fn = quote! {
+            pub fn validate_value(value: &str) -> Result<(), String> {
+                #(#checks)*
+                Ok(())
+            }
+        };
+
+        let deserialize_fn = if is_generic {
+            quote! {
+                pub fn deserialize_value<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+                where
+                    D: serde::Deserializer<'de>,
+                    T: serde::Deserialize<'de> + std::fmt::Display,
+                {
+                    use serde::Deserialize;
+                    let v = T::deserialize(deserializer)?;
+                    validate_value(&v.to_string()).map_err(serde::de::Error::custom)?;
+                    Ok(v)
+                }
+            }
+        } else {
+            quote! {
+                pub fn deserialize_value<'de, D>(deserializer: D) -> Result<#inner_ty, D::Error>
+                where
+                    D: serde::Deserializer<'de>,
+                {
+                    use serde::Deserialize;
+                    let v = <#inner_ty>::deserialize(deserializer)?;
+                    validate_value(&v.to_string()).map_err(serde::de::Error::custom)?;
+                    Ok(v)
+                }
+            }
+        };
+
+        Some((validate_fn, deserialize_fn))
+    } else {
+        None
     };
 
     // --- Build schema module impl items ---
@@ -563,6 +814,38 @@ fn process_branded_newtype(item_struct: syn::ItemStruct) -> TokenStream {
         #[cfg(feature = "zod")]
         zod_schema_method,
     ];
+
+    // --- Generate schema_example method ---
+    #[cfg(feature = "zod")]
+    let has_example = example_code.is_some();
+
+    #[cfg(feature = "zod")]
+    let schema_example_method = example_code.as_ref().map(|code| {
+        let code_tokens: proc_macro2::TokenStream = code.parse().unwrap();
+        if is_generic {
+            // For generic newtypes, the example constructs a concrete type (e.g., DocumentId<String>)
+            // We use String as the concrete type since the Zod schema always uses z.string()
+            quote! {
+                #[cfg(feature = "zod")]
+                pub fn schema_example() -> serde_json::Value {
+                    let value: #name<String> = {
+                        #code_tokens
+                    };
+                    serde_json::to_value(&value).unwrap()
+                }
+            }
+        } else {
+            quote! {
+                #[cfg(feature = "zod")]
+                pub fn schema_example() -> serde_json::Value {
+                    let value: #name = {
+                        #code_tokens
+                    };
+                    serde_json::to_value(&value).unwrap()
+                }
+            }
+        }
+    });
 
     // --- Generate delegate methods ---
 
@@ -579,9 +862,27 @@ fn process_branded_newtype(item_struct: syn::ItemStruct) -> TokenStream {
     #[cfg(feature = "zod")]
     let delegate_zod = {
         let mi = module_ident.clone();
-        quote! {
-            pub fn zod_schema() -> String {
-                #mi::Schema::zod_schema()
+        if has_example {
+            quote! {
+                pub fn zod_schema() -> String {
+                    let base_schema = #mi::Schema::zod_schema();
+                    let example_json = serde_json::to_string(&Self::schema_example()).unwrap();
+                    // Insert example into .meta() before the first closing \n});
+                    if let Some(pos) = base_schema.find("\n});") {
+                        let mut result = base_schema[..pos].to_string();
+                        result.push_str(&format!("\n  example: {},", example_json));
+                        result.push_str(&base_schema[pos..]);
+                        result
+                    } else {
+                        base_schema
+                    }
+                }
+            }
+        } else {
+            quote! {
+                pub fn zod_schema() -> String {
+                    #mi::Schema::zod_schema()
+                }
             }
         }
     };
@@ -595,33 +896,140 @@ fn process_branded_newtype(item_struct: syn::ItemStruct) -> TokenStream {
     ];
 
     // --- Use generics for the impl block so it works with generic structs ---
-    let generics = &item_struct.generics;
-    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-
-    let output = quote! {
-        #item_struct
-
-        pub mod #module_ident {
-            use super::*;
-
-            pub struct Schema;
-
-            impl Schema {
-                #(#schema_impl_items)*
+    // When constraints exist on a generic type, add Display bound for validation via .to_string()
+    let generics_for_ty = item_struct.generics.clone();
+    let (_, ty_generics, _) = generics_for_ty.split_for_impl();
+    let mut generics = item_struct.generics.clone();
+    #[cfg(feature = "serde")]
+    if is_generic && args.has_string_constraints() {
+        for param in &mut generics.params {
+            if let syn::GenericParam::Type(tp) = param {
+                tp.bounds.push(syn::parse_quote!(std::fmt::Display));
             }
         }
+    }
+    let (impl_generics, _, where_clause) = generics.split_for_impl();
 
-        impl #impl_generics #name #ty_generics #where_clause {
-            #(#delegate_impl_items)*
+    // schema_example goes on the type impl, not the module (same as structs/enums)
+    #[cfg(feature = "zod")]
+    let schema_example_tokens = schema_example_method.unwrap_or_default();
+    #[cfg(not(feature = "zod"))]
+    let schema_example_tokens = quote! {};
+
+    // --- Inject serde(deserialize_with) on inner field and generate validate() ---
+    #[cfg(feature = "serde")]
+    let validation_tokens;
+    #[cfg(feature = "serde")]
+    let validate_method;
+    #[cfg(feature = "serde")]
+    {
+        let mut item_struct = item_struct;
+        if let Some((ref validate_fn, ref deserialize_fn)) = branded_validation {
+            // Add Display bound to struct generic params so serde deserialize_with works
+            if is_generic {
+                for param in &mut item_struct.generics.params {
+                    if let syn::GenericParam::Type(tp) = param {
+                        tp.bounds.push(syn::parse_quote!(std::fmt::Display));
+                    }
+                }
+            }
+            // Add serde bound attribute so derived Deserialize passes generic bounds to deserialize_with
+            if is_generic {
+                let bounds: Vec<String> = generic_params.iter().map(|p| {
+                    format!("{p}: serde::de::DeserializeOwned + std::fmt::Display")
+                }).collect();
+                let bound_str = bounds.join(", ");
+                let bound_lit = syn::LitStr::new(&bound_str, proc_macro2::Span::call_site());
+                let bound_attr: syn::Attribute = syn::parse_quote! {
+                    #[serde(bound(deserialize = #bound_lit))]
+                };
+                item_struct.attrs.push(bound_attr);
+            }
+            let deserialize_with_path = format!("{module_name}::deserialize_value");
+            let path_lit = syn::LitStr::new(&deserialize_with_path, proc_macro2::Span::call_site());
+            let serde_attr: syn::Attribute = syn::parse_quote! {
+                #[serde(deserialize_with = #path_lit)]
+            };
+            if let syn::Fields::Unnamed(ref mut fields) = item_struct.fields {
+                fields.unnamed.first_mut().unwrap().attrs.push(serde_attr);
+            }
+            validation_tokens = quote! {
+                #validate_fn
+                #deserialize_fn
+            };
+            validate_method = quote! {
+                pub fn validate(&self) -> Result<(), Vec<String>> {
+                    let mut errors = Vec::new();
+                    if let Err(e) = #module_ident::validate_value(&self.0.to_string()) {
+                        errors.push(e);
+                    }
+                    if errors.is_empty() { Ok(()) } else { Err(errors) }
+                }
+            };
+        } else {
+            validation_tokens = quote! {};
+            validate_method = quote! {};
         }
-    };
 
-    if env::var("RUST_LOG") == Ok(String::from("trace")) {
-        let output_str = output.to_string();
-        println!("{output_str}");
+        let output = quote! {
+            #item_struct
+
+            pub mod #module_ident {
+                use super::*;
+
+                pub struct Schema;
+
+                impl Schema {
+                    #(#schema_impl_items)*
+                }
+
+                #validation_tokens
+            }
+
+            impl #impl_generics #name #ty_generics #where_clause {
+                #(#delegate_impl_items)*
+                #schema_example_tokens
+                #validate_method
+            }
+        };
+
+        if env::var("RUST_LOG") == Ok(String::from("trace")) {
+            let output_str = output.to_string();
+            println!("{output_str}");
+        }
+
+        return TokenStream::from(output);
     }
 
-    TokenStream::from(output)
+    // Without serde feature, no validation
+    #[cfg(not(feature = "serde"))]
+    {
+        let output = quote! {
+            #item_struct
+
+            pub mod #module_ident {
+                use super::*;
+
+                pub struct Schema;
+
+                impl Schema {
+                    #(#schema_impl_items)*
+                }
+            }
+
+            impl #impl_generics #name #ty_generics #where_clause {
+                #(#delegate_impl_items)*
+                #schema_example_tokens
+            }
+        };
+
+        if env::var("RUST_LOG") == Ok(String::from("trace")) {
+            let output_str = output.to_string();
+            println!("{output_str}");
+        }
+
+        TokenStream::from(output)
+    }
 }
 
 /// Processes an enum item and generates TypeScript and Zod schema definitions for it.
@@ -874,13 +1282,13 @@ fn process_plain_enum(
             pub fn zod_schema() -> String {
                 let base_schema = #module_ident::Schema::zod_schema();
                 let example_json = serde_json::to_string(&Self::schema_example()).unwrap();
-                // For plain enums, insert example before the closing });
-                // Base format: "...meta({\n  description: \"...\",\n});"
-                // We want: "...meta({\n  description: \"...\",\n  example: ...,\n});"
-                if let Some(pos) = base_schema.rfind("\n});") {
+                // For plain enums, insert example before the FIRST closing });
+                // Base format: "...meta({\n  description: \"...\",\n});\n\nexport const ..."
+                // We want: "...meta({\n  description: \"...\",\n  example: ...,\n});\n\nexport const ..."
+                if let Some(pos) = base_schema.find("\n});") {
                     let mut result = base_schema[..pos].to_string();
                     result.push_str(&format!("\n  example: {},", example_json));
-                    result.push_str("\n});");
+                    result.push_str(&base_schema[pos..]);
                     result
                 } else {
                     base_schema
@@ -1045,9 +1453,9 @@ fn process_discriminated_enum(
 
         for field in &mut item.fields {
             #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-            let (f_def, validation_fn) = process_field(rename_all, field, Some(&enum_module_name));
+            let (f_def, validation_fn, _validate_body) = process_field(rename_all, field, Some(&enum_module_name));
             #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
-            let (f_def, validation_fn) = process_field(rename_all, field, None);
+            let (f_def, validation_fn, _validate_body) = process_field(rename_all, field, None);
             if let Some(vfn) = validation_fn {
                 enum_validation_fns.push(vfn);
             }
@@ -1757,75 +2165,50 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
 
     let schema_code = match field_type {
         FieldDefType::String => {
+            // Extract string constraints from model_schema_prop_meta
+            let min_len_opt = fld.model_schema_prop_meta.as_ref().and_then(|m| m.min_length);
+            let max_len_opt = fld.model_schema_prop_meta.as_ref().and_then(|m| m.max_length);
+            let pattern_opt = fld
+                .model_schema_prop_meta
+                .as_ref()
+                .and_then(|m| m.pattern.as_deref().map(ToString::to_string));
+
+            // Generate constraint insertion statements
+            let min_len_insert = min_len_opt.map(|min_len| {
+                quote! { schema_obj.insert("minLength".to_string(), serde_json::json!(#min_len)); }
+            });
+            let max_len_insert = max_len_opt.map(|max_len| {
+                quote! { schema_obj.insert("maxLength".to_string(), serde_json::json!(#max_len)); }
+            });
+            let pattern_insert = pattern_opt.as_ref().map(|pattern| {
+                quote! { schema_obj.insert("pattern".to_string(), serde_json::json!(#pattern)); }
+            });
+
             if fld.is_array {
-                // Check if minLength is specified for array items
-                if let Some(ref meta) = fld.model_schema_prop_meta {
-                    if let Some(min_len) = meta.min_length {
-                        quote! {
-                            properties.insert(#field_name_str.to_string(), {
-                                serde_json::json!({
-                                    "type": "array",
-                                    "items": serde_json::json!({ "type": "string", "minLength": #min_len })
-                                })
-                            });
-                        }
-                    } else {
-                        quote! {
-                            properties.insert(#field_name_str.to_string(), {
-                                serde_json::json!({
-                                    "type": "array",
-                                    "items": serde_json::json!({ "type": "string" })
-                                })
-                            });
-                        }
-                    }
-                } else {
-                    quote! {
-                        properties.insert(#field_name_str.to_string(), {
-                            serde_json::json!({
-                                "type": "array",
-                                "items": serde_json::json!({ "type": "string" })
-                            })
-                        });
-                    }
+                quote! {
+                    properties.insert(#field_name_str.to_string(), {
+                        let mut schema_obj = serde_json::Map::new();
+                        schema_obj.insert("type".to_string(), serde_json::json!("string"));
+                        #min_len_insert
+                        #max_len_insert
+                        #pattern_insert
+                        let items = serde_json::Value::Object(schema_obj);
+                        serde_json::json!({
+                            "type": "array",
+                            "items": items
+                        })
+                    });
                 }
             } else {
-                let min_len_opt = fld.model_schema_prop_meta.as_ref().and_then(|m| m.min_length);
-                let pattern_opt = fld.model_schema_prop_meta.as_ref().and_then(|m| m.pattern.as_deref().map(ToString::to_string));
-
-                match (min_len_opt, pattern_opt) {
-                    (Some(min_len), Some(pattern)) => quote! {
-                        properties.insert(#field_name_str.to_string(), {
-                            serde_json::json!({
-                                "type": "string",
-                                "minLength": #min_len,
-                                "pattern": #pattern
-                            })
-                        });
-                    },
-                    (Some(min_len), None) => quote! {
-                        properties.insert(#field_name_str.to_string(), {
-                            serde_json::json!({
-                                "type": "string",
-                                "minLength": #min_len
-                            })
-                        });
-                    },
-                    (None, Some(pattern)) => quote! {
-                        properties.insert(#field_name_str.to_string(), {
-                            serde_json::json!({
-                                "type": "string",
-                                "pattern": #pattern
-                            })
-                        });
-                    },
-                    (None, None) => quote! {
-                        properties.insert(#field_name_str.to_string(), {
-                            serde_json::json!({
-                                "type": "string",
-                            })
-                        });
-                    },
+                quote! {
+                    properties.insert(#field_name_str.to_string(), {
+                        let mut schema_obj = serde_json::Map::new();
+                        schema_obj.insert("type".to_string(), serde_json::json!("string"));
+                        #min_len_insert
+                        #max_len_insert
+                        #pattern_insert
+                        serde_json::Value::Object(schema_obj)
+                    });
                 }
             }
         }
@@ -1860,41 +2243,73 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
         | FieldDefType::I64
         | FieldDefType::Usize
         | FieldDefType::Isize => {
+            let minimum_opt = fld.model_schema_prop_meta.as_ref().and_then(|m| m.minimum);
+            let maximum_opt = fld.model_schema_prop_meta.as_ref().and_then(|m| m.maximum);
+            let minimum_insert = minimum_opt.map(|min| {
+                quote! { schema_obj.insert("minimum".to_string(), serde_json::json!(#min)); }
+            });
+            let maximum_insert = maximum_opt.map(|max| {
+                quote! { schema_obj.insert("maximum".to_string(), serde_json::json!(#max)); }
+            });
+
             if fld.is_array {
                 quote! {
                     properties.insert(#field_name_str.to_string(), {
+                        let mut schema_obj = serde_json::Map::new();
+                        schema_obj.insert("type".to_string(), serde_json::json!("integer"));
+                        #minimum_insert
+                        #maximum_insert
+                        let items = serde_json::Value::Object(schema_obj);
                         serde_json::json!({
                             "type": "array",
-                            "items": serde_json::json!({ "type": "integer" })
+                            "items": items
                         })
                     });
                 }
             } else {
                 quote! {
                     properties.insert(#field_name_str.to_string(), {
-                        serde_json::json!({
-                            "type": "integer",
-                        })
+                        let mut schema_obj = serde_json::Map::new();
+                        schema_obj.insert("type".to_string(), serde_json::json!("integer"));
+                        #minimum_insert
+                        #maximum_insert
+                        serde_json::Value::Object(schema_obj)
                     });
                 }
             }
         }
         FieldDefType::F32 | FieldDefType::F64 => {
+            let minimum_opt = fld.model_schema_prop_meta.as_ref().and_then(|m| m.minimum);
+            let maximum_opt = fld.model_schema_prop_meta.as_ref().and_then(|m| m.maximum);
+            let minimum_insert = minimum_opt.map(|min| {
+                quote! { schema_obj.insert("minimum".to_string(), serde_json::json!(#min)); }
+            });
+            let maximum_insert = maximum_opt.map(|max| {
+                quote! { schema_obj.insert("maximum".to_string(), serde_json::json!(#max)); }
+            });
+
             if fld.is_array {
                 quote! {
                     properties.insert(#field_name_str.to_string(), {
+                        let mut schema_obj = serde_json::Map::new();
+                        schema_obj.insert("type".to_string(), serde_json::json!("number"));
+                        #minimum_insert
+                        #maximum_insert
+                        let items = serde_json::Value::Object(schema_obj);
                         serde_json::json!({
                             "type": "array",
-                            "items": serde_json::json!({ "type": "number" })
+                            "items": items
                         })
                     });
                 }
             } else {
                 quote! {
                     properties.insert(#field_name_str.to_string(), {
-                        serde_json::json!({
-                            "type": "number",
-                        })
+                        let mut schema_obj = serde_json::Map::new();
+                        schema_obj.insert("type".to_string(), serde_json::json!("number"));
+                        #minimum_insert
+                        #maximum_insert
+                        serde_json::Value::Object(schema_obj)
                     });
                 }
             }
@@ -2661,43 +3076,190 @@ fn write_field_type_and_schema(
     }
 }
 
-/// Generates a serde `deserialize_with` validation function for a field with a pattern constraint.
+/// Holds the generated validation code for a single field.
 #[cfg(feature = "serde")]
-fn generate_validate_fn(
-    field_ident: &str,
-    pattern: &str,
-) -> proc_macro2::TokenStream {
-    let fn_name = format!("validate_{field_ident}");
-    let fn_ident = proc_macro2::Ident::new(&fn_name, proc_macro2::Span::call_site());
-    let pattern_lit = pattern.to_string();
+struct FieldValidationCode {
+    /// Functions to emit into the schema module (static validator + serde deserializer)
+    pub module_items: proc_macro2::TokenStream,
+    /// Code to contribute to the type-level `validate()` method body
+    pub validate_body: proc_macro2::TokenStream,
+}
 
-    quote! {
-        pub fn #fn_ident<'de, D>(deserializer: D) -> Result<String, D::Error>
+/// Generates the static validator and serde deserializer for a String field with constraints.
+///
+/// Returns (`module_items`, `validate_body`) — both go into the schema module and validate() respectively.
+#[cfg(feature = "serde")]
+fn generate_string_validation_code(
+    field_ident: &str,
+    meta: &crate::features::model_schema_prop::ModelSchemaPropMeta,
+) -> FieldValidationCode {
+    let validate_value_fn_name = format!("validate_{field_ident}_value");
+    let validate_value_fn_ident =
+        proc_macro2::Ident::new(&validate_value_fn_name, proc_macro2::Span::call_site());
+    let deserialize_fn_name = format!("deserialize_{field_ident}");
+    let deserialize_fn_ident =
+        proc_macro2::Ident::new(&deserialize_fn_name, proc_macro2::Span::call_site());
+
+    let field_name_lit = field_ident.to_string();
+
+    // Build validation checks
+    let mut checks: Vec<proc_macro2::TokenStream> = Vec::new();
+
+    if let Some(min_len) = meta.min_length {
+        checks.push(quote! {
+            if value.len() < #min_len {
+                return Err(format!(
+                    "'{}' is too short: minimum length is {}, got {}",
+                    #field_name_lit, #min_len, value.len()
+                ));
+            }
+        });
+    }
+
+    if let Some(max_len) = meta.max_length {
+        checks.push(quote! {
+            if value.len() > #max_len {
+                return Err(format!(
+                    "'{}' is too long: maximum length is {}, got {}",
+                    #field_name_lit, #max_len, value.len()
+                ));
+            }
+        });
+    }
+
+    if let Some(ref pattern) = meta.pattern {
+        let pattern_lit = pattern.to_string();
+        checks.push(quote! {
+            {
+                use std::sync::LazyLock;
+                static RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+                    regex::Regex::new(#pattern_lit).unwrap()
+                });
+                if !RE.is_match(value) {
+                    return Err(format!(
+                        "'{}' does not match pattern '{}'",
+                        #field_name_lit, #pattern_lit
+                    ));
+                }
+            }
+        });
+    }
+
+    let module_items = quote! {
+        pub fn #validate_value_fn_ident(value: &str) -> Result<(), String> {
+            #(#checks)*
+            Ok(())
+        }
+
+        pub fn #deserialize_fn_ident<'de, D>(deserializer: D) -> Result<String, D::Error>
         where
             D: serde::Deserializer<'de>,
         {
-            use std::sync::LazyLock;
             use serde::Deserialize;
-            static RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-                regex::Regex::new(#pattern_lit).unwrap()
-            });
             let s = String::deserialize(deserializer)?;
-            if !RE.is_match(&s) {
-                return Err(serde::de::Error::custom(
-                    format!("value '{}' does not match pattern '{}'", s, #pattern_lit)
-                ));
-            }
+            #validate_value_fn_ident(&s).map_err(serde::de::Error::custom)?;
             Ok(s)
         }
+    };
+
+    let field_ident_tok =
+        proc_macro2::Ident::new(field_ident, proc_macro2::Span::call_site());
+
+    let validate_body = quote! {
+        if let Err(e) = #validate_value_fn_ident(&self.#field_ident_tok) {
+            errors.push(e);
+        }
+    };
+
+    FieldValidationCode {
+        module_items,
+        validate_body,
     }
 }
 
-/// Processes a field and returns its definition plus an optional validation function TokenStream.
+/// Generates the static validator and serde deserializer for a numeric field with constraints.
+#[cfg(feature = "serde")]
+fn generate_numeric_validation_code(
+    field_ident: &str,
+    rust_type_str: &str,
+    meta: &crate::features::model_schema_prop::ModelSchemaPropMeta,
+) -> FieldValidationCode {
+    let validate_value_fn_name = format!("validate_{field_ident}_value");
+    let validate_value_fn_ident =
+        proc_macro2::Ident::new(&validate_value_fn_name, proc_macro2::Span::call_site());
+    let deserialize_fn_name = format!("deserialize_{field_ident}");
+    let deserialize_fn_ident =
+        proc_macro2::Ident::new(&deserialize_fn_name, proc_macro2::Span::call_site());
+
+    let rust_type_ident: proc_macro2::TokenStream = rust_type_str.parse().unwrap();
+    let field_name_lit = field_ident.to_string();
+
+    let mut checks: Vec<proc_macro2::TokenStream> = Vec::new();
+
+    if let Some(minimum) = meta.minimum {
+        // Cast to the correct type for comparison
+        let min_cast: proc_macro2::TokenStream = format!("{minimum} as {rust_type_str}").parse().unwrap();
+        checks.push(quote! {
+            if *value < #min_cast {
+                return Err(format!(
+                    "'{}' is too small: minimum is {}, got {}",
+                    #field_name_lit, #minimum, value
+                ));
+            }
+        });
+    }
+
+    if let Some(maximum) = meta.maximum {
+        let max_cast: proc_macro2::TokenStream = format!("{maximum} as {rust_type_str}").parse().unwrap();
+        checks.push(quote! {
+            if *value > #max_cast {
+                return Err(format!(
+                    "'{}' is too large: maximum is {}, got {}",
+                    #field_name_lit, #maximum, value
+                ));
+            }
+        });
+    }
+
+    let module_items = quote! {
+        pub fn #validate_value_fn_ident(value: &#rust_type_ident) -> Result<(), String> {
+            #(#checks)*
+            Ok(())
+        }
+
+        pub fn #deserialize_fn_ident<'de, D>(deserializer: D) -> Result<#rust_type_ident, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            use serde::Deserialize;
+            let v = #rust_type_ident::deserialize(deserializer)?;
+            #validate_value_fn_ident(&v).map_err(serde::de::Error::custom)?;
+            Ok(v)
+        }
+    };
+
+    let field_ident_tok =
+        proc_macro2::Ident::new(field_ident, proc_macro2::Span::call_site());
+
+    let validate_body = quote! {
+        if let Err(e) = #validate_value_fn_ident(&self.#field_ident_tok) {
+            errors.push(e);
+        }
+    };
+
+    FieldValidationCode {
+        module_items,
+        validate_body,
+    }
+}
+
+/// Processes a field and returns its definition, optional module items (validators/deserializers),
+/// and optional validate_body (contribution to the type-level `validate()` method).
 fn process_field(
     rename_all: &Option<String>,
     field: &mut Field,
     schema_module_name: Option<&str>,
-) -> (FieldDef, Option<proc_macro2::TokenStream>) {
+) -> (FieldDef, Option<proc_macro2::TokenStream>, Option<proc_macro2::TokenStream>) {
     let mut new_attrs = Vec::new();
 
     #[cfg(feature = "serde")]
@@ -2728,26 +3290,116 @@ fn process_field(
         }
     }
 
-    // If pattern is set and serde feature is enabled, inject serde deserialize_with attribute
+    // Determine the Rust type for numeric validation (bare numeric types only)
     #[cfg(feature = "serde")]
-    let validation_fn: Option<proc_macro2::TokenStream> =
-        if let (Some(module_name), Some(pattern)) =
-            (schema_module_name, &model_schema_prop_meta.pattern)
+    fn field_rust_type_str(field: &Field) -> Option<&'static str> {
+        // Look at the field type to determine the concrete Rust type for numeric validators.
+        // Only matches bare types (not wrapped in Vec, Option, etc.)
+        if let syn::Type::Path(tp) = &field.ty
+            && let Some(seg) = tp.path.segments.last()
+            && matches!(seg.arguments, syn::PathArguments::None)
         {
+            return match seg.ident.to_string().as_str() {
+                "u8" => Some("u8"),
+                "u16" => Some("u16"),
+                "u32" => Some("u32"),
+                "u64" => Some("u64"),
+                "i8" => Some("i8"),
+                "i16" => Some("i16"),
+                "i32" => Some("i32"),
+                "i64" => Some("i64"),
+                "usize" => Some("usize"),
+                "isize" => Some("isize"),
+                "f32" => Some("f32"),
+                "f64" => Some("f64"),
+                _ => None,
+            };
+        }
+        None
+    }
+
+    // Check if the field is a bare String type (not Vec<String>, Option<String>, etc.)
+    #[cfg(feature = "serde")]
+    fn field_is_bare_string(field: &Field) -> bool {
+        if let syn::Type::Path(tp) = &field.ty
+            && let Some(seg) = tp.path.segments.last()
+        {
+            return seg.ident == "String"
+                && matches!(seg.arguments, syn::PathArguments::None);
+        }
+        false
+    }
+
+    // Determine if this field has string constraints (minLength, maxLength, pattern)
+    // Only applicable to bare String fields (not Vec<String>, Option<String>, etc.)
+    #[cfg(feature = "serde")]
+    let has_string_constraints = (model_schema_prop_meta.min_length.is_some()
+        || model_schema_prop_meta.max_length.is_some()
+        || model_schema_prop_meta.pattern.is_some())
+        && field_is_bare_string(field);
+
+    // Determine if this field has numeric constraints (minimum, maximum)
+    #[cfg(feature = "serde")]
+    let has_numeric_constraints =
+        model_schema_prop_meta.minimum.is_some() || model_schema_prop_meta.maximum.is_some();
+
+    // Generate validation code and inject serde attribute if serde feature is enabled
+    #[cfg(feature = "serde")]
+    let (validation_fn, validate_body): (
+        Option<proc_macro2::TokenStream>,
+        Option<proc_macro2::TokenStream>,
+    ) = if let Some(module_name) = schema_module_name {
+        if has_string_constraints {
+            // String field with constraints: generate static validator + deserializer
+            let validation_code =
+                generate_string_validation_code(&raw_field_ident, &model_schema_prop_meta);
             let deserialize_with_path =
-                format!("{module_name}::validate_{raw_field_ident}");
-            let path_lit = syn::LitStr::new(&deserialize_with_path, proc_macro2::Span::call_site());
+                format!("{module_name}::deserialize_{raw_field_ident}");
+            let path_lit =
+                syn::LitStr::new(&deserialize_with_path, proc_macro2::Span::call_site());
             let serde_attr: syn::Attribute = syn::parse_quote! {
                 #[serde(deserialize_with = #path_lit)]
             };
             new_attrs.push(serde_attr);
-            Some(generate_validate_fn(&raw_field_ident, pattern))
+            (
+                Some(validation_code.module_items),
+                Some(validation_code.validate_body),
+            )
+        } else if has_numeric_constraints {
+            // Numeric field with constraints: generate static validator + deserializer
+            if let Some(rust_type) = field_rust_type_str(field) {
+                let validation_code = generate_numeric_validation_code(
+                    &raw_field_ident,
+                    rust_type,
+                    &model_schema_prop_meta,
+                );
+                let deserialize_with_path =
+                    format!("{module_name}::deserialize_{raw_field_ident}");
+                let path_lit =
+                    syn::LitStr::new(&deserialize_with_path, proc_macro2::Span::call_site());
+                let serde_attr: syn::Attribute = syn::parse_quote! {
+                    #[serde(deserialize_with = #path_lit)]
+                };
+                new_attrs.push(serde_attr);
+                (
+                    Some(validation_code.module_items),
+                    Some(validation_code.validate_body),
+                )
+            } else {
+                (None, None)
+            }
         } else {
-            None
-        };
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
 
     #[cfg(not(feature = "serde"))]
-    let validation_fn: Option<proc_macro2::TokenStream> = None;
+    let (validation_fn, validate_body): (
+        Option<proc_macro2::TokenStream>,
+        Option<proc_macro2::TokenStream>,
+    ) = (None, None);
 
     field.attrs = new_attrs;
 
@@ -2779,7 +3431,10 @@ fn process_field(
     field_def.model_schema_prop_meta = if model_schema_prop_meta.as_type.is_some()
         || model_schema_prop_meta.literal.is_some()
         || model_schema_prop_meta.min_length.is_some()
+        || model_schema_prop_meta.max_length.is_some()
         || model_schema_prop_meta.pattern.is_some()
+        || model_schema_prop_meta.minimum.is_some()
+        || model_schema_prop_meta.maximum.is_some()
         || !model_schema_prop_meta.preprocess.is_empty()
     {
         Some(model_schema_prop_meta)
@@ -2796,20 +3451,32 @@ fn process_field(
     }
     // TODO: Handle `as` parameter for type overrides in future implementation
 
-    // Update field docs to include minimum length information
-    if let Some(ref meta) = field_def.model_schema_prop_meta
-        && let Some(min_len) = meta.min_length
-    {
-        // Add minimum length information to the docs
-        let min_len_doc = format!(" * Minimum length: {min_len}");
-        field_def.docs = if field_def.docs.is_empty() {
-            format!(" * {final_name}\n * \n{min_len_doc}")
-        } else {
-            format!("{}\n{}", field_def.docs, min_len_doc)
-        };
+    // Update field docs to include length/range constraint information
+    if let Some(ref meta) = field_def.model_schema_prop_meta {
+        let mut constraint_docs: Vec<String> = Vec::new();
+        if let Some(min_len) = meta.min_length {
+            constraint_docs.push(format!(" * Minimum length: {min_len}"));
+        }
+        if let Some(max_len) = meta.max_length {
+            constraint_docs.push(format!(" * Maximum length: {max_len}"));
+        }
+        if let Some(minimum) = meta.minimum {
+            constraint_docs.push(format!(" * Minimum value: {minimum}"));
+        }
+        if let Some(maximum) = meta.maximum {
+            constraint_docs.push(format!(" * Maximum value: {maximum}"));
+        }
+        if !constraint_docs.is_empty() {
+            let extra_docs = constraint_docs.join("\n");
+            field_def.docs = if field_def.docs.is_empty() {
+                format!(" * {final_name}\n * \n{extra_docs}")
+            } else {
+                format!("{}\n{}", field_def.docs, extra_docs)
+            };
+        }
     }
 
-    (field_def, validation_fn)
+    (field_def, validation_fn, validate_body)
 }
 
 /// Gets the final name for a field or enum variant, considering serde attributes.
@@ -3033,7 +3700,7 @@ fn generate_plain_enum_zod_schema_method(
         {
             quote::quote! {
                 pub fn zod_schema() -> String {
-                    format!("export const {}$Schema: ZodType<{}> = z.enum([{}]).meta({{\n  description: \"{}\",\n}});", #item_name, #item_name, #schema_code, #description)
+                    format!("const {}$RawSchema = z.enum([{}]).meta({{\n  description: \"{}\",\n}});\n\nexport const {}$Schema: ZodType<{}> = {}$RawSchema;", #item_name, #schema_code, #description, #item_name, #item_name, #item_name)
                 }
             }
         }
@@ -3126,7 +3793,7 @@ fn generate_discriminated_enum_zod_schema_method(
         {
             quote::quote! {
                 pub fn zod_schema() -> String {
-                    format!(r#"export const {}$Schema: ZodType<{}> = {};"#, #item_name, #item_name, #schema_code)
+                    format!("const {}$RawSchema = {};\n\nexport const {}$Schema: ZodType<{}> = {}$RawSchema;", #item_name, #schema_code, #item_name, #item_name, #item_name)
                 }
             }
         }

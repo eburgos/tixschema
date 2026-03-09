@@ -1,31 +1,12 @@
 # TixSchema
 
-A Rust procedural macro library for generating TypeScript type definitions and Zod validation schemas from Rust structs and enums in Tixena applications.
-
-## Overview
-
-`tixschema` provides procedural macros that automatically generate TypeScript types and Zod schemas from your Rust data models. This ensures type safety and consistency between your Rust backend and TypeScript frontend without manual synchronization.
-
-## Features
-
-- **Automatic TypeScript Generation**: Creates TypeScript type definitions from Rust structs and enums
-- **Zod v4 Schema Generation**: Generates modern runtime validation schemas using Zod v4 syntax
-- **JSON Schema Support**: Generates JSON schemas for API documentation and validation (enabled by Zod v4 compatibility)
-- **MongoDB ObjectId Support**: First-class support for MongoDB ObjectId types with proper serialization and validation
-- **Serde Integration**: Respects Serde attributes for consistent naming and serialization
-- **Type Mapping**: Handles complex types including:
-  - Nested objects and references
-  - Arrays and collections (`Vec<T>` → `Array<T>`)
-  - Optional fields (`Option<T>` → `T | undefined`)
-  - Maps (`HashMap<String, T>` → `Partial<Record<string, T>>`)
-  - MongoDB ObjectId fields (`ObjectId` → `ObjectId` with JSON schema validation)
-  - Primitive types (bool, String, numeric types)
-  - Discriminated unions (tagged enums)
-  - Complex nested structures (including deeply nested HashMaps)
+A Rust procedural macro library that generates TypeScript type definitions and Zod v4 validation schemas from Rust structs and enums, ensuring type safety and consistency between Rust backends and TypeScript frontends.
 
 ## Installation
 
-Add this to your `Cargo.toml`:
+### Rust Dependencies
+
+Add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
@@ -34,11 +15,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ```
 
-### Frontend Dependencies
+### Frontend Dependencies (Zod v4)
 
-**⚠️ Important: This crate requires Zod v4 for full functionality, especially JSON schema generation.**
-
-Install Zod v4 in your TypeScript/JavaScript project:
+**Important:** This crate requires Zod v4 for full functionality, especially JSON schema generation. Zod v3 is not supported.
 
 ```bash
 npm install zod@^4.0.0
@@ -46,11 +25,7 @@ npm install zod@^4.0.0
 yarn add zod@^4.0.0
 ```
 
-**Note**: Zod v3 is not supported. The generated schemas use Zod v4 syntax (`z.union([type, z.undefined()])`) which is incompatible with earlier versions.
-
-## Usage
-
-### Basic Struct
+## Quick Start
 
 ```rust
 use tixschema::model_schema;
@@ -58,7 +33,7 @@ use serde::{Deserialize, Serialize};
 
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct UserJson {
+pub struct User {
     pub id: String,
     pub name: String,
     pub email: String,
@@ -68,450 +43,12 @@ pub struct UserJson {
 ```
 
 This generates:
-- `UserJson::json_schema()` - Returns a JSON schema
-- `UserJson::ts_definition()` - Returns TypeScript type and Zod schema as a string
+- `User::ts_definition()` -- Returns a TypeScript type definition and Zod schema as a string
+- `User::json_schema()` -- Returns a JSON schema (requires `jsonschema` feature)
 
-### Serde Attributes
-
-The macros respect Serde attributes for field renaming:
-
-```rust
-#[model_schema()]
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UserProfileJson {
-    pub user_id: String,
-    pub first_name: String,
-    pub last_name: String,
-    #[serde(rename = "emailAddress")]
-    pub email: String,
-    pub created_at: String,
-}
-```
-
-### Optional Fields
-
-```rust
-#[model_schema()]
-#[derive(Serialize, Deserialize)]
-pub struct UserWithOptionalsJson {
-    pub id: String,
-    pub name: String,
-    pub email: Option<String>,
-    pub phone: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub avatar_url: Option<String>,
-}
-```
-
-### Collections and Maps
-
-```rust
-use std::collections::HashMap;
-
-#[model_schema()]
-#[derive(Serialize, Deserialize)]
-pub struct UserWithCollectionsJson {
-    pub id: String,
-    pub tags: Vec<String>,
-    pub scores: Vec<u32>,
-    pub metadata: HashMap<String, String>,
-    pub settings: Option<HashMap<String, String>>,
-}
-```
-
-### Plain Enums
-
-```rust
-#[model_schema()]
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum UserStatusJson {
-    Active,
-    Inactive,
-    Pending,
-    Suspended,
-}
-```
-
-### Discriminated Unions (Tagged Enums)
-
-```rust
-#[model_schema()]
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum PaymentMethodJson {
-    CreditCard {
-        card_number: String,
-        expiry_date: String,
-        cvv: String,
-    },
-    BankTransfer {
-        account_number: String,
-        routing_number: String,
-    },
-    PayPal {
-        email: String,
-    },
-}
-```
-
-### Nested Types
-
-```rust
-#[model_schema()]
-#[derive(Serialize, Deserialize)]
-pub struct AddressJson {
-    pub street: String,
-    pub city: String,
-    pub zip_code: String,
-}
-
-#[model_schema()]
-#[derive(Serialize, Deserialize)]
-pub struct UserWithAddressJson {
-    pub id: String,
-    pub name: String,
-    pub address: AddressJson,
-    pub backup_addresses: Vec<AddressJson>,
-}
-```
-
-### Field-Level Customization
-
-Use `model_schema_prop` for field-specific overrides:
-
-```rust
-use tixschema::{model_schema, model_schema_prop};
-
-#[model_schema()]
-#[derive(Serialize, Deserialize)]
-pub struct ApiConfigJson {
-    pub id: String,
-    #[model_schema_prop(as = String)]
-    pub metric_type: String,
-    pub enabled: bool,
-}
-```
-
-### Literal Values
-
-You can constrain a `String` field to a specific literal value using `model_schema_prop(literal = "value")`. This generates `z.literal("value")` in the Zod schema and a literal type in TypeScript, while the Rust field remains a `String`.
-
-```rust
-#[model_schema()]
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum ActionJson {
-    Generate {
-        #[model_schema_prop(literal = "document")]
-        value: String,
-    },
-}
-```
-
-This generates:
-```typescript
-export type Action = {
-  type: "generate";
-  value: "document";
-};
-
-export const Action$Schema = z.discriminatedUnion("type", [
-  z.strictObject({
-    type: z.literal("generate"),
-    value: z.literal("document"),
-  }),
-]);
-```
-
-#### Recommended: Single-Value Enums over Literal Strings
-
-While `model_schema_prop(literal = ...)` works, we recommend using a **single-value enum** instead. This provides type safety in Rust — the field can only hold the correct value at compile time, whereas a `String` with a literal annotation can hold any string in Rust (the constraint only applies in the generated TypeScript/Zod output).
-
-```rust
-// ✅ Recommended: single-value enum
-#[model_schema()]
-#[derive(Serialize, Deserialize)]
-pub enum DocumentLiteralValue {
-    #[serde(rename = "document")]
-    Document,
-}
-
-#[model_schema()]
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum ActionJson {
-    Generate {
-        value: DocumentLiteralValue,  // Type-safe in Rust
-    },
-}
-
-// ❌ Still supported, but not recommended:
-#[model_schema()]
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum ActionAltJson {
-    Generate {
-        #[model_schema_prop(literal = "document")]
-        value: String,  // Any string value accepted in Rust
-    },
-}
-```
-
-Both approaches produce identical TypeScript and Zod output. The single-value enum is preferred because:
-
-- **Type safety in Rust** — impossible to construct with a wrong value
-- **Self-documenting** — the enum name makes the intent clear
-- **Pattern matching** — match on `DocumentLiteralValue::Document` instead of checking string equality
-- **Naming convention**: Use the `<Something>LiteralValue` naming pattern (e.g., `DocumentLiteralValue`, `ProDoctivityLiteralValue`)
-
-### Examples
-
-You can provide compiler-validated example values for your types that will be embedded in the generated Zod schemas' `.meta()` field. Examples are written in Rust code blocks and fully type-checked at compile time.
-
-#### Basic Usage
-
-```rust
-/// User profile
-/// ```rust example
-/// UserJson {
-///     name: "John Doe".to_string(),
-///     email: "john@example.com".to_string(),
-///     age: 25,
-/// }
-/// ```
-#[model_schema()]
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct UserJson {
-    pub name: String,
-    pub email: String,
-    pub age: u32,
-}
-```
-
-**Generated Zod Schema:**
-```typescript
-export const User$Schema: ZodType<User> = z.strictObject({
-  name: z.string(),
-  email: z.string(),
-  age: z.number().int(),
-}).meta({
-  example: { name: "John Doe", email: "john@example.com", age: 25 }
-});
-```
-
-#### Complex Examples with Setup Logic
-
-You can include arbitrary setup code before the example value:
-
-```rust
-/// User with tags
-/// ```rust example
-/// let user_id = "usr_123".to_string();
-/// let tags = vec!["admin".to_string(), "active".to_string()];
-/// UserJson {
-///     id: user_id,
-///     tags,
-///     age: 30,
-/// }
-/// ```
-#[model_schema()]
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct UserJson {
-    pub id: String,
-    pub tags: Vec<String>,
-    pub age: u32,
-}
-```
-
-#### Enum Examples
-
-```rust
-/// Data type enumeration
-/// ```rust example
-/// DataTypeJson::Numeric
-/// ```
-#[model_schema()]
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum DataTypeJson {
-    Alphanumeric,
-    Numeric,
-    Date,
-}
-```
-
-**Generated:**
-```typescript
-export const DataType$Schema: ZodType<DataType> = z.enum(["Alphanumeric", "Numeric", "Date"]).meta({
-  description: "Data type enumeration",
-  example: "Numeric",
-});
-```
-
-#### Benefits
-
-- **Compiler-Validated**: Examples must match the type exactly or compilation fails
-- **Auto-Serialized**: Uses Serde to match your API's JSON format (respects `rename`, `rename_all`, etc.)
-- **AI-Friendly**: Helps AI assistants understand your API
-- **Type-Safe**: Wrong types = compile errors
-
-#### Important Notes
-
-- Examples are **optional** - if not provided, no example is generated
-- Use the exact syntax: ` ```rust example` (note the space and `example` keyword)
-- If multiple examples are present, only the **first one** is used
-- Examples respect Serde attributes (field renaming, etc.)
-- The example code is executed at compile time and serialized to JSON
-
-### MongoDB ObjectId Support
-
-The crate provides first-class support for MongoDB ObjectId types with proper serialization and validation:
-
-```rust
-use tixschema::model_schema;
-use serde::{Deserialize, Serialize};
-use mongodb::bson::oid::ObjectId;
-
-#[model_schema()]
-#[derive(Serialize, Deserialize)]
-pub struct DocumentJson {
-    pub id: ObjectId,
-    pub title: String,
-    pub author_id: ObjectId,
-    pub tags: Vec<ObjectId>,
-    pub metadata: HashMap<String, ObjectId>,
-    pub parent_id: Option<ObjectId>,
-    pub related_docs: HashMap<String, Vec<ObjectId>>,
-}
-```
-
-**Generated TypeScript:**
-```typescript
-export type Document = {
-  id: ObjectId;
-  title: string;
-  author_id: ObjectId;
-  tags: Array<ObjectId>;
-  metadata: Partial<Record<string, ObjectId>>;
-  parent_id: ObjectId | undefined;
-  related_docs: Partial<Record<string, Array<ObjectId>>>;
-};
-
-export const Document$Schema = z.strictObject({
-  id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }),
-  title: z.string(),
-  author_id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }),
-  tags: z.array(z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) })),
-  metadata: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) })),
-  parent_id: z.union(z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }), z.undefined()]),
-  related_docs: z.record(z.string(), z.array(z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }))),
-});
-```
-
-**MongoDB JSON Serialization:**
-```json
-{
-  "id": { "$oid": "507f1f77bcf86cd799439011" },
-  "title": "My Document",
-  "author_id": { "$oid": "507f1f77bcf86cd799439012" },
-  "tags": [
-    { "$oid": "507f1f77bcf86cd799439013" },
-    { "$oid": "507f1f77bcf86cd799439014" }
-  ],
-  "metadata": {
-    "template": { "$oid": "507f1f77bcf86cd799439015" }
-  },
-  "parent_id": { "$oid": "507f1f77bcf86cd799439016" },
-  "related_docs": {
-    "references": [
-      { "$oid": "507f1f77bcf86cd799439017" },
-      { "$oid": "507f1f77bcf86cd799439018" }
-    ]
-  }
-}
-```
-
-**ObjectId Features:**
-- **Proper MongoDB Serialization**: Uses `{ "$oid": "hex_string" }` format
-- **Regex Validation**: Validates 24-character hexadecimal ObjectId format
-- **JSON Schema Generation**: Generates correct MongoDB-compatible JSON schemas
-- **Complex Nesting**: Supports ObjectIds in arrays, HashMaps, and optional fields
-- **Production Safe**: MongoDB dependency is dev-only for testing, no production overhead
-
-## Generating TypeScript Files
-
-Create a utility function to generate TypeScript files with all your types:
-
-```rust
-// In your tests/mod.rs or similar
-use std::fs;
-
-pub enum MyEntities {}
-
-impl MyEntities {
-    pub fn get_entities() -> (String, Vec<String>) {
-        (
-            "Generated Types".to_string(),
-            vec![
-                UserJson::ts_definition(),
-                UserStatusJson::ts_definition(),
-                PaymentMethodJson::ts_definition(),
-                AddressJson::ts_definition(),
-                UserWithAddressJson::ts_definition(),
-            ],
-        )
-    }
-}
-
-#[test]
-fn test_generate_typescript() {
-    generate_ts_schemas("../frontend/src/types/generated.ts").unwrap();
-}
-
-pub fn generate_ts_schemas(target_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let mut file_contents = String::from("import { z } from \"zod\";\n\n");
-
-    let (header, type_definitions) = MyEntities::get_entities();
-    
-    file_contents.push_str(&format!(
-        "/*\n * {}\n */\n\n",
-        header
-    ));
-    
-    file_contents.push_str(&type_definitions.join("\n\n"));
-    file_contents.push('\n');
-
-    fs::write(target_path, file_contents)?;
-    println!("Generated TypeScript types at: {}", target_path);
-    Ok(())
-}
-```
-
-## Generated Output Example
-
-For the `UserJson` struct above, the generated TypeScript would be:
+Generated TypeScript:
 
 ```typescript
-import { z } from "zod";
-
-/**
- * UserJson
- * 
- * JSON Schema:
- * {
- *   "type": "object",
- *   "properties": {
- *     "id": { "type": "string" },
- *     "name": { "type": "string" },
- *     "email": { "type": "string" },
- *     "age": { "type": "integer" },
- *     "is_active": { "type": "boolean" }
- *   },
- *   "required": ["id", "name", "email", "age", "is_active"],
- *   "additionalProperties": false
- * }
- **/
 export type User = {
   id: string;
   name: string;
@@ -529,31 +66,1042 @@ export const User$Schema: ZodType<User> = z.strictObject({
 });
 ```
 
+## Usage
+
+### Structs
+
+Any Rust struct annotated with `#[model_schema()]` generates a corresponding TypeScript type and Zod schema. Primitive types map as follows: `String` to `string`, `bool` to `boolean`, all numeric types to `number` (integers get `.int()`), `Option<T>` to `T | undefined`, `Vec<T>` to `Array<T>`, and `HashMap<String, T>` to `Partial<Record<string, T>>`.
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+pub struct UserProfile {
+    pub user_id: String,
+    pub name: String,
+    pub age: u32,
+    pub score: f64,
+    pub is_verified: bool,
+}
+```
+
+### Optional Fields
+
+`Option<T>` fields become `T | undefined` in TypeScript and `z.union([type, z.undefined()])` in Zod v4.
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+pub struct UserWithOptionals {
+    pub id: String,
+    pub name: String,
+    pub email: Option<String>,
+    pub phone: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+}
+```
+
+### Collections and Maps
+
+`Vec<T>` becomes `Array<T>`. Only `HashMap<String, T>` is supported (non-string keys will cause compilation errors).
+
+```rust
+use std::collections::HashMap;
+
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+pub struct UserWithCollections {
+    pub id: String,
+    pub tags: Vec<String>,
+    pub scores: Vec<u32>,
+    pub metadata: HashMap<String, String>,
+    pub settings: Option<HashMap<String, String>>,
+}
+```
+
+### Enums
+
+#### Plain Enums
+
+Plain enums (all unit variants) generate a TypeScript string union and `z.enum()` in Zod.
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UserStatus {
+    Active,
+    Inactive,
+    Pending,
+    Suspended,
+}
+```
+
+#### Discriminated Unions (Tagged Enums)
+
+Enums with `#[serde(tag = "...")]` generate TypeScript discriminated unions.
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum PaymentMethod {
+    CreditCard {
+        card_number: String,
+        expiry_date: String,
+        cvv: String,
+    },
+    BankTransfer {
+        account_number: String,
+        routing_number: String,
+    },
+    PayPal {
+        email: String,
+    },
+}
+```
+
+#### Tuple Variants
+
+Discriminated unions also support tuple variants. Single-element tuples are flattened to a `value` field, and multi-element tuples generate a TypeScript tuple type.
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum FixedValue {
+    // Unit variant (no data)
+    Empty,
+    // Single-element tuple: { type: "Text", value: string }
+    Text(String),
+    // Multi-element tuple: { type: "Pair", value: [string, number] }
+    Pair(String, i64),
+    // Named struct variant (existing behavior)
+    Named { field_a: String, field_b: bool },
+}
+```
+
+Generated TypeScript:
+
+```typescript
+export type FixedValue = {
+  type: "Empty";
+} | {
+  type: "Text";
+  value: string;
+} | {
+  type: "Pair";
+  value: [string, number];
+} | {
+  type: "Named";
+  field_a: string;
+  field_b: boolean;
+};
+```
+
+Generated Zod:
+
+```typescript
+export const FixedValue$Schema: ZodType<FixedValue> = z.discriminatedUnion("type", [
+  z.strictObject({
+    type: z.literal("Empty"),
+  }),
+  z.strictObject({
+    type: z.literal("Text"),
+    value: z.string(),
+  }),
+  z.strictObject({
+    type: z.literal("Pair"),
+    value: z.tuple([z.string(), z.number().int()]),
+  }),
+  z.strictObject({
+    type: z.literal("Named"),
+    field_a: z.string(),
+    field_b: z.boolean(),
+  }),
+]);
+```
+
+You can customize the tag and content field names using Serde's `tag` and `content` attributes:
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "kind", content = "data")]
+pub enum Event {
+    Text(String),
+    Number(i64),
+}
+```
+
+This generates `kind` as the discriminator and `data` as the value field instead of the defaults (`type` and `value`).
+
+### Nested Types
+
+Types annotated with `#[model_schema()]` can reference each other. The TypeScript output uses the type's name (without any suffix) as the reference.
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+pub struct Address {
+    pub street: String,
+    pub city: String,
+    pub zip_code: String,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+pub struct UserWithAddress {
+    pub id: String,
+    pub name: String,
+    pub address: Address,
+    pub backup_addresses: Vec<Address>,
+}
+```
+
+### Recursive Types
+
+The library supports recursive and self-referential types. In the generated Zod schema, recursive fields use JavaScript getter syntax to defer the reference and avoid "use before declaration" errors.
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TreeNode {
+    pub val: String,
+    pub children: Vec<TreeNode>,
+}
+```
+
+Generated TypeScript:
+
+```typescript
+export type TreeNode = {
+  val: string;
+  children: Array<TreeNode>;
+};
+```
+
+Generated Zod:
+
+```typescript
+const TreeNode$RawSchema = z.strictObject({
+  val: z.string(),
+  get children() { return z.array(TreeNode$Schema); },
+});
+
+export const TreeNode$Schema: ZodType<TreeNode> = TreeNode$RawSchema;
+```
+
+Recursive enums are also supported. Only the variants that contain a self-reference use getter syntax; non-recursive variants use normal property syntax:
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "type", content = "value")]
+pub enum DynamicValue {
+    #[serde(rename = "string")]
+    String(String),
+    #[serde(rename = "integer")]
+    Integer(i64),
+    #[serde(rename = "array")]
+    Array(Vec<DynamicValue>),
+    #[serde(rename = "object")]
+    Object(HashMap<String, DynamicValue>),
+}
+```
+
+Generated Zod:
+
+```typescript
+export const DynamicValue$Schema: ZodType<DynamicValue> = z.discriminatedUnion("type", [
+  z.strictObject({
+    type: z.literal("string"),
+    value: z.string(),
+  }),
+  z.strictObject({
+    type: z.literal("integer"),
+    value: z.number().int(),
+  }),
+  z.strictObject({
+    type: z.literal("array"),
+    get value() { return z.array(DynamicValue$Schema); },
+  }),
+  z.strictObject({
+    type: z.literal("object"),
+    get value() { return z.record(z.string(), DynamicValue$Schema); },
+  }),
+]);
+```
+
+### Type Aliases
+
+The `#[model_schema()]` macro supports `type` alias statements, creating semantic type aliases that appear in the generated TypeScript output. Use the `name` argument to control the generated TypeScript name.
+
+```rust
+use tixschema::model_schema;
+
+#[model_schema(name = "DocumentId")]
+pub type DocumentId = String;
+
+#[model_schema(name = "Revision")]
+pub type Revision = i64;
+
+#[model_schema(name = "Tags")]
+pub type Tags = Vec<String>;
+```
+
+Generated TypeScript:
+
+```typescript
+export type DocumentId = string;
+
+export type Revision = number;
+
+export type Tags = Array<string>;
+```
+
+Type aliases are referenced by name when used as struct fields:
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DocumentRecord {
+    pub document_id: DocumentId,
+    pub revision: Revision,
+}
+```
+
+Generated TypeScript:
+
+```typescript
+export type DocumentRecord = {
+  document_id: DocumentId;
+  revision: Revision;
+};
+```
+
+### Branded Newtypes
+
+`#[serde(transparent)]` tuple structs with a single public field generate branded TypeScript types. The newtype is invisible in JSON serialization but carries a distinct type identity in TypeScript, preventing accidental mixing of different ID types.
+
+```rust
+use tixschema::model_schema;
+use serde::{Deserialize, Serialize};
+
+// Generic branded newtype (good for parameterized IDs)
+#[model_schema()]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct UserId<ID_TYPE>(pub ID_TYPE);
+
+// Non-generic branded newtype
+#[model_schema()]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CorrelationId(pub String);
+```
+
+Generated TypeScript (with `zod` feature):
+
+```typescript
+export type UserId<ID_TYPE> = ID_TYPE & z.$brand<"UserId">;
+const UserId$RawSchema = z.string().brand<"UserId">();
+export const UserId$Schema: ZodType<UserId<string>> = UserId$RawSchema;
+
+export type CorrelationId = string & z.$brand<"CorrelationId">;
+const CorrelationId$RawSchema = z.string().brand<"CorrelationId">();
+export const CorrelationId$Schema: ZodType<CorrelationId> = CorrelationId$RawSchema;
+```
+
+Generated TypeScript (without `zod` feature):
+
+```typescript
+declare const __brand_UserId: unique symbol;
+export type UserId<ID_TYPE> = ID_TYPE & { readonly [__brand_UserId]: true };
+export function assertUserId<ID_TYPE>(value: ID_TYPE): asserts value is UserId<ID_TYPE> {}
+
+declare const __brand_CorrelationId: unique symbol;
+export type CorrelationId = string & { readonly [__brand_CorrelationId]: true };
+export function assertCorrelationId(value: string): asserts value is CorrelationId {}
+```
+
+Notes:
+
+- If the Rust type name ends with `Json`, the suffix is stripped in the generated TypeScript (e.g., `UserIdJson` becomes `UserId`). Otherwise, the Rust name is used as-is.
+- Generic parameter names (e.g., `ID_TYPE`) are preserved exactly.
+- Serde transparent serialization works normally -- the wrapper is invisible in JSON.
+- Use branded newtypes for opaque IDs and phantom types to prevent passing the wrong ID type across domain boundaries.
+
+#### Branded Newtype Validation Constraints
+
+You can add `pattern`, `minLength`, and `maxLength` constraints directly on the `#[model_schema()]` attribute for branded newtypes. Constraints are enforced in three places: the generated Zod schema, serde deserialization, and a `validate()` method on the type.
+
+**This only works for `String` inner types.** Applying constraints to a non-String branded newtype (e.g., `u64`) produces a compile-time error.
+
+```rust
+#[model_schema(pattern = "^[a-z0-9_]+$", minLength = 3, maxLength = 50)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SlugId(pub String);
+```
+
+Generated Zod:
+
+```typescript
+const SlugId$RawSchema = z.string()
+  .min(3)
+  .max(50)
+  .check(z.regex(/^[a-z0-9_]+$/))
+  .brand<"SlugId">()
+  .meta({
+    description: "SlugId",
+  });
+
+export const SlugId$Schema: $ZodBranded<ZodString, "SlugId"> = SlugId$RawSchema;
+```
+
+Serde deserialization validates automatically:
+
+```rust
+// Rejects values that violate constraints
+let result: Result<SlugId, _> = serde_json::from_str("\"ab\"");
+assert!(result.is_err()); // too short (min 3)
+
+let result: Result<SlugId, _> = serde_json::from_str("\"UPPERCASE\"");
+assert!(result.is_err()); // pattern mismatch
+
+// Accepts valid values
+let result: Result<SlugId, _> = serde_json::from_str("\"hello_world\"");
+assert!(result.is_ok());
+```
+
+The `validate()` method checks constraints on instances constructed directly in code:
+
+```rust
+let slug = SlugId("hello_world".to_string());
+assert!(slug.validate().is_ok());
+
+let bad = SlugId("ab".to_string());
+match bad.validate() {
+    Ok(()) => unreachable!(),
+    Err(errors) => println!("{:?}", errors), // ["'value' is too short: minimum length is 3, got 2"]
+}
+```
+
+You can use any combination of the three constraints:
+
+```rust
+// Pattern only -- e.g., ObjectId hex string
+#[model_schema(pattern = "^[0-9a-fA-F]{24}$")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ObjectIdStr(pub String);
+
+// Length only -- no pattern
+#[model_schema(minLength = 1, maxLength = 255)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct NonEmptyString(pub String);
+```
+
+Compile-time error for non-String types:
+
+```rust
+// This will NOT compile:
+#[model_schema(pattern = "^[0-9]+$")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct BadNum(pub u64);
+// Error: model_schema constraints (pattern, minLength, maxLength) are only
+//        supported on String branded newtypes, but `BadNum` has inner type `u64`
+```
+
+#### Doc Comments and Examples on Branded Newtypes
+
+Branded newtypes support doc comments (for Zod `.meta({ description })`) and compiler-validated examples, just like structs and enums:
+
+```rust
+/// Generic document identifier.
+///
+/// - `DocumentId<String>` for API/HTTP layer
+/// - `DocumentId<ObjectId>` for MongoDB layer
+///
+/// ```rust example
+/// DocumentId("64de3d95ff45b119e5b53a7e".to_string())
+/// ```
+#[model_schema()]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DocumentId<ID_TYPE>(pub ID_TYPE);
+```
+
+Generated Zod:
+
+```typescript
+const DocumentId$RawSchema = z.string().brand<"DocumentId">().meta({
+  description: "Generic document identifier.\n...",
+  example: "64de3d95ff45b119e5b53a7e",
+});
+
+export const DocumentId$Schema: $ZodBranded<ZodString, "DocumentId"> = DocumentId$RawSchema;
+```
+
+## Field Validation (`model_schema_prop`)
+
+Use `#[model_schema_prop(...)]` on individual fields to add validation constraints, override types, or apply Zod preprocessing. Constraints are enforced in both Zod (frontend) and a generated `validate()` method (Rust).
+
+### String Constraints (minLength, maxLength, pattern)
+
+```rust
+use tixschema::{model_schema, model_schema_prop};
+use serde::{Deserialize, Serialize};
+
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+pub struct UserProfile {
+    #[model_schema_prop(minLength = 3, maxLength = 30, pattern = "^[a-z0-9_]+$")]
+    pub username: String,
+
+    #[model_schema_prop(maxLength = 200)]
+    pub bio: String,
+
+    #[model_schema_prop(pattern = "^[0-9a-fA-F]{24}$")]
+    pub external_id: String,
+}
+```
+
+Generated Zod for `username`: `z.string().min(3).max(30).check(z.regex(/^[a-z0-9_]+$/))`
+
+Generated JSON Schema for `username`: `{ "type": "string", "minLength": 3, "maxLength": 30, "pattern": "^[a-z0-9_]+$" }`
+
+The TypeScript type is unchanged -- still just `string`.
+
+### Numeric Constraints (minimum, maximum)
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+pub struct Product {
+    #[model_schema_prop(minimum = 0, maximum = 120)]
+    pub age_restriction: u32,
+
+    #[model_schema_prop(minimum = 0.0)]
+    pub price: f64,
+}
+```
+
+### The `validate()` Method
+
+When any field carries a constraint, the macro generates a `validate(&self) -> Result<(), Vec<String>>` method. Use this to validate instances constructed directly in Rust code (serde deserialization validates automatically on the way in).
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+pub struct Registration {
+    #[model_schema_prop(minLength = 3, maxLength = 30)]
+    pub username: String,
+
+    #[model_schema_prop(minimum = 0, maximum = 120)]
+    pub age: u32,
+}
+
+let reg = Registration { username: "ab".to_string(), age: 150 };
+
+match reg.validate() {
+    Ok(()) => println!("valid"),
+    Err(errors) => {
+        for e in &errors {
+            println!("Error: {e}");
+        }
+        // "username: too short (minimum length 3, got 2)"
+        // "age: too large (maximum 120, got 150)"
+    }
+}
+```
+
+The macro also generates into the type's schema module:
+- `validate_{field}_value(&FieldType) -> Result<(), String>` -- pure static validator per field
+- `deserialize_{field}(D) -> Result<FieldType, E>` -- serde hook that calls the static validator
+
+### Literal Values
+
+You can constrain a `String` field to a specific literal value using `model_schema_prop(literal = "value")`. This generates `z.literal("value")` in the Zod schema and a literal type in TypeScript, while the Rust field remains a `String`.
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum Action {
+    Generate {
+        #[model_schema_prop(literal = "document")]
+        value: String,
+    },
+}
+```
+
+Generated:
+
+```typescript
+export type Action = {
+  type: "generate";
+  value: "document";
+};
+
+export const Action$Schema = z.discriminatedUnion("type", [
+  z.strictObject({
+    type: z.literal("generate"),
+    value: z.literal("document"),
+  }),
+]);
+```
+
+**Recommended: Single-value enums over literal strings.** While `model_schema_prop(literal = ...)` works, a single-value enum provides type safety in Rust -- the field can only hold the correct value at compile time, whereas a `String` with a literal annotation can hold any string in Rust (the constraint only applies in the generated TypeScript/Zod output).
+
+```rust
+// Correct: single-value enum
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+pub enum DocumentLiteralValue {
+    #[serde(rename = "document")]
+    Document,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum Action {
+    Generate {
+        value: DocumentLiteralValue,  // Type-safe in Rust
+    },
+}
+
+// Wrong: not recommended
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ActionAlt {
+    Generate {
+        #[model_schema_prop(literal = "document")]
+        value: String,  // Any string value accepted in Rust
+    },
+}
+```
+
+Both approaches produce identical TypeScript and Zod output. The single-value enum is preferred because:
+
+- **Type safety in Rust** -- impossible to construct with a wrong value
+- **Self-documenting** -- the enum name makes the intent clear
+- **Pattern matching** -- match on `DocumentLiteralValue::Document` instead of checking string equality
+- **Naming convention**: Use the `<Something>LiteralValue` naming pattern (e.g., `DocumentLiteralValue`)
+
+### Type Overrides (`as`)
+
+Use `as` to override the TypeScript/Zod type for a field, keeping the Rust type unchanged:
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+pub struct ApiConfig {
+    pub id: String,
+    #[model_schema_prop(as = String)]
+    pub metric_type: String,
+    pub enabled: bool,
+}
+```
+
+### Zod Preprocessing
+
+`preprocess = ["fn1", "fn2"]` wraps the Zod schema with `z.preprocess()` calls. This is Zod-only -- no effect on Rust types or serde deserialization. Multiple preprocessors are applied as nested calls.
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+pub struct Event {
+    // generates: z.preprocess(epochToDate, z.string())
+    #[model_schema_prop(preprocess = ["epochToDate"])]
+    pub created_at: String,
+
+    // generates: z.preprocess(trim, z.preprocess(normalize, z.string()))
+    #[model_schema_prop(preprocess = ["trim", "normalize"])]
+    pub name: String,
+}
+```
+
+## Compiler-Validated Examples
+
+You can provide compiler-validated example values for your types that will be embedded in the generated Zod schemas' `.meta()` field. Examples are written in doc comment code blocks and fully type-checked at compile time.
+
+```rust
+/// User profile
+/// ```rust example
+/// User {
+///     name: "John Doe".to_string(),
+///     email: "john@example.com".to_string(),
+///     age: 25,
+/// }
+/// ```
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct User {
+    pub name: String,
+    pub email: String,
+    pub age: u32,
+}
+```
+
+Generated Zod:
+
+```typescript
+export const User$Schema: ZodType<User> = z.strictObject({
+  name: z.string(),
+  email: z.string(),
+  age: z.number().int(),
+}).meta({
+  example: { name: "John Doe", email: "john@example.com", age: 25 }
+});
+```
+
+You can include arbitrary setup code before the example value:
+
+```rust
+/// User with tags
+/// ```rust example
+/// let user_id = "usr_123".to_string();
+/// let tags = vec!["admin".to_string(), "active".to_string()];
+/// User {
+///     id: user_id,
+///     tags,
+///     age: 30,
+/// }
+/// ```
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct User {
+    pub id: String,
+    pub tags: Vec<String>,
+    pub age: u32,
+}
+```
+
+Enum examples work similarly:
+
+```rust
+/// Data type enumeration
+/// ```rust example
+/// DataType::Numeric
+/// ```
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum DataType {
+    Alphanumeric,
+    Numeric,
+    Date,
+}
+```
+
+Key points:
+
+- Examples are **optional** -- if not provided, no example is generated.
+- Use the exact syntax: ` ```rust example` (note the space and `example` keyword).
+- If multiple examples are present, only the **first one** is used.
+- Examples respect Serde attributes (field renaming, etc.).
+- The example code is executed at compile time and serialized to JSON.
+- Wrong types produce compile errors, ensuring examples stay in sync with your types.
+
+## MongoDB ObjectId Support
+
+Enable the `object_id` feature for first-class MongoDB ObjectId support with proper serialization and validation.
+
+```rust
+use tixschema::model_schema;
+use serde::{Deserialize, Serialize};
+use mongodb::bson::oid::ObjectId;
+
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+pub struct Document {
+    pub id: ObjectId,
+    pub title: String,
+    pub author_id: ObjectId,
+    pub tags: Vec<ObjectId>,
+    pub metadata: HashMap<String, ObjectId>,
+    pub parent_id: Option<ObjectId>,
+    pub related_docs: HashMap<String, Vec<ObjectId>>,
+}
+```
+
+Generated TypeScript:
+
+```typescript
+export type Document = {
+  id: ObjectId;
+  title: string;
+  author_id: ObjectId;
+  tags: Array<ObjectId>;
+  metadata: Partial<Record<string, ObjectId>>;
+  parent_id: ObjectId | undefined;
+  related_docs: Partial<Record<string, Array<ObjectId>>>;
+};
+
+export const Document$Schema = z.strictObject({
+  id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }),
+  title: z.string(),
+  author_id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }),
+  tags: z.array(z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) })),
+  metadata: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) })),
+  parent_id: z.union([z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }), z.undefined()]),
+  related_docs: z.record(z.string(), z.array(z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }))),
+});
+```
+
+ObjectIds serialize to MongoDB's standard JSON format:
+
+```json
+{
+  "id": { "$oid": "507f1f77bcf86cd799439011" },
+  "title": "My Document",
+  "author_id": { "$oid": "507f1f77bcf86cd799439012" },
+  "tags": [
+    { "$oid": "507f1f77bcf86cd799439013" },
+    { "$oid": "507f1f77bcf86cd799439014" }
+  ]
+}
+```
+
+Key details:
+
+- Uses `{ "$oid": "hex_string" }` format matching MongoDB's native serialization.
+- Validates 24-character hexadecimal ObjectId strings via regex.
+- Supports ObjectIds in arrays, HashMaps, optional fields, and deeply nested structures.
+- The MongoDB crate is a dev-dependency only -- zero production overhead.
+
+## Chrono Date/Time Types
+
+Enable the `chrono` feature for chrono date/time type support. All chrono types map to `string` in TypeScript, with appropriate Zod validation for the specific date/time format.
+
+```toml
+tixschema = { features = ["chrono"] }
+```
+
+Supported types and mappings:
+
+| Rust Type | TypeScript | Zod Schema | JSON Schema Format |
+|-----------|------------|------------|--------------------|
+| `NaiveDate` | `string` | `z.iso.date()` | `"date"` |
+| `NaiveTime` | `string` | `z.iso.time()` | `"time"` |
+| `NaiveDateTime` | `string` | `z.iso.datetime({ local: true })` | `"date-time"` |
+| `DateTime<Utc>` | `string` | `z.iso.datetime()` | `"date-time"` |
+| `DateTime<Local>` | `string` | `z.iso.datetime()` | `"date-time"` |
+
+Example:
+
+```rust
+use tixschema::model_schema;
+use serde::{Deserialize, Serialize};
+use chrono::{NaiveDate, NaiveTime, NaiveDateTime, DateTime, Utc};
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Event {
+    pub name: String,
+    pub date: NaiveDate,
+    pub time: NaiveTime,
+    pub local_datetime: NaiveDateTime,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+```
+
+Generated TypeScript:
+
+```typescript
+export type Event = {
+  name: string;
+  date: string;
+  time: string;
+  local_datetime: string;
+  created_at: string;
+  updated_at: string | undefined;
+};
+```
+
+Generated Zod:
+
+```typescript
+export const Event$Schema: ZodType<Event> = z.strictObject({
+  name: z.string(),
+  date: z.iso.date(),
+  time: z.iso.time(),
+  local_datetime: z.iso.datetime({ local: true }),
+  created_at: z.iso.datetime(),
+  updated_at: z.union([z.iso.datetime(), z.undefined()]),
+});
+```
+
+Chrono types also work in collections (`Vec<NaiveDate>` generates `z.array(z.iso.date())`) and in enums as tuple variant elements.
+
+## Feature Flags
+
+The crate uses optional features to control code generation and dependencies. All features can be independently enabled or disabled.
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `serde` | Yes | Serde attribute parsing (`rename`, `rename_all`, `tag`, etc.) |
+| `zod` | Yes | Zod v4 schema generation alongside TypeScript types |
+| `jsonschema` | Yes | JSON Schema generation via `json_schema()` method |
+| `typescript` | Yes | TypeScript type generation via `ts_definition()` method |
+| `object_id` | No | MongoDB ObjectId type support with validation |
+| `chrono` | No | Chrono date/time type support (`NaiveDate`, `NaiveTime`, `NaiveDateTime`, `DateTime<Tz>`) |
+
+Common configurations:
+
+```toml
+# Default (serde + zod + jsonschema + typescript)
+tixschema = "0.1.0"
+
+# All features including optional ones
+tixschema = { features = ["serde", "zod", "jsonschema", "typescript", "object_id", "chrono"] }
+
+# Minimal (TypeScript only, no Zod or JSON Schema)
+tixschema = { default-features = false, features = ["typescript"] }
+
+# TypeScript + Zod without JSON Schema
+tixschema = { default-features = false, features = ["serde", "zod", "typescript"] }
+```
+
+All 2^6 = 64 feature combinations are tested in CI via `cargo-hack`.
+
+## Generating TypeScript Files
+
+Create a utility function to generate TypeScript files with all your types:
+
+```rust
+use std::fs;
+
+pub enum MyEntities {}
+
+impl MyEntities {
+    pub fn get_entities() -> (String, Vec<String>) {
+        (
+            "Generated Types".to_string(),
+            vec![
+                User::ts_definition(),
+                UserStatus::ts_definition(),
+                PaymentMethod::ts_definition(),
+                Address::ts_definition(),
+            ],
+        )
+    }
+}
+
+pub fn generate_ts_schemas(target_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut file_contents = String::from("import { z } from \"zod\";\n\n");
+    let (header, type_definitions) = MyEntities::get_entities();
+
+    file_contents.push_str(&format!("/*\n * {}\n */\n\n", header));
+    file_contents.push_str(&type_definitions.join("\n\n"));
+    file_contents.push('\n');
+
+    fs::write(target_path, file_contents)?;
+    Ok(())
+}
+
+// Run generation as a test
+#[test]
+fn generate_typescript() {
+    generate_ts_schemas("../frontend/src/types/generated.ts").unwrap();
+}
+```
+
+### Alternatives
+
+There are several ways to run the generation:
+
+- **Test-based generation** (shown above): Run `cargo test generate_typescript` to produce the file. Simple and works well for most projects.
+- **Binary crate**: Create a small binary that imports your types and calls `ts_definition()`. Run it with `cargo run --bin generate_types`.
+- **`just` command**: Wrap `cargo test --test generation` in a justfile target for a convenient `just generate-ts` command.
+
+**Note:** `build.rs` is not recommended for proc-macro libraries since the types are not available during the build script phase.
+
+## Integration with Frontend
+
+1. Run your TypeScript generation: `cargo test generate_typescript`
+2. The generated file will include all your types and schemas
+3. Import and use in your TypeScript/JavaScript code:
+
+```typescript
+import { z } from "zod";
+import { User, User$Schema } from './types/generated';
+
+// Runtime validation
+const userData = User$Schema.parse(apiResponse);
+
+// Type-safe usage
+const user: User = {
+  id: "123",
+  name: "John Doe",
+  email: "john@example.com",
+  age: 30,
+  is_active: true
+};
+```
+
+You can also generate JSON schemas from the Zod schemas for API documentation or OpenAPI specs:
+
+```typescript
+import { generateSchema } from '@zod-schema/json-schema';
+import { User$Schema } from './types/generated';
+
+const jsonSchema = generateSchema(User$Schema);
+```
+
+## Serde Attribute Support
+
+The macro respects Serde attributes when the `serde` feature is enabled:
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserProfile {
+    pub user_id: String,       // becomes userId in TypeScript
+    pub first_name: String,    // becomes firstName in TypeScript
+    pub last_name: String,     // becomes lastName in TypeScript
+    #[serde(rename = "emailAddress")]
+    pub email: String,         // becomes emailAddress in TypeScript
+    pub created_at: String,    // becomes createdAt in TypeScript
+}
+```
+
+Supported Serde attributes:
+
+- `#[serde(rename = "...")]` -- rename individual fields
+- `#[serde(rename_all = "camelCase")]` -- rename all fields with a naming convention
+- `#[serde(tag = "...")]` -- set the discriminator field for tagged enums
+- `#[serde(tag = "...", content = "...")]` -- adjacently tagged enums
+- `#[serde(transparent)]` -- transparent wrappers (used for branded newtypes)
+- `#[serde(skip_serializing_if = "...")]` -- respected but does not affect generated types
+
+If the `serde` feature is disabled but serde attributes are present, you will see compile-time warnings and field names will not be transformed.
+
 ## Important Notes
 
-1. **Naming Convention**: Use `Json` suffix for Rust types (e.g., `UserJson`). The generated TypeScript will strip this suffix (becomes `User`).
+1. **Naming Convention**: The `Json` suffix on Rust type names is optional. If present, it is automatically stripped in the generated TypeScript output (e.g., `UserJson` becomes `User`). If no `Json` suffix is present, the Rust type name is used as-is (e.g., `User` stays `User`).
 
-2. **Type References**: Nested types reference each other without the `Json` suffix in TypeScript.
+2. **Type References**: Nested types reference each other by their TypeScript name (with the `Json` suffix stripped if present).
 
-3. **HashMap Handling**: `HashMap<String, T>` becomes `Partial<Record<string, T>>` in TypeScript.
+3. **HashMap Keys**: Only `HashMap<String, T>` is supported. Non-string keys will cause compilation errors.
 
 4. **Array Types**: `Vec<T>` becomes `Array<T>` in TypeScript.
 
-5. **Optional Fields**: `Option<T>` becomes `T | undefined` in TypeScript and `z.union([type, z.undefined()])` in Zod (v4 syntax).
+5. **Optional Fields**: `Option<T>` becomes `T | undefined` in TypeScript and `z.union([type, z.undefined()])` in Zod v4.
 
-6. **Supported Map Keys**: Currently only `HashMap<String, T>` is fully supported.
+6. **Complex Nesting**: The crate supports deeply nested structures including `HashMap<String, Vec<HashMap<String, T>>>` and similar patterns.
 
-7. **MongoDB ObjectId**: `ObjectId` fields are supported with proper JSON schema validation and MongoDB-compatible serialization format `{ "$oid": "hex_string" }`.
-
-8. **Complex Nesting**: The crate supports extremely complex nested structures including `HashMap<String, Vec<HashMap<String, ObjectId>>>` and similar deep nesting patterns.
+7. **Doc Comments**: Rust doc comments on types and fields are carried through to the generated TypeScript as JSDoc comments.
 
 ## Error Handling & Troubleshooting
 
-This section covers common errors you might encounter and how to resolve them.
-
 ### Feature-Related Errors
-
-The crate uses optional features to reduce dependencies. If features are disabled, you'll get specific compile-time or runtime behavior:
 
 #### ObjectId Errors
 
@@ -566,19 +1114,8 @@ The crate uses optional features to reduce dependencies. If features are disable
 # Option 1: Enable the object_id feature
 tixschema = { features = ["object_id"] }
 
-# Option 2: Use full path
-use mongodb::bson::oid::ObjectId;
-
-# Option 3: Define ObjectId type yourself
-pub type ObjectId = String; // Simple fallback
-```
-
-**Warning:** You'll see compile-time warnings when ObjectId is detected without the feature:
-```
-warning: ObjectId type detected but 'object_id' feature is not enabled
-         ObjectId will be treated as a custom type (may cause compilation errors)
-         Enable the object_id feature: features = ["object_id"]
-         Or add the required ObjectId type definition to your code
+# Option 2: Use full path in your code
+# use mongodb::bson::oid::ObjectId;
 ```
 
 #### JSON Schema Method Missing
@@ -592,15 +1129,9 @@ warning: ObjectId type detected but 'object_id' feature is not enabled
 tixschema = { features = ["jsonschema"] }
 ```
 
-**Alternative:** Check if the method exists at runtime:
-```rust
-#[cfg(feature = "jsonschema")]
-let schema = MyType::json_schema();
-```
+#### Zod Schema Missing
 
-#### Zod Schema Missing  
-
-**Error:** Generated TypeScript contains only types, no Zod schemas
+**Symptom:** Generated TypeScript contains only types, no Zod schemas.
 
 **Cause:** `zod` feature is disabled.
 
@@ -611,219 +1142,97 @@ tixschema = { features = ["zod"] }
 
 #### Serde Attributes Ignored
 
-**Symptom:** Field names not transformed (e.g., `user_id` instead of `userId`)
+**Symptom:** Field names not transformed (e.g., `user_id` instead of `userId`).
 
-**Cause:** `serde` feature is disabled, but you're using serde attributes.
-
-**Warning:** You'll see compile-time warnings:
-```
-warning: serde attribute detected but 'serde' feature is not enabled
-         Field names will not be transformed (camelCase, etc.)
-         Enable the serde feature: features = ["serde"]
-```
+**Cause:** `serde` feature is disabled.
 
 **Solution:**
 ```toml
 tixschema = { features = ["serde"] }
 ```
 
-### Common Feature Combinations
-
-```toml
-# Minimal (TypeScript only)
-tixschema = { default-features = false }
-
-# Basic (TypeScript + Zod)
-tixschema = { default-features = false, features = ["zod"] }
-
-# With serde support
-tixschema = { default-features = false, features = ["serde", "zod"] }
-
-# Full features (recommended)
-tixschema = { features = ["serde", "zod", "jsonschema", "object_id"] }
-
-# Default (all features enabled)
-tixschema = "0.1.0"
-```
-
 ### Compilation Errors
 
 #### Unsupported Map Key Types
 
-**Error:** Compilation fails with complex HashMap key types
+**Error:** Compilation fails with complex HashMap key types.
 
-**Cause:** Only `HashMap<String, T>` is fully supported.
+Only `HashMap<String, T>` is supported:
 
-**Example of unsupported:**
 ```rust
-// ❌ Not supported
-pub struct BadConfigJson {
+// Wrong: not supported
+pub struct BadConfig {
     pub settings: HashMap<i32, String>,
-    pub metadata: HashMap<UserId, UserData>,
 }
-```
 
-**Solution:** Use string keys:
-```rust
-// ✅ Supported
-pub struct ConfigJson {
+// Correct: use string keys
+pub struct Config {
     pub settings: HashMap<String, String>,
-    pub metadata: HashMap<String, UserData>,
 }
 ```
 
 #### Missing Derives
 
-**Error:** Various compilation errors related to traits
+**Error:** Various compilation errors related to traits.
 
-**Cause:** Missing required derives for serde.
-
-**Solution:** Always include required derives:
+Always include required derives:
 ```rust
 #[model_schema()]
-#[derive(Serialize, Deserialize, Debug, Clone)] // All recommended
-pub struct MyTypeJson {
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MyType {
     // fields...
 }
 ```
 
 ### Runtime Issues
 
-#### Zod Version Compatibility
-
-**Error:** TypeScript compilation fails with Zod schema errors
-
-**Cause:** Using Zod v3 with v4-generated schemas.
-
-**Solution:** Upgrade to Zod v4:
-```bash
-npm install zod@^4.0.0
-```
-
-**Generated schemas use modern syntax:**
-```typescript
-// ✅ Zod v4 compatible (generated)
-email: z.union([z.string(), z.undefined()]),
-
-// ❌ Old v3 style (not generated)
-email: z.string().optional(),
-```
-
 #### Missing TypeScript Types
 
-**Error:** `Cannot find name 'ObjectId'` in TypeScript
+**Error:** `Cannot find name 'ObjectId'` in TypeScript.
 
-**Cause:** ObjectId type not imported in frontend.
-
-**Solution:** Define ObjectId type in your TypeScript:
+**Solution:** Define the ObjectId type in your TypeScript project:
 ```typescript
 // types/mongodb.ts
 export interface ObjectId {
   $oid: string;
 }
-
-// Or use a library
-import { ObjectId } from 'mongodb';
 ```
 
 #### JSON Schema Validation Failures
 
-**Problem:** Data doesn't validate against generated schemas
+**Problem:** Data doesn't validate against generated schemas.
 
-**Common Causes:**
-1. **Field naming mismatch**: Check serde attributes and feature flags
-2. **Optional field handling**: Ensure consistent `Option<T>` usage
-3. **ObjectId format**: Must be `{ "$oid": "hex_string" }` format
+Common causes:
 
-**Debug Tips:**
+1. **Field naming mismatch**: Check serde attributes and feature flags.
+2. **Optional field handling**: Ensure consistent `Option<T>` usage.
+3. **ObjectId format**: Must be `{ "$oid": "hex_string" }` format.
+
+Debug by printing generated output:
 ```rust
-// Print generated schema to debug
-println!("{}", serde_json::to_string_pretty(&MyType::json_schema())?);
+println!("{}", MyType::ts_definition());
 
-// Check field naming
-let ts_def = MyType::ts_definition();
-println!("Generated TypeScript:\n{}", ts_def);
+#[cfg(feature = "jsonschema")]
+println!("{}", serde_json::to_string_pretty(&MyType::json_schema()).unwrap());
 ```
 
-### Best Practices for Error Prevention
+## Zod v4 Compatibility
 
-1. **Use Default Features**: Start with all features enabled, disable only when needed
-   ```toml
-   tixschema = "0.1.0"  # All features enabled
-   ```
+This library generates Zod v4 compatible schemas exclusively. The key difference from Zod v3 is how optional fields are handled:
 
-2. **Consistent Naming**: Always use `Json` suffix
-   ```rust
-   // ✅ Good
-   pub struct UserJson { ... }
-   
-   // ❌ Bad
-   pub struct User { ... }
-   ```
-
-3. **Test Generation**: Include TypeScript generation in your test suite
-   ```rust
-   #[test]
-   fn test_typescript_generation() {
-       generate_ts_schemas("../frontend/types/generated.ts").unwrap();
-   }
-   ```
-
-4. **Version Lock Dependencies**: Pin Zod version in frontend
-   ```json
-   {
-     "dependencies": {
-       "zod": "^4.0.0"
-     }
-   }
-   ```
-
-5. **Use Type Checking**: Enable strict TypeScript checking
-   ```json
-   {
-     "compilerOptions": {
-       "strict": true,
-       "noUncheckedIndexedAccess": true
-     }
-   }
-   ```
-
-### Getting Help
-
-If you encounter issues not covered here:
-
-1. **Check Feature Flags**: Ensure required features are enabled
-2. **Review Generated Output**: Print generated TypeScript to debug
-3. **Validate JSON**: Test generated JSON schemas with sample data
-4. **Check Dependencies**: Ensure Zod v4 compatibility
-5. **Minimal Example**: Create a minimal reproduction case
-
-## Zod v4 Migration & JSON Schema Generation
-
-This library now generates **Zod v4 compatible schemas** using the modern `z.union([type, z.undefined()])` syntax for optional fields instead of the older `.optional()` + `.transform()` approach.
-
-### Benefits of Zod v4 Support:
-
-- **🚀 JSON Schema Generation**: Zod v4 can generate JSON schemas directly from the validation schemas
-- **🧹 Cleaner Code**: No complex transform functions needed
-- **⚡ Better Performance**: Eliminates runtime transform overhead
-- **🎯 Type Safety**: Maintains the same `T | undefined` TypeScript semantics
-
-### Optional Field Examples:
-
-**Generated Zod v4 Schema (Current):**
+Zod v4 (generated by this library):
 ```typescript
 export const User$Schema = z.strictObject({
   id: z.string(),
   name: z.string(),
-  email: z.union([z.string(), z.undefined()]),    // ✅ Modern v4 syntax
-  age: z.union([z.number().int(), z.undefined()]), // ✅ Works with JSON schema generation
+  email: z.union([z.string(), z.undefined()]),
+  age: z.union([z.number().int(), z.undefined()]),
 });
 ```
 
-**Old Zod v3 Style (No longer generated):**
+Zod v3 style (not supported):
 ```typescript
-// ❌ This format is no longer generated
+// This format is NOT generated and will not work
 export const User$Schema = z.strictObject({
   id: z.string(),
   name: z.string(),
@@ -835,71 +1244,9 @@ export const User$Schema = z.strictObject({
 }));
 ```
 
-### Using with Zod v4 JSON Schema Generation:
+Benefits of the Zod v4 approach:
 
-```typescript
-import { generateSchema } from '@zod-schema/json-schema';
-import { User$Schema } from './types/generated';
-
-// Generate JSON schema for API docs, OpenAPI, etc.
-const jsonSchema = generateSchema(User$Schema);
-console.log(jsonSchema);
-```
-
-## Testing
-
-The crate includes comprehensive tests covering all features. Run them with:
-
-```bash
-cargo test
-```
-
-**Test Coverage (59+ tests across 9 specialized modules):**
-
-- **Basic Types**: Struct generation, optional fields, primitive types
-- **Collections**: Arrays, HashMaps, complex nested structures
-- **Enums**: Plain enums, discriminated unions, tagged enums
-- **Serde Integration**: All attribute combinations and naming conventions
-- **Advanced Features**: Complex nested maps, edge cases, serialization consistency
-- **MongoDB ObjectId**: 
-  - Mock ObjectId implementation (10 tests)
-  - Real MongoDB ObjectId integration (8 tests with actual `mongodb` crate)
-  - Complex ObjectId nesting, arrays, HashMaps, optional fields
-  - JSON schema validation and regex pattern matching
-- **Zod v4 Compatibility**: Modern syntax generation, JSON schema output
-- **Edge Cases**: Deeply nested structures, compilation safety, performance
-
-**Production Safety**: MongoDB ObjectId tests use the real `mongodb` crate as a dev-dependency only, ensuring zero production overhead while providing complete compatibility validation.
-
-## Integration with Frontend
-
-1. Run your TypeScript generation test: `cargo test test_generate_typescript`
-2. The generated file will include all your types and schemas
-3. Import and use in your TypeScript/JavaScript code:
-
-```typescript
-import { User, User$Schema } from './types/generated';
-
-// Runtime validation
-const userData = User$Schema.parse(apiResponse);
-
-// Type-safe usage
-const user: User = {
-  id: "123",
-  name: "John Doe", 
-  email: "john@example.com",
-  age: 30,
-  is_active: true
-};
-```
-
-## Best Practices
-
-1. **Consistent Naming**: Always use `Json` suffix for Rust types that will be serialized
-2. **Validation**: Use generated Zod schemas for runtime validation
-3. **Documentation**: Add doc comments to your Rust types - they'll appear in generated TypeScript
-4. **Testing**: Include the TypeScript generation in your CI/CD pipeline
-5. **Version Control**: Consider committing generated TypeScript files or generating them in build steps
-6. **MongoDB ObjectId**: For MongoDB applications, use `mongodb::bson::oid::ObjectId` directly in your structs for proper serialization and validation
-7. **Complex Nesting**: The crate handles deep nesting well, but consider flattening overly complex structures for better maintainability
-8. **Production Dependencies**: The crate has zero production dependencies - MongoDB support is validated through dev-only testing
+- **JSON Schema generation**: Zod v4 can generate JSON schemas directly from the validation schemas.
+- **Cleaner code**: No complex transform functions needed.
+- **Better performance**: Eliminates runtime transform overhead.
+- **Type safety**: Maintains the same `T | undefined` TypeScript semantics.

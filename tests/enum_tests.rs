@@ -320,4 +320,86 @@ mod tests {
         // The upload variant should use z.string()
         assert!(zod_schema.contains("z.string()"));
     }
+
+    // Test plain enum with serde rename containing special characters (slashes, dots)
+    #[cfg(all(test, feature = "serde", any(feature = "typescript", feature = "zod")))]
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub enum MimeType {
+        /// PDF document format
+        #[serde(rename = "application/pdf")]
+        ApplicationPdf,
+        /// Microsoft Word (OOXML) document format
+        #[serde(rename = "application/vnd.openxmlformats-officedocument.wordprocessingml.document")]
+        ApplicationDocx,
+    }
+
+    #[test]
+    #[cfg(all(feature = "typescript", feature = "serde", feature = "zod"))]
+    fn test_plain_enum_special_chars_zod_has_raw_and_schema() {
+        let zod = MimeType::zod_schema();
+        assert!(
+            zod.contains("MimeType$RawSchema"),
+            "Should contain $RawSchema. Got:\n{zod}"
+        );
+        assert!(
+            zod.contains("export const MimeType$Schema: ZodType<MimeType> = MimeType$RawSchema;"),
+            "Should contain exported $Schema referencing $RawSchema. Got:\n{zod}"
+        );
+        assert!(
+            zod.contains("\"application/pdf\""),
+            "Should contain renamed variant with slash. Got:\n{zod}"
+        );
+        assert!(
+            zod.contains("\"application/vnd.openxmlformats-officedocument.wordprocessingml.document\""),
+            "Should contain renamed variant with dots. Got:\n{zod}"
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "typescript", feature = "serde"))]
+    fn test_plain_enum_special_chars_ts_definition() {
+        let ts = MimeType::ts_definition();
+        assert!(
+            ts.contains("\"application/pdf\""),
+            "TS definition should contain renamed variant. Got:\n{ts}"
+        );
+        assert!(
+            ts.contains("\"application/vnd.openxmlformats-officedocument.wordprocessingml.document\""),
+            "TS definition should contain renamed variant with dots. Got:\n{ts}"
+        );
+    }
+
+    // Exact reproduction of user's DistributionValidMimeType enum
+    #[cfg(all(test, feature = "serde", any(feature = "typescript", feature = "zod")))]
+    #[model_schema()]
+    #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+    pub enum DistributionValidMimeType {
+        /// PDF document format
+        #[serde(rename = "application/pdf")]
+        ApplicationPdf,
+        /// Microsoft Word (OOXML) document format
+        #[serde(
+            rename = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )]
+        ApplicationDocx,
+    }
+
+    #[test]
+    #[cfg(all(feature = "typescript", feature = "serde", feature = "zod"))]
+    fn test_distribution_mime_type_zod_schema() {
+        let zod = DistributionValidMimeType::zod_schema();
+        assert!(
+            zod.contains("DistributionValidMimeType$RawSchema"),
+            "Should contain $RawSchema. Got:\n{zod}"
+        );
+        assert!(
+            zod.contains("export const DistributionValidMimeType$Schema: ZodType<DistributionValidMimeType> = DistributionValidMimeType$RawSchema;"),
+            "Should contain exported $Schema referencing $RawSchema. Got:\n{zod}"
+        );
+        assert!(
+            zod.contains("\"application/pdf\""),
+            "Should contain renamed variant. Got:\n{zod}"
+        );
+    }
 }

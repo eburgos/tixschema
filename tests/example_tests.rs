@@ -6,25 +6,38 @@ use tixschema::model_schema;
 fn test_simple_enum_example() {
     /// Data type enumeration
     /// ```rust example
-    /// let data_type = DataTypeJson::Numeric;
+    /// let data_type = DataType::Numeric;
     /// println!("Example: {:?}", data_type);
     /// ```
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub enum DataTypeJson {
+    pub enum DataType {
         Alphanumeric,
         Numeric,
         Date,
     }
 
     // Check that schema_example() method exists and returns correct value
-    let example = DataTypeJson::schema_example();
+    let example = DataType::schema_example();
     assert_eq!(example.as_str().unwrap(), "Numeric");
 
     // Check that zod schema includes the example
-    let zod = DataTypeJson::zod_schema();
+    let zod = DataType::zod_schema();
     assert!(zod.contains("example:"));
     assert!(zod.contains("\"Numeric\""));
+
+    // Verify that example injection doesn't drop $Schema line
+    #[cfg(feature = "typescript")]
+    {
+        assert!(
+            zod.contains("DataType$RawSchema"),
+            "Plain enum with example should have $RawSchema. Got:\n{zod}"
+        );
+        assert!(
+            zod.contains("export const DataType$Schema: ZodType<DataType> = DataType$RawSchema;"),
+            "Plain enum with example should have $Schema referencing $RawSchema. Got:\n{zod}"
+        );
+    }
 }
 
 #[cfg(feature = "zod")]
@@ -32,7 +45,7 @@ fn test_simple_enum_example() {
 fn test_simple_struct_example() {
     /// User profile
     /// ```rust example
-    /// let user = UserJson {
+    /// let user = User {
     ///     name: "John Doe".to_string(),
     ///     age: 25,
     /// };
@@ -40,18 +53,18 @@ fn test_simple_struct_example() {
     /// ```
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub struct UserJson {
+    pub struct User {
         pub name: String,
         pub age: u32,
     }
 
     // Check that schema_example() method exists
-    let example = UserJson::schema_example();
+    let example = User::schema_example();
     assert_eq!(example["name"].as_str().unwrap(), "John Doe");
     assert_eq!(example["age"].as_u64().unwrap(), 25);
 
     // Check that zod schema includes the example
-    let zod = UserJson::zod_schema();
+    let zod = User::zod_schema();
     assert!(zod.contains("example:"));
     assert!(zod.contains("John Doe"));
     assert!(zod.contains("25"));
@@ -64,7 +77,7 @@ fn test_complex_struct_with_logic() {
     /// ```rust example
     /// let user_id = "usr_123".to_string();
     /// let tags = vec!["admin".to_string(), "active".to_string()];
-    /// let user = ComplexUserJson {
+    /// let user = ComplexUser {
     ///     id: user_id,
     ///     tags,
     ///     age: 30,
@@ -73,21 +86,21 @@ fn test_complex_struct_with_logic() {
     /// ```
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub struct ComplexUserJson {
+    pub struct ComplexUser {
         pub id: String,
         pub tags: Vec<String>,
         pub age: u32,
     }
 
     // Check that schema_example() method exists and logic executed correctly
-    let example = ComplexUserJson::schema_example();
+    let example = ComplexUser::schema_example();
     assert_eq!(example["id"].as_str().unwrap(), "usr_123");
     assert_eq!(example["tags"][0].as_str().unwrap(), "admin");
     assert_eq!(example["tags"][1].as_str().unwrap(), "active");
     assert_eq!(example["age"].as_u64().unwrap(), 30);
 
     // Check that zod schema includes the example
-    let zod = ComplexUserJson::zod_schema();
+    let zod = ComplexUser::zod_schema();
     assert!(zod.contains("example:"));
 }
 
@@ -98,7 +111,7 @@ fn test_nested_types_example() {
 
     /// Profile with nested types
     /// ```rust example
-    /// let profile = ProfileJson {
+    /// let profile = Profile {
     ///     tags: vec!["tag1".to_string()],
     ///     metadata: HashMap::from([("key1".to_string(), "value1".to_string())]),
     ///     optional_field: Some("present".to_string()),
@@ -107,20 +120,20 @@ fn test_nested_types_example() {
     /// ```
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub struct ProfileJson {
+    pub struct Profile {
         pub tags: Vec<String>,
         pub metadata: HashMap<String, String>,
         pub optional_field: Option<String>,
     }
 
     // Check that schema_example() method exists
-    let example = ProfileJson::schema_example();
+    let example = Profile::schema_example();
     assert_eq!(example["tags"][0].as_str().unwrap(), "tag1");
     assert_eq!(example["metadata"]["key1"].as_str().unwrap(), "value1");
     assert_eq!(example["optional_field"].as_str().unwrap(), "present");
 
     // Check that zod schema includes the example
-    let zod = ProfileJson::zod_schema();
+    let zod = Profile::zod_schema();
     assert!(zod.contains("example:"));
 }
 
@@ -129,7 +142,7 @@ fn test_nested_types_example() {
 fn test_discriminated_enum_example() {
     /// Event types
     /// ```rust example
-    /// let event = EventJson::UserCreated {
+    /// let event = Event::UserCreated {
     ///     user_id: "user_123".to_string(),
     ///     timestamp: "2024-01-01".to_string(),
     /// };
@@ -138,19 +151,19 @@ fn test_discriminated_enum_example() {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
     #[serde(tag = "type")]
-    pub enum EventJson {
+    pub enum Event {
         UserCreated { user_id: String, timestamp: String },
         UserDeleted { user_id: String },
     }
 
     // Check that schema_example() method exists
-    let example = EventJson::schema_example();
+    let example = Event::schema_example();
     assert_eq!(example["type"].as_str().unwrap(), "UserCreated");
     assert_eq!(example["user_id"].as_str().unwrap(), "user_123");
     assert_eq!(example["timestamp"].as_str().unwrap(), "2024-01-01");
 
     // Check that zod schema includes the example
-    let zod = EventJson::zod_schema();
+    let zod = Event::zod_schema();
     assert!(zod.contains("example:"));
 }
 
@@ -159,20 +172,20 @@ fn test_discriminated_enum_example() {
 fn test_multiple_examples_uses_first() {
     /// Type with multiple examples
     /// ```rust example
-    /// let _: FirstExampleJson = FirstExampleJson { value: 1 };
+    /// let _: FirstExample = FirstExample { value: 1 };
     /// ```
     /// Second description
     /// ```rust example
-    /// let _: FirstExampleJson = FirstExampleJson { value: 2 };
+    /// let _: FirstExample = FirstExample { value: 2 };
     /// ```
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub struct FirstExampleJson {
+    pub struct FirstExample {
         pub value: u32,
     }
 
     // Check that only the first example is used
-    let example = FirstExampleJson::schema_example();
+    let example = FirstExample::schema_example();
     assert_eq!(example["value"].as_u64().unwrap(), 1);
 }
 
@@ -181,7 +194,7 @@ fn test_no_example_no_method() {
     /// Type without example
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub struct NoExampleJson {
+    pub struct NoExample {
         pub value: String,
     }
 
@@ -191,7 +204,7 @@ fn test_no_example_no_method() {
     // However, zod schema should still be generated without example
     #[cfg(feature = "zod")]
     {
-        let zod = NoExampleJson::zod_schema();
+        let zod = NoExample::zod_schema();
         assert!(!zod.contains("example:"));
     }
 }
@@ -201,15 +214,15 @@ fn test_no_example_no_method() {
 fn test_typescript_zod_format() {
     /// Test type
     /// ```rust example
-    /// TestJson { name: "test".to_string() }
+    /// Test { name: "test".to_string() }
     /// ```
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub struct TestJson {
+    pub struct Test {
         pub name: String,
     }
 
-    let zod = TestJson::zod_schema();
+    let zod = Test::zod_schema();
 
     // Should have TypeScript-style format with ZodType
     assert!(zod.contains("ZodType<"));
@@ -222,15 +235,15 @@ fn test_typescript_zod_format() {
 fn test_javascript_zod_format() {
     /// Test type
     /// ```rust example
-    /// TestJson { name: "test".to_string() }
+    /// Test { name: "test".to_string() }
     /// ```
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub struct TestJson {
+    pub struct Test {
         pub name: String,
     }
 
-    let zod = TestJson::zod_schema();
+    let zod = Test::zod_schema();
 
     // Should have JavaScript-style format without ZodType
     assert!(!zod.contains("ZodType<"));
@@ -242,7 +255,7 @@ fn test_javascript_zod_format() {
 fn test_serde_attributes_in_example() {
     /// User with serde attributes
     /// ```rust example
-    /// let user = UserWithSerdeJson {
+    /// let user = UserWithSerde {
     ///     user_id: "123".to_string(),
     ///     email_address: "test@example.com".to_string(),
     /// };
@@ -251,14 +264,14 @@ fn test_serde_attributes_in_example() {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
     #[serde(rename_all = "camelCase")]
-    pub struct UserWithSerdeJson {
+    pub struct UserWithSerde {
         pub user_id: String,
         #[serde(rename = "emailAddress")]
         pub email_address: String,
     }
 
     // Check that example serializes with serde attributes
-    let example = UserWithSerdeJson::schema_example();
+    let example = UserWithSerde::schema_example();
     // The example should have camelCase keys
     assert!(example.get("userId").is_some());
     assert_eq!(
@@ -266,7 +279,7 @@ fn test_serde_attributes_in_example() {
         "test@example.com"
     );
 
-    let zod = UserWithSerdeJson::zod_schema();
+    let zod = UserWithSerde::zod_schema();
     assert!(zod.contains("example:"));
 }
 
@@ -278,7 +291,7 @@ fn test_objectid_example() {
     /// Document with ObjectId
     /// ```rust example
     /// let oid = ObjectId::parse_str("507f1f77bcf86cd799439011").unwrap();
-    /// let doc = DocumentJson {
+    /// let doc = Document {
     ///     id: oid,
     ///     name: "test".to_string(),
     /// };
@@ -286,18 +299,18 @@ fn test_objectid_example() {
     /// ```
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub struct DocumentJson {
+    pub struct Document {
         pub id: ObjectId,
         pub name: String,
     }
 
     // Check that schema_example() method exists
-    let example = DocumentJson::schema_example();
+    let example = Document::schema_example();
     assert_eq!(example["name"].as_str().unwrap(), "test");
     // ObjectId should serialize to { "$oid": "..." } format
     assert!(example["id"].get("$oid").is_some());
 
-    let zod = DocumentJson::zod_schema();
+    let zod = Document::zod_schema();
     assert!(zod.contains("example:"));
 }
 
@@ -305,18 +318,18 @@ fn test_objectid_example() {
 fn test_example_fence_must_be_exact() {
     /// Type with regular code fence (not example)
     /// ```rust
-    /// RegularFenceJson { value: 1 }
+    /// RegularFence { value: 1 }
     /// ```
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub struct RegularFenceJson {
+    pub struct RegularFence {
         pub value: u32,
     }
 
     // schema_example() should not exist since fence is not "rust example"
     #[cfg(feature = "zod")]
     {
-        let zod = RegularFenceJson::zod_schema();
+        let zod = RegularFence::zod_schema();
         assert!(!zod.contains("example:"));
     }
 }
@@ -329,7 +342,7 @@ fn test_empty_example_block() {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
     #[allow(dead_code)]
-    pub struct ValidExampleJson {
+    pub struct ValidExample {
         pub value: u32,
     }
 
@@ -343,22 +356,22 @@ fn test_empty_example_block() {
 fn test_regex_transform_println() {
     /// Data type with println pattern (for doctest compatibility)
     /// ```rust example
-    /// let data_type = DataTypeJson::Integer;
+    /// let data_type = DataType::Integer;
     /// println!("data_type: {:?}", data_type);
     /// ```
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub enum DataTypeJson {
+    pub enum DataType {
         Integer,
         Float,
         String,
     }
 
     // Check that transformation worked - should extract the variable
-    let example = DataTypeJson::schema_example();
+    let example = DataType::schema_example();
     assert_eq!(example.as_str().unwrap(), "Integer");
 
-    let zod = DataTypeJson::zod_schema();
+    let zod = DataType::zod_schema();
     assert!(zod.contains("example:"));
     assert!(zod.contains("\"Integer\""));
 }
@@ -368,20 +381,20 @@ fn test_regex_transform_println() {
 fn test_regex_transform_let_underscore() {
     /// Status with let underscore pattern (for doctest compatibility)
     /// ```rust example
-    /// let _: StatusJson = StatusJson::Active;
+    /// let _: Status = Status::Active;
     /// ```
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub enum StatusJson {
+    pub enum Status {
         Active,
         Inactive,
     }
 
     // Check that transformation worked - should extract the value
-    let example = StatusJson::schema_example();
+    let example = Status::schema_example();
     assert_eq!(example.as_str().unwrap(), "Active");
 
-    let zod = StatusJson::zod_schema();
+    let zod = Status::zod_schema();
     assert!(zod.contains("example:"));
     assert!(zod.contains("\"Active\""));
 }
@@ -392,18 +405,18 @@ fn test_description_strips_examples() {
     /// This is a description
     /// with multiple lines
     /// ```rust example
-    /// let _: DescriptionTestJson = DescriptionTestJson { value: 42 };
+    /// let _: DescriptionTest = DescriptionTest { value: 42 };
     /// ```
     /// More description after example
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub struct DescriptionTestJson {
+    pub struct DescriptionTest {
         pub value: u32,
     }
 
-    let zod = DescriptionTestJson::zod_schema();
+    let zod = DescriptionTest::zod_schema();
     // Description should not contain the example code
-    assert!(!zod.contains("DescriptionTestJson { value: 42 }"));
+    assert!(!zod.contains("DescriptionTest { value: 42 }"));
     // Note: Structs don't embed descriptions in .meta() currently (only enums do)
 }
 
@@ -412,16 +425,16 @@ fn test_description_strips_examples() {
 fn test_description_escapes_quotes() {
     /// Description with "quoted" text
     /// ```rust example
-    /// let _: QuoteTestJson = QuoteTestJson::Active;
+    /// let _: QuoteTest = QuoteTest::Active;
     /// ```
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub enum QuoteTestJson {
+    pub enum QuoteTest {
         Active,
         Inactive,
     }
 
-    let zod = QuoteTestJson::zod_schema();
+    let zod = QuoteTest::zod_schema();
     // The generated code should have escaped quotes in description
     assert!(zod.contains("example:"));
     // Check that the description is properly formatted with escaped quotes

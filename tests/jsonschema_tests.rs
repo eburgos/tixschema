@@ -28,7 +28,7 @@ mod tests {
 
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    struct BasicStructJson {
+    struct BasicStruct {
         name: String,
         age: u32,
         score: f64,
@@ -37,7 +37,7 @@ mod tests {
 
     #[test]
     fn test_basic_struct_json_schema() {
-        let schema = BasicStructJson::json_schema();
+        let schema = BasicStruct::json_schema();
 
         // Check top-level schema properties
         assert_eq!(schema["type"], "object");
@@ -71,7 +71,7 @@ mod tests {
 
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    struct OptionalFieldsJson {
+    struct OptionalFields {
         required: String,
         optional_string: Option<String>,
         optional_number: Option<i32>,
@@ -80,7 +80,7 @@ mod tests {
 
     #[test]
     fn test_optional_fields_not_in_required() {
-        let schema = OptionalFieldsJson::json_schema();
+        let schema = OptionalFields::json_schema();
 
         let properties = schema["properties"].as_object().unwrap();
         assert!(properties.contains_key("required"));
@@ -108,7 +108,7 @@ mod tests {
 
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    struct ArrayFieldsJson {
+    struct ArrayFields {
         tags: Vec<String>,
         numbers: Vec<i32>,
         optional_array: Option<Vec<String>>,
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn test_vec_fields_generate_array_schemas() {
-        let schema = ArrayFieldsJson::json_schema();
+        let schema = ArrayFields::json_schema();
 
         let properties = schema["properties"].as_object().unwrap();
 
@@ -145,14 +145,14 @@ mod tests {
 
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    struct MapFieldsJson {
+    struct MapFields {
         metadata: std::collections::HashMap<String, String>,
         counts: std::collections::HashMap<String, i32>,
     }
 
     #[test]
     fn test_hashmap_generates_object_with_additional_properties() {
-        let schema = MapFieldsJson::json_schema();
+        let schema = MapFields::json_schema();
 
         let properties = schema["properties"].as_object().unwrap();
 
@@ -177,23 +177,23 @@ mod tests {
 
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    struct AddressJson {
+    struct Address {
         street: String,
         city: String,
     }
 
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    struct PersonJson {
+    struct Person {
         name: String,
-        address: AddressJson,
-        previous_addresses: Vec<AddressJson>,
+        address: Address,
+        previous_addresses: Vec<Address>,
     }
 
     #[test]
     fn test_nested_structs_present_in_schema() {
-        let schema = PersonJson::json_schema();
-        let address_schema = AddressJson::json_schema();
+        let schema = Person::json_schema();
+        let address_schema = Address::json_schema();
 
         let properties = schema["properties"].as_object().unwrap();
 
@@ -217,7 +217,7 @@ mod tests {
 
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    enum StatusJson {
+    enum Status {
         Active,
         Inactive,
         Pending,
@@ -225,7 +225,7 @@ mod tests {
 
     #[test]
     fn test_plain_enum_generates_string_enum() {
-        let schema = StatusJson::json_schema();
+        let schema = Status::json_schema();
 
         assert_eq!(schema["type"], "string");
 
@@ -242,7 +242,7 @@ mod tests {
 
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    struct AllNumericTypesJson {
+    struct AllNumericTypes {
         u8_val: u8,
         u16_val: u16,
         u32_val: u32,
@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn test_integer_types_use_integer_schema() {
-        let schema = AllNumericTypesJson::json_schema();
+        let schema = AllNumericTypes::json_schema();
 
         let properties = schema["properties"].as_object().unwrap();
 
@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn test_float_types_use_number_schema() {
-        let schema = AllNumericTypesJson::json_schema();
+        let schema = AllNumericTypes::json_schema();
 
         let properties = schema["properties"].as_object().unwrap();
 
@@ -295,7 +295,7 @@ mod tests {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
     #[serde(rename_all = "camelCase")]
-    struct RenamedFieldsJson {
+    struct RenamedFields {
         user_name: String,
         user_email: String,
     }
@@ -303,7 +303,7 @@ mod tests {
     #[test]
     #[cfg(feature = "serde")]
     fn test_serde_rename_all_affects_property_names() {
-        let schema = RenamedFieldsJson::json_schema();
+        let schema = RenamedFields::json_schema();
 
         let properties = schema["properties"].as_object().unwrap();
 
@@ -324,7 +324,7 @@ mod tests {
     #[cfg(feature = "serde")]
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    struct CustomFieldRenameJson {
+    struct CustomFieldRename {
         #[serde(rename = "customName")]
         field_name: String,
     }
@@ -332,7 +332,7 @@ mod tests {
     #[test]
     #[cfg(feature = "serde")]
     fn test_serde_field_rename() {
-        let schema = CustomFieldRenameJson::json_schema();
+        let schema = CustomFieldRename::json_schema();
 
         let properties = schema["properties"].as_object().unwrap();
 
@@ -349,14 +349,14 @@ mod tests {
 
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    struct ComplexCollectionsJson {
+    struct ComplexCollections {
         map_of_arrays: std::collections::HashMap<String, Vec<String>>,
         optional_map: Option<std::collections::HashMap<String, i32>>,
     }
 
     #[test]
     fn test_complex_nested_collections() {
-        let schema = ComplexCollectionsJson::json_schema();
+        let schema = ComplexCollections::json_schema();
 
         let properties = schema["properties"].as_object().unwrap();
 
@@ -392,13 +392,13 @@ mod tests {
 
         #[model_schema()]
         #[derive(Serialize, Deserialize, Debug, Clone)]
-        struct DocumentJson {
+        struct Document {
             id: ObjectId,
             author_id: Option<ObjectId>,
             tag_ids: Vec<ObjectId>,
         }
 
-        let schema = DocumentJson::json_schema();
+        let schema = Document::json_schema();
 
         let properties = schema["properties"].as_object().unwrap();
 
@@ -430,11 +430,11 @@ mod tests {
 
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    struct EmptyStructJson {}
+    struct EmptyStruct {}
 
     #[test]
     fn test_empty_struct_generates_valid_schema() {
-        let schema = EmptyStructJson::json_schema();
+        let schema = EmptyStruct::json_schema();
 
         assert_eq!(schema["type"], "object");
         assert_eq!(schema["additionalProperties"], false);
@@ -454,11 +454,11 @@ mod tests {
     fn test_schema_has_required_structure() {
         #[model_schema()]
         #[derive(Serialize, Deserialize, Debug, Clone)]
-        struct TestJson {
+        struct Test {
             field: String,
         }
 
-        let schema = TestJson::json_schema();
+        let schema = Test::json_schema();
 
         // Should be a JSON object
         assert!(schema.is_object());
