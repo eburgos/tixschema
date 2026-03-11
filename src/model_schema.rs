@@ -808,7 +808,11 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
     };
 
     // --- Build schema module impl items ---
+    let json_schema_method = generate_alias_json_schema_stub();
+
     let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![
+        #[cfg(feature = "jsonschema")]
+        json_schema_method,
         #[cfg(feature = "typescript")]
         ts_definition_method,
         #[cfg(feature = "zod")]
