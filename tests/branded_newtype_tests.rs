@@ -81,8 +81,8 @@ mod zod_ts_tests {
             "Should have generic isRoleId guard. Got: {ts}"
         );
         assert!(
-            ts.contains("export function createRoleId<T>(value: T): RoleId<T>"),
-            "Should have generic createRoleId factory. Got: {ts}"
+            ts.contains("export function assertRoleId<T>(value: T): RoleId<T>"),
+            "Should have generic assertRoleId factory. Got: {ts}"
         );
     }
 
@@ -94,8 +94,8 @@ mod zod_ts_tests {
             "Should have non-generic isCorrelationId guard. Got: {ts}"
         );
         assert!(
-            ts.contains("export function createCorrelationId(value: string): CorrelationId"),
-            "Should have non-generic createCorrelationId factory. Got: {ts}"
+            ts.contains("export function assertCorrelationId(value: string): CorrelationId"),
+            "Should have non-generic assertCorrelationId factory. Got: {ts}"
         );
     }
 
@@ -445,17 +445,6 @@ mod no_zod_tests {
     }
 
     #[test]
-    fn test_branded_newtype_no_zod_assert_function() {
-        let ts = RoleIdNoZod::<String>::ts_definition();
-        assert!(
-            ts.contains(
-                "export function assertRoleIdNoZod<ID_TYPE>(value: ID_TYPE): asserts value is RoleIdNoZod<ID_TYPE>"
-            ),
-            "Got: {ts}"
-        );
-    }
-
-    #[test]
     fn test_branded_newtype_no_zod_generic_helpers() {
         let ts = RoleIdNoZod::<String>::ts_definition();
         assert!(
@@ -463,8 +452,8 @@ mod no_zod_tests {
             "Should have generic isRoleIdNoZod guard. Got: {ts}"
         );
         assert!(
-            ts.contains("export function createRoleIdNoZod<T>(value: T): RoleIdNoZod<T>"),
-            "Should have generic createRoleIdNoZod factory. Got: {ts}"
+            ts.contains("export function assertRoleIdNoZod<T>(value: T): RoleIdNoZod<T>"),
+            "Should have generic assertRoleIdNoZod factory. Got: {ts}"
         );
     }
 
@@ -492,7 +481,7 @@ mod no_zod_tests {
         // Should have non-generic assert function
         assert!(
             ts.contains(
-                "export function assertSessionToken(value: string): asserts value is SessionToken"
+                "export function assertSessionToken(value: string): SessionToken"
             ),
             "Should have assert function without generics. Got: {ts}"
         );
@@ -506,8 +495,8 @@ mod no_zod_tests {
             "Should have non-generic isSessionToken guard. Got: {ts}"
         );
         assert!(
-            ts.contains("export function createSessionToken(value: string): SessionToken"),
-            "Should have non-generic createSessionToken factory. Got: {ts}"
+            ts.contains("export function assertSessionToken(value: string): SessionToken"),
+            "Should have non-generic assertSessionToken factory. Got: {ts}"
         );
     }
 }
