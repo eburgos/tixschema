@@ -642,11 +642,11 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
         );
         let helpers = if is_generic {
             format!(
-                "\n\nfunction is{item_name}<T>(_value: T): _value is {item_name}<T> {{\n  return true;\n}}\n\nexport function create{item_name}<T>(value: T): {item_name}<T> {{\n  if (is{item_name}(value)) {{\n    return value;\n  }}\n  throw new Error(\"create{item_name} error\");\n}}"
+                "\n\nfunction is{item_name}<T>(_value: T): _value is {item_name}<T> {{\n  return true;\n}}\n\nexport function assert{item_name}<T>(value: T): {item_name}<T> {{\n  if (is{item_name}(value)) {{\n    return value;\n  }}\n  throw new Error(\"assert{item_name} error\");\n}}"
             )
         } else {
             format!(
-                "\n\nfunction is{item_name}(_value: {ts_inner_type}): _value is {item_name} {{\n  return true;\n}}\n\nexport function create{item_name}(value: {ts_inner_type}): {item_name} {{\n  if (is{item_name}(value)) {{\n    return value;\n  }}\n  throw new Error(\"create{item_name} error\");\n}}"
+                "\n\nfunction is{item_name}(_value: {ts_inner_type}): _value is {item_name} {{\n  return true;\n}}\n\nexport function assert{item_name}(value: {ts_inner_type}): {item_name} {{\n  if (is{item_name}(value)) {{\n    return value;\n  }}\n  throw new Error(\"assert{item_name} error\");\n}}"
             )
         };
         quote! {
@@ -663,27 +663,18 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
             "export type {}{} = {} & {{ readonly [__brand_{}]: true }};",
             item_name, ts_generics, ts_inner_type, item_name
         );
-        let assert_fn = if is_generic {
-            format!(
-                "export function assert{item_name}{ts_generics}(value: {ts_inner_type}): asserts value is {item_name}{ts_generics} {{\n}}",
-            )
-        } else {
-            format!(
-                "export function assert{item_name}(value: {ts_inner_type}): asserts value is {item_name} {{\n}}",
-            )
-        };
         let helpers = if is_generic {
             format!(
-                "function is{item_name}<T>(_value: T): _value is {item_name}<T> {{\n  return true;\n}}\n\nexport function create{item_name}<T>(value: T): {item_name}<T> {{\n  if (is{item_name}(value)) {{\n    return value;\n  }}\n  throw new Error(\"create{item_name} error\");\n}}"
+                "function is{item_name}<T>(_value: T): _value is {item_name}<T> {{\n  return true;\n}}\n\nexport function assert{item_name}<T>(value: T): {item_name}<T> {{\n  if (is{item_name}(value)) {{\n    return value;\n  }}\n  throw new Error(\"assert{item_name} error\");\n}}"
             )
         } else {
             format!(
-                "function is{item_name}(_value: {ts_inner_type}): _value is {item_name} {{\n  return true;\n}}\n\nexport function create{item_name}(value: {ts_inner_type}): {item_name} {{\n  if (is{item_name}(value)) {{\n    return value;\n  }}\n  throw new Error(\"create{item_name} error\");\n}}"
+                "function is{item_name}(_value: {ts_inner_type}): _value is {item_name} {{\n  return true;\n}}\n\nexport function assert{item_name}(value: {ts_inner_type}): {item_name} {{\n  if (is{item_name}(value)) {{\n    return value;\n  }}\n  throw new Error(\"assert{item_name} error\");\n}}"
             )
         };
         quote! {
             pub fn ts_definition() -> String {
-                format!("{}\n{}\n\n{}\n\n{}", #unique_symbol, #type_str, #assert_fn, #helpers)
+                format!("{}\n{}\n\n{}", #unique_symbol, #type_str, #helpers)
             }
         }
     };
