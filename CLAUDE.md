@@ -329,7 +329,6 @@ With `typescript` only (no `zod`):
 ```typescript
 declare const __brand_UserId: unique symbol;
 export type UserId<ID_TYPE> = ID_TYPE & { readonly [__brand_UserId]: true };
-export function assertUserId<ID_TYPE>(value: ID_TYPE): asserts value is UserId<ID_TYPE> {}
 ```
 
 Rules:

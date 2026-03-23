@@ -308,18 +308,10 @@ impl FieldDef {
             }
             FieldDefType::SiblingType(name, lst) => {
                 if let Some(info) = lookup_alias_info(name) {
-                    if lst.is_empty() {
-                        // Use the exported schema name (e.g., "ContactInfo$Schema")
-                        format!("{}$Schema", info.export_name)
-                    } else {
-                        format!(
-                            "{name}<{}>",
-                            lst.iter()
-                                .map(Self::typescript_typename)
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )
-                    }
+                    // Always reference the $Schema, regardless of generic params.
+                    // For branded wrappers like DocumentTypeId<String>, the Zod
+                    // schema is defined on the wrapper itself.
+                    format!("{}$Schema", info.export_name)
                 } else if lst.is_empty() {
                     format!("{name}$Schema")
                 } else {

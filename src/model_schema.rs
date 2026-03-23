@@ -604,6 +604,21 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
     #[cfg(not(any(feature = "typescript", feature = "zod")))]
     let _ = inner_ty;
 
+    // Resolve the JSON schema type for the inner field.
+    // For generic newtypes, always "string" (mirrors Zod logic).
+    // For non-generic, map from the resolved TypeScript type name.
+    #[cfg(feature = "jsonschema")]
+    let json_inner_type = if is_generic {
+        "string".to_string()
+    } else {
+        let ts_name = get_field_def("_inner", inner_ty, "").typescript_typename();
+        match ts_name.as_str() {
+            "number" => "number".to_string(),
+            "boolean" => "boolean".to_string(),
+            _ => "string".to_string(),
+        }
+    };
+
     #[cfg(feature = "zod")]
     let zod_inner = {
         let base = if is_generic {
@@ -640,18 +655,9 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
             "export type {}{} = {} & $brand<\"{}\">;",
             item_name, ts_generics, ts_inner_type, item_name
         );
-        let helpers = if is_generic {
-            format!(
-                "\n\nfunction is{item_name}<T>(_value: T): _value is {item_name}<T> {{\n  return true;\n}}\n\nexport function assert{item_name}<T>(value: T): {item_name}<T> {{\n  if (is{item_name}(value)) {{\n    return value;\n  }}\n  throw new Error(\"assert{item_name} error\");\n}}"
-            )
-        } else {
-            format!(
-                "\n\nfunction is{item_name}(_value: {ts_inner_type}): _value is {item_name} {{\n  return true;\n}}\n\nexport function assert{item_name}(value: {ts_inner_type}): {item_name} {{\n  if (is{item_name}(value)) {{\n    return value;\n  }}\n  throw new Error(\"assert{item_name} error\");\n}}"
-            )
-        };
         quote! {
             pub fn ts_definition() -> String {
-                format!("{}{}", #type_str, #helpers)
+                #type_str.to_string()
             }
         }
     };
@@ -663,18 +669,9 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
             "export type {}{} = {} & {{ readonly [__brand_{}]: true }};",
             item_name, ts_generics, ts_inner_type, item_name
         );
-        let helpers = if is_generic {
-            format!(
-                "function is{item_name}<T>(_value: T): _value is {item_name}<T> {{\n  return true;\n}}\n\nexport function assert{item_name}<T>(value: T): {item_name}<T> {{\n  if (is{item_name}(value)) {{\n    return value;\n  }}\n  throw new Error(\"assert{item_name} error\");\n}}"
-            )
-        } else {
-            format!(
-                "function is{item_name}(_value: {ts_inner_type}): _value is {item_name} {{\n  return true;\n}}\n\nexport function assert{item_name}(value: {ts_inner_type}): {item_name} {{\n  if (is{item_name}(value)) {{\n    return value;\n  }}\n  throw new Error(\"assert{item_name} error\");\n}}"
-            )
-        };
         quote! {
             pub fn ts_definition() -> String {
-                format!("{}\n{}\n\n{}", #unique_symbol, #type_str, #helpers)
+                format!("{}\n{}", #unique_symbol, #type_str)
             }
         }
     };
@@ -799,6 +796,38 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
     };
 
     // --- Build schema module impl items ---
+    #[cfg(feature = "jsonschema")]
+    let json_schema_method = {
+        let mut constraint_inserts: Vec<proc_macro2::TokenStream> = Vec::new();
+
+        if let Some(min_len) = args.min_length {
+            constraint_inserts.push(quote! {
+                schema_obj.insert("minLength".to_string(), serde_json::Value::Number(serde_json::Number::from(#min_len as u64)));
+            });
+        }
+        if let Some(max_len) = args.max_length {
+            constraint_inserts.push(quote! {
+                schema_obj.insert("maxLength".to_string(), serde_json::Value::Number(serde_json::Number::from(#max_len as u64)));
+            });
+        }
+        if let Some(ref pattern) = args.pattern {
+            constraint_inserts.push(quote! {
+                schema_obj.insert("pattern".to_string(), serde_json::Value::String(#pattern.to_string()));
+            });
+        }
+
+        quote! {
+            #[cfg(feature = "jsonschema")]
+            pub fn json_schema() -> serde_json::Value {
+                let mut schema_obj = serde_json::Map::new();
+                schema_obj.insert("type".to_string(), serde_json::Value::String(#json_inner_type.to_string()));
+                #(#constraint_inserts)*
+                serde_json::Value::Object(schema_obj)
+            }
+        }
+    };
+
+    #[cfg(not(feature = "jsonschema"))]
     let json_schema_method = generate_alias_json_schema_stub();
 
     let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![
@@ -882,8 +911,20 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
         }
     };
 
+    #[cfg(feature = "jsonschema")]
+    let delegate_json_schema = {
+        let mi = module_ident.clone();
+        quote! {
+            pub fn json_schema() -> serde_json::Value {
+                #mi::Schema::json_schema()
+            }
+        }
+    };
+
     // --- Build delegate_impl_items ---
     let delegate_impl_items: Vec<proc_macro2::TokenStream> = vec![
+        #[cfg(feature = "jsonschema")]
+        delegate_json_schema,
         #[cfg(feature = "typescript")]
         delegate_ts,
         #[cfg(feature = "zod")]
@@ -910,6 +951,26 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
     let schema_example_tokens = schema_example_method.unwrap_or_default();
     #[cfg(not(feature = "zod"))]
     let schema_example_tokens = quote! {};
+
+    // --- Generate Display impl for branded newtypes ---
+    // Delegates to the inner field's Display, so DocumentTypeId<String> displays as the raw string.
+    let display_impl = {
+        let mut display_generics = item_struct.generics.clone();
+        for param in &mut display_generics.params {
+            if let syn::GenericParam::Type(tp) = param {
+                tp.bounds.push(syn::parse_quote!(std::fmt::Display));
+            }
+        }
+        let (display_impl_generics, _, display_where_clause) =
+            display_generics.split_for_impl();
+        quote! {
+            impl #display_impl_generics std::fmt::Display for #name #ty_generics #display_where_clause {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    self.0.fmt(f)
+                }
+            }
+        }
+    };
 
     // --- Inject serde(deserialize_with) on inner field and generate validate() ---
     #[cfg(feature = "serde")]
@@ -969,6 +1030,8 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
         let output = quote! {
             #item_struct
 
+            #display_impl
+
             pub mod #module_ident {
                 use super::*;
 
@@ -1001,6 +1064,8 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
     {
         let output = quote! {
             #item_struct
+
+            #display_impl
 
             pub mod #module_ident {
                 use super::*;
@@ -2477,7 +2542,11 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
                         })
                     });
                 }
-            } else if lst.is_empty() {
+            } else {
+                // Handles both non-generic sibling types (lst.is_empty()) and
+                // generic branded wrappers like DocumentTypeId<String>.
+                // For transparent newtypes the JSON schema is defined on the
+                // wrapper type's own schema module; type params don't affect it.
                 if let Some(alias) = lookup_alias_info(name) {
                     let module_ident = proc_macro2::Ident::new(
                         alias.module_name.as_str(),
@@ -2498,8 +2567,6 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
 
                     generate_type_schema(fld, &field_name_str, type_json_schema)
                 }
-            } else {
-                panic!("Unsupported generic type: {name} - {lst:?}");
             }
         }
         FieldDefType::Map(key, value) => {

@@ -73,32 +73,6 @@ mod zod_ts_tests {
         );
     }
 
-    #[test]
-    fn test_branded_newtype_generic_helpers() {
-        let ts = RoleId::<String>::ts_definition();
-        assert!(
-            ts.contains("function isRoleId<T>(_value: T): _value is RoleId<T>"),
-            "Should have generic isRoleId guard. Got: {ts}"
-        );
-        assert!(
-            ts.contains("export function assertRoleId<T>(value: T): RoleId<T>"),
-            "Should have generic assertRoleId factory. Got: {ts}"
-        );
-    }
-
-    #[test]
-    fn test_branded_newtype_non_generic_helpers() {
-        let ts = CorrelationId::ts_definition();
-        assert!(
-            ts.contains("function isCorrelationId(_value: string): _value is CorrelationId"),
-            "Should have non-generic isCorrelationId guard. Got: {ts}"
-        );
-        assert!(
-            ts.contains("export function assertCorrelationId(value: string): CorrelationId"),
-            "Should have non-generic assertCorrelationId factory. Got: {ts}"
-        );
-    }
-
     // Integer inner type branded newtype
     #[model_schema()]
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -382,11 +356,9 @@ mod constrained_objectid_branded_tests {
     }
 }
 
-// Branded newtype referenced from a struct
-// Note: jsonschema must be OFF because branded newtypes don't generate json_schema(),
-// so a struct referencing one cannot compile with jsonschema enabled.
-#[cfg(all(feature = "zod", feature = "typescript", not(feature = "jsonschema")))]
-mod branded_in_struct_tests {
+// Branded newtype referenced from a struct (all features enabled)
+#[cfg(all(feature = "zod", feature = "typescript", feature = "jsonschema"))]
+mod branded_in_struct_all_features_tests {
     use super::*;
 
     #[model_schema()]
@@ -396,26 +368,283 @@ mod branded_in_struct_tests {
 
     #[model_schema()]
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct TaskTypeId<T>(pub T);
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct Task {
         pub id: TaskId,
+        pub type_id: TaskTypeId<String>,
+        pub name: String,
+    }
+
+    #[test]
+    fn test_branded_in_struct_ts_definition() {
+        let ts = Task::ts_definition();
+        assert!(
+            ts.contains("TaskId"),
+            "Struct TS should reference TaskId. Got: {ts}"
+        );
+        assert!(
+            ts.contains("TaskTypeId<string>"),
+            "Struct TS should reference TaskTypeId<string>. Got: {ts}"
+        );
+    }
+
+    #[test]
+    fn test_branded_in_struct_zod_schema() {
+        let zod = Task::zod_schema();
+        assert!(
+            zod.contains("TaskId$Schema"),
+            "Struct Zod should reference TaskId$Schema. Got: {zod}"
+        );
+        assert!(
+            zod.contains("TaskTypeId$Schema"),
+            "Struct Zod should reference TaskTypeId$Schema. Got: {zod}"
+        );
+    }
+
+    #[test]
+    fn test_branded_in_struct_json_schema() {
+        let schema = Task::json_schema();
+        let properties = schema["properties"].as_object().unwrap();
+        assert!(
+            properties.contains_key("id"),
+            "JSON schema should have 'id' property. Got: {schema}"
+        );
+        assert!(
+            properties.contains_key("type_id"),
+            "JSON schema should have 'type_id' property. Got: {schema}"
+        );
+        assert!(
+            properties.contains_key("name"),
+            "JSON schema should have 'name' property. Got: {schema}"
+        );
+    }
+
+    #[test]
+    fn test_branded_newtype_own_json_schema() {
+        let schema = TaskId::json_schema();
+        assert_eq!(
+            schema["type"], "string",
+            "Non-generic branded type should have type 'string'. Got: {schema}"
+        );
+    }
+
+    #[test]
+    fn test_generic_branded_newtype_own_json_schema() {
+        let schema = TaskTypeId::<String>::json_schema();
+        assert_eq!(
+            schema["type"], "string",
+            "Generic branded type should have type 'string'. Got: {schema}"
+        );
+    }
+}
+
+// Branded newtype referenced from a struct (zod+typescript, no jsonschema)
+#[cfg(all(feature = "zod", feature = "typescript", not(feature = "jsonschema")))]
+mod branded_in_struct_no_jsonschema_tests {
+    use super::*;
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct TaskIdNJ(pub String);
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct TaskTypeIdNJ<T>(pub T);
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct TaskNJ {
+        pub id: TaskIdNJ,
+        pub type_id: TaskTypeIdNJ<String>,
         pub name: String,
     }
 
     #[test]
     fn test_branded_newtype_used_in_struct() {
-        let ts = Task::ts_definition();
-        // The struct's TS definition should reference the branded type by its export name
+        let ts = TaskNJ::ts_definition();
         assert!(
-            ts.contains("TaskId"),
-            "Struct TS should reference TaskId. Got: {ts}"
+            ts.contains("TaskIdNJ"),
+            "Struct TS should reference TaskIdNJ. Got: {ts}"
+        );
+        assert!(
+            ts.contains("TaskTypeIdNJ<string>"),
+            "Struct TS should reference TaskTypeIdNJ<string>. Got: {ts}"
         );
 
-        let zod = Task::zod_schema();
-        // The struct's Zod schema should reference the branded type's schema
+        let zod = TaskNJ::zod_schema();
         assert!(
-            zod.contains("TaskId$Schema"),
-            "Struct Zod should reference TaskId$Schema. Got: {zod}"
+            zod.contains("TaskIdNJ$Schema"),
+            "Struct Zod should reference TaskIdNJ$Schema. Got: {zod}"
         );
+        assert!(
+            zod.contains("TaskTypeIdNJ$Schema"),
+            "Struct Zod should reference TaskTypeIdNJ$Schema. Got: {zod}"
+        );
+    }
+}
+
+// Branded newtype referenced from a struct (jsonschema only, no zod/typescript)
+#[cfg(all(feature = "jsonschema", not(feature = "zod"), not(feature = "typescript")))]
+mod branded_in_struct_jsonschema_only_tests {
+    use super::*;
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct TaskIdJO(pub String);
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct TaskTypeIdJO<T>(pub T);
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct TaskJO {
+        pub id: TaskIdJO,
+        pub type_id: TaskTypeIdJO<String>,
+        pub name: String,
+    }
+
+    #[test]
+    fn test_branded_in_struct_json_schema_only() {
+        let schema = TaskJO::json_schema();
+        let properties = schema["properties"].as_object().unwrap();
+        assert!(
+            properties.contains_key("id"),
+            "JSON schema should have 'id' property. Got: {schema}"
+        );
+        assert!(
+            properties.contains_key("type_id"),
+            "JSON schema should have 'type_id' property. Got: {schema}"
+        );
+    }
+
+    #[test]
+    fn test_branded_own_json_schema_only() {
+        let schema = TaskIdJO::json_schema();
+        assert_eq!(schema["type"], "string", "Got: {schema}");
+    }
+
+    #[test]
+    fn test_generic_branded_own_json_schema_only() {
+        let schema = TaskTypeIdJO::<String>::json_schema();
+        assert_eq!(schema["type"], "string", "Got: {schema}");
+    }
+}
+
+// Branded newtype referenced from a struct (typescript only, no zod/jsonschema)
+#[cfg(all(feature = "typescript", not(feature = "zod"), not(feature = "jsonschema")))]
+mod branded_in_struct_typescript_only_tests {
+    use super::*;
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct TaskIdTO(pub String);
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct TaskTypeIdTO<T>(pub T);
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct TaskTO {
+        pub id: TaskIdTO,
+        pub type_id: TaskTypeIdTO<String>,
+        pub name: String,
+    }
+
+    #[test]
+    fn test_branded_in_struct_ts_only() {
+        let ts = TaskTO::ts_definition();
+        assert!(
+            ts.contains("TaskIdTO"),
+            "Struct TS should reference TaskIdTO. Got: {ts}"
+        );
+        assert!(
+            ts.contains("TaskTypeIdTO<string>"),
+            "Struct TS should reference TaskTypeIdTO<string>. Got: {ts}"
+        );
+    }
+}
+
+// Branded newtype with constraints — json_schema should include them
+#[cfg(feature = "jsonschema")]
+mod branded_constrained_json_schema_tests {
+    use super::*;
+
+    #[model_schema(minLength = 24, maxLength = 24, pattern = "^[a-f\\d]{24}$")]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct ConstrainedId<T>(pub T);
+
+    #[test]
+    fn test_constrained_branded_json_schema() {
+        let schema = ConstrainedId::<String>::json_schema();
+        assert_eq!(schema["type"], "string", "Got: {schema}");
+        assert_eq!(schema["minLength"], 24, "Got: {schema}");
+        assert_eq!(schema["maxLength"], 24, "Got: {schema}");
+        assert_eq!(
+            schema["pattern"], "^[a-f\\d]{24}$",
+            "Got: {schema}"
+        );
+    }
+
+    #[model_schema(minLength = 3, maxLength = 50)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct ShortId(pub String);
+
+    #[test]
+    fn test_constrained_non_generic_json_schema() {
+        let schema = ShortId::json_schema();
+        assert_eq!(schema["type"], "string", "Got: {schema}");
+        assert_eq!(schema["minLength"], 3, "Got: {schema}");
+        assert_eq!(schema["maxLength"], 50, "Got: {schema}");
+        // No pattern constraint — should not be present
+        assert!(schema.get("pattern").is_none(), "Got: {schema}");
+    }
+}
+
+// Display impl is generated for branded newtypes when any schema feature is enabled
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+mod branded_display_tests {
+    use super::*;
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct DisplayId<T>(pub T);
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct SimpleDisplayId(pub String);
+
+    #[test]
+    fn test_generic_branded_display() {
+        let id = DisplayId("abc123".to_string());
+        assert_eq!(format!("{id}"), "abc123");
+    }
+
+    #[test]
+    fn test_non_generic_branded_display() {
+        let id = SimpleDisplayId("xyz789".to_string());
+        assert_eq!(format!("{id}"), "xyz789");
+    }
+
+    #[test]
+    fn test_branded_display_to_string() {
+        let id = DisplayId("hello".to_string());
+        assert_eq!(id.to_string(), "hello");
     }
 }
 
@@ -444,19 +673,6 @@ mod no_zod_tests {
         );
     }
 
-    #[test]
-    fn test_branded_newtype_no_zod_generic_helpers() {
-        let ts = RoleIdNoZod::<String>::ts_definition();
-        assert!(
-            ts.contains("function isRoleIdNoZod<T>(_value: T): _value is RoleIdNoZod<T>"),
-            "Should have generic isRoleIdNoZod guard. Got: {ts}"
-        );
-        assert!(
-            ts.contains("export function assertRoleIdNoZod<T>(value: T): RoleIdNoZod<T>"),
-            "Should have generic assertRoleIdNoZod factory. Got: {ts}"
-        );
-    }
-
     // Non-generic branded newtype without Zod
     #[model_schema()]
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -477,26 +693,6 @@ mod no_zod_tests {
                 "export type SessionToken = string & { readonly [__brand_SessionToken]: true }"
             ),
             "Should have branded type without generics. Got: {ts}"
-        );
-        // Should have non-generic assert function
-        assert!(
-            ts.contains(
-                "export function assertSessionToken(value: string): SessionToken"
-            ),
-            "Should have assert function without generics. Got: {ts}"
-        );
-    }
-
-    #[test]
-    fn test_branded_newtype_non_generic_no_zod_helpers() {
-        let ts = SessionToken::ts_definition();
-        assert!(
-            ts.contains("function isSessionToken(_value: string): _value is SessionToken"),
-            "Should have non-generic isSessionToken guard. Got: {ts}"
-        );
-        assert!(
-            ts.contains("export function assertSessionToken(value: string): SessionToken"),
-            "Should have non-generic assertSessionToken factory. Got: {ts}"
         );
     }
 }
