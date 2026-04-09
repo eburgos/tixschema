@@ -442,14 +442,16 @@ impl FieldDef {
                     return true;
                 }
                 // Also check generic arguments
-                generics.iter().any(|g| g.contains_type_reference(type_name))
+                generics
+                    .iter()
+                    .any(|g| g.contains_type_reference(type_name))
             }
             FieldDefType::Map(k, v) => {
                 k.contains_type_reference(type_name) || v.contains_type_reference(type_name)
             }
-            FieldDefType::Tuple(elements) => {
-                elements.iter().any(|e| e.contains_type_reference(type_name))
-            }
+            FieldDefType::Tuple(elements) => elements
+                .iter()
+                .any(|e| e.contains_type_reference(type_name)),
             // Primitive types can't contain recursive references
             _ => false,
         }
@@ -526,7 +528,9 @@ pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
                             result.name = safe_name;
                             result.is_array = true;
                             result
-                        } else if arg_types.len() == 2 && &ident == "HashMap" {
+                        } else if arg_types.len() == 2
+                            && (ident == "HashMap" || ident == "BTreeMap")
+                        {
                             // Debug print to see what's happening
                             if std::env::var("RUST_LOG") == Ok(String::from("trace")) {
                                 println!(
