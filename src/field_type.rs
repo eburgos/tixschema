@@ -654,7 +654,8 @@ fn get_field_def_type_or_sibling(t_name: &str) -> FieldDefType {
     }
     match t_name {
         "bool" => FieldDefType::Boolean,
-        "String" => FieldDefType::String,
+        "String" | "PathBuf" => FieldDefType::String,
+        "Value" => FieldDefType::Unknown,
         "u8" => FieldDefType::U8,
         "u16" => FieldDefType::U16,
         "u32" => FieldDefType::U32,
