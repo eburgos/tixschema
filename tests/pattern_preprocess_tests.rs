@@ -83,7 +83,10 @@ fn test_pattern_enum_variant_field() {
     );
 }
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_pattern_rust_validation_valid() {
     #[model_schema()]
@@ -95,10 +98,16 @@ fn test_pattern_rust_validation_valid() {
 
     let valid = r#"{"id": "507f1f77bcf86cd799439011"}"#;
     let result: Result<ValidationTest, _> = serde_json::from_str(valid);
-    assert!(result.is_ok(), "Valid hex ID should deserialize successfully");
+    assert!(
+        result.is_ok(),
+        "Valid hex ID should deserialize successfully"
+    );
 }
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_pattern_rust_validation_invalid() {
     #[model_schema()]
@@ -391,7 +400,10 @@ fn test_pattern_enum_variant_with_min_length() {
 
 // ==================== Serde validation for pattern with enum variant ====================
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_pattern_enum_variant_serde_validation() {
     #[model_schema()]
@@ -416,10 +428,7 @@ fn test_pattern_enum_variant_serde_validation() {
     // Invalid: contains uppercase and digits
     let invalid = r#"{"type": "Item", "key": "Hello123"}"#;
     let result: Result<PatternEnumSerde, _> = serde_json::from_str(invalid);
-    assert!(
-        result.is_err(),
-        "Invalid key should fail to deserialize"
-    );
+    assert!(result.is_err(), "Invalid key should fail to deserialize");
     let err_str = result.unwrap_err().to_string();
     assert!(
         err_str.contains("does not match pattern"),

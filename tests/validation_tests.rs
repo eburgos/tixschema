@@ -102,7 +102,10 @@ fn test_min_and_max_length_json_schema() {
 
 // ==================== String constraint: maxLength — Rust validation ====================
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_max_length_rust_valid() {
     #[model_schema()]
@@ -114,10 +117,17 @@ fn test_max_length_rust_valid() {
 
     let valid = r#"{"name": "hello"}"#;
     let result: Result<MaxLengthValid, _> = serde_json::from_str(valid);
-    assert!(result.is_ok(), "String within maxLength should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "String within maxLength should succeed: {:?}",
+        result.err()
+    );
 }
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_max_length_rust_invalid() {
     #[model_schema()]
@@ -139,7 +149,10 @@ fn test_max_length_rust_invalid() {
 
 // ==================== String constraint: minLength — Rust validation ====================
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_min_length_rust_valid() {
     #[model_schema()]
@@ -151,10 +164,17 @@ fn test_min_length_rust_valid() {
 
     let valid = r#"{"name": "hello"}"#;
     let result: Result<MinLengthRustValid, _> = serde_json::from_str(valid);
-    assert!(result.is_ok(), "String meeting minLength should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "String meeting minLength should succeed: {:?}",
+        result.err()
+    );
 }
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_min_length_rust_invalid() {
     #[model_schema()]
@@ -176,7 +196,10 @@ fn test_min_length_rust_invalid() {
 
 // ==================== Combined string constraints ====================
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_combined_string_constraints_valid() {
     #[model_schema()]
@@ -188,10 +211,17 @@ fn test_combined_string_constraints_valid() {
 
     let valid = r#"{"id": "hello"}"#;
     let result: Result<CombinedStringValid, _> = serde_json::from_str(valid);
-    assert!(result.is_ok(), "Value meeting all constraints should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Value meeting all constraints should succeed: {:?}",
+        result.err()
+    );
 }
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_combined_string_constraints_too_short() {
     #[model_schema()]
@@ -206,7 +236,10 @@ fn test_combined_string_constraints_too_short() {
     assert!(result.is_err(), "Too short value should fail");
 }
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_combined_string_constraints_pattern_fail() {
     #[model_schema()]
@@ -223,7 +256,10 @@ fn test_combined_string_constraints_pattern_fail() {
 
 // ==================== validate() method — string ====================
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_validate_method_ok() {
     #[model_schema()]
@@ -237,10 +273,17 @@ fn test_validate_method_ok() {
         name: "hello".to_string(),
     };
     let result = instance.validate();
-    assert!(result.is_ok(), "validate() should return Ok for valid data: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "validate() should return Ok for valid data: {:?}",
+        result.err()
+    );
 }
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_validate_method_err() {
     #[model_schema()]
@@ -254,16 +297,23 @@ fn test_validate_method_err() {
         name: "hi".to_string(),
     };
     let result = instance.validate();
-    assert!(result.is_err(), "validate() should return Err for invalid data");
+    assert!(
+        result.is_err(),
+        "validate() should return Err for invalid data"
+    );
     let errors = result.unwrap_err();
     assert!(!errors.is_empty(), "Errors vector should not be empty");
     assert!(
         errors[0].contains("too short"),
-        "Error message should mention 'too short': {:?}", errors
+        "Error message should mention 'too short': {:?}",
+        errors
     );
 }
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_validate_method_multiple_errors() {
     #[model_schema()]
@@ -281,7 +331,10 @@ fn test_validate_method_multiple_errors() {
         code: "toolongcode".to_string(),
     };
     let result = instance.validate();
-    assert!(result.is_err(), "validate() should return Err for invalid data");
+    assert!(
+        result.is_err(),
+        "validate() should return Err for invalid data"
+    );
     let errors = result.unwrap_err();
     assert_eq!(errors.len(), 2, "Should have 2 errors, got: {:?}", errors);
 }
@@ -383,7 +436,10 @@ fn test_maximum_json_schema() {
 
 // ==================== Numeric constraints: minimum/maximum — Rust validation ====================
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_minimum_rust_valid() {
     #[model_schema()]
@@ -395,10 +451,17 @@ fn test_minimum_rust_valid() {
 
     let valid = r#"{"count": 5}"#;
     let result: Result<MinimumRustValid, _> = serde_json::from_str(valid);
-    assert!(result.is_ok(), "Value above minimum should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Value above minimum should succeed: {:?}",
+        result.err()
+    );
 }
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_minimum_rust_invalid() {
     #[model_schema()]
@@ -418,7 +481,10 @@ fn test_minimum_rust_invalid() {
     );
 }
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_maximum_rust_valid() {
     #[model_schema()]
@@ -430,10 +496,17 @@ fn test_maximum_rust_valid() {
 
     let valid = r#"{"count": 50}"#;
     let result: Result<MaximumRustValid, _> = serde_json::from_str(valid);
-    assert!(result.is_ok(), "Value below maximum should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Value below maximum should succeed: {:?}",
+        result.err()
+    );
 }
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_maximum_rust_invalid() {
     #[model_schema()]
@@ -453,7 +526,10 @@ fn test_maximum_rust_invalid() {
     );
 }
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_minimum_at_boundary() {
     #[model_schema()]
@@ -466,10 +542,17 @@ fn test_minimum_at_boundary() {
     // Exactly at minimum should pass
     let valid = r#"{"count": 5}"#;
     let result: Result<MinBoundary, _> = serde_json::from_str(valid);
-    assert!(result.is_ok(), "Value exactly at minimum should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Value exactly at minimum should succeed: {:?}",
+        result.err()
+    );
 }
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_maximum_at_boundary() {
     #[model_schema()]
@@ -482,12 +565,19 @@ fn test_maximum_at_boundary() {
     // Exactly at maximum should pass
     let valid = r#"{"count": 5}"#;
     let result: Result<MaxBoundary, _> = serde_json::from_str(valid);
-    assert!(result.is_ok(), "Value exactly at maximum should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Value exactly at maximum should succeed: {:?}",
+        result.err()
+    );
 }
 
 // ==================== validate() method — numeric ====================
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_validate_method_numeric_ok() {
     #[model_schema()]
@@ -499,10 +589,17 @@ fn test_validate_method_numeric_ok() {
 
     let instance = ValidateNumericOk { count: 50 };
     let result = instance.validate();
-    assert!(result.is_ok(), "validate() should return Ok for valid numeric data: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "validate() should return Ok for valid numeric data: {:?}",
+        result.err()
+    );
 }
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_validate_method_numeric_err() {
     #[model_schema()]
@@ -514,18 +611,25 @@ fn test_validate_method_numeric_err() {
 
     let instance = ValidateNumericErr { count: 3 };
     let result = instance.validate();
-    assert!(result.is_err(), "validate() should return Err for numeric out of range");
+    assert!(
+        result.is_err(),
+        "validate() should return Err for numeric out of range"
+    );
     let errors = result.unwrap_err();
     assert!(!errors.is_empty(), "Errors vector should not be empty");
     assert!(
         errors[0].contains("too small"),
-        "Error message should mention 'too small': {:?}", errors
+        "Error message should mention 'too small': {:?}",
+        errors
     );
 }
 
 // ==================== validate() method — pattern ====================
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_validate_method_pattern_ok() {
     #[model_schema()]
@@ -539,10 +643,17 @@ fn test_validate_method_pattern_ok() {
         slug: "hello".to_string(),
     };
     let result = instance.validate();
-    assert!(result.is_ok(), "validate() should return Ok for value matching pattern: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "validate() should return Ok for value matching pattern: {:?}",
+        result.err()
+    );
 }
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_validate_method_pattern_err() {
     #[model_schema()]
@@ -556,16 +667,23 @@ fn test_validate_method_pattern_err() {
         slug: "ABC123".to_string(),
     };
     let result = instance.validate();
-    assert!(result.is_err(), "validate() should return Err for value not matching pattern");
+    assert!(
+        result.is_err(),
+        "validate() should return Err for value not matching pattern"
+    );
     let errors = result.unwrap_err();
     assert!(!errors.is_empty(), "Errors vector should not be empty");
     assert!(
         errors[0].contains("does not match pattern"),
-        "Error message should mention 'does not match pattern': {:?}", errors
+        "Error message should mention 'does not match pattern': {:?}",
+        errors
     );
 }
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_validate_method_pattern_and_length() {
     #[model_schema()]
@@ -579,7 +697,10 @@ fn test_validate_method_pattern_and_length() {
     let valid = ValidatePatternLength {
         tag: "hello".to_string(),
     };
-    assert!(valid.validate().is_ok(), "Valid value should pass all constraints");
+    assert!(
+        valid.validate().is_ok(),
+        "Valid value should pass all constraints"
+    );
 
     // Too short — minLength check fires first
     let too_short = ValidatePatternLength {
@@ -590,7 +711,8 @@ fn test_validate_method_pattern_and_length() {
     let errors = result.unwrap_err();
     assert!(
         errors.iter().any(|e| e.contains("too short")),
-        "Should report 'too short' error: {:?}", errors
+        "Should report 'too short' error: {:?}",
+        errors
     );
 
     // Pattern failure (uppercase)
@@ -602,13 +724,17 @@ fn test_validate_method_pattern_and_length() {
     let errors = result.unwrap_err();
     assert!(
         errors.iter().any(|e| e.contains("does not match pattern")),
-        "Should report 'does not match pattern' error: {:?}", errors
+        "Should report 'does not match pattern' error: {:?}",
+        errors
     );
 }
 
 // ==================== validate() method — maxLength ====================
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_validate_method_max_length_ok() {
     #[model_schema()]
@@ -622,10 +748,17 @@ fn test_validate_method_max_length_ok() {
         label: "short".to_string(),
     };
     let result = instance.validate();
-    assert!(result.is_ok(), "validate() should return Ok for value within maxLength: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "validate() should return Ok for value within maxLength: {:?}",
+        result.err()
+    );
 }
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_validate_method_max_length_err() {
     #[model_schema()]
@@ -639,18 +772,25 @@ fn test_validate_method_max_length_err() {
         label: "way too long value".to_string(),
     };
     let result = instance.validate();
-    assert!(result.is_err(), "validate() should return Err for value exceeding maxLength");
+    assert!(
+        result.is_err(),
+        "validate() should return Err for value exceeding maxLength"
+    );
     let errors = result.unwrap_err();
     assert!(!errors.is_empty(), "Errors vector should not be empty");
     assert!(
         errors[0].contains("too long"),
-        "Error message should mention 'too long': {:?}", errors
+        "Error message should mention 'too long': {:?}",
+        errors
     );
 }
 
 // ==================== validate() method — mixed string and numeric ====================
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_validate_method_mixed_string_numeric() {
     #[model_schema()]
@@ -668,22 +808,35 @@ fn test_validate_method_mixed_string_numeric() {
         score: 2,
     };
     let result = instance.validate();
-    assert!(result.is_err(), "validate() should return Err when both fields are invalid");
+    assert!(
+        result.is_err(),
+        "validate() should return Err when both fields are invalid"
+    );
     let errors = result.unwrap_err();
-    assert_eq!(errors.len(), 2, "Should have exactly 2 errors, got: {:?}", errors);
+    assert_eq!(
+        errors.len(),
+        2,
+        "Should have exactly 2 errors, got: {:?}",
+        errors
+    );
     assert!(
         errors.iter().any(|e| e.contains("too short")),
-        "Should contain string 'too short' error: {:?}", errors
+        "Should contain string 'too short' error: {:?}",
+        errors
     );
     assert!(
         errors.iter().any(|e| e.contains("too small")),
-        "Should contain numeric 'too small' error: {:?}", errors
+        "Should contain numeric 'too small' error: {:?}",
+        errors
     );
 }
 
 // ==================== Float numeric validation — Rust (serde) ====================
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_minimum_float_rust_valid() {
     #[model_schema()]
@@ -695,10 +848,17 @@ fn test_minimum_float_rust_valid() {
 
     let valid = r#"{"ratio": 0.5}"#;
     let result: Result<MinFloatValid, _> = serde_json::from_str(valid);
-    assert!(result.is_ok(), "Float above minimum should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Float above minimum should succeed: {:?}",
+        result.err()
+    );
 }
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_minimum_float_rust_invalid() {
     #[model_schema()]
@@ -718,7 +878,10 @@ fn test_minimum_float_rust_invalid() {
     );
 }
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_maximum_float_rust_valid() {
     #[model_schema()]
@@ -730,10 +893,17 @@ fn test_maximum_float_rust_valid() {
 
     let valid = r#"{"value": 50.0}"#;
     let result: Result<MaxFloatValid, _> = serde_json::from_str(valid);
-    assert!(result.is_ok(), "Float below maximum should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Float below maximum should succeed: {:?}",
+        result.err()
+    );
 }
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_maximum_float_rust_invalid() {
     #[model_schema()]
@@ -755,7 +925,10 @@ fn test_maximum_float_rust_invalid() {
 
 // ==================== validate() method — float ====================
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_validate_method_float_err() {
     #[model_schema()]
@@ -767,12 +940,16 @@ fn test_validate_method_float_err() {
 
     let instance = ValidateFloatErr { percentage: 150.0 };
     let result = instance.validate();
-    assert!(result.is_err(), "validate() should return Err for float out of range");
+    assert!(
+        result.is_err(),
+        "validate() should return Err for float out of range"
+    );
     let errors = result.unwrap_err();
     assert!(!errors.is_empty(), "Errors vector should not be empty");
     assert!(
         errors[0].contains("too large"),
-        "Error message should mention 'too large': {:?}", errors
+        "Error message should mention 'too large': {:?}",
+        errors
     );
 }
 
@@ -841,22 +1018,51 @@ fn test_constraints_dont_affect_typescript() {
     // Extract just the type body (after "export type ... = {" and before the closing "};")
     // The TypeScript type syntax itself should use plain `string` and `number` — no Zod
     // or JSON Schema constraint methods like `.min()`, `.max()`, `.check()`, `.regex()`.
-    let type_body_start = ts.find("export type").expect("Should contain 'export type'");
+    let type_body_start = ts
+        .find("export type")
+        .expect("Should contain 'export type'");
     let type_section = &ts[type_body_start..];
-    assert!(!type_section.contains(".min("), "TypeScript type should not contain .min(): {type_section}");
-    assert!(!type_section.contains(".max("), "TypeScript type should not contain .max(): {type_section}");
-    assert!(!type_section.contains(".check("), "TypeScript type should not contain .check(): {type_section}");
-    assert!(!type_section.contains("z.regex"), "TypeScript type should not contain z.regex: {type_section}");
-    assert!(!type_section.contains("z.string"), "TypeScript type should not contain z.string: {type_section}");
-    assert!(!type_section.contains("z.number"), "TypeScript type should not contain z.number: {type_section}");
+    assert!(
+        !type_section.contains(".min("),
+        "TypeScript type should not contain .min(): {type_section}"
+    );
+    assert!(
+        !type_section.contains(".max("),
+        "TypeScript type should not contain .max(): {type_section}"
+    );
+    assert!(
+        !type_section.contains(".check("),
+        "TypeScript type should not contain .check(): {type_section}"
+    );
+    assert!(
+        !type_section.contains("z.regex"),
+        "TypeScript type should not contain z.regex: {type_section}"
+    );
+    assert!(
+        !type_section.contains("z.string"),
+        "TypeScript type should not contain z.string: {type_section}"
+    );
+    assert!(
+        !type_section.contains("z.number"),
+        "TypeScript type should not contain z.number: {type_section}"
+    );
     // Type fields should still be plain `string` and `number`
-    assert!(type_section.contains("username: string"), "TypeScript should have 'username: string': {type_section}");
-    assert!(type_section.contains("age: number"), "TypeScript should have 'age: number': {type_section}");
+    assert!(
+        type_section.contains("username: string"),
+        "TypeScript should have 'username: string': {type_section}"
+    );
+    assert!(
+        type_section.contains("age: number"),
+        "TypeScript should have 'age: number': {type_section}"
+    );
 }
 
 // ==================== Edge cases ====================
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_boundary_min_length_zero() {
     #[model_schema()]
@@ -871,15 +1077,26 @@ fn test_boundary_min_length_zero() {
         tag: "".to_string(),
     };
     let result = instance.validate();
-    assert!(result.is_ok(), "Empty string should pass minLength = 0: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Empty string should pass minLength = 0: {:?}",
+        result.err()
+    );
 
     // Also test via serde
     let valid = r#"{"tag": ""}"#;
     let result: Result<MinLenZero, _> = serde_json::from_str(valid);
-    assert!(result.is_ok(), "Empty string via serde should pass minLength = 0: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Empty string via serde should pass minLength = 0: {:?}",
+        result.err()
+    );
 }
 
-#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 #[test]
 fn test_pattern_empty_string_match() {
     #[model_schema()]
@@ -894,17 +1111,25 @@ fn test_pattern_empty_string_match() {
         empty_field: "".to_string(),
     };
     let result = valid_instance.validate();
-    assert!(result.is_ok(), "Empty string should match pattern '^$': {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Empty string should match pattern '^$': {:?}",
+        result.err()
+    );
 
     // Non-empty string should NOT match "^$"
     let invalid_instance = PatternEmpty {
         empty_field: "not empty".to_string(),
     };
     let result = invalid_instance.validate();
-    assert!(result.is_err(), "Non-empty string should not match pattern '^$'");
+    assert!(
+        result.is_err(),
+        "Non-empty string should not match pattern '^$'"
+    );
     let errors = result.unwrap_err();
     assert!(
         errors[0].contains("does not match pattern"),
-        "Error should mention 'does not match pattern': {:?}", errors
+        "Error should mention 'does not match pattern': {:?}",
+        errors
     );
 }

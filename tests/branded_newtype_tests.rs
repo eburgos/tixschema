@@ -9,7 +9,7 @@ mod zod_ts_tests {
     #[model_schema()]
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     #[serde(transparent)]
-    pub struct RoleId<ID_TYPE>(pub ID_TYPE);
+    pub struct RoleId<IdType>(pub IdType);
 
     #[model_schema()]
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -20,7 +20,7 @@ mod zod_ts_tests {
     fn test_branded_newtype_ts_definition() {
         let ts = RoleId::<String>::ts_definition();
         assert!(
-            ts.contains("export type RoleId<ID_TYPE> = ID_TYPE & $brand<\"RoleId\">"),
+            ts.contains("export type RoleId<IdType> = IdType & $brand<\"RoleId\">"),
             "Got: {ts}"
         );
     }
@@ -29,15 +29,18 @@ mod zod_ts_tests {
     fn test_branded_newtype_zod_schema() {
         let zod = RoleId::<String>::zod_schema();
         assert!(zod.contains("z.string().brand"), "Got: {zod}");
-        assert!(zod.contains("$ZodBranded<ZodString, \"RoleId\">"), "Got: {zod}");
+        assert!(
+            zod.contains("$ZodBranded<ZodString, \"RoleId\">"),
+            "Got: {zod}"
+        );
     }
 
     #[test]
     fn test_branded_newtype_preserves_generic_param_name() {
         let ts = RoleId::<String>::ts_definition();
-        // Should contain ID_TYPE not T or any other name
+        // Should contain IdType not T or any other name
         assert!(
-            ts.contains("ID_TYPE"),
+            ts.contains("IdType"),
             "Should preserve generic param name. Got: {ts}"
         );
     }
@@ -55,7 +58,10 @@ mod zod_ts_tests {
     fn test_branded_newtype_non_generic_zod() {
         let zod = CorrelationId::zod_schema();
         assert!(zod.contains("z.string().brand"), "Got: {zod}");
-        assert!(zod.contains("$ZodBranded<ZodString, \"CorrelationId\">"), "Got: {zod}");
+        assert!(
+            zod.contains("$ZodBranded<ZodString, \"CorrelationId\">"),
+            "Got: {zod}"
+        );
     }
 
     #[test]
@@ -138,7 +144,7 @@ mod zod_ts_tests {
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     #[serde(transparent)]
     #[allow(non_camel_case_types)]
-    pub struct DocumentId<ID_TYPE>(pub ID_TYPE);
+    pub struct DocumentId<IdType>(pub IdType);
 
     #[test]
     fn test_branded_newtype_generic_with_example() {
@@ -490,7 +496,11 @@ mod branded_in_struct_no_jsonschema_tests {
 }
 
 // Branded newtype referenced from a struct (jsonschema only, no zod/typescript)
-#[cfg(all(feature = "jsonschema", not(feature = "zod"), not(feature = "typescript")))]
+#[cfg(all(
+    feature = "jsonschema",
+    not(feature = "zod"),
+    not(feature = "typescript")
+))]
 mod branded_in_struct_jsonschema_only_tests {
     use super::*;
 
@@ -540,7 +550,11 @@ mod branded_in_struct_jsonschema_only_tests {
 }
 
 // Branded newtype referenced from a struct (typescript only, no zod/jsonschema)
-#[cfg(all(feature = "typescript", not(feature = "zod"), not(feature = "jsonschema")))]
+#[cfg(all(
+    feature = "typescript",
+    not(feature = "zod"),
+    not(feature = "jsonschema")
+))]
 mod branded_in_struct_typescript_only_tests {
     use super::*;
 
@@ -592,10 +606,7 @@ mod branded_constrained_json_schema_tests {
         assert_eq!(schema["type"], "string", "Got: {schema}");
         assert_eq!(schema["minLength"], 24, "Got: {schema}");
         assert_eq!(schema["maxLength"], 24, "Got: {schema}");
-        assert_eq!(
-            schema["pattern"], "^[a-f\\d]{24}$",
-            "Got: {schema}"
-        );
+        assert_eq!(schema["pattern"], "^[a-f\\d]{24}$", "Got: {schema}");
     }
 
     #[model_schema(minLength = 3, maxLength = 50)]
@@ -656,7 +667,7 @@ mod no_zod_tests {
     #[model_schema()]
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     #[serde(transparent)]
-    pub struct RoleIdNoZod<ID_TYPE>(pub ID_TYPE);
+    pub struct RoleIdNoZod<IdType>(pub IdType);
 
     #[test]
     fn test_branded_newtype_no_zod_ts_definition() {
@@ -667,7 +678,7 @@ mod no_zod_tests {
         );
         assert!(
             ts.contains(
-                "export type RoleIdNoZod<ID_TYPE> = ID_TYPE & { readonly [__brand_RoleIdNoZod]: true }"
+                "export type RoleIdNoZod<IdType> = IdType & { readonly [__brand_RoleIdNoZod]: true }"
             ),
             "Got: {ts}"
         );
@@ -722,7 +733,7 @@ mod serde_tests {
     #[model_schema()]
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     #[serde(transparent)]
-    pub struct GenericId<ID_TYPE>(pub ID_TYPE);
+    pub struct GenericId<IdType>(pub IdType);
 
     #[test]
     fn test_branded_newtype_generic_serde_roundtrip() {
@@ -733,10 +744,7 @@ mod serde_tests {
 
         // Deserialize back
         let deserialized: GenericId<String> = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            deserialized, original,
-            "Roundtrip should preserve equality"
-        );
+        assert_eq!(deserialized, original, "Roundtrip should preserve equality");
 
         // Also test with a numeric inner type
         let num_original = GenericId::<u64>(42);

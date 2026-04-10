@@ -1074,7 +1074,7 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
             println!("{output_str}");
         }
 
-        return TokenStream::from(output);
+        TokenStream::from(output)
     }
 
     // Without serde feature, no validation

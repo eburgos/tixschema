@@ -29,9 +29,15 @@ mod tests {
 
         // Verify discriminator field
         assert!(ts.contains("type: \"Text\""), "Missing Text discriminator");
-        assert!(ts.contains("type: \"Number\""), "Missing Number discriminator");
+        assert!(
+            ts.contains("type: \"Number\""),
+            "Missing Number discriminator"
+        );
         assert!(ts.contains("type: \"Flag\""), "Missing Flag discriminator");
-        assert!(ts.contains("type: \"Decimal\""), "Missing Decimal discriminator");
+        assert!(
+            ts.contains("type: \"Decimal\""),
+            "Missing Decimal discriminator"
+        );
 
         // Verify value field with correct types
         assert!(ts.contains("value: string"), "Missing string value");
@@ -207,7 +213,10 @@ mod tests {
         println!("Generated TypeScript:\n{}", ts);
 
         // Unit variant should only have discriminator
-        assert!(ts.contains("type: \"Empty\""), "Missing Empty discriminator");
+        assert!(
+            ts.contains("type: \"Empty\""),
+            "Missing Empty discriminator"
+        );
 
         // Single tuple should have value field
         assert!(ts.contains("type: \"Text\""), "Missing Text discriminator");
@@ -221,7 +230,10 @@ mod tests {
         );
 
         // Named struct should have individual fields
-        assert!(ts.contains("type: \"Named\""), "Missing Named discriminator");
+        assert!(
+            ts.contains("type: \"Named\""),
+            "Missing Named discriminator"
+        );
         assert!(ts.contains("field_a: string"), "Missing field_a");
         assert!(ts.contains("field_b: boolean"), "Missing field_b");
     }
@@ -249,7 +261,10 @@ mod tests {
         );
 
         // Unit variant
-        assert!(zod.contains("z.literal(\"Empty\")"), "Missing Empty literal");
+        assert!(
+            zod.contains("z.literal(\"Empty\")"),
+            "Missing Empty literal"
+        );
 
         // Single tuple
         assert!(zod.contains("z.literal(\"Text\")"), "Missing Text literal");
@@ -260,7 +275,10 @@ mod tests {
         assert!(zod.contains("z.tuple("), "Missing tuple");
 
         // Named struct
-        assert!(zod.contains("z.literal(\"Named\")"), "Missing Named literal");
+        assert!(
+            zod.contains("z.literal(\"Named\")"),
+            "Missing Named literal"
+        );
         assert!(zod.contains("field_a: z.string()"), "Missing field_a");
         assert!(zod.contains("field_b: z.boolean()"), "Missing field_b");
     }
@@ -572,7 +590,10 @@ mod tests {
             ts.contains("type: \"Alphanumeric\""),
             "Missing Alphanumeric"
         );
-        assert!(ts.contains("value: string"), "Alphanumeric should have value");
+        assert!(
+            ts.contains("value: string"),
+            "Alphanumeric should have value"
+        );
 
         assert!(ts.contains("type: \"Image\""), "Missing Image");
         assert!(
