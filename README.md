@@ -889,8 +889,9 @@ Supported types and mappings:
 | `NaiveDate` | `string` | `z.iso.date()` | `"date"` |
 | `NaiveTime` | `string` | `z.iso.time()` | `"time"` |
 | `NaiveDateTime` | `string` | `z.iso.datetime({ local: true })` | `"date-time"` |
-| `DateTime<Utc>` | `string` | `z.iso.datetime()` | `"date-time"` |
-| `DateTime<Local>` | `string` | `z.iso.datetime()` | `"date-time"` |
+| `DateTime<Utc>` | `string` | `z.iso.datetime({ offset: true })` | `"date-time"` |
+| `DateTime<Local>` | `string` | `z.iso.datetime({ offset: true })` | `"date-time"` |
+| `DateTime<FixedOffset>` | `string` | `z.iso.datetime({ offset: true })` | `"date-time"` |
 
 Example:
 
@@ -932,8 +933,8 @@ export const Event$Schema: ZodType<Event> = z.strictObject({
   date: z.iso.date(),
   time: z.iso.time(),
   local_datetime: z.iso.datetime({ local: true }),
-  created_at: z.iso.datetime(),
-  updated_at: z.union([z.iso.datetime(), z.undefined()]),
+  created_at: z.iso.datetime({ offset: true }),
+  updated_at: z.union([z.iso.datetime({ offset: true }), z.undefined()]),
 });
 ```
 
