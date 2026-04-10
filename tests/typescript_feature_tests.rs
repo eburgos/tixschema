@@ -89,7 +89,9 @@ mod tests {
         let zod_schema = TypeScriptTestStatus::zod_schema();
 
         // Should contain $RawSchema definition with z.enum
-        assert!(zod_schema.contains("const TypeScriptTestStatus$RawSchema = z.enum([\"active\", \"inactive\", \"pending\"])"));
+        assert!(zod_schema.contains(
+            "const TypeScriptTestStatus$RawSchema = z.enum([\"active\", \"inactive\", \"pending\"])"
+        ));
         // Should contain typed $Schema referencing $RawSchema
         assert!(zod_schema.contains("export const TypeScriptTestStatus$Schema: ZodType<TypeScriptTestStatus> = TypeScriptTestStatus$RawSchema;"));
         // Now includes .meta() with description
@@ -165,7 +167,9 @@ mod tests {
 
         // When serde feature is disabled, the rename_all attribute is not processed
         // so the enum values will be the original Rust names (Title case)
-        assert!(zod_schema.contains("const TypeScriptTestStatus$RawSchema = z.enum([\"Active\", \"Inactive\", \"Pending\"])"));
+        assert!(zod_schema.contains(
+            "const TypeScriptTestStatus$RawSchema = z.enum([\"Active\", \"Inactive\", \"Pending\"])"
+        ));
         assert!(zod_schema.contains("export const TypeScriptTestStatus$Schema: ZodType<TypeScriptTestStatus> = TypeScriptTestStatus$RawSchema;"));
         assert!(zod_schema.contains(".meta({"));
 
@@ -179,7 +183,9 @@ mod tests {
 
         // When serde feature is disabled, the rename_all attribute is not processed
         // so the enum values will be the original Rust names (Title case)
-        assert!(zod_schema.contains("const TypeScriptTestStatus$RawSchema = z.enum([\"active\", \"inactive\", \"pending\"])"));
+        assert!(zod_schema.contains(
+            "const TypeScriptTestStatus$RawSchema = z.enum([\"active\", \"inactive\", \"pending\"])"
+        ));
         assert!(zod_schema.contains("export const TypeScriptTestStatus$Schema: ZodType<TypeScriptTestStatus> = TypeScriptTestStatus$RawSchema;"));
         assert!(zod_schema.contains(".meta({"));
 

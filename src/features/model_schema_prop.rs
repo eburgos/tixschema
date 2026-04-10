@@ -69,14 +69,14 @@ use syn::{Attribute, LitStr, Type};
 /// ```
 #[derive(Clone, Debug, Default)]
 pub struct ModelSchemaPropMeta {
-    pub as_type: Option<String>,    // e.g., "String" from as = String
-    pub literal: Option<String>,    // e.g., "Tixena" from literal = "Tixena"
-    pub min_length: Option<usize>,  // e.g., 1 from minLength = 1
-    pub max_length: Option<usize>,  // e.g., 50 from maxLength = 50
-    pub pattern: Option<String>,    // e.g., "^[0-9a-fA-F]{24}$" from pattern = "^[0-9a-fA-F]{24}$"
-    pub minimum: Option<f64>,       // e.g., 0.0 from minimum = 0
-    pub maximum: Option<f64>,       // e.g., 100.0 from maximum = 100
-    pub preprocess: Vec<String>,    // e.g., ["epoch_to_date", "trim"] from preprocess = ["epoch_to_date", "trim"]
+    pub as_type: Option<String>,   // e.g., "String" from as = String
+    pub literal: Option<String>,   // e.g., "Tixena" from literal = "Tixena"
+    pub min_length: Option<usize>, // e.g., 1 from minLength = 1
+    pub max_length: Option<usize>, // e.g., 50 from maxLength = 50
+    pub pattern: Option<String>,   // e.g., "^[0-9a-fA-F]{24}$" from pattern = "^[0-9a-fA-F]{24}$"
+    pub minimum: Option<f64>,      // e.g., 0.0 from minimum = 0
+    pub maximum: Option<f64>,      // e.g., 100.0 from maximum = 100
+    pub preprocess: Vec<String>, // e.g., ["epoch_to_date", "trim"] from preprocess = ["epoch_to_date", "trim"]
 }
 
 /// Parses `model_schema_prop` attributes from a field.

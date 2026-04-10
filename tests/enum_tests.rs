@@ -248,10 +248,7 @@ mod tests {
     // instead of #[model_schema_prop(literal = "value")] on String fields.
     // This provides type safety in Rust while generating identical TypeScript output.
 
-    #[cfg(all(
-        test,
-        any(feature = "typescript", feature = "zod", feature = "serde")
-    ))]
+    #[cfg(all(test, any(feature = "typescript", feature = "zod", feature = "serde")))]
     #[model_schema()]
     #[cfg_attr(
         feature = "serde",
@@ -284,10 +281,7 @@ mod tests {
     }
 
     // Test single-value enum used as a field in a discriminated union
-    #[cfg(all(
-        test,
-        any(feature = "typescript", feature = "zod", feature = "serde")
-    ))]
+    #[cfg(all(test, any(feature = "typescript", feature = "zod", feature = "serde")))]
     #[model_schema()]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     #[derive(Debug, Clone, PartialEq)]
@@ -351,7 +345,9 @@ mod tests {
             "Should contain renamed variant with slash. Got:\n{zod}"
         );
         assert!(
-            zod.contains("\"application/vnd.openxmlformats-officedocument.wordprocessingml.document\""),
+            zod.contains(
+                "\"application/vnd.openxmlformats-officedocument.wordprocessingml.document\""
+            ),
             "Should contain renamed variant with dots. Got:\n{zod}"
         );
     }
@@ -365,7 +361,9 @@ mod tests {
             "TS definition should contain renamed variant. Got:\n{ts}"
         );
         assert!(
-            ts.contains("\"application/vnd.openxmlformats-officedocument.wordprocessingml.document\""),
+            ts.contains(
+                "\"application/vnd.openxmlformats-officedocument.wordprocessingml.document\""
+            ),
             "TS definition should contain renamed variant with dots. Got:\n{ts}"
         );
     }
@@ -379,9 +377,7 @@ mod tests {
         #[serde(rename = "application/pdf")]
         ApplicationPdf,
         /// Microsoft Word (OOXML) document format
-        #[serde(
-            rename = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        )]
+        #[serde(rename = "application/vnd.openxmlformats-officedocument.wordprocessingml.document")]
         ApplicationDocx,
     }
 
