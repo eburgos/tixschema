@@ -258,8 +258,8 @@ mod tests {
     fn test_datetime_utc_zod() {
         let zod = TimestampedRecord::zod_schema();
         assert!(
-            zod.contains("created_at: z.iso.datetime(),"),
-            "DateTime<Utc> should use z.iso.datetime(). Got: {zod}"
+            zod.contains("created_at: z.iso.datetime({ offset: true }),"),
+            "DateTime<Utc> should use z.iso.datetime({{ offset: true }}). Got: {zod}"
         );
     }
 
@@ -268,8 +268,8 @@ mod tests {
     fn test_datetime_local_zod() {
         let zod = LocalTimestamp::zod_schema();
         assert!(
-            zod.contains("local_time: z.iso.datetime(),"),
-            "DateTime<Local> should use z.iso.datetime(). Got: {zod}"
+            zod.contains("local_time: z.iso.datetime({ offset: true }),"),
+            "DateTime<Local> should use z.iso.datetime({{ offset: true }}). Got: {zod}"
         );
     }
 
@@ -278,8 +278,8 @@ mod tests {
     fn test_optional_datetime_zod() {
         let zod = OptionalTimestamp::zod_schema();
         assert!(
-            zod.contains("updated_at: z.union([z.iso.datetime(), z.undefined()]),"),
-            "Option<DateTime<Utc>> should use z.union([...datetime(), z.undefined()]). Got: {zod}"
+            zod.contains("updated_at: z.union([z.iso.datetime({ offset: true }), z.undefined()]),"),
+            "Option<DateTime<Utc>> should use z.union([...datetime({{ offset: true }}), z.undefined()]). Got: {zod}"
         );
     }
 
@@ -298,8 +298,8 @@ mod tests {
     fn test_hashmap_datetime_zod() {
         let zod = DateMap::zod_schema();
         assert!(
-            zod.contains("events: z.record(z.string(), z.iso.datetime()),"),
-            "HashMap<String, DateTime<Utc>> should use z.record(z.string(), z.iso.datetime()). Got: {zod}"
+            zod.contains("events: z.record(z.string(), z.iso.datetime({ offset: true })),"),
+            "HashMap<String, DateTime<Utc>> should use z.record(z.string(), z.iso.datetime({{ offset: true }})). Got: {zod}"
         );
     }
 

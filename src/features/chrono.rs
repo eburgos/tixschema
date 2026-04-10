@@ -73,11 +73,14 @@ pub fn get_naive_datetime_zod_schema() -> String {
     "z.iso.datetime({ local: true })".to_string()
 }
 
-/// Generates Zod schema for `DateTime<Tz>` (datetime with timezone validation)
-/// Uses Zod v4's `z.iso.datetime()` syntax (z.string().datetime() is deprecated)
+/// Generates Zod schema for `DateTime<Tz>` (datetime with timezone validation).
+/// Uses Zod v4's `z.iso.datetime({ offset: true })` so both `Z` and numeric
+/// offsets (e.g. `-04:00`) are accepted, matching Rust's default serialized
+/// form for `DateTime<FixedOffset>` (and still accepting `DateTime<Utc>` /
+/// `DateTime<Local>`). `z.string().datetime()` is deprecated.
 #[cfg(any(test, feature = "zod"))]
 pub fn get_datetime_zod_schema() -> String {
-    "z.iso.datetime()".to_string()
+    "z.iso.datetime({ offset: true })".to_string()
 }
 
 #[cfg(test)]
@@ -128,6 +131,9 @@ mod tests {
             get_naive_datetime_zod_schema(),
             "z.iso.datetime({ local: true })"
         );
-        assert_eq!(get_datetime_zod_schema(), "z.iso.datetime()");
+        assert_eq!(
+            get_datetime_zod_schema(),
+            "z.iso.datetime({ offset: true })"
+        );
     }
 }
