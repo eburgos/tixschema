@@ -1,4 +1,6 @@
 use core::cell::RefCell;
+#[cfg(any(feature = "typescript", feature = "zod"))]
+use core::iter;
 use std::collections::HashMap;
 use syn::{Attribute, Expr, Field, Lit, Meta, Variant};
 
@@ -18,9 +20,9 @@ thread_local! {
 pub fn register_alias_info(rust_ident: &str, export_name: &str, module_name: String) {
     ALIAS_INFO.with(|map| {
         map.borrow_mut().insert(
-            rust_ident.to_string(),
+            rust_ident.to_owned(),
             AliasInfo {
-                export_name: export_name.to_string(),
+                export_name: export_name.to_owned(),
                 module_name,
             },
         );
@@ -33,11 +35,9 @@ pub fn lookup_alias_info(rust_ident: &str) -> Option<AliasInfo> {
 
 pub fn safe_type_name(key: &str) -> String {
     if key.ends_with("Json") {
-        key.strip_suffix("Json")
-            .map(ToString::to_string)
-            .expect("Failed to strip Json suffix")
+        key.strip_suffix("Json").map(str::to_owned).unwrap()
     } else {
-        key.to_string()
+        key.to_owned()
     }
 }
 
@@ -56,7 +56,7 @@ pub fn format_docs_for_ts(docs: &[String], fallback_name: &str) -> String {
     } else {
         docs.iter()
             .map(|line| format!(" * {line}"))
-            .chain(core::iter::once(" * ".to_string()))
+            .chain(iter::once(" * ".to_owned()))
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -111,7 +111,7 @@ fn collect_doc_lines(attrs: &[Attribute]) -> Option<Vec<String>> {
             // Split on newlines to handle block comments (/** */)
             // which may come as a single string with embedded \n
             for line in value.lines() {
-                doc_lines.push(line.trim().to_string());
+                doc_lines.push(line.trim().to_owned());
             }
         }
     }
@@ -195,7 +195,7 @@ pub fn extract_example_from_docs(docs: &[String]) -> Option<String> {
     }
 }
 
-/// Transforms doctest-compatible example code to be suitable for schema_example().
+/// Transforms doctest-compatible example code to be suitable for `schema_example()`.
 ///
 /// Applies regex transformations to convert code that returns () (for doctest)
 /// into code that returns the actual value (for schema serialization).
@@ -205,7 +205,7 @@ pub fn extract_example_from_docs(docs: &[String]) -> Option<String> {
 /// - `println!("...", value);` → `value`
 /// - `let _: Type = value;` → `value`
 fn transform_example_code(code: &str) -> String {
-    let mut result = code.to_string();
+    let mut result = code.to_owned();
 
     // Pattern 0: Strip use statements
     // Remove lines starting with "use " (they're not needed in the impl block context)
@@ -214,7 +214,7 @@ fn transform_example_code(code: &str) -> String {
 
     // Pattern 1: println!("...", variable); → variable
     // Matches: println!("anything", value); or println!("format {}", value);
-    let re = regex::Regex::new(r#"println!\s*\([^,)]+,\s*([^)]+)\)\s*;?\s*$"#).unwrap();
+    let re = regex::Regex::new(r"println!\s*\([^,)]+,\s*([^)]+)\)\s*;?\s*$").unwrap();
     if let Some(captures) = re.captures(&result)
         && let Some(variable) = captures.get(1)
     {
@@ -223,14 +223,14 @@ fn transform_example_code(code: &str) -> String {
 
     // Pattern 2: let _: Type = value; → value
     // Matches: let _: SomeType = value; or let _ = value;
-    let re2 = regex::Regex::new(r#"let\s+_(?:\s*:\s*[^=]+)?\s*=\s*([^;]+)\s*;?\s*$"#).unwrap();
+    let re2 = regex::Regex::new(r"let\s+_(?:\s*:\s*[^=]+)?\s*=\s*([^;]+)\s*;?\s*$").unwrap();
     if let Some(captures) = re2.captures(&result)
         && let Some(variable) = captures.get(1)
     {
         result = re2.replace(&result, variable.as_str()).to_string();
     }
 
-    result.trim().to_string()
+    result.trim().to_owned()
 }
 
 /// Strips example code blocks from documentation lines.
@@ -269,186 +269,4 @@ pub fn strip_examples_from_docs(docs: &[String]) -> Vec<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_extract_example_simple() {
-        let docs = vec![
-            "User profile".to_string(),
-            "```rust example".to_string(),
-            "User { name: \"John\".to_string(), age: 25 }".to_string(),
-            "```".to_string(),
-        ];
-
-        let example = extract_example_from_docs(&docs);
-        assert!(example.is_some());
-        assert_eq!(
-            example.unwrap(),
-            "User { name: \"John\".to_string(), age: 25 }"
-        );
-    }
-
-    #[test]
-    fn test_extract_example_multiline() {
-        let docs = vec![
-            "Complex example".to_string(),
-            "```rust example".to_string(),
-            "let x = 5;".to_string(),
-            "let y = 10;".to_string(),
-            "User { age: x + y }".to_string(),
-            "```".to_string(),
-        ];
-
-        let example = extract_example_from_docs(&docs);
-        assert!(example.is_some());
-        let code = example.unwrap();
-        assert!(code.contains("let x = 5;"));
-        assert!(code.contains("let y = 10;"));
-        assert!(code.contains("User { age: x + y }"));
-    }
-
-    #[test]
-    fn test_extract_example_first_only() {
-        let docs = vec![
-            "Multiple examples".to_string(),
-            "```rust example".to_string(),
-            "User { age: 25 }".to_string(),
-            "```".to_string(),
-            "Another description".to_string(),
-            "```rust example".to_string(),
-            "User { age: 30 }".to_string(),
-            "```".to_string(),
-        ];
-
-        let example = extract_example_from_docs(&docs);
-        assert!(example.is_some());
-        assert_eq!(example.unwrap(), "User { age: 25 }");
-    }
-
-    #[test]
-    fn test_extract_example_none() {
-        let docs = vec!["User profile".to_string(), "No examples here".to_string()];
-
-        let example = extract_example_from_docs(&docs);
-        assert!(example.is_none());
-    }
-
-    #[test]
-    fn test_extract_example_empty_docs() {
-        let docs: Vec<String> = vec![];
-        let example = extract_example_from_docs(&docs);
-        assert!(example.is_none());
-    }
-
-    #[test]
-    fn test_extract_example_regular_code_fence_ignored() {
-        let docs = vec![
-            "Example with regular fence".to_string(),
-            "```rust".to_string(),
-            "User { age: 25 }".to_string(),
-            "```".to_string(),
-        ];
-
-        let example = extract_example_from_docs(&docs);
-        assert!(example.is_none());
-    }
-
-    #[test]
-    fn test_transform_println_pattern() {
-        let code = r#"let data_type = DataType::Integer;
-println!("data_type: {:?}", data_type);"#;
-        let result = transform_example_code(code);
-        assert_eq!(result, "let data_type = DataType::Integer;\ndata_type");
-    }
-
-    #[test]
-    fn test_transform_let_underscore_pattern() {
-        let code = "let _: DataType = DataType::Integer;";
-        let result = transform_example_code(code);
-        assert_eq!(result, "DataType::Integer");
-    }
-
-    #[test]
-    fn test_transform_let_underscore_no_type() {
-        let code = "let _ = DataType::Integer;";
-        let result = transform_example_code(code);
-        assert_eq!(result, "DataType::Integer");
-    }
-
-    #[test]
-    fn test_transform_no_pattern_match() {
-        let code = "DataType::Integer";
-        let result = transform_example_code(code);
-        assert_eq!(result, "DataType::Integer");
-    }
-
-    #[test]
-    fn test_transform_strips_use_statements() {
-        let code = r#"use crate::definition::DataType;
-
-let data_type = DataType::Integer;
-println!("data_type: {:?}", data_type);"#;
-        let result = transform_example_code(code);
-        assert_eq!(result, "let data_type = DataType::Integer;\ndata_type");
-    }
-
-    #[test]
-    fn test_transform_strips_multiple_use_statements() {
-        let code = r#"use crate::definition::DataType;
-use std::collections::HashMap;
-
-let data_type = DataType::Integer;
-println!("data_type: {:?}", data_type);"#;
-        let result = transform_example_code(code);
-        assert_eq!(result, "let data_type = DataType::Integer;\ndata_type");
-    }
-
-    #[test]
-    fn test_strip_examples_removes_example_blocks() {
-        let docs = vec![
-            "User profile".to_string(),
-            "Some description".to_string(),
-            "```rust example".to_string(),
-            "User { name: \"John\".to_string() }".to_string(),
-            "```".to_string(),
-            "More description".to_string(),
-        ];
-
-        let result = strip_examples_from_docs(&docs);
-        assert_eq!(result.len(), 3);
-        assert_eq!(result[0], "User profile");
-        assert_eq!(result[1], "Some description");
-        assert_eq!(result[2], "More description");
-    }
-
-    #[test]
-    fn test_strip_examples_multiple_blocks() {
-        let docs = vec![
-            "Description".to_string(),
-            "```rust example".to_string(),
-            "Example 1".to_string(),
-            "```".to_string(),
-            "Between".to_string(),
-            "```rust example".to_string(),
-            "Example 2".to_string(),
-            "```".to_string(),
-            "End".to_string(),
-        ];
-
-        let result = strip_examples_from_docs(&docs);
-        assert_eq!(result.len(), 3);
-        assert_eq!(result[0], "Description");
-        assert_eq!(result[1], "Between");
-        assert_eq!(result[2], "End");
-    }
-
-    #[test]
-    fn test_strip_examples_no_examples() {
-        let docs = vec!["User profile".to_string(), "Some description".to_string()];
-
-        let result = strip_examples_from_docs(&docs);
-        assert_eq!(result.len(), 2);
-        assert_eq!(result, docs);
-    }
-}
+mod tests;

@@ -1,17 +1,3 @@
-#![allow(clippy::match_same_arms)]
-#![expect(clippy::unwrap_used)]
-#![expect(clippy::min_ident_chars)]
-#![expect(clippy::std_instead_of_alloc)]
-#![expect(clippy::option_if_let_else)]
-#![expect(clippy::ref_option)]
-#![expect(clippy::shadow_unrelated)]
-#![expect(clippy::print_stdout)]
-#![expect(clippy::cognitive_complexity)]
-#![expect(clippy::too_many_lines)] //how many?
-#![expect(clippy::allow_attributes_without_reason)]
-#![expect(clippy::needless_pass_by_value)]
-#![allow(clippy::missing_docs_in_private_items)]
-
 mod features;
 mod field_type;
 mod generation;
@@ -22,7 +8,7 @@ use model_schema::exec_model_schema;
 use proc_macro::TokenStream;
 use utils::safe_type_name;
 
-/// # model_schema
+/// # `model_schema`
 ///
 /// A macro that generates TypeScript type definitions and Zod validation schemas for Rust structs and enums.
 ///
@@ -218,9 +204,9 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 /// }
 /// ```
 ///
-/// Generated Zod: `z.string().min(3).max(50).check(z.regex(/^[a-z0-9_]+$/))`
+/// Generated Zod: `z.string().min(3).max(50).check(z.regex(/^[a-z0-9_]+$/))`.
 ///
-/// Generated JSON Schema: `{ "type": "string", "minLength": 3, "maxLength": 50, "pattern": "^[a-z0-9_]+$" }`
+/// Generated JSON Schema: `{ "type": "string", "minLength": 3, "maxLength": 50, "pattern": "^[a-z0-9_]+$" }`.
 ///
 /// ### Numeric Constraints
 ///
