@@ -1,8 +1,8 @@
-//! JSON Schema generation feature module
+//! JSON Schema generation feature module.
 //!
 //! This module handles JSON schema generation when the "jsonschema" feature is enabled.
 
-/// Check if we should generate JSON schema methods
+/// Check if we should generate JSON schema methods.
 #[cfg(test)]
 pub const fn should_generate_json_schema() -> bool {
     true // Always true when this module is compiled (feature is enabled)
@@ -130,7 +130,7 @@ pub fn generate_struct_json_schema_method(
     }
 }
 
-/// Generates the JSON schema method implementation for plain enums
+/// Generates the JSON schema method implementation for plain enums.
 pub fn generate_plain_enum_json_schema_method(
     enumerated: &[proc_macro2::TokenStream],
 ) -> proc_macro2::TokenStream {
@@ -148,38 +148,4 @@ pub fn generate_plain_enum_json_schema_method(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_should_generate_json_schema() {
-        assert!(should_generate_json_schema());
-    }
-
-    #[test]
-    fn test_json_schema_method_generation() {
-        let fields = vec![];
-        let method = generate_struct_json_schema_method(&fields, &[]);
-        let method_str = method.to_string();
-
-        assert!(method_str.contains("json_schema"));
-        assert!(method_str.contains("serde_json"));
-        assert!(method_str.contains("properties"));
-        assert!(method_str.contains("required"));
-    }
-
-    #[test]
-    fn test_json_schema_method_flatten_emits_merge() {
-        let fields = vec![];
-        let no_flatten = generate_struct_json_schema_method(&fields, &[]).to_string();
-        let with_flatten = generate_struct_json_schema_method(
-            &fields,
-            &[quote::quote! { serde_json::json!({ "type": "object" }) }],
-        )
-        .to_string();
-
-        assert!(!no_flatten.contains("merge_object_schemas"));
-        assert!(with_flatten.contains("merge_object_schemas"));
-        assert!(with_flatten.contains("oneOf"));
-    }
-}
+mod tests;

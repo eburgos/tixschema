@@ -25,7 +25,7 @@ mod tests {
         }
 
         let ts = SingleTuple::ts_definition();
-        println!("Generated TypeScript:\n{}", ts);
+        println!("Generated TypeScript:\n{ts}");
 
         // Verify discriminator field
         assert!(ts.contains("type: \"Text\""), "Missing Text discriminator");
@@ -58,7 +58,7 @@ mod tests {
         }
 
         let zod = SingleTupleZod::zod_schema();
-        println!("Generated Zod:\n{}", zod);
+        println!("Generated Zod:\n{zod}");
 
         // Verify Zod schema structure
         assert!(
@@ -94,7 +94,7 @@ mod tests {
         }
 
         let ts = MultiTuple::ts_definition();
-        println!("Generated TypeScript:\n{}", ts);
+        println!("Generated TypeScript:\n{ts}");
 
         // Verify tuple syntax
         assert!(
@@ -123,7 +123,7 @@ mod tests {
         }
 
         let zod = MultiTupleZod::zod_schema();
-        println!("Generated Zod:\n{}", zod);
+        println!("Generated Zod:\n{zod}");
 
         // Verify z.tuple() is used
         assert!(zod.contains("z.tuple("), "Missing z.tuple");
@@ -152,7 +152,7 @@ mod tests {
         }
 
         let ts = DataType::ts_definition();
-        println!("Generated TypeScript:\n{}", ts);
+        println!("Generated TypeScript:\n{ts}");
 
         // Should be a string union, not discriminated union
         assert!(ts.contains("\"Alphanumeric\""), "Missing Alphanumeric");
@@ -182,7 +182,7 @@ mod tests {
         }
 
         let zod = PlainEnumZod::zod_schema();
-        println!("Generated Zod:\n{}", zod);
+        println!("Generated Zod:\n{zod}");
 
         // Should use z.enum, not z.discriminatedUnion
         assert!(zod.contains("z.enum("), "Should use z.enum for plain enums");
@@ -210,7 +210,7 @@ mod tests {
         }
 
         let ts = Mixed::ts_definition();
-        println!("Generated TypeScript:\n{}", ts);
+        println!("Generated TypeScript:\n{ts}");
 
         // Unit variant should only have discriminator
         assert!(
@@ -252,7 +252,7 @@ mod tests {
         }
 
         let zod = MixedZod::zod_schema();
-        println!("Generated Zod:\n{}", zod);
+        println!("Generated Zod:\n{zod}");
 
         // Should use discriminatedUnion since not all variants are unit
         assert!(
@@ -296,7 +296,7 @@ mod tests {
 
         let schema = TupleSchema::json_schema();
         let schema_str = serde_json::to_string_pretty(&schema).unwrap();
-        println!("Generated JSON Schema:\n{}", schema_str);
+        println!("Generated JSON Schema:\n{schema_str}");
 
         // Should have oneOf for discriminated union
         assert!(schema_str.contains("\"oneOf\""), "Missing oneOf");
@@ -323,7 +323,7 @@ mod tests {
         }
 
         let ts = CustomContent::ts_definition();
-        println!("Generated TypeScript:\n{}", ts);
+        println!("Generated TypeScript:\n{ts}");
 
         // Should use "kind" instead of "type"
         assert!(ts.contains("kind: \"Text\""), "Should use 'kind' as tag");
@@ -353,7 +353,7 @@ mod tests {
         }
 
         let zod = CustomContentZod::zod_schema();
-        println!("Generated Zod:\n{}", zod);
+        println!("Generated Zod:\n{zod}");
 
         // Should use "kind" in discriminatedUnion
         assert!(
@@ -384,7 +384,7 @@ mod tests {
         }
 
         let ts = TupleWithVec::ts_definition();
-        println!("Generated TypeScript:\n{}", ts);
+        println!("Generated TypeScript:\n{ts}");
 
         // Image should have tuple with string and array
         assert!(
@@ -411,7 +411,7 @@ mod tests {
         }
 
         let zod = TupleWithVecZod::zod_schema();
-        println!("Generated Zod:\n{}", zod);
+        println!("Generated Zod:\n{zod}");
 
         // Image tuple
         assert!(
@@ -443,7 +443,7 @@ mod tests {
         }
 
         let ts = PaymentMethod::ts_definition();
-        println!("Generated TypeScript:\n{}", ts);
+        println!("Generated TypeScript:\n{ts}");
 
         // Should still work as before
         assert!(
@@ -478,7 +478,7 @@ mod tests {
         }
 
         let ts = OptionalTuple::ts_definition();
-        println!("Generated TypeScript:\n{}", ts);
+        println!("Generated TypeScript:\n{ts}");
 
         // Single optional tuple
         assert!(
@@ -510,7 +510,7 @@ mod tests {
         }
 
         let ts = Outer::ts_definition();
-        println!("Generated TypeScript:\n{}", ts);
+        println!("Generated TypeScript:\n{ts}");
 
         // Should reference the inner type
         assert!(
@@ -528,7 +528,7 @@ mod tests {
     #[test]
     fn test_serde_serialization_compatibility() {
         #[model_schema()]
-        #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+        #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
         #[serde(tag = "type", content = "value")]
         pub enum SerdeCompat {
             Text(String),
@@ -537,7 +537,7 @@ mod tests {
         }
 
         // Test serialization produces expected format
-        let text = SerdeCompat::Text("hello".to_string());
+        let text = SerdeCompat::Text("hello".to_owned());
         let json = serde_json::to_value(&text).unwrap();
         assert_eq!(json["type"], "Text");
         assert_eq!(json["value"], "hello");
@@ -547,7 +547,7 @@ mod tests {
         assert_eq!(json["type"], "Number");
         assert_eq!(json["value"], 42);
 
-        let pair = SerdeCompat::Pair("hello".to_string(), 42);
+        let pair = SerdeCompat::Pair("hello".to_owned(), 42);
         let json = serde_json::to_value(&pair).unwrap();
         assert_eq!(json["type"], "Pair");
         assert!(json["value"].is_array());
@@ -555,7 +555,7 @@ mod tests {
         assert_eq!(json["value"][1], 42);
     }
 
-    /// Test 12: Complex FixedValue enum from original issue
+    /// Test 12: Complex `FixedValue` enum from original issue
     /// This is the exact enum from the user's original problem
     #[test]
     fn test_fixed_value_original_issue() {
@@ -570,7 +570,7 @@ mod tests {
         }
 
         let ts = FixedValue::ts_definition();
-        println!("Generated TypeScript:\n{}", ts);
+        println!("Generated TypeScript:\n{ts}");
 
         // Verify NO empty field names (the original bug)
         // Empty field names would look like "  : string;" (space before colon, no field name)
@@ -606,7 +606,7 @@ mod tests {
         assert!(ts.contains("type: \"Boolean\""), "Missing Boolean");
     }
 
-    /// Test 13: FixedValueExt with all variant types
+    /// Test 13: `FixedValueExt` with all variant types
     #[test]
     fn test_fixed_value_ext_comprehensive() {
         #[model_schema()]
@@ -623,7 +623,7 @@ mod tests {
         }
 
         let ts = FixedValueExt::ts_definition();
-        println!("Generated TypeScript:\n{}", ts);
+        println!("Generated TypeScript:\n{ts}");
 
         // Single tuple variants
         assert!(
@@ -666,7 +666,7 @@ mod tests {
         }
 
         let ts = EmptyTuple::ts_definition();
-        println!("Generated TypeScript:\n{}", ts);
+        println!("Generated TypeScript:\n{ts}");
 
         // Both should be in discriminated union
         assert!(ts.contains("type: \"Normal\""), "Missing Normal");
@@ -677,7 +677,7 @@ mod tests {
         // This is verified by ensuring the total schema structure is correct
     }
 
-    /// Test 15: JSDoc comments in generated TypeScript
+    /// Test 15: `JSDoc` comments in generated TypeScript
     #[test]
     fn test_jsdoc_comments() {
         #[model_schema()]
@@ -688,7 +688,7 @@ mod tests {
         }
 
         let ts = JsDoc::ts_definition();
-        println!("Generated TypeScript:\n{}", ts);
+        println!("Generated TypeScript:\n{ts}");
 
         // Should have JSDoc comments
         assert!(ts.contains("/**"), "Should have JSDoc comments");

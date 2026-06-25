@@ -66,41 +66,10 @@ quick:
     @echo "Quick test with default features..."
     cargo test
 
-# Run linting with clippy (optionally fix issues with fix=true)
-lint fix='false':
-    #!/usr/bin/env bash
-    set -e
-
-    # Define lint flags once to avoid duplication
-    LINT_FLAGS="\
-        -W clippy::all \
-        -W clippy::pedantic \
-        -W clippy::nursery \
-        -W clippy::as_conversions \
-        -W clippy::unwrap_used \
-        -W clippy::print_stdout \
-        -W clippy::missing_docs_in_private_items \
-        -W clippy::missing_inline_in_public_items \
-        -W clippy::allow_attributes_without_reason \
-        -W clippy::arithmetic_side_effects \
-        -W clippy::float_arithmetic \
-        -W clippy::min_ident_chars \
-        -W clippy::std_instead_of_alloc \
-        -W clippy::std_instead_of_core \
-        -W clippy::shadow_unrelated \
-        -D warnings"
-
-    if [ "{{fix}}" = "true" ]; then
-        echo "Running cargo fix..."
-        cargo fix --allow-dirty
-        echo "Running clippy with fixes..."
-        cargo clippy --all-targets --fix --allow-dirty -- $LINT_FLAGS
-        echo "Formatting code..."
-        cargo fmt
-    else
-        echo "Running clippy lints..."
-        cargo clippy --all-targets -- $LINT_FLAGS
-    fi 
+# Lint Rust (clippy + fmt check). Lint levels are configured in Cargo.toml [lints.clippy].
+lint:
+    cargo clippy --all-targets -- -D warnings
+    cargo fmt --check
 
 # Check code without running tests
 check:

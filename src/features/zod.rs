@@ -1,4 +1,4 @@
-//! Zod v4 schema generation support
+//! Zod v4 schema generation support.
 //!
 //! This module provides functionality for generating Zod v4 validation schemas
 //! from Rust types when the `zod` feature is enabled.
@@ -11,4 +11,4 @@
 //! - Uses z.union([type, `z.undefined()`]) for optional fields
 //!
 //! ## Tests:
-//! Comprehensive tests for this feature are located in `tests/zod_tests.rs`
+//! Comprehensive tests for this feature are located in `tests/zod_tests.rs`.

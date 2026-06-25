@@ -3,7 +3,6 @@
 // correctly with real MongoDB ObjectIds
 
 #[cfg(all(test, feature = "object_id"))]
-#[expect(clippy::unwrap_used, reason = "This is a test file")]
 mod tests {
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;

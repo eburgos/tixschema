@@ -1,5 +1,4 @@
 #[cfg(all(test, feature = "object_id"))]
-#[expect(clippy::unwrap_used, reason = "This is a test file")]
 mod tests {
 
     #[cfg(all(test, feature = "serde"))]
