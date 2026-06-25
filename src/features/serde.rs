@@ -18,6 +18,7 @@ pub struct SerdeTypeMeta {
 pub struct SerdeFieldMeta {
     pub rename: Option<String>, // e.g., "new_name"
     pub skip: bool,             // Whether to skip the field
+    pub flatten: bool,          // Whether the field is `#[serde(flatten)]`
 }
 
 /// Parses serde attributes from a struct or enum.
@@ -78,6 +79,10 @@ pub fn parse_serde_field_attributes(attrs: &[Attribute]) -> SerdeFieldMeta {
                     || nested.path.is_ident("skip_serializing_if")
                 {
                     meta.skip = true;
+                }
+                // Handle `flatten`
+                else if nested.path.is_ident("flatten") {
+                    meta.flatten = true;
                 }
                 Ok(())
             })
@@ -205,6 +210,7 @@ mod tests {
         let field_meta_with_rename = SerdeFieldMeta {
             rename: Some("customName".to_string()),
             skip: false,
+            flatten: false,
         };
         assert_eq!(
             get_final_field_name(
@@ -219,10 +225,46 @@ mod tests {
         let field_meta_no_rename = SerdeFieldMeta {
             rename: None,
             skip: false,
+            flatten: false,
         };
         assert_eq!(
             get_final_field_name("field_name".to_string(), &field_meta_no_rename, &type_meta),
             "fieldName"
         );
+    }
+
+    #[test]
+    fn test_parse_flatten_field_attribute() {
+        let item: syn::ItemStruct = syn::parse_quote! {
+            struct S {
+                #[serde(flatten)]
+                variant: SomeVariant,
+            }
+        };
+        let field = item.fields.iter().next().unwrap();
+        let meta = parse_serde_field_attributes(&field.attrs);
+        assert!(meta.flatten);
+        assert!(!meta.skip);
+        assert!(meta.rename.is_none());
+    }
+
+    #[test]
+    fn test_parse_non_flatten_field_attribute() {
+        let item: syn::ItemStruct = syn::parse_quote! {
+            struct S {
+                #[serde(rename = "renamed")]
+                foo: String,
+            }
+        };
+        let field = item.fields.iter().next().unwrap();
+        let meta = parse_serde_field_attributes(&field.attrs);
+        assert!(!meta.flatten);
+        assert_eq!(meta.rename.as_deref(), Some("renamed"));
+    }
+
+    #[test]
+    fn test_flatten_default_is_false() {
+        let meta = SerdeFieldMeta::default();
+        assert!(!meta.flatten);
     }
 }

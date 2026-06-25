@@ -234,12 +234,29 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
     let mut field_defs = Vec::new();
     let mut validation_fns: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut validate_bodies: Vec<proc_macro2::TokenStream> = Vec::new();
+    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+    let mut flattened_fields: Vec<FieldDef> = Vec::new();
     for field in &mut item_struct.fields {
+        #[cfg(feature = "serde")]
+        let is_flatten = parse_serde_field_attributes(&field.attrs).flatten;
+        #[cfg(not(feature = "serde"))]
+        let is_flatten = false;
+
         #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
         let (f_def, validation_fn, validate_body) =
             process_field(&rename_all, field, Some(&module_name));
         #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
         let (f_def, validation_fn, validate_body) = process_field(&rename_all, field, None);
+
+        if is_flatten {
+            let _ = (&validation_fn, &validate_body);
+            #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+            flattened_fields.push(f_def);
+            #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+            let _ = f_def;
+            continue;
+        }
+
         if let Some(vfn) = validation_fn {
             validation_fns.push(vfn);
         }
@@ -248,6 +265,20 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
         }
         field_defs.push(f_def);
     }
+
+    #[cfg(feature = "typescript")]
+    let flatten_ts_types: Vec<String> = flattened_fields
+        .iter()
+        .map(FieldDef::typescript_typename)
+        .collect();
+    #[cfg(feature = "zod")]
+    let flatten_zod_schemas: Vec<String> =
+        flattened_fields.iter().map(FieldDef::zod_type).collect();
+    #[cfg(feature = "jsonschema")]
+    let flatten_json_schemas: Vec<proc_macro2::TokenStream> = flattened_fields
+        .iter()
+        .map(flatten_field_json_schema_ref)
+        .collect();
 
     // Generate TypeScript type and Zod schema code
     let mut type_code = String::new();
@@ -306,11 +337,16 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
 
     // Generate the schema module methods
     #[cfg(feature = "jsonschema")]
-    let json_schema_method = generate_json_schema_method(&json_schema_fields);
+    let json_schema_method = generate_json_schema_method(&json_schema_fields, &flatten_json_schemas);
 
     #[cfg(feature = "typescript")]
-    let ts_definition_method =
-        generate_ts_definition_method(&docs, &item_name, &type_code, fields_empty);
+    let ts_definition_method = generate_ts_definition_method(
+        &docs,
+        &item_name,
+        &type_code,
+        fields_empty,
+        &flatten_ts_types,
+    );
 
     #[cfg(feature = "zod")]
     let has_example = example_code.is_some();
@@ -318,7 +354,8 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
     // Schema module generates zod_schema without examples - example injection is handled
     // by the delegating method on the type itself to avoid super:: resolution issues
     #[cfg(feature = "zod")]
-    let zod_schema_method = generate_zod_schema_method(&item_name, &schema_code, show_opts);
+    let zod_schema_method =
+        generate_zod_schema_method(&item_name, &schema_code, show_opts, &flatten_zod_schemas);
 
     // schema_example must be directly on the type (not in module) because
     // the example code uses type names that may not be accessible from nested module
@@ -3631,8 +3668,27 @@ fn snake_to_camel(s: &str) -> String {
 /// Generates the JSON schema method conditionally based on the jsonschema feature
 fn generate_json_schema_method(
     json_schema_fields: &[proc_macro2::TokenStream],
+    flatten_json_schemas: &[proc_macro2::TokenStream],
 ) -> proc_macro2::TokenStream {
-    crate::features::jsonschema::generate_struct_json_schema_method(json_schema_fields)
+    crate::features::jsonschema::generate_struct_json_schema_method(
+        json_schema_fields,
+        flatten_json_schemas,
+    )
+}
+
+#[cfg(feature = "jsonschema")]
+fn flatten_field_json_schema_ref(fld: &FieldDef) -> proc_macro2::TokenStream {
+    match &fld.field_type {
+        FieldDefType::SiblingType(name, _) => {
+            let module_name = match lookup_alias_info(name) {
+                Some(alias) => alias.module_name,
+                None => format!("{}_schema", to_snake_case(&safe_type_name(name))),
+            };
+            let module_ident = Ident::new(&module_name, proc_macro2::Span::call_site());
+            quote! { #module_ident::Schema::json_schema() }
+        }
+        _ => quote! { serde_json::json!({ "type": "object" }) },
+    }
 }
 
 #[cfg(feature = "typescript")]
@@ -3642,11 +3698,27 @@ fn generate_ts_definition_method(
     item_name: &str,
     type_code: &str,
     fields_empty: bool,
+    flatten_types: &[String],
 ) -> proc_macro2::TokenStream {
+    let has_flatten = !flatten_types.is_empty();
+    let intersection_only = flatten_types.join(" & ");
+    let intersection_suffix: String =
+        flatten_types.iter().map(|t| format!(" & {t}")).collect();
+
     // TypeScript type generation (only available when typescript feature is enabled)
     let typescript_type_gen = if fields_empty {
+        if has_flatten {
+            quote::quote! {
+                format!("{}\n\nexport type {} = {};", docs, #item_name, #intersection_only)
+            }
+        } else {
+            quote::quote! {
+                format!(r#"/**\n{}\n**/\nexport type {} = Record<string, never>;"#, docs, #item_name)
+            }
+        }
+    } else if has_flatten {
         quote::quote! {
-            format!(r#"/**\n{}\n**/\nexport type {} = Record<string, never>;"#, docs, #item_name)
+            format!("{}\n\nexport type {} = {{\n{}\n}}{};", docs, #item_name, #type_code, #intersection_suffix)
         }
     } else {
         quote::quote! {
@@ -3677,7 +3749,14 @@ fn generate_zod_schema_method(
     item_name: &str,
     schema_code: &str,
     show_opts: &str,
+    flatten_schemas: &[String],
 ) -> proc_macro2::TokenStream {
+    #[cfg_attr(not(feature = "zod"), allow(unused_variables))]
+    let and_suffix: String = flatten_schemas
+        .iter()
+        .map(|s| format!(".and({s})"))
+        .collect();
+
     #[cfg(feature = "zod")]
     {
         // When typescript feature is enabled, generate TypeScript-style Zod schema
@@ -3688,9 +3767,9 @@ fn generate_zod_schema_method(
                 pub fn zod_schema() -> String {
                     format!(r#"const {}$RawSchema = z.strictObject({{
 {}
-}}){};
+}}){}{};
 
-export const {}$Schema: ZodType<{}> = {}$RawSchema;"#, #item_name, #schema_code, #show_opts, #item_name, #item_name, #item_name)
+export const {}$Schema: ZodType<{}> = {}$RawSchema;"#, #item_name, #schema_code, #show_opts, #and_suffix, #item_name, #item_name, #item_name)
                 }
             }
         }
@@ -3702,7 +3781,7 @@ export const {}$Schema: ZodType<{}> = {}$RawSchema;"#, #item_name, #schema_code,
                 pub fn zod_schema() -> String {
                     format!(r#"export const {}$Schema = z.strictObject({{
 {}
-}}){};"#, #item_name, #schema_code, #show_opts)
+}}){}{};"#, #item_name, #schema_code, #show_opts, #and_suffix)
                 }
             }
         }
@@ -3710,7 +3789,7 @@ export const {}$Schema: ZodType<{}> = {}$RawSchema;"#, #item_name, #schema_code,
 
     #[cfg(not(feature = "zod"))]
     {
-        let _ = (item_name, schema_code, show_opts);
+        let _ = (item_name, schema_code, show_opts, flatten_schemas);
         quote::quote! {
             // Zod schema method not available - zod feature disabled
             // To enable: add "zod" to your features
