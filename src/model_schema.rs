@@ -572,7 +572,7 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
     #[cfg(feature = "serde")]
     let rename_all = parse_serde_type_attributes(&item_struct.attrs).rename_all;
     #[cfg(not(feature = "serde"))]
-    let rename_all = None;
+    let rename_all: Option<String> = None;
 
     // Compute schema-module identifiers and register the struct in the alias registry.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -1390,7 +1390,8 @@ fn process_enum(item_enum: syn::ItemEnum) -> TokenStream {
         );
 
         #[cfg(not(feature = "serde"))]
-        let (tag_name, content_name, rename_all) = ("type".to_string(), "value".to_string(), None);
+        let (tag_name, content_name, rename_all): (String, String, Option<String>) =
+            ("type".to_string(), "value".to_string(), None);
 
         process_discriminated_enum(
             item_enum,
@@ -1463,7 +1464,7 @@ fn collect_plain_enum_options(
         #[cfg(feature = "serde")]
         let field_rename = parse_serde_field_attributes(&item.attrs).rename;
         #[cfg(not(feature = "serde"))]
-        let field_rename = None;
+        let field_rename: Option<String> = None;
 
         let final_name =
             get_final_name(item.ident.to_string(), field_rename.as_deref(), rename_all);
@@ -1671,7 +1672,7 @@ fn collect_discriminated_variants(
         #[cfg(feature = "serde")]
         let field_rename = parse_serde_field_attributes(&item.attrs).rename;
         #[cfg(not(feature = "serde"))]
-        let field_rename = None;
+        let field_rename: Option<String> = None;
 
         let final_name =
             get_final_name(item.ident.to_string(), field_rename.as_deref(), rename_all);
@@ -2765,6 +2766,7 @@ fn build_string_key_map_value_schema(
     }
 }
 
+#[cfg(feature = "jsonschema")]
 fn build_map_field_schema(
     key: &FieldDef,
     value: &FieldDef,
@@ -3455,7 +3457,7 @@ fn process_field(
     #[cfg(feature = "serde")]
     let field_rename = parse_serde_field_attributes(&field.attrs).rename;
     #[cfg(not(feature = "serde"))]
-    let field_rename = None;
+    let field_rename: Option<String> = None;
 
     // Get raw field ident (before renaming) for validation function name
     let raw_field_ident = field
