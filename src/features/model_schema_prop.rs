@@ -71,11 +71,11 @@ use syn::{Attribute, LitStr, Type};
 pub struct ModelSchemaPropMeta {
     pub as_type: Option<String>,   // e.g., "String" from as = String
     pub literal: Option<String>,   // e.g., "Tixena" from literal = "Tixena"
-    pub min_length: Option<usize>, // e.g., 1 from minLength = 1
     pub max_length: Option<usize>, // e.g., 50 from maxLength = 50
-    pub pattern: Option<String>,   // e.g., "^[0-9a-fA-F]{24}$" from pattern = "^[0-9a-fA-F]{24}$"
-    pub minimum: Option<f64>,      // e.g., 0.0 from minimum = 0
     pub maximum: Option<f64>,      // e.g., 100.0 from maximum = 100
+    pub min_length: Option<usize>, // e.g., 1 from minLength = 1
+    pub minimum: Option<f64>,      // e.g., 0.0 from minimum = 0
+    pub pattern: Option<String>,   // e.g., "^[0-9a-fA-F]{24}$" from pattern = "^[0-9a-fA-F]{24}$"
     pub preprocess: Vec<String>, // e.g., ["epoch_to_date", "trim"] from preprocess = ["epoch_to_date", "trim"]
 }
 
@@ -120,36 +120,32 @@ pub fn parse_model_schema_prop_attributes(attrs: &[Attribute]) -> ModelSchemaPro
                 else if nested.path.is_ident("minimum") {
                     let value = nested.value()?;
                     let lit: syn::Lit = value.parse()?;
-                    match lit {
-                        syn::Lit::Int(li) => {
-                            if let Ok(n) = li.base10_parse::<i64>() {
-                                meta.minimum = Some(n as f64);
-                            }
+                    if let syn::Lit::Int(li) = lit {
+                        if let Ok(n) = li.base10_parse::<f64>() {
+                            meta.minimum = Some(n);
                         }
-                        syn::Lit::Float(lf) => {
-                            if let Ok(n) = lf.base10_parse::<f64>() {
-                                meta.minimum = Some(n);
-                            }
-                        }
-                        _ => {}
+                    } else if let syn::Lit::Float(lf) = lit
+                        && let Ok(n) = lf.base10_parse::<f64>()
+                    {
+                        meta.minimum = Some(n);
+                    } else {
+                        // Non-numeric literals are ignored.
                     }
                 }
                 // Handle `maximum = N` (integer or float)
                 else if nested.path.is_ident("maximum") {
                     let value = nested.value()?;
                     let lit: syn::Lit = value.parse()?;
-                    match lit {
-                        syn::Lit::Int(li) => {
-                            if let Ok(n) = li.base10_parse::<i64>() {
-                                meta.maximum = Some(n as f64);
-                            }
+                    if let syn::Lit::Int(li) = lit {
+                        if let Ok(n) = li.base10_parse::<f64>() {
+                            meta.maximum = Some(n);
                         }
-                        syn::Lit::Float(lf) => {
-                            if let Ok(n) = lf.base10_parse::<f64>() {
-                                meta.maximum = Some(n);
-                            }
-                        }
-                        _ => {}
+                    } else if let syn::Lit::Float(lf) = lit
+                        && let Ok(n) = lf.base10_parse::<f64>()
+                    {
+                        meta.maximum = Some(n);
+                    } else {
+                        // Non-numeric literals are ignored.
                     }
                 }
                 // Handle `pattern = "regex"`
@@ -175,13 +171,13 @@ pub fn parse_model_schema_prop_attributes(attrs: &[Attribute]) -> ModelSchemaPro
                         })
                         .collect();
                     meta.preprocess = fns;
+                } else {
+                    // Ignore unknown model_schema_prop keys.
                 }
                 Ok(())
             })
             .unwrap_or_else(|e| {
-                if std::env::var("RUST_LOG") == Ok(String::from("trace")) {
-                    println!("Failed to parse model_schema_prop attribute: {e}");
-                }
+                log::trace!("Failed to parse model_schema_prop attribute: {e}");
             });
         }
     }
@@ -190,82 +186,4 @@ pub fn parse_model_schema_prop_attributes(attrs: &[Attribute]) -> ModelSchemaPro
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use syn::parse_quote;
-
-    #[test]
-    fn test_parse_empty_attributes() {
-        let attrs: Vec<Attribute> = vec![];
-        let meta = parse_model_schema_prop_attributes(&attrs);
-        assert!(meta.as_type.is_none());
-        assert!(meta.literal.is_none());
-        assert!(meta.min_length.is_none());
-    }
-
-    #[test]
-    fn test_parse_as_type() {
-        let attr: Attribute = parse_quote! { #[model_schema_prop(as = String)] };
-        let meta = parse_model_schema_prop_attributes(&[attr]);
-        assert!(meta.as_type.is_some());
-        assert_eq!(meta.as_type.unwrap(), "String");
-        assert!(meta.literal.is_none());
-        assert!(meta.min_length.is_none());
-    }
-
-    #[test]
-    fn test_parse_literal() {
-        let attr: Attribute = parse_quote! { #[model_schema_prop(literal = "Tixena")] };
-        let meta = parse_model_schema_prop_attributes(&[attr]);
-        assert!(meta.as_type.is_none());
-        assert!(meta.literal.is_some());
-        assert_eq!(meta.literal.unwrap(), "Tixena");
-        assert!(meta.min_length.is_none());
-    }
-
-    #[test]
-    fn test_parse_both_as_and_literal() {
-        let attr: Attribute =
-            parse_quote! { #[model_schema_prop(as = String, literal = "Tixena")] };
-        let meta = parse_model_schema_prop_attributes(&[attr]);
-        assert!(meta.as_type.is_some());
-        assert_eq!(meta.as_type.unwrap(), "String");
-        assert!(meta.literal.is_some());
-        assert_eq!(meta.literal.unwrap(), "Tixena");
-        assert!(meta.min_length.is_none());
-    }
-
-    #[test]
-    fn test_parse_min_length() {
-        let attr: Attribute = parse_quote! { #[model_schema_prop(minLength = 1)] };
-        let meta = parse_model_schema_prop_attributes(&[attr]);
-        assert!(meta.as_type.is_none());
-        assert!(meta.literal.is_none());
-        assert!(meta.min_length.is_some());
-        assert_eq!(meta.min_length.unwrap(), 1);
-    }
-
-    #[test]
-    fn test_parse_as_and_min_length() {
-        let attr: Attribute = parse_quote! { #[model_schema_prop(as = String, minLength = 5)] };
-        let meta = parse_model_schema_prop_attributes(&[attr]);
-        assert!(meta.as_type.is_some());
-        assert_eq!(meta.as_type.unwrap(), "String");
-        assert!(meta.literal.is_none());
-        assert!(meta.min_length.is_some());
-        assert_eq!(meta.min_length.unwrap(), 5);
-    }
-
-    #[test]
-    fn test_parse_all_attributes() {
-        let attr: Attribute =
-            parse_quote! { #[model_schema_prop(as = String, literal = "test", minLength = 3)] };
-        let meta = parse_model_schema_prop_attributes(&[attr]);
-        assert!(meta.as_type.is_some());
-        assert_eq!(meta.as_type.unwrap(), "String");
-        assert!(meta.literal.is_some());
-        assert_eq!(meta.literal.unwrap(), "test");
-        assert!(meta.min_length.is_some());
-        assert_eq!(meta.min_length.unwrap(), 3);
-    }
-}
+mod tests;

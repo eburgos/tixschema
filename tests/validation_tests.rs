@@ -270,7 +270,7 @@ fn test_validate_method_ok() {
     }
 
     let instance = ValidateOk {
-        name: "hello".to_string(),
+        name: "hello".to_owned(),
     };
     let result = instance.validate();
     assert!(
@@ -294,7 +294,7 @@ fn test_validate_method_err() {
     }
 
     let instance = ValidateErr {
-        name: "hi".to_string(),
+        name: "hi".to_owned(),
     };
     let result = instance.validate();
     assert!(
@@ -305,8 +305,7 @@ fn test_validate_method_err() {
     assert!(!errors.is_empty(), "Errors vector should not be empty");
     assert!(
         errors[0].contains("too short"),
-        "Error message should mention 'too short': {:?}",
-        errors
+        "Error message should mention 'too short': {errors:?}"
     );
 }
 
@@ -327,8 +326,8 @@ fn test_validate_method_multiple_errors() {
 
     // name is too short, code is too long
     let instance = ValidateMultiErr {
-        name: "hi".to_string(),
-        code: "toolongcode".to_string(),
+        name: "hi".to_owned(),
+        code: "toolongcode".to_owned(),
     };
     let result = instance.validate();
     assert!(
@@ -336,7 +335,7 @@ fn test_validate_method_multiple_errors() {
         "validate() should return Err for invalid data"
     );
     let errors = result.unwrap_err();
-    assert_eq!(errors.len(), 2, "Should have 2 errors, got: {:?}", errors);
+    assert_eq!(errors.len(), 2, "Should have 2 errors, got: {errors:?}");
 }
 
 // ==================== Numeric constraints: minimum/maximum — Zod ====================
@@ -619,8 +618,7 @@ fn test_validate_method_numeric_err() {
     assert!(!errors.is_empty(), "Errors vector should not be empty");
     assert!(
         errors[0].contains("too small"),
-        "Error message should mention 'too small': {:?}",
-        errors
+        "Error message should mention 'too small': {errors:?}"
     );
 }
 
@@ -640,7 +638,7 @@ fn test_validate_method_pattern_ok() {
     }
 
     let instance = ValidatePatternOk {
-        slug: "hello".to_string(),
+        slug: "hello".to_owned(),
     };
     let result = instance.validate();
     assert!(
@@ -664,7 +662,7 @@ fn test_validate_method_pattern_err() {
     }
 
     let instance = ValidatePatternErr {
-        slug: "ABC123".to_string(),
+        slug: "ABC123".to_owned(),
     };
     let result = instance.validate();
     assert!(
@@ -675,8 +673,7 @@ fn test_validate_method_pattern_err() {
     assert!(!errors.is_empty(), "Errors vector should not be empty");
     assert!(
         errors[0].contains("does not match pattern"),
-        "Error message should mention 'does not match pattern': {:?}",
-        errors
+        "Error message should mention 'does not match pattern': {errors:?}"
     );
 }
 
@@ -695,7 +692,7 @@ fn test_validate_method_pattern_and_length() {
 
     // Valid case
     let valid = ValidatePatternLength {
-        tag: "hello".to_string(),
+        tag: "hello".to_owned(),
     };
     assert!(
         valid.validate().is_ok(),
@@ -704,28 +701,26 @@ fn test_validate_method_pattern_and_length() {
 
     // Too short — minLength check fires first
     let too_short = ValidatePatternLength {
-        tag: "ab".to_string(),
+        tag: "ab".to_owned(),
     };
     let result = too_short.validate();
     assert!(result.is_err(), "Too short value should fail");
     let errors = result.unwrap_err();
     assert!(
         errors.iter().any(|e| e.contains("too short")),
-        "Should report 'too short' error: {:?}",
-        errors
+        "Should report 'too short' error: {errors:?}"
     );
 
     // Pattern failure (uppercase)
     let bad_pattern = ValidatePatternLength {
-        tag: "Hello".to_string(),
+        tag: "Hello".to_owned(),
     };
     let result = bad_pattern.validate();
     assert!(result.is_err(), "Value not matching pattern should fail");
     let errors = result.unwrap_err();
     assert!(
         errors.iter().any(|e| e.contains("does not match pattern")),
-        "Should report 'does not match pattern' error: {:?}",
-        errors
+        "Should report 'does not match pattern' error: {errors:?}"
     );
 }
 
@@ -745,7 +740,7 @@ fn test_validate_method_max_length_ok() {
     }
 
     let instance = ValidateMaxLenOk {
-        label: "short".to_string(),
+        label: "short".to_owned(),
     };
     let result = instance.validate();
     assert!(
@@ -769,7 +764,7 @@ fn test_validate_method_max_length_err() {
     }
 
     let instance = ValidateMaxLenErr {
-        label: "way too long value".to_string(),
+        label: "way too long value".to_owned(),
     };
     let result = instance.validate();
     assert!(
@@ -780,8 +775,7 @@ fn test_validate_method_max_length_err() {
     assert!(!errors.is_empty(), "Errors vector should not be empty");
     assert!(
         errors[0].contains("too long"),
-        "Error message should mention 'too long': {:?}",
-        errors
+        "Error message should mention 'too long': {errors:?}"
     );
 }
 
@@ -804,7 +798,7 @@ fn test_validate_method_mixed_string_numeric() {
 
     // Both fields invalid
     let instance = ValidateMixed {
-        title: "hi".to_string(),
+        title: "hi".to_owned(),
         score: 2,
     };
     let result = instance.validate();
@@ -816,18 +810,15 @@ fn test_validate_method_mixed_string_numeric() {
     assert_eq!(
         errors.len(),
         2,
-        "Should have exactly 2 errors, got: {:?}",
-        errors
+        "Should have exactly 2 errors, got: {errors:?}"
     );
     assert!(
         errors.iter().any(|e| e.contains("too short")),
-        "Should contain string 'too short' error: {:?}",
-        errors
+        "Should contain string 'too short' error: {errors:?}"
     );
     assert!(
         errors.iter().any(|e| e.contains("too small")),
-        "Should contain numeric 'too small' error: {:?}",
-        errors
+        "Should contain numeric 'too small' error: {errors:?}"
     );
 }
 
@@ -948,8 +939,7 @@ fn test_validate_method_float_err() {
     assert!(!errors.is_empty(), "Errors vector should not be empty");
     assert!(
         errors[0].contains("too large"),
-        "Error message should mention 'too large': {:?}",
-        errors
+        "Error message should mention 'too large': {errors:?}"
     );
 }
 
@@ -1073,9 +1063,7 @@ fn test_boundary_min_length_zero() {
     }
 
     // Empty string should pass with minLength = 0
-    let instance = MinLenZero {
-        tag: "".to_string(),
-    };
+    let instance = MinLenZero { tag: String::new() };
     let result = instance.validate();
     assert!(
         result.is_ok(),
@@ -1108,7 +1096,7 @@ fn test_pattern_empty_string_match() {
 
     // Empty string should match "^$"
     let valid_instance = PatternEmpty {
-        empty_field: "".to_string(),
+        empty_field: String::new(),
     };
     let result = valid_instance.validate();
     assert!(
@@ -1119,7 +1107,7 @@ fn test_pattern_empty_string_match() {
 
     // Non-empty string should NOT match "^$"
     let invalid_instance = PatternEmpty {
-        empty_field: "not empty".to_string(),
+        empty_field: "not empty".to_owned(),
     };
     let result = invalid_instance.validate();
     assert!(
@@ -1129,7 +1117,6 @@ fn test_pattern_empty_string_match() {
     let errors = result.unwrap_err();
     assert!(
         errors[0].contains("does not match pattern"),
-        "Error should mention 'does not match pattern': {:?}",
-        errors
+        "Error should mention 'does not match pattern': {errors:?}"
     );
 }
