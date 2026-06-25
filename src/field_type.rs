@@ -368,6 +368,7 @@ impl FieldDef {
         result
     }
 
+    #[cfg(feature = "zod")]
     pub fn zod_type(&self) -> String {
         let result = match &self.field_type {
             FieldDefType::Unknown => "z.unknown()".to_owned(),

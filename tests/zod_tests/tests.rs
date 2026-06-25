@@ -12,29 +12,17 @@ struct Address {
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct AllNumericTypes {
-    #[serde(rename = "f32_val")]
     f32: f32,
-    #[serde(rename = "f64_val")]
     f64: f64,
-    #[serde(rename = "i16_val")]
     i16: i16,
-    #[serde(rename = "i32_val")]
     i32: i32,
-    #[serde(rename = "i64_val")]
     i64: i64,
-    #[serde(rename = "i8_val")]
     i8: i8,
-    #[serde(rename = "isize_val")]
     isize: isize,
-    #[serde(rename = "u16_val")]
     u16: u16,
-    #[serde(rename = "u32_val")]
     u32: u32,
-    #[serde(rename = "u64_val")]
     u64: u64,
-    #[serde(rename = "u8_val")]
     u8: u8,
-    #[serde(rename = "usize_val")]
     usize: usize,
 }
 
@@ -293,19 +281,19 @@ fn test_integer_types_use_int_modifier() {
 
     // All integer types should use .int()
     assert!(
-        zod.contains("u8_val: z.number().int()"),
+        zod.contains("u8: z.number().int()"),
         "u8 should use .int(). Got: {zod}"
     );
     assert!(
-        zod.contains("i32_val: z.number().int()"),
+        zod.contains("i32: z.number().int()"),
         "i32 should use .int(). Got: {zod}"
     );
     assert!(
-        zod.contains("usize_val: z.number().int()"),
+        zod.contains("usize: z.number().int()"),
         "usize should use .int(). Got: {zod}"
     );
     assert!(
-        zod.contains("isize_val: z.number().int()"),
+        zod.contains("isize: z.number().int()"),
         "isize should use .int(). Got: {zod}"
     );
 }
@@ -316,11 +304,11 @@ fn test_float_types_do_not_use_int_modifier() {
 
     // Float types should not use .int()
     assert!(
-        zod.contains("f32_val: z.number()") && !zod.contains("f32_val: z.number().int()"),
+        zod.contains("f32: z.number()") && !zod.contains("f32: z.number().int()"),
         "f32 should not use .int(). Got: {zod}"
     );
     assert!(
-        zod.contains("f64_val: z.number()") && !zod.contains("f64_val: z.number().int()"),
+        zod.contains("f64: z.number()") && !zod.contains("f64: z.number().int()"),
         "f64 should not use .int(). Got: {zod}"
     );
 }
