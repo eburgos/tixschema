@@ -19,14 +19,9 @@ enum Color {
 #[serde(tag = "type", rename_all = "camelCase")]
 enum Event {
     #[serde(rename = "userCreated")]
-    Created {
-        user_id: String,
-        user_name: String,
-    },
+    Created { user_id: String, user_name: String },
     #[serde(rename = "userDeleted")]
-    Deleted {
-        user_id: String,
-    },
+    Deleted { user_id: String },
     #[serde(rename = "userUpdated")]
     Updated {
         #[serde(rename = "newEmail")]

@@ -475,6 +475,7 @@ fn collect_struct_fields(
     fields: &mut syn::Fields,
     rename_all: Option<&str>,
     module_name_opt: Option<&str>,
+    type_name: &str,
 ) -> (
     Vec<FieldDef>,
     Vec<FieldDef>,
@@ -493,7 +494,7 @@ fn collect_struct_fields(
         let is_flatten = false;
 
         let (f_def, validation_fn, validate_body) =
-            process_field(rename_all, field, module_name_opt);
+            process_field(rename_all, field, module_name_opt, type_name);
 
         if is_flatten {
             let _: (&_, &_) = (&validation_fn, &validate_body);
@@ -593,6 +594,7 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
         &mut item_struct.fields,
         rename_all.as_deref(),
         module_name_opt,
+        &name.to_string(),
     );
 
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -1667,6 +1669,7 @@ fn collect_discriminated_variants(
     let mut docs_by_variant: HashMap<String, String> = HashMap::new();
     let mut kinds_by_variant: HashMap<String, VariantKind> = HashMap::new();
     let mut enum_validation_fns: Vec<proc_macro2::TokenStream> = Vec::new();
+    let enum_type_name = item_enum.ident.to_string();
 
     for item in &mut item_enum.variants {
         #[cfg(feature = "serde")]
@@ -1681,7 +1684,7 @@ fn collect_discriminated_variants(
         let mut field_defs: Vec<FieldDef> = Vec::new();
         for field in &mut item.fields {
             let (f_def, validation_fn, _validate_body) =
-                process_field(rename_all, field, enum_module_name_opt);
+                process_field(rename_all, field, enum_module_name_opt, &enum_type_name);
             if let Some(vfn) = validation_fn {
                 enum_validation_fns.push(vfn);
             }
@@ -3447,6 +3450,7 @@ fn process_field(
     rename_all: Option<&str>,
     field: &mut Field,
     schema_module_name: Option<&str>,
+    type_name: &str,
 ) -> (
     FieldDef,
     Option<proc_macro2::TokenStream>,
@@ -3508,6 +3512,9 @@ fn process_field(
 
     // Create the field definition and apply any model_schema_prop overrides
     let mut field_def = get_field_def(&final_name, field_type, &field_docs);
+    // Resolve `Self` references to the concrete type name so recursive fields
+    // (e.g. `Vec<Self>`) are treated exactly like `Vec<EnclosingType>`.
+    field_def.resolve_self_references(type_name);
     field_def.model_schema_prop_meta = (model_schema_prop_meta.as_type.is_some()
         || model_schema_prop_meta.literal.is_some()
         || model_schema_prop_meta.min_length.is_some()

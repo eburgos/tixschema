@@ -47,8 +47,9 @@ mod tests {
         let zod_schema = RealUser::zod_schema();
         assert!(zod_schema.contains("id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }),"));
         assert!(zod_schema.contains("name: z.string(),"));
-        assert!(zod_schema
-            .contains("email: z.union([z.string(), z.undefined()]).prefault(undefined),"));
+        assert!(
+            zod_schema.contains("email: z.union([z.string(), z.undefined()]).prefault(undefined),")
+        );
     }
 
     #[test]

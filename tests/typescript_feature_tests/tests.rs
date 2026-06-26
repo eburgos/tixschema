@@ -195,7 +195,9 @@ fn test_typescript_disabled_plain_enum_zod_schema_javascript_serde_style() {
 
     // When serde feature is disabled, the rename_all attribute is not processed
     // so the enum values will be the original Rust names (Title case)
-    assert!(zod_schema.contains("export const TypeScriptTestStatus$Schema = z.enum([\"active\", \"inactive\", \"pending\"])"));
+    assert!(zod_schema.contains(
+        "export const TypeScriptTestStatus$Schema = z.enum([\"active\", \"inactive\", \"pending\"])"
+    ));
     assert!(zod_schema.contains(".meta({"));
 
     // Should NOT contain TypeScript type annotations
@@ -210,7 +212,9 @@ fn test_typescript_disabled_plain_enum_zod_schema_javascript_not_serde_style() {
 
     // When serde feature is disabled, the rename_all attribute is not processed
     // so the enum values will be the original Rust names (Title case)
-    assert!(zod_schema.contains("export const TypeScriptTestStatus$Schema = z.enum([\"Active\", \"Inactive\", \"Pending\"])"));
+    assert!(zod_schema.contains(
+        "export const TypeScriptTestStatus$Schema = z.enum([\"Active\", \"Inactive\", \"Pending\"])"
+    ));
     assert!(zod_schema.contains(".meta({"));
 
     // Should NOT contain TypeScript type annotations
