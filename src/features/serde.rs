@@ -11,6 +11,7 @@ pub struct SerdeTypeMeta {
     pub content: Option<String>, // e.g., "value" for adjacently tagged enums
     pub rename_all: Option<String>, // e.g., "camelCase"
     pub tag: Option<String>,     // e.g., "behaviorType"
+    pub untagged: bool,          // Whether the enum is `#[serde(untagged)]`
 }
 
 /// Metadata for serde attributes applied to a field.
@@ -45,6 +46,10 @@ pub fn parse_serde_type_attributes(attrs: &[Attribute]) -> SerdeTypeMeta {
                     let value = nested.value()?;
                     let lit: LitStr = value.parse()?;
                     meta.rename_all = Some(lit.value());
+                }
+                // Handle `untagged`
+                else if nested.path.is_ident("untagged") {
+                    meta.untagged = true;
                 } else {
                     // Ignore other serde attributes.
                 }

@@ -1379,6 +1379,11 @@ fn process_enum(item_enum: syn::ItemEnum) -> TokenStream {
         process_plain_enum(item_enum, &name, rename_all, &item_name)
     } else {
         #[cfg(feature = "serde")]
+        if serde_type_meta.untagged {
+            return process_untagged_enum(item_enum, &name, &item_name);
+        }
+
+        #[cfg(feature = "serde")]
         let (tag_name, content_name, rename_all) = (
             serde_type_meta
                 .tag
@@ -1894,6 +1899,445 @@ fn process_discriminated_enum(
 
     #[cfg(not(any(feature = "zod", feature = "typescript", feature = "jsonschema")))]
     {
+        let output = quote! {
+            #item_enum
+        };
+        log::trace!("{output}");
+        TokenStream::from(output)
+    }
+}
+
+/// Renders one variant of an untagged enum as a union member.
+///
+/// Returns `(typescript, zod, json_value)` where:
+/// - `typescript` is the member type (e.g. `DateString`, `number`, `{ a: A }`)
+/// - `zod` is the member schema (e.g. `DateString$Schema`, `z.number().int()`)
+/// - `json_value` is a standalone `serde_json::Value` token expression (cfg jsonschema)
+///
+/// Only `TupleSingle` (`S(T)`) and `Named` (`{ a: A }`) variant kinds are supported; `Unit` and
+/// `TupleMultiple` produce a clear compile-time `panic!` because an untagged choice has no
+/// discriminator to carry them.
+#[cfg(feature = "serde")]
+fn render_untagged_variant(
+    kind: &VariantKind,
+    variant_name: &str,
+    field_defs: &[FieldDef],
+    self_type_name: &str,
+) -> (String, String, proc_macro2::TokenStream) {
+    match kind {
+        VariantKind::TupleSingle => {
+            render_untagged_tuple_single(variant_name, field_defs, self_type_name)
+        }
+        VariantKind::Named => render_untagged_named(field_defs, self_type_name),
+        VariantKind::Unit | VariantKind::TupleMultiple => {
+            // An untagged choice has no discriminator to carry these shapes. The assert fails
+            // unconditionally here (the match already proved `kind` is Unit/TupleMultiple),
+            // surfacing a clear compile-time error during macro expansion.
+            assert!(
+                matches!(kind, VariantKind::TupleSingle | VariantKind::Named),
+                "#[serde(untagged)] supports newtype and struct variants only; `{variant_name}` is unsupported"
+            );
+            (String::new(), String::new(), quote! {})
+        }
+    }
+}
+
+/// Renders a `TupleSingle` (`S(T)`) untagged variant as a union member (`T` / `T$Schema` / value).
+#[cfg(feature = "serde")]
+fn render_untagged_tuple_single(
+    variant_name: &str,
+    field_defs: &[FieldDef],
+    self_type_name: &str,
+) -> (String, String, proc_macro2::TokenStream) {
+    assert!(
+        !field_defs.is_empty(),
+        "#[serde(untagged)] newtype variant `{variant_name}` has no inner field"
+    );
+    let fld = &field_defs[0];
+
+    let ts = fld.typescript_typename();
+
+    #[cfg(feature = "zod")]
+    let zod = fld.zod_type();
+    #[cfg(not(feature = "zod"))]
+    let zod = String::new();
+
+    #[cfg(feature = "jsonschema")]
+    let json_val = field_json_schema_value(fld);
+    #[cfg(not(feature = "jsonschema"))]
+    let json_val = quote! {};
+
+    let _: &str = self_type_name;
+    (ts, zod, json_val)
+}
+
+/// Renders a `Named` (`{ a: A }`) untagged variant as a union member (object type / strictObject /
+/// object schema).
+#[cfg(feature = "serde")]
+fn render_untagged_named(
+    field_defs: &[FieldDef],
+    self_type_name: &str,
+) -> (String, String, proc_macro2::TokenStream) {
+    // TypeScript: `{ a: A; b: B }`
+    let ts_fields = field_defs
+        .iter()
+        .map(|fld| format!("{}: {}", fld.name, fld.typescript_typename()))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let ts = format!("{{ {ts_fields} }}");
+
+    // Zod: `z.strictObject({ a: ..., })`
+    #[cfg(feature = "zod")]
+    let zod = {
+        let mut body = String::from("z.strictObject({ ");
+        for fld in field_defs {
+            let zod_field_type = fld.zod_type();
+            if fld.contains_type_reference(self_type_name) {
+                let _ = write!(
+                    body,
+                    "get {}() {{ return {}; }}, ",
+                    fld.name, zod_field_type
+                );
+            } else {
+                let _ = write!(body, "{}: {}, ", fld.name, zod_field_type);
+            }
+        }
+        body.push_str("})");
+        body
+    };
+    #[cfg(not(feature = "zod"))]
+    let zod = {
+        let _: &str = self_type_name;
+        String::new()
+    };
+
+    #[cfg(feature = "jsonschema")]
+    let json_val = untagged_named_json_value(field_defs);
+    #[cfg(not(feature = "jsonschema"))]
+    let json_val = quote! {};
+
+    (ts, zod, json_val)
+}
+
+/// Builds the `{ type: object, properties, required, additionalProperties: false }` JSON-schema
+/// value token for a `Named` untagged variant.
+#[cfg(all(feature = "serde", feature = "jsonschema"))]
+fn untagged_named_json_value(field_defs: &[FieldDef]) -> proc_macro2::TokenStream {
+    let property_inserts = field_defs.iter().map(|fld| {
+        let name_str = fld.name.clone();
+        let value = field_json_schema_value(fld);
+        let required_insert = if fld.is_optional {
+            quote! {}
+        } else {
+            quote! {
+                required.push(serde_json::Value::String(#name_str.to_string()));
+            }
+        };
+        quote! {
+            properties.insert(#name_str.to_string(), #value);
+            #required_insert
+        }
+    });
+    quote! {
+        {
+            let mut object_schema = serde_json::Map::new();
+            object_schema.insert(
+                "type".to_string(),
+                serde_json::Value::String("object".to_string()),
+            );
+            let mut properties = serde_json::Map::new();
+            let mut required: Vec<serde_json::Value> = Vec::new();
+            #(#property_inserts)*
+            object_schema.insert(
+                "properties".to_string(),
+                serde_json::Value::Object(properties),
+            );
+            object_schema.insert(
+                "required".to_string(),
+                serde_json::Value::Array(required),
+            );
+            object_schema.insert(
+                "additionalProperties".to_string(),
+                serde_json::Value::Bool(false),
+            );
+            serde_json::Value::Object(object_schema)
+        }
+    }
+}
+
+/// Builds the `{ "type": "string", ... }` JSON-schema value token for a `String` field, including
+/// any `pattern` / `minLength` / `maxLength` constraints from its `model_schema_prop` metadata.
+#[cfg(all(feature = "serde", feature = "jsonschema"))]
+fn string_field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
+    let meta = fld.model_schema_prop_meta.as_ref();
+    let pattern_insert = meta.and_then(|m| m.pattern.clone()).map(|p| {
+        quote! {
+            string_schema.insert(
+                "pattern".to_string(),
+                serde_json::Value::String(#p.to_string()),
+            );
+        }
+    });
+    let min_insert = meta.and_then(|m| m.min_length).map(|n| {
+        let len = n as u64;
+        quote! {
+            string_schema.insert(
+                "minLength".to_string(),
+                serde_json::Value::Number(serde_json::Number::from(#len)),
+            );
+        }
+    });
+    let max_insert = meta.and_then(|m| m.max_length).map(|n| {
+        let len = n as u64;
+        quote! {
+            string_schema.insert(
+                "maxLength".to_string(),
+                serde_json::Value::Number(serde_json::Number::from(#len)),
+            );
+        }
+    });
+    quote! {
+        {
+            let mut string_schema = serde_json::Map::new();
+            string_schema.insert(
+                "type".to_string(),
+                serde_json::Value::String("string".to_string()),
+            );
+            #pattern_insert
+            #min_insert
+            #max_insert
+            serde_json::Value::Object(string_schema)
+        }
+    }
+}
+
+/// Builds a standalone `serde_json::Value` token expression for a single field, with `Vec<T>`
+/// array wrapping. Sibling type of [`flatten_field_json_schema_ref`]; used by untagged enum
+/// members where the JSON value is consumed directly (not inserted under a property name).
+#[cfg(all(feature = "serde", feature = "jsonschema"))]
+fn field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
+    let inner = match &fld.field_type {
+        FieldDefType::SiblingType(name, _) => {
+            let module_name = match lookup_alias_info(name) {
+                Some(alias) => alias.module_name,
+                None => format!("{}_schema", to_snake_case(&safe_type_name(name))),
+            };
+            let module_ident = Ident::new(&module_name, proc_macro2::Span::call_site());
+            quote! { #module_ident::Schema::json_schema() }
+        }
+        FieldDefType::String => string_field_json_schema_value(fld),
+        FieldDefType::StringLiteral(literal) => {
+            quote! { serde_json::json!({ "type": "string", "const": #literal }) }
+        }
+        FieldDefType::U8
+        | FieldDefType::U16
+        | FieldDefType::U32
+        | FieldDefType::U64
+        | FieldDefType::I8
+        | FieldDefType::I16
+        | FieldDefType::I32
+        | FieldDefType::I64
+        | FieldDefType::Usize
+        | FieldDefType::Isize => quote! { serde_json::json!({ "type": "integer" }) },
+        FieldDefType::F32 | FieldDefType::F64 => {
+            quote! { serde_json::json!({ "type": "number" }) }
+        }
+        FieldDefType::Boolean => quote! { serde_json::json!({ "type": "boolean" }) },
+        #[cfg(feature = "object_id")]
+        FieldDefType::ObjectId => quote! {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "$oid": { "type": "string", "pattern": "^[a-f\\d]{24}$" }
+                },
+                "required": ["$oid"]
+            })
+        },
+        #[cfg(feature = "chrono")]
+        FieldDefType::NaiveDate => {
+            quote! { serde_json::json!({ "type": "string", "format": "date" }) }
+        }
+        #[cfg(feature = "chrono")]
+        FieldDefType::NaiveTime => {
+            quote! { serde_json::json!({ "type": "string", "format": "time" }) }
+        }
+        #[cfg(feature = "chrono")]
+        FieldDefType::NaiveDateTime | FieldDefType::DateTime => {
+            quote! { serde_json::json!({ "type": "string", "format": "date-time" }) }
+        }
+        // Map / Tuple / Unknown inner shapes are out of scope for v1 untagged members;
+        // emit a permissive empty schema rather than silently mis-typing.
+        FieldDefType::Map(_, _) | FieldDefType::Tuple(_) | FieldDefType::Unknown => {
+            quote! { serde_json::json!({}) }
+        }
+    };
+
+    if fld.is_array {
+        quote! {
+            serde_json::json!({
+                "type": "array",
+                "items": #inner
+            })
+        }
+    } else {
+        inner
+    }
+}
+
+/// Collects each untagged variant's union-member parts: the TypeScript member type, the Zod member
+/// schema, and the JSON-schema value token. All three are always returned; the caller selects which
+/// to use based on the enabled features.
+#[cfg(feature = "serde")]
+fn collect_untagged_members(
+    item_enum: &mut syn::ItemEnum,
+) -> (Vec<String>, Vec<String>, Vec<proc_macro2::TokenStream>) {
+    let enum_type_name = item_enum.ident.to_string();
+    let mut ts_parts: Vec<String> = Vec::new();
+    let mut zod_parts: Vec<String> = Vec::new();
+    let mut json_parts: Vec<proc_macro2::TokenStream> = Vec::new();
+
+    for variant in &mut item_enum.variants {
+        let kind = classify_variant(variant);
+        let variant_name = variant.ident.to_string();
+
+        let mut field_defs: Vec<FieldDef> = Vec::new();
+        for field in &mut variant.fields {
+            let field_name = field
+                .ident
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            let mut field_def = get_field_def(&field_name, &field.ty, "");
+            field_def.resolve_self_references(&enum_type_name);
+            field_defs.push(field_def);
+        }
+
+        let (ts, zod, json_val) =
+            render_untagged_variant(&kind, &variant_name, &field_defs, &enum_type_name);
+        ts_parts.push(ts);
+        zod_parts.push(zod);
+        json_parts.push(json_val);
+    }
+
+    (ts_parts, zod_parts, json_parts)
+}
+
+/// Processes an untagged enum (`#[serde(untagged)]`) and generates its definitions.
+///
+/// Emits a TypeScript union (`A | B`), a Zod `z.union([...])`, and a JSON-schema `anyOf`.
+/// Mirrors [`process_discriminated_enum`]'s setup/assembly so all feature combinations compile.
+#[cfg(feature = "serde")]
+fn process_untagged_enum(
+    mut item_enum: syn::ItemEnum,
+    name: &syn::Ident,
+    item_name: &str,
+) -> TokenStream {
+    // Compute module name for schema struct (same pattern as type aliases)
+    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+    let module_name = format!("{}_schema", to_snake_case(item_name));
+    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+    let module_ident = Ident::new(&module_name, name.span());
+
+    // Register enum in alias registry so other types can find it
+    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+    register_alias_info(&name.to_string(), item_name, module_name);
+
+    // Extract docs early for example extraction
+    #[cfg(any(feature = "typescript", feature = "zod"))]
+    let docs_vec = get_enum_docs(&item_enum);
+
+    #[cfg(feature = "zod")]
+    let example_code = docs_vec
+        .as_ref()
+        .and_then(|docs| extract_example_from_docs(docs));
+
+    // Render each variant into its union member (TS / Zod / JSON parts).
+    let (ts_parts, zod_parts, json_parts) = collect_untagged_members(&mut item_enum);
+    #[cfg(not(feature = "zod"))]
+    let _ = &zod_parts;
+    #[cfg(not(feature = "jsonschema"))]
+    let _ = &json_parts;
+
+    #[cfg(feature = "jsonschema")]
+    let main_schema_code = quote! {
+        let mut schema_obj = serde_json::Map::new();
+        schema_obj.insert("anyOf".to_string(), {
+            let result: Vec<serde_json::Value> = vec![
+                #(#json_parts), *
+            ];
+
+            serde_json::Value::Array(result)
+        });
+
+        serde_json::Value::Object(schema_obj)
+    };
+
+    #[cfg(feature = "typescript")]
+    let type_code = ts_parts.join(" | ");
+    #[cfg(not(feature = "typescript"))]
+    let _ = &ts_parts;
+
+    #[cfg(feature = "zod")]
+    let schema_code = format!("z.union([{}])", zod_parts.join(", "));
+
+    #[cfg(feature = "typescript")]
+    let docs = build_item_jsdoc(docs_vec.as_deref(), name);
+
+    // Generate schema module methods
+    #[cfg(feature = "jsonschema")]
+    let json_schema_method = generate_discriminated_enum_json_schema_method(&main_schema_code);
+
+    #[cfg(feature = "typescript")]
+    let ts_definition_method =
+        generate_discriminated_enum_ts_definition_method(&docs, item_name, &type_code);
+
+    #[cfg(feature = "zod")]
+    let zod_schema_method = generate_discriminated_enum_zod_schema_method(item_name, &schema_code);
+
+    #[cfg(not(any(feature = "typescript", feature = "zod")))]
+    let _ = item_name;
+
+    #[cfg(feature = "zod")]
+    let schema_example_method = build_struct_schema_example(example_code.as_ref(), name);
+    #[cfg(not(feature = "zod"))]
+    let schema_example_method: Option<proc_macro2::TokenStream> = None;
+
+    // Build schema module impl items (without schema_example)
+    #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
+    let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![
+        #[cfg(feature = "jsonschema")]
+        json_schema_method,
+        #[cfg(feature = "typescript")]
+        ts_definition_method,
+        #[cfg(feature = "zod")]
+        zod_schema_method,
+    ];
+
+    #[cfg(not(any(feature = "zod", feature = "typescript", feature = "jsonschema")))]
+    let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![];
+
+    #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
+    let delegate_impl_items =
+        build_struct_delegate_items(&module_ident, schema_example_method, None);
+
+    // Untagged enums have no per-field serde validation functions.
+    let enum_validation_fns: Vec<proc_macro2::TokenStream> = Vec::new();
+
+    #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
+    {
+        assemble_schema_output(
+            &item_enum,
+            &module_ident,
+            name,
+            &schema_impl_items,
+            &enum_validation_fns,
+            &delegate_impl_items,
+        )
+    }
+
+    #[cfg(not(any(feature = "zod", feature = "typescript", feature = "jsonschema")))]
+    {
+        let _ = (schema_impl_items, enum_validation_fns);
         let output = quote! {
             #item_enum
         };
