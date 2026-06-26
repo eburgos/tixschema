@@ -226,7 +226,10 @@ fn test_flatten_serialization_is_flat() {
     let json = serde_json::to_value(&entry).unwrap();
     assert_eq!(json["dataElementId"], "abc");
     assert_eq!(json["dataType"], "Numeric");
-    assert_eq!(json["sampleValues"], serde_json::json!([1_i64, 2_i64, 3_i64]));
+    assert_eq!(
+        json["sampleValues"],
+        serde_json::json!([1_i64, 2_i64, 3_i64])
+    );
     assert!(json.get("variant").is_none());
 
     let back: DataElementSampleValueEntry = serde_json::from_value(json).unwrap();

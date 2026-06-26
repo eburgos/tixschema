@@ -236,7 +236,9 @@ mod tests {
         let zod_schema = User::zod_schema();
         assert!(zod_schema.contains("id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }),"));
         assert!(zod_schema.contains("name: z.string(),"));
-        assert!(zod_schema.contains("email: z.union([z.string(), z.undefined()]),"));
+        assert!(
+            zod_schema.contains("email: z.union([z.string(), z.undefined()]).prefault(undefined),")
+        );
     }
 
     #[test]
@@ -268,7 +270,7 @@ mod tests {
 
         // Zod schema should use the MongoDB ObjectId structure with regex validation - now in separate method
         let zod_schema = UserWithOptionalId::zod_schema();
-        assert!(zod_schema.contains("id: z.union([z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }), z.undefined()]),"));
+        assert!(zod_schema.contains("id: z.union([z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }), z.undefined()]).prefault(undefined),"));
         assert!(zod_schema.contains("name: z.string(),"));
         assert!(zod_schema.contains("email: z.string(),"));
     }
@@ -279,7 +281,7 @@ mod tests {
         let zod_schema = UserWithOptionalId::zod_schema();
 
         // Should handle optional ObjectId correctly
-        assert!(zod_schema.contains("id: z.union([z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }), z.undefined()]),"));
+        assert!(zod_schema.contains("id: z.union([z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }), z.undefined()]).prefault(undefined),"));
         assert!(zod_schema.contains("name: z.string(),"));
         assert!(zod_schema.contains("email: z.string(),"));
     }
@@ -398,7 +400,7 @@ mod tests {
             "metadata: z.record(z.string(), z.object({{ $oid: {regex_pattern} }})),"
         )));
         assert!(zod_schema.contains(&format!(
-            "parent_id: z.union([z.object({{ $oid: {regex_pattern} }}), z.undefined()]),"
+            "parent_id: z.union([z.object({{ $oid: {regex_pattern} }}), z.undefined()]).prefault(undefined),"
         )));
         assert!(zod_schema.contains(&format!(
             "nested_refs: z.record(z.string(), z.array(z.object({{ $oid: {regex_pattern} }}))),"
@@ -460,7 +462,7 @@ mod tests {
         let zod_schema = Post::zod_schema();
 
         // Should handle optional ObjectId correctly
-        assert!(zod_schema.contains("parent_id: z.union([z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }), z.undefined()]),"));
+        assert!(zod_schema.contains("parent_id: z.union([z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }), z.undefined()]).prefault(undefined),"));
     }
 
     #[test]
