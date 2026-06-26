@@ -211,6 +211,62 @@ impl FieldDef {
         }
     }
 
+    /// Rewrites any `Self` type reference to the concrete enclosing type name.
+    ///
+    /// A recursive type may refer to itself with the `Self` keyword
+    /// (e.g. `Array(Vec<Self>)`). The macro detects recursion and renders
+    /// references by comparing type names, so `Self` must be resolved to the
+    /// actual type name before that logic runs; afterwards `Vec<Self>` is
+    /// treated exactly like `Vec<EnclosingType>`.
+    ///
+    /// Recurses through `SiblingType` generics, `Map` keys/values, and `Tuple`
+    /// elements.
+    pub fn resolve_self_references(&mut self, type_name: &str) {
+        match &mut self.field_type {
+            FieldDefType::SiblingType(name, generics) => {
+                if name == "Self" {
+                    type_name.clone_into(name);
+                }
+                for generic in generics.iter_mut() {
+                    generic.resolve_self_references(type_name);
+                }
+            }
+            FieldDefType::Map(key, value) => {
+                key.resolve_self_references(type_name);
+                value.resolve_self_references(type_name);
+            }
+            FieldDefType::Tuple(elements) => {
+                for element in elements.iter_mut() {
+                    element.resolve_self_references(type_name);
+                }
+            }
+            // Leaf types cannot contain nested references.
+            FieldDefType::Unknown
+            | FieldDefType::StringLiteral(_)
+            | FieldDefType::Boolean
+            | FieldDefType::String
+            | FieldDefType::U8
+            | FieldDefType::U16
+            | FieldDefType::U32
+            | FieldDefType::U64
+            | FieldDefType::I8
+            | FieldDefType::I16
+            | FieldDefType::I32
+            | FieldDefType::I64
+            | FieldDefType::Usize
+            | FieldDefType::Isize
+            | FieldDefType::F32
+            | FieldDefType::F64 => {}
+            #[cfg(feature = "object_id")]
+            FieldDefType::ObjectId => {}
+            #[cfg(feature = "chrono")]
+            FieldDefType::NaiveDate
+            | FieldDefType::NaiveTime
+            | FieldDefType::NaiveDateTime
+            | FieldDefType::DateTime => {}
+        }
+    }
+
     /// Generates the TypeScript type name for this field.
     ///
     /// This method is the core of TypeScript type generation. It recursively builds
