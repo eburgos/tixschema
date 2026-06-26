@@ -13,29 +13,17 @@ struct Address {
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct AllNumericTypes {
-    #[serde(rename = "f32_val")]
     f32: f32,
-    #[serde(rename = "f64_val")]
     f64: f64,
-    #[serde(rename = "i16_val")]
     i16: i16,
-    #[serde(rename = "i32_val")]
     i32: i32,
-    #[serde(rename = "i64_val")]
     i64: i64,
-    #[serde(rename = "i8_val")]
     i8: i8,
-    #[serde(rename = "isize_val")]
     isize: isize,
-    #[serde(rename = "u16_val")]
     u16: u16,
-    #[serde(rename = "u32_val")]
     u32: u32,
-    #[serde(rename = "u64_val")]
     u64: u64,
-    #[serde(rename = "u8_val")]
     u8: u8,
-    #[serde(rename = "usize_val")]
     usize: usize,
 }
 
@@ -257,16 +245,16 @@ fn test_integer_types_use_integer_schema() {
     let properties = schema["properties"].as_object().unwrap();
 
     // All integer types should have type "integer"
-    assert_eq!(properties["u8_val"]["type"], "integer");
-    assert_eq!(properties["u16_val"]["type"], "integer");
-    assert_eq!(properties["u32_val"]["type"], "integer");
-    assert_eq!(properties["u64_val"]["type"], "integer");
-    assert_eq!(properties["i8_val"]["type"], "integer");
-    assert_eq!(properties["i16_val"]["type"], "integer");
-    assert_eq!(properties["i32_val"]["type"], "integer");
-    assert_eq!(properties["i64_val"]["type"], "integer");
-    assert_eq!(properties["usize_val"]["type"], "integer");
-    assert_eq!(properties["isize_val"]["type"], "integer");
+    assert_eq!(properties["u8"]["type"], "integer");
+    assert_eq!(properties["u16"]["type"], "integer");
+    assert_eq!(properties["u32"]["type"], "integer");
+    assert_eq!(properties["u64"]["type"], "integer");
+    assert_eq!(properties["i8"]["type"], "integer");
+    assert_eq!(properties["i16"]["type"], "integer");
+    assert_eq!(properties["i32"]["type"], "integer");
+    assert_eq!(properties["i64"]["type"], "integer");
+    assert_eq!(properties["usize"]["type"], "integer");
+    assert_eq!(properties["isize"]["type"], "integer");
 }
 
 #[test]
@@ -276,8 +264,8 @@ fn test_float_types_use_number_schema() {
     let properties = schema["properties"].as_object().unwrap();
 
     // Float types should have type "number"
-    assert_eq!(properties["f32_val"]["type"], "number");
-    assert_eq!(properties["f64_val"]["type"], "number");
+    assert_eq!(properties["f32"]["type"], "number");
+    assert_eq!(properties["f64"]["type"], "number");
 }
 
 #[test]

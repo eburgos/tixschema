@@ -18,7 +18,7 @@ pub struct Address {
 #[serde(tag = "type", content = "value")]
 pub enum DynamicValueTest {
     #[serde(rename = "array")]
-    Array(Vec<DynamicValueTest>),
+    Array(Vec<Self>),
     #[serde(rename = "boolean")]
     Bool(bool),
     #[serde(rename = "decimal")]
@@ -26,7 +26,7 @@ pub enum DynamicValueTest {
     #[serde(rename = "integer")]
     Integer(i64),
     #[serde(rename = "object")]
-    Object(HashMap<String, DynamicValueTest>),
+    Object(HashMap<String, Self>),
     #[serde(rename = "string")]
     String(String),
 }
@@ -45,7 +45,7 @@ pub struct Person {
 #[serde(tag = "type", content = "value")]
 pub enum RecursiveMapEnum {
     Number(i64),
-    Object(HashMap<String, RecursiveMapEnum>),
+    Object(HashMap<String, Self>),
 }
 
 /// Recursive enum with `Vec` of self.
@@ -53,7 +53,7 @@ pub enum RecursiveMapEnum {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", content = "value")]
 pub enum RecursiveVecEnum {
-    Array(Vec<RecursiveVecEnum>),
+    Array(Vec<Self>),
     Text(String),
 }
 
@@ -81,7 +81,7 @@ pub struct SimpleStruct {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
 pub enum TreeEnum {
-    Branch { nodes: Vec<TreeEnum> },
+    Branch { nodes: Vec<Self> },
     Leaf { text: String },
 }
 
@@ -89,7 +89,7 @@ pub enum TreeEnum {
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TreeNode {
-    pub children: Vec<TreeNode>,
+    pub children: Vec<Self>,
     pub val: String,
 }
 
