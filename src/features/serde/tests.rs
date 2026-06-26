@@ -31,6 +31,7 @@ fn test_final_field_name() {
         tag: None,
         content: None,
         rename_all: Some("camelCase".to_owned()),
+        untagged: false,
     };
 
     // Test field with explicit rename
@@ -89,4 +90,25 @@ fn test_parse_non_flatten_field_attribute() {
 fn test_flatten_default_is_false() {
     let meta = SerdeFieldMeta::default();
     assert!(!meta.flatten);
+}
+
+#[test]
+fn test_parse_untagged_type_attribute() {
+    let item: syn::ItemEnum = syn::parse_quote! {
+        #[serde(untagged)]
+        enum E {
+            S(String),
+            N(i64),
+        }
+    };
+    let meta = parse_serde_type_attributes(&item.attrs);
+    assert!(meta.untagged);
+    assert!(meta.tag.is_none());
+    assert!(meta.content.is_none());
+}
+
+#[test]
+fn test_untagged_default_is_false() {
+    let meta = SerdeTypeMeta::default();
+    assert!(!meta.untagged);
 }
