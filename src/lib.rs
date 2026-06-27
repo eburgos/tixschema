@@ -57,7 +57,7 @@ use utils::safe_type_name;
 /// //   id: z.string(),
 /// //   firstName: z.string(),
 /// //   lastName: z.string(),
-/// //   age: z.union([z.number(), z.undefined()]),
+/// //   age: z.union([z.number(), z.undefined()]).prefault(undefined),
 /// //   roles: z.array(z.string()),
 /// // });
 /// ```
@@ -159,7 +159,7 @@ pub struct Document {
 //   author_id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }),
 //   tags: z.array(z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) })),
 //   metadata: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) })),
-//   parent_id: z.union([z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }), z.undefined()]),
+//   parent_id: z.union([z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }), z.undefined()]).prefault(undefined),
 // });
 ```
 "#
