@@ -86,7 +86,7 @@ pub struct UserProfile {
 
 ### Optional Fields
 
-`Option<T>` fields become `T | undefined` in TypeScript and `z.union([type, z.undefined()])` in Zod v4.
+`Option<T>` fields become `T | undefined` in TypeScript and `z.union([type, z.undefined()]).prefault(undefined)` in Zod v4. The `.prefault(undefined)` makes the field default to `undefined` when omitted from the input.
 
 ```rust
 #[model_schema()]
@@ -235,6 +235,125 @@ pub enum Event {
 
 This generates `kind` as the discriminator and `data` as the value field instead of the defaults (`type` and `value`).
 
+### Intersection Types (`#[serde(flatten)]`)
+
+A struct field marked `#[serde(flatten)]` is lifted into the parent type as a TypeScript intersection (`A & B`) and a Zod `.and()` chain, instead of a nested object. This is the idiomatic way to compose a common set of fields with a discriminated union.
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataElementSampleValueEntry {
+    pub data_element_id: String,
+    #[serde(flatten)]
+    pub variant: DataElementSampleValueVariant,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "dataType")]
+pub enum DataElementSampleValueVariant {
+    Alphanumeric {
+        #[serde(rename = "sampleValues")]
+        sample_values: Vec<String>,
+    },
+    Numeric {
+        #[serde(rename = "sampleValues")]
+        sample_values: Vec<i64>,
+    },
+}
+```
+
+Generated TypeScript:
+
+```typescript
+export type DataElementSampleValueEntry = {
+  dataElementId: string;
+} & DataElementSampleValueVariant;
+```
+
+Generated Zod:
+
+```typescript
+export const DataElementSampleValueEntry$Schema: ZodType<DataElementSampleValueEntry> =
+  z.strictObject({
+    dataElementId: z.string(),
+  }).and(DataElementSampleValueVariant$Schema);
+```
+
+Notes:
+
+- Multiple `#[serde(flatten)]` fields chain: `{ ... } & BasePart & ExtraPart` in TypeScript and `z.strictObject({ ... }).and(BasePart$Schema).and(ExtraPart$Schema)` in Zod.
+- A struct whose only field is flattened becomes a plain alias (e.g. `export type FlattenOnly = DataElementSampleValueVariant;`).
+- **JSON Schema** stays strict: rather than `allOf` (which cannot faithfully compose a tagged union under `additionalProperties: false`), the base properties are distributed into each branch of the flattened union, keeping every branch closed. Plain-struct flattens merge into a single closed object; multiple flattened unions form a cross-product.
+
+### Untagged Enums (`#[serde(untagged)]`)
+
+An enum marked `#[serde(untagged)]` serializes as just its content, with no discriminator field. It generates a TypeScript union (`A | B`), a Zod `z.union([...])`, and a JSON Schema `anyOf`. Newtype (`S(T)`) and named-struct (`{ a: A }`) variants are supported.
+
+```rust
+/// ISO-8601 date string; branded newtype carrying the regex pattern.
+#[model_schema(pattern = r"^\d{4}-\d{2}-\d{2}$")]
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DateString(pub String);
+
+/// A date sample value: an ISO date string OR an epoch number.
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DateValue {
+    N(i64),
+    S(DateString),
+}
+```
+
+Generated TypeScript:
+
+```typescript
+export type DateValue = number | DateString;
+```
+
+Generated Zod:
+
+```typescript
+const DateValue$RawSchema = z.union([z.number().int(), DateString$Schema]);
+export const DateValue$Schema: ZodType<DateValue> = DateValue$RawSchema;
+```
+
+Generated JSON Schema:
+
+```json
+{ "anyOf": [
+  { "type": "integer" },
+  { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" }
+] }
+```
+
+Named-struct variants render each member as a closed object:
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum NamedUnion {
+    A { x: String },
+    B { y: i64 },
+}
+```
+
+```typescript
+// TypeScript
+export type NamedUnion = { x: string } | { y: number };
+// Zod
+z.union([z.strictObject({ x: z.string(), }), z.strictObject({ y: z.number().int(), })])
+// JSON Schema: { "anyOf": [ <object>, <object> ] }  — each branch has additionalProperties: false
+```
+
+Untagged enums compose with `#[serde(flatten)]`: a flattened variant carrying `Vec<DateValue>` renders `sampleValues: z.array(DateValue$Schema)` (TypeScript `Array<DateValue>`), and the JSON-schema `items` for that field is the `DateValue` `anyOf`.
+
+**Unsupported variants:** unit variants and multi-field tuple variants in an untagged enum produce a compile-time error.
+
 ### Nested Types
 
 Types annotated with `#[model_schema()]` can reference each other. The TypeScript output uses the type's name (without any suffix) as the reference.
@@ -261,6 +380,8 @@ pub struct UserWithAddress {
 ### Recursive Types
 
 The library supports recursive and self-referential types. In the generated Zod schema, recursive fields use JavaScript getter syntax to defer the reference and avoid "use before declaration" errors.
+
+The self-reference can be written either with the type's own name (`Vec<TreeNode>`) or with the `Self` keyword (`Vec<Self>`); both produce identical output.
 
 ```rust
 #[model_schema()]
@@ -848,7 +969,7 @@ export const Document$Schema = z.strictObject({
   author_id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }),
   tags: z.array(z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) })),
   metadata: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) })),
-  parent_id: z.union([z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }), z.undefined()]),
+  parent_id: z.union([z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }), z.undefined()]).prefault(undefined),
   related_docs: z.record(z.string(), z.array(z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }))),
 });
 ```
@@ -934,7 +1055,7 @@ export const Event$Schema: ZodType<Event> = z.strictObject({
   time: z.iso.time(),
   local_datetime: z.iso.datetime({ local: true }),
   created_at: z.iso.datetime({ offset: true }),
-  updated_at: z.union([z.iso.datetime({ offset: true }), z.undefined()]),
+  updated_at: z.union([z.iso.datetime({ offset: true }), z.undefined()]).prefault(undefined),
 });
 ```
 
@@ -1079,6 +1200,8 @@ Supported Serde attributes:
 - `#[serde(rename_all = "camelCase")]` -- rename all fields with a naming convention
 - `#[serde(tag = "...")]` -- set the discriminator field for tagged enums
 - `#[serde(tag = "...", content = "...")]` -- adjacently tagged enums
+- `#[serde(untagged)]` -- untagged enums generate a union (`A | B`) / Zod `z.union([...])` / JSON Schema `anyOf`
+- `#[serde(flatten)]` -- flatten a field into the parent as an intersection type (`A & B`) / Zod `.and(...)`
 - `#[serde(transparent)]` -- transparent wrappers (used for branded newtypes)
 - `#[serde(skip_serializing_if = "...")]` -- respected but does not affect generated types
 
@@ -1094,11 +1217,13 @@ If the `serde` feature is disabled but serde attributes are present, you will se
 
 4. **Array Types**: `Vec<T>` becomes `Array<T>` in TypeScript.
 
-5. **Optional Fields**: `Option<T>` becomes `T | undefined` in TypeScript and `z.union([type, z.undefined()])` in Zod v4.
+5. **Optional Fields**: `Option<T>` becomes `T | undefined` in TypeScript and `z.union([type, z.undefined()]).prefault(undefined)` in Zod v4.
 
 6. **Complex Nesting**: The crate supports deeply nested structures including `HashMap<String, Vec<HashMap<String, T>>>` and similar patterns.
 
 7. **Doc Comments**: Rust doc comments on types and fields are carried through to the generated TypeScript as JSDoc comments.
+
+8. **Built-in Type Mappings**: Besides the primitives, `String` and `std::path::PathBuf` both map to `string` (`z.string()`), and `serde_json::Value` maps to `unknown` (`z.unknown()`). MongoDB `ObjectId` and the `chrono` date/time types are supported behind their respective feature flags.
 
 ## Error Handling & Troubleshooting
 
@@ -1226,8 +1351,8 @@ Zod v4 (generated by this library):
 export const User$Schema = z.strictObject({
   id: z.string(),
   name: z.string(),
-  email: z.union([z.string(), z.undefined()]),
-  age: z.union([z.number().int(), z.undefined()]),
+  email: z.union([z.string(), z.undefined()]).prefault(undefined),
+  age: z.union([z.number().int(), z.undefined()]).prefault(undefined),
 });
 ```
 
