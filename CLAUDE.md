@@ -201,11 +201,13 @@ pub struct BadConfig {
 - `String` → `string`
 - `bool` → `boolean`
 - Numeric types → `number`
-- `Option<T>` → `T | undefined`
+- `Option<T>` → `T | undefined` (Zod: `z.union([T, z.undefined()]).prefault(undefined)`)
 - `Vec<T>` → `Array<T>`
 - `HashMap<String, T>` → `Partial<Record<string, T>>`
 - Custom types → Reference by name (Json suffix stripped if present)
 - `ObjectId` → `ObjectId` (with $oid validation)
+- `#[serde(flatten)]` field → TypeScript intersection (`A & B`), Zod `.and(...)`
+- `#[serde(untagged)]` enum → TypeScript union (`A | B`), Zod `z.union([...])`, JSON Schema `anyOf`
 
 ### 5. Zod v4 Requirements
 
@@ -223,8 +225,8 @@ Generated schemas use Zod v4's modern syntax:
 export const User$Schema = z.strictObject({
   id: z.string(),
   name: z.string(),
-  email: z.union([z.string(), z.undefined()]),      // Modern v4 syntax
-  age: z.union([z.number().int(), z.undefined()]),  // Works with JSON schema generation
+  email: z.union([z.string(), z.undefined()]).prefault(undefined),      // Modern v4 syntax
+  age: z.union([z.number().int(), z.undefined()]).prefault(undefined),  // Works with JSON schema generation
 });
 
 // ❌ OLD FORMAT (no longer generated)
@@ -475,7 +477,7 @@ The macro transforms Rust types to TypeScript following these rules:
 
 1. **Type Name Transformation**: If the Rust type name ends with `Json`, the suffix is stripped (e.g., `UserJson` → `User`). Otherwise, the name is used as-is (e.g., `User` → `User`).
 2. **Field Names**: Respect serde rename attributes (`#[serde(rename = "...")]`, `#[serde(rename_all = "...")]`)
-3. **Optional Fields**: `Option<T>` becomes `T | undefined` in TypeScript and `z.union([type, z.undefined()])` in Zod
+3. **Optional Fields**: `Option<T>` becomes `T | undefined` in TypeScript and `z.union([type, z.undefined()]).prefault(undefined)` in Zod
 4. **Arrays**: `Vec<T>` becomes `Array<T>` in TypeScript
 5. **Maps**: `HashMap<String, T>` becomes `Partial<Record<string, T>>` in TypeScript
 6. **Nested Types**: Reference other types by name (Json suffix stripped if present)
@@ -630,7 +632,7 @@ export const Document$Schema = z.strictObject({
   author_id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }),
   tags: z.array(z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) })),
   metadata: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) })),
-  parent_id: z.union([z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }), z.undefined()]),
+  parent_id: z.union([z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }), z.undefined()]).prefault(undefined),
   related: z.record(z.string(), z.array(z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }))),
 });
 ```
