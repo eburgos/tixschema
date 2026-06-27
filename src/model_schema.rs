@@ -3558,6 +3558,49 @@ fn build_string_format_field_schema(
     }
 }
 
+/// Builds JSON schema for a tuple struct field.
+///
+/// A Rust tuple field `(A, B, ...)` serializes (via serde) as a fixed-length
+/// JSON array, so it is rendered as `{ "type": "array", "prefixItems": [...],
+/// "items": false, "minItems": N, "maxItems": N }`. This mirrors the tuple
+/// **variant** path (`write_tuple_multiple_variant_fields`) and reuses the same
+/// per-element schema builder (`build_tuple_element_json_schema`).
+#[cfg(feature = "jsonschema")]
+fn build_tuple_field_schema(
+    fld: &FieldDef,
+    field_name_str: &str,
+    lst: &[FieldDef],
+) -> proc_macro2::TokenStream {
+    let arity = lst.len();
+    let element_schemas: Vec<proc_macro2::TokenStream> =
+        lst.iter().map(build_tuple_element_json_schema).collect();
+
+    let tuple_schema = quote! {
+        serde_json::json!({
+            "type": "array",
+            "prefixItems": [#(#element_schemas),*],
+            "items": false,
+            "minItems": #arity,
+            "maxItems": #arity
+        })
+    };
+
+    if fld.is_array {
+        quote! {
+            properties.insert(#field_name_str.to_string(), {
+                serde_json::json!({
+                    "type": "array",
+                    "items": #tuple_schema
+                })
+            });
+        }
+    } else {
+        quote! {
+            properties.insert(#field_name_str.to_string(), #tuple_schema);
+        }
+    }
+}
+
 /// Builds JSON schema for a field.
 #[cfg(feature = "jsonschema")]
 fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
@@ -3602,6 +3645,7 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
             build_sibling_type_field_schema(fld, &field_name_str, name, lst)
         }
         FieldDefType::Map(key, value) => build_map_field_schema(key, value, &field_name_str),
+        FieldDefType::Tuple(lst) => build_tuple_field_schema(fld, &field_name_str, lst),
         fld_def => {
             log::trace!("Other => field_name: {field_name_str}, fld_def: {fld_def:?}");
             // Fallback: Use module pattern. This should not typically be reached
