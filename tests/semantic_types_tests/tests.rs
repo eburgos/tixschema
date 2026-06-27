@@ -220,11 +220,11 @@ fn test_double_generic_alias_typescript() {
         ts.contains("export type Pair<T, U>"),
         "Should include both generic type parameters. Got: {ts}"
     );
-    // Note: Rust tuples are rendered as objects with element_0, element_1, etc.
-    // This is consistent with how serde serializes tuples
+    // Rust tuples serialize (via serde) as JSON arrays, so they render as
+    // TypeScript tuples `[T, U]` (not objects).
     assert!(
-        ts.contains("element_0: T") && ts.contains("element_1: U"),
-        "Should generate object with element_0 and element_1 fields. Got: {ts}"
+        ts.contains("[T, U]"),
+        "Should generate a tuple type [T, U]. Got: {ts}"
     );
 }
 

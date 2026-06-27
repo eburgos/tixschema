@@ -291,10 +291,10 @@ impl FieldDef {
             FieldDefType::Tuple(lst) => {
                 let elements = lst
                     .iter()
-                    .map(|v| format!("{}: {}", v.name, v.typescript_typename()))
+                    .map(Self::typescript_typename)
                     .collect::<Vec<_>>()
-                    .join("; ");
-                format!("{{ {elements} }}")
+                    .join(", ");
+                format!("[{elements}]")
             }
             FieldDefType::SiblingType(name, lst) => {
                 if let Some(info) = lookup_alias_info(name) {
@@ -431,10 +431,10 @@ impl FieldDef {
             FieldDefType::Tuple(lst) => {
                 let elements = lst
                     .iter()
-                    .map(|v| format!("{}: {}", v.name, v.zod_type()))
+                    .map(Self::zod_type)
                     .collect::<Vec<_>>()
-                    .join("; ");
-                format!("{{ {elements} }}")
+                    .join(", ");
+                format!("z.tuple([{elements}])")
             }
             FieldDefType::SiblingType(name, lst) => {
                 if let Some(info) = lookup_alias_info(name) {
