@@ -42,12 +42,7 @@ use syn::{Attribute, LitStr, Type};
 ///
 /// - `as = Type` — override the TypeScript/Zod type emitted for this field.
 /// - `literal = "value"` — emit as a string literal type instead of `string`.
-/// - `ts_optional` — bare flag (no value). For an `Option<T>` field, emit the TypeScript
-///   key as `field?: T` (optional key) instead of the default `field: T | undefined`
-///   (required key carrying an explicit `| undefined`). Zod and JSON Schema output are
-///   unchanged. This is a TypeScript-only knob. **Requires the field to be `Option<T>`**;
-///   applying it to a non-`Option` field is a compile error at macro-expansion time.
-///   Composes with `as = Type` (the `?` still applies once `as` resolves the type name).
+/// - `ts_optional` — for an `Option<T>` field, emit `field?: T` instead of `field: T | undefined` (TypeScript only; a non-`Option` field is a compile error).
 ///
 /// ## Zod preprocessing
 ///
@@ -83,7 +78,7 @@ pub struct ModelSchemaPropMeta {
     pub minimum: Option<f64>,      // e.g., 0.0 from minimum = 0
     pub pattern: Option<String>,   // e.g., "^[0-9a-fA-F]{24}$" from pattern = "^[0-9a-fA-F]{24}$"
     pub preprocess: Vec<String>, // e.g., ["epoch_to_date", "trim"] from preprocess = ["epoch_to_date", "trim"]
-    pub ts_optional: bool,       // bare `ts_optional` flag: emit `field?: T` for Option<T> fields
+    pub ts_optional: bool,
 }
 
 /// Parses `model_schema_prop` attributes from a field.
@@ -178,9 +173,7 @@ pub fn parse_model_schema_prop_attributes(attrs: &[Attribute]) -> ModelSchemaPro
                         })
                         .collect();
                     meta.preprocess = fns;
-                }
-                // Handle bare `ts_optional` flag (no value)
-                else if nested.path.is_ident("ts_optional") {
+                } else if nested.path.is_ident("ts_optional") {
                     meta.ts_optional = true;
                 } else {
                     // Ignore unknown model_schema_prop keys.

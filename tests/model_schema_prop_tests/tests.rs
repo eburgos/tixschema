@@ -147,7 +147,6 @@ struct OptionalLiteral {
     pub optional_type: Option<String>,
 }
 
-// Inner sibling type referenced by ts_optional fields.
 #[cfg(all(
     test,
     any(
@@ -164,8 +163,6 @@ struct Inner {
     pub value: String,
 }
 
-// Struct exercising ts_optional on a plain Option<T> field, plus a control
-// Option<T> field without the flag, and a coexistence field with `as`.
 #[cfg(all(
     test,
     any(
@@ -181,14 +178,12 @@ struct Inner {
 struct TsOptionalStruct {
     #[model_schema_prop(ts_optional)]
     pub f: Option<Inner>,
-    // Control: same shape, no flag.
     pub g: Option<Inner>,
-    // Coexistence with `as` (a currently no-op override).
+    // `as` is currently a no-op override; this field guards their coexistence.
     #[model_schema_prop(as = Inner, ts_optional)]
     pub h: Option<Inner>,
 }
 
-// Discriminated-union enum exercising ts_optional on a named-variant field.
 #[cfg(all(
     test,
     any(feature = "typescript", feature = "jsonschema", feature = "zod")
@@ -481,20 +476,17 @@ fn test_combined_literal_minlength_json_schema() {
 fn test_ts_optional_struct_typescript() {
     let ts = TsOptionalStruct::ts_definition();
 
-    // ts_optional field uses the optional-key form, no `| undefined`.
     assert!(ts.contains("f?: Inner;"), "expected `f?: Inner;` in:\n{ts}");
     assert!(
         !ts.contains("f: Inner | undefined"),
         "did not expect required-key form for `f` in:\n{ts}"
     );
 
-    // Control field without the flag keeps the required-key + `| undefined` form.
     assert!(
         ts.contains("g: Inner | undefined;"),
         "expected control `g: Inner | undefined;` in:\n{ts}"
     );
 
-    // Coexistence with `as`: still optional-key form, no panic.
     assert!(ts.contains("h?: Inner;"), "expected `h?: Inner;` in:\n{ts}");
 }
 
@@ -503,7 +495,6 @@ fn test_ts_optional_struct_typescript() {
 fn test_ts_optional_struct_zod_unchanged() {
     let zod = TsOptionalStruct::zod_schema();
 
-    // Zod output for the ts_optional field is byte-identical to the default optional form.
     assert!(
         zod.contains("f: z.union([Inner$Schema, z.undefined()]).prefault(undefined)"),
         "expected unchanged Zod for `f` in:\n{zod}"
@@ -521,7 +512,6 @@ fn test_ts_optional_struct_json_schema_unchanged() {
     let required_arr = schema["required"].as_array().unwrap();
     let required: Vec<&str> = required_arr.iter().filter_map(|v| v.as_str()).collect();
 
-    // ts_optional does not change JSON Schema: optional fields are absent from `required`.
     assert!(
         !required.contains(&"f"),
         "`f` should not be required: {required:?}"

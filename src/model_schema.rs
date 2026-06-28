@@ -3941,11 +3941,6 @@ fn field_is_bare_string(field: &Field) -> bool {
     false
 }
 
-/// Validates the `#[model_schema_prop(ts_optional)]` flag against the field's optionality.
-///
-/// The flag only makes sense on `Option<T>` fields (where `field_optional == true`),
-/// because it controls the `field?: T` vs `field: T | undefined` rendering. Applying it
-/// to a non-`Option` field returns `Err` — the caller turns that into a compile error.
 fn validate_ts_optional_flag(field_optional: bool, flag_set: bool) -> Result<(), String> {
     if flag_set && !field_optional {
         return Err("#[model_schema_prop(ts_optional)] requires an Option<T> field".into());
@@ -4035,13 +4030,11 @@ fn process_field(
         || !model_schema_prop_meta.preprocess.is_empty())
     .then_some(model_schema_prop_meta);
 
-    // `ts_optional` is only valid on `Option<T>` fields. Reject otherwise at
-    // macro-expansion time (failed assert = compile error). The pure validator
-    // `validate_ts_optional_flag` encodes the same rule and is unit-tested directly.
     let ts_optional_flag = field_def
         .model_schema_prop_meta
         .as_ref()
         .is_some_and(|m| m.ts_optional);
+    // A failed assert here surfaces as a compile error at macro-expansion time.
     assert!(
         validate_ts_optional_flag(field_def.is_optional, ts_optional_flag).is_ok(),
         "#[model_schema_prop(ts_optional)] requires an Option<T> field on field `{final_name}`"
