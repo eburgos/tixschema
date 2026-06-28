@@ -1,26 +1,20 @@
-#[cfg(all(test, feature = "serde"))]
+#[cfg(all(
+    test,
+    feature = "serde",
+    any(feature = "typescript", feature = "jsonschema", feature = "zod")
+))]
 use serde::{Deserialize, Serialize};
 #[cfg(all(test, feature = "jsonschema"))]
 use serde_json::Value;
 #[cfg(all(
     test,
-    any(
-        feature = "typescript",
-        feature = "jsonschema",
-        feature = "zod",
-        feature = "serde"
-    )
+    any(feature = "typescript", feature = "jsonschema", feature = "zod")
 ))]
 use tixschema::model_schema;
 
 #[cfg(all(
     test,
-    any(
-        feature = "typescript",
-        feature = "jsonschema",
-        feature = "zod",
-        feature = "serde"
-    )
+    any(feature = "typescript", feature = "jsonschema", feature = "zod")
 ))]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
@@ -57,6 +51,32 @@ struct UserWithOptionals {
     id: String,
     name: String,
     nickname: Option<String>,
+}
+
+#[cfg(all(
+    test,
+    any(feature = "typescript", feature = "jsonschema", feature = "zod")
+))]
+#[test]
+fn test_basic_structs_constructible() {
+    let basic = BasicUser {
+        age: 0,
+        height: 0.0,
+        id: String::new(),
+        is_active: false,
+        name: String::new(),
+    };
+    assert!(basic.id.is_empty());
+    let empty = EmptyStruct;
+    assert_eq!(format!("{empty:?}"), "EmptyStruct");
+    let optionals = UserWithOptionals {
+        age: None,
+        email: None,
+        id: String::new(),
+        name: String::new(),
+        nickname: None,
+    };
+    assert!(optionals.id.is_empty());
 }
 
 #[test]

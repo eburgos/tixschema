@@ -198,6 +198,11 @@ fn test_no_example_no_method() {
         pub value: String,
     }
 
+    let no_example = NoExample {
+        value: String::new(),
+    };
+    assert!(no_example.value.is_empty());
+
     // schema_example() should not exist, so we can't call it
     // This test just verifies it compiles without the method
 
@@ -288,7 +293,7 @@ fn test_serde_attributes_in_example() {
 fn test_objectid_example() {
     use mongodb::bson::oid::ObjectId;
 
-    /// Document with ObjectId
+    /// Document with `ObjectId`
     /// ```rust example
     /// let oid = ObjectId::parse_str("507f1f77bcf86cd799439011").unwrap();
     /// let doc = Document {
@@ -325,6 +330,9 @@ fn test_example_fence_must_be_exact() {
     pub struct RegularFence {
         pub value: u32,
     }
+
+    let regular_fence = RegularFence { value: 0 };
+    assert_eq!(regular_fence.value, 0_u32);
 
     // schema_example() should not exist since fence is not "rust example"
     #[cfg(feature = "zod")]

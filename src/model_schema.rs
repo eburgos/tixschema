@@ -8,23 +8,35 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::parse::Parser as _;
 use syn::punctuated::Punctuated;
-use syn::{Field, Ident, Item, ItemType, MetaNameValue, Token, parse_macro_input};
+use syn::{Field, Item, ItemType, MetaNameValue, Token, parse_macro_input};
 
 #[cfg(feature = "typescript")]
 use syn::GenericParam;
+
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+use syn::Ident;
 
 use crate::{
     field_type::{
         FieldDef, FieldDefType, VariantKind, classify_variant, get_field_def, is_plain_enum,
     },
     safe_type_name,
-    utils::{extract_example_from_docs, get_field_docs, get_variant_docs, lookup_alias_info},
+    utils::{get_field_docs, get_variant_docs},
 };
+
+#[cfg(feature = "zod")]
+use crate::utils::extract_example_from_docs;
+
+#[cfg(feature = "jsonschema")]
+use crate::utils::lookup_alias_info;
 
 #[cfg(feature = "serde")]
 use crate::field_type::{parse_serde_field_attributes, parse_serde_type_attributes};
 
-use crate::features::model_schema_prop::{ModelSchemaPropMeta, parse_model_schema_prop_attributes};
+use crate::features::model_schema_prop::parse_model_schema_prop_attributes;
+
+#[cfg(feature = "serde")]
+use crate::features::model_schema_prop::ModelSchemaPropMeta;
 
 #[cfg(feature = "jsonschema")]
 use crate::features::jsonschema::{
@@ -33,10 +45,10 @@ use crate::features::jsonschema::{
 };
 
 #[cfg(any(feature = "typescript", feature = "zod"))]
-use crate::utils::{
-    compute_alias_export_name, format_docs_for_ts, get_enum_docs, get_item_docs, get_struct_docs,
-    strip_examples_from_docs,
-};
+use crate::utils::{get_enum_docs, get_struct_docs, strip_examples_from_docs};
+
+#[cfg(feature = "typescript")]
+use crate::utils::{compute_alias_export_name, format_docs_for_ts, get_item_docs};
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::register_alias_info;
@@ -92,6 +104,16 @@ struct ModelSchemaArgs {
     min_length: Option<usize>,
     name_override: Option<String>,
     pattern: Option<String>,
+}
+
+/// Mutable output buffers shared by the discriminated-enum variant writers. Bundled so each writer
+/// takes a single always-mutated `&mut`, keeping its conditionally-written fields (Zod schema, JSON
+/// fields) from tripping `needless_pass_by_ref_mut` under feature subsets.
+struct VariantParts {
+    json_fields: Vec<proc_macro2::TokenStream>,
+    optional_fields: Vec<String>,
+    schema_code: String,
+    type_code: String,
 }
 
 impl ModelSchemaArgs {
@@ -175,7 +197,7 @@ fn process_type_alias(item_type: ItemType, args: &ModelSchemaArgs) -> TokenStrea
         get_item_docs(&alias.attrs).unwrap_or_else(|| vec![export_name.clone(), String::new()]);
     let docs_formatted = format_docs_for_ts(&docs_vec, &export_name);
 
-    register_alias_info(&rust_ident_str, &export_name, module_name);
+    register_alias_info(&rust_ident_str, &export_name, &module_name);
 
     let generics: Vec<String> = alias
         .generics
@@ -225,6 +247,7 @@ fn process_type_alias(item_type: ItemType, _args: &ModelSchemaArgs) -> TokenStre
     TokenStream::from(quote! { #alias })
 }
 
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn has_serde_transparent(attrs: &[syn::Attribute]) -> bool {
     for attr in attrs {
         if attr.path().is_ident("serde") {
@@ -294,14 +317,14 @@ fn build_struct_schema_example(
 #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
 fn build_struct_delegate_items(
     module_ident: &Ident,
-    schema_example_method: Option<proc_macro2::TokenStream>,
+    schema_example_method: Option<&proc_macro2::TokenStream>,
     validate_method: Option<proc_macro2::TokenStream>,
 ) -> Vec<proc_macro2::TokenStream> {
     // A `schema_example()` method is emitted iff an example was extracted.
     #[cfg(feature = "zod")]
     let has_example = schema_example_method.is_some();
     #[cfg(not(feature = "zod"))]
-    let _: Option<proc_macro2::TokenStream> = schema_example_method;
+    let _: Option<&proc_macro2::TokenStream> = schema_example_method;
 
     let mut items: Vec<proc_macro2::TokenStream> = Vec::new();
 
@@ -346,7 +369,7 @@ fn build_struct_delegate_items(
     });
 
     #[cfg(feature = "zod")]
-    items.extend(schema_example_method);
+    items.extend(schema_example_method.cloned());
     items.extend(validate_method);
     items
 }
@@ -451,6 +474,7 @@ fn compute_flatten_outputs(
 
 /// Renders the per-field TypeScript type code, Zod schema code, and JSON-schema fragments for a
 /// struct's (non-flattened) fields. Returns the accumulated code and whether the field set is empty.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn render_struct_field_bodies(
     field_defs: Vec<FieldDef>,
     item_name_opt: Option<&str>,
@@ -458,10 +482,17 @@ fn render_struct_field_bodies(
     let fields_empty = field_defs.is_empty();
     let mut type_code = String::new();
     let mut schema_code = String::new();
+    #[cfg(feature = "jsonschema")]
     let mut json_schema_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+    #[cfg(not(feature = "jsonschema"))]
+    let json_schema_fields: Vec<proc_macro2::TokenStream> = Vec::new();
 
     for fld in field_defs {
-        write_field_type_and_schema(&mut type_code, &mut schema_code, &fld, item_name_opt);
+        schema_code.push_str(&write_field_type_and_schema(
+            &mut type_code,
+            &fld,
+            item_name_opt,
+        ));
         #[cfg(feature = "jsonschema")]
         json_schema_fields.push(build_field_schema(&fld));
     }
@@ -541,7 +572,7 @@ fn struct_module_idents(name: &syn::Ident) -> (String, String, Ident) {
     let item_name = safe_type_name(&name.to_string());
     let module_name = format!("{}_schema", to_snake_case(&item_name));
     let module_ident = Ident::new(&module_name, name.span());
-    register_alias_info(&name.to_string(), &item_name, module_name.clone());
+    register_alias_info(&name.to_string(), &item_name, &module_name);
     (item_name, module_name, module_ident)
 }
 
@@ -581,57 +612,56 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
 
     // Extract docs early for example extraction
     #[cfg(any(feature = "typescript", feature = "zod"))]
-    let (docs_vec, example_code) = struct_docs_and_example(&item_struct);
+    let docs_and_example = struct_docs_and_example(&item_struct);
 
     // `Some(..)` selects schema-module-aware field processing; `None` (no schema output feature)
     // skips it so generated code never references a module that won't be emitted.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     let (module_name_opt, item_name_opt) = (Some(module_name.as_str()), Some(item_name.as_str()));
     #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
-    let (module_name_opt, item_name_opt): (Option<&str>, Option<&str>) = (None, None);
+    let module_name_opt: Option<&str> = None;
 
-    let (field_defs, flattened_fields, validation_fns, validate_bodies) = collect_struct_fields(
+    // `collected`: (field_defs, flattened_fields, validation_fns, validate_bodies). Bound as a
+    // whole so feature-gated field access (`.0`/`.2`/`.3`) marks it used without per-element
+    // unused warnings; `collect_struct_fields` is always called for its `item_struct` mutation.
+    let collected = collect_struct_fields(
         &mut item_struct.fields,
         rename_all.as_deref(),
         module_name_opt,
         &name.to_string(),
     );
-
-    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    let (flatten_ts_types, flatten_zod_schemas, flatten_json_schemas) =
-        compute_flatten_outputs(&flattened_fields);
-
-    let (type_code, schema_code, json_schema_fields, fields_empty) =
-        render_struct_field_bodies(field_defs, item_name_opt);
+    #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+    let _: &_ = &&collected;
 
     #[cfg(feature = "typescript")]
-    let docs = build_item_jsdoc(docs_vec.as_deref(), name);
+    let docs = build_item_jsdoc(docs_and_example.0.as_deref(), name);
 
     // Generate the schema module methods. The schema module emits zod_schema without examples;
     // example injection happens in the delegating method on the type to avoid `super::` issues.
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
-    let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![
-        #[cfg(feature = "jsonschema")]
-        generate_json_schema_method(&json_schema_fields, &flatten_json_schemas),
-        #[cfg(feature = "typescript")]
-        generate_ts_definition_method(
-            &docs,
-            &item_name,
-            &type_code,
-            fields_empty,
-            &flatten_ts_types,
-        ),
-        #[cfg(feature = "zod")]
-        generate_zod_schema_method(&item_name, &schema_code, "", &flatten_zod_schemas),
-    ];
-    #[cfg(not(any(feature = "zod", feature = "typescript", feature = "jsonschema")))]
-    let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![];
+    let schema_impl_items: Vec<proc_macro2::TokenStream> = {
+        // bodies: (type_code, schema_code, json_schema_fields, fields_empty)
+        let bodies = render_struct_field_bodies(collected.0, item_name_opt);
+        // flatten: (ts_types, zod_schemas, json_schemas)
+        let flatten = compute_flatten_outputs(&collected.1);
+        vec![
+            #[cfg(feature = "jsonschema")]
+            generate_json_schema_method(&bodies.2, &flatten.2),
+            #[cfg(feature = "typescript")]
+            generate_ts_definition_method(&docs, &item_name, &bodies.0, bodies.3, &flatten.0),
+            #[cfg(feature = "zod")]
+            generate_zod_schema_method(&item_name, &bodies.1, "", &flatten.1),
+        ]
+    };
 
     // schema_example must be directly on the type (not in the module) because the example code
     // uses type names that may not be accessible from the nested module.
     #[cfg(feature = "zod")]
-    let schema_example_method = build_struct_schema_example(example_code.as_ref(), name);
-    #[cfg(not(feature = "zod"))]
+    let schema_example_method = build_struct_schema_example(docs_and_example.1.as_ref(), name);
+    #[cfg(all(
+        not(feature = "zod"),
+        any(feature = "typescript", feature = "jsonschema")
+    ))]
     let schema_example_method: Option<proc_macro2::TokenStream> = None;
 
     // Generate the type-level validate() method if there are constrained fields.
@@ -639,17 +669,20 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
         feature = "serde",
         any(feature = "typescript", feature = "zod", feature = "jsonschema")
     ))]
-    let validate_method = build_struct_validate_method(&validate_bodies, &module_ident);
-    #[cfg(not(all(
-        feature = "serde",
+    let validate_method = build_struct_validate_method(&collected.3, &module_ident);
+    #[cfg(all(
+        not(feature = "serde"),
         any(feature = "typescript", feature = "zod", feature = "jsonschema")
-    )))]
+    ))]
     let validate_method: Option<proc_macro2::TokenStream> = None;
 
     // Build delegating impl items (schema_example is added directly, not as a delegate).
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
-    let delegate_impl_items =
-        build_struct_delegate_items(&module_ident, schema_example_method, validate_method);
+    let delegate_impl_items = build_struct_delegate_items(
+        &module_ident,
+        schema_example_method.as_ref(),
+        validate_method,
+    );
 
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     {
@@ -658,7 +691,7 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
             &module_ident,
             name,
             &schema_impl_items,
-            &validation_fns,
+            &collected.2,
             &delegate_impl_items,
         )
     }
@@ -692,7 +725,10 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
 ///
 /// Returns `None` when the newtype has no string constraints. Uses `ToString` so it works for
 /// `String`, `ObjectId`, and any generic `ID_TYPE` that implements `Display`.
-#[cfg(feature = "serde")]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 fn build_branded_validation(
     args: &ModelSchemaArgs,
     is_generic: bool,
@@ -870,7 +906,7 @@ fn branded_json_inner_type(is_generic: bool, inner_ty: &syn::Type) -> String {
 
 /// Flattens a branded newtype's doc comments into a single escaped description string,
 /// stripping ` ```rust example ` fences. Falls back to the type name when there are no docs.
-#[cfg(any(feature = "typescript", feature = "zod"))]
+#[cfg(feature = "zod")]
 fn branded_plain_description(docs_vec: Option<&[String]>, item_name: &str) -> String {
     docs_vec.map_or_else(
         || item_name.to_owned(),
@@ -982,7 +1018,7 @@ fn build_branded_zod_schema_method(
     }
     #[cfg(not(feature = "typescript"))]
     {
-        let _ = (is_generic, ts_inner_type);
+        let _: &_ = &(is_generic, ts_inner_type);
         quote! {
             pub fn zod_schema() -> String {
                 format!(
@@ -1001,7 +1037,7 @@ fn build_branded_delegate_items(
     has_example: bool,
 ) -> Vec<proc_macro2::TokenStream> {
     #[cfg(not(feature = "zod"))]
-    let _ = has_example;
+    let _: &_ = &has_example;
 
     #[cfg(feature = "typescript")]
     let delegate_ts = quote! {
@@ -1227,10 +1263,12 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
     let module_name = format!("{}_schema", to_snake_case(&item_name));
     let module_ident = Ident::new(&module_name, name.span());
 
-    register_alias_info(&name.to_string(), &item_name, module_name.clone());
+    register_alias_info(&name.to_string(), &item_name, &module_name);
+    #[cfg(not(any(feature = "zod", feature = "jsonschema", feature = "serde")))]
+    let _: &_ = &args;
 
     // Extract docs and example
-    #[cfg(any(feature = "typescript", feature = "zod"))]
+    #[cfg(feature = "zod")]
     let docs_vec = get_struct_docs(&item_struct);
 
     #[cfg(feature = "zod")]
@@ -1238,7 +1276,7 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
         .as_ref()
         .and_then(|docs| extract_example_from_docs(docs));
 
-    #[cfg(any(feature = "typescript", feature = "zod"))]
+    #[cfg(feature = "zod")]
     let plain_description = branded_plain_description(docs_vec.as_deref(), &item_name);
 
     // Get generic type parameters from the struct
@@ -1249,12 +1287,13 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
     let inner_field = item_struct.fields.iter().next().unwrap();
     let inner_ty = &inner_field.ty;
 
+    // `ts_pair`: (ts_inner_type, ts_generics). Bound whole so zod-only builds (which use only the
+    // inner type) don't trip an unused-variable warning on the generics half.
     #[cfg(any(feature = "typescript", feature = "zod"))]
-    let (ts_inner_type, ts_generics) =
-        branded_ts_type_and_generics(is_generic, &generic_params, inner_ty);
+    let ts_pair = branded_ts_type_and_generics(is_generic, &generic_params, inner_ty);
 
     #[cfg(not(any(feature = "typescript", feature = "zod")))]
-    let _ = inner_ty;
+    let _: &_ = &inner_ty;
 
     #[cfg(feature = "jsonschema")]
     let json_inner_type = branded_json_inner_type(is_generic, inner_ty);
@@ -1265,14 +1304,14 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
     // --- Generate ts_definition method ---
     #[cfg(feature = "typescript")]
     let ts_definition_method =
-        build_branded_ts_definition_method(&item_name, &ts_generics, &ts_inner_type);
+        build_branded_ts_definition_method(&item_name, &ts_pair.1, &ts_pair.0);
 
     // --- Generate zod_schema method ---
     #[cfg(feature = "zod")]
     let zod_schema_method = build_branded_zod_schema_method(
         &item_name,
         is_generic,
-        &ts_inner_type,
+        &ts_pair.0,
         &zod_inner,
         &plain_description,
     );
@@ -1284,9 +1323,6 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
     // --- Build schema module impl items ---
     #[cfg(feature = "jsonschema")]
     let json_schema_method = build_branded_json_schema_method(args, &json_inner_type);
-
-    #[cfg(not(feature = "jsonschema"))]
-    let json_schema_method = generate_alias_json_schema_stub();
 
     let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![
         #[cfg(feature = "jsonschema")]
@@ -1312,18 +1348,10 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
     // --- Generate delegate methods ---
     let delegate_impl_items = build_branded_delegate_items(&module_ident, has_example);
 
-    // Use generics for the impl block so it works with generic structs. When constraints exist on
-    // a generic type, add a Display bound for validation via `.to_string()`.
+    // `generics` is for the impl block (Display bounds added when constrained); `generics_for_ty`
+    // is the unmodified clone used for the type alias.
     let generics_for_ty = item_struct.generics.clone();
-    let mut generics = item_struct.generics.clone();
-    #[cfg(feature = "serde")]
-    if is_generic && args.has_string_constraints() {
-        for param in &mut generics.params {
-            if let syn::GenericParam::Type(tp) = param {
-                tp.bounds.push(syn::parse_quote!(std::fmt::Display));
-            }
-        }
-    }
+    let generics = branded_impl_generics(&item_struct, is_generic, args);
 
     // --- Generate Display impl for branded newtypes ---
     let display_impl = build_branded_display_impl(&item_struct.generics, &name);
@@ -1358,6 +1386,32 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
         validate_method: &validate_method,
         validation_tokens: &validation_tokens,
     })
+}
+
+/// Clones a branded newtype's generics, adding a `Display` bound to each type parameter when the
+/// newtype carries string constraints (needed for `.to_string()`-based validation on generic inner
+/// types). Without the `serde` feature no bounds are added.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn branded_impl_generics(
+    item_struct: &syn::ItemStruct,
+    is_generic: bool,
+    args: &ModelSchemaArgs,
+) -> syn::Generics {
+    #[cfg(feature = "serde")]
+    let mut generics = item_struct.generics.clone();
+    #[cfg(not(feature = "serde"))]
+    let generics = item_struct.generics.clone();
+    #[cfg(not(feature = "serde"))]
+    let _: &_ = &(is_generic, args);
+    #[cfg(feature = "serde")]
+    if is_generic && args.has_string_constraints() {
+        for param in &mut generics.params {
+            if let syn::GenericParam::Type(tp) = param {
+                tp.bounds.push(syn::parse_quote!(std::fmt::Display));
+            }
+        }
+    }
+    generics
 }
 
 /// Processes an enum item and generates TypeScript and Zod schema definitions for it.
@@ -1398,7 +1452,7 @@ fn process_enum(item_enum: syn::ItemEnum) -> TokenStream {
 
         #[cfg(not(feature = "serde"))]
         let (tag_name, content_name, rename_all): (String, String, Option<String>) =
-            ("type".to_string(), "value".to_string(), None);
+            ("type".to_owned(), "value".to_owned(), None);
 
         process_discriminated_enum(
             item_enum,
@@ -1465,7 +1519,10 @@ fn collect_plain_enum_options(
     rename_all: Option<&str>,
 ) -> (Vec<String>, Vec<String>) {
     let mut enum_options = Vec::new();
+    #[cfg(feature = "typescript")]
     let mut enum_variant_docs = Vec::new();
+    #[cfg(not(feature = "typescript"))]
+    let enum_variant_docs: Vec<String> = Vec::new();
 
     for item in &mut item_enum.variants {
         #[cfg(feature = "serde")]
@@ -1535,7 +1592,7 @@ fn process_plain_enum(
 
     // Register enum in alias registry so other types can find it
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    register_alias_info(&name.to_string(), item_name, module_name);
+    register_alias_info(&name.to_string(), item_name, &module_name);
 
     // Extract docs early for example extraction
     #[cfg(any(feature = "typescript", feature = "zod"))]
@@ -1547,6 +1604,8 @@ fn process_plain_enum(
         .and_then(|docs| extract_example_from_docs(docs));
 
     let (enum_options, enum_variant_docs) = collect_plain_enum_options(&mut item_enum, rename_all);
+    #[cfg(not(feature = "typescript"))]
+    let _: &_ = &&enum_variant_docs;
 
     #[cfg(feature = "typescript")]
     let type_code = build_plain_enum_type_code(&enum_options, &enum_variant_docs);
@@ -1567,7 +1626,7 @@ fn process_plain_enum(
         .collect();
 
     #[cfg(any(feature = "typescript", feature = "zod"))]
-    let (docs, plain_description) = build_item_docs_and_description(docs_vec.as_deref(), name);
+    let docs_and_description = build_item_docs_and_description(docs_vec.as_deref(), name);
 
     // Generate schema module methods
     #[cfg(feature = "jsonschema")]
@@ -1575,22 +1634,25 @@ fn process_plain_enum(
 
     #[cfg(feature = "typescript")]
     let ts_definition_method =
-        generate_plain_enum_ts_definition_method(&docs, item_name, &type_code);
+        generate_plain_enum_ts_definition_method(&docs_and_description.0, item_name, &type_code);
 
     // Schema module emits zod_schema without examples; example injection happens in the delegating
     // method on the type to avoid `super::` resolution issues.
     #[cfg(feature = "zod")]
     let zod_schema_method =
-        generate_plain_enum_zod_schema_method(item_name, &schema_code, &plain_description);
+        generate_plain_enum_zod_schema_method(item_name, &schema_code, &docs_and_description.1);
 
     #[cfg(not(any(feature = "typescript", feature = "zod")))]
-    let _ = item_name;
+    let _: &_ = &item_name;
 
     // schema_example must be directly on the type (not in the module) because the example code
     // uses type names that may not be accessible from the nested module.
     #[cfg(feature = "zod")]
     let schema_example_method = build_struct_schema_example(example_code.as_ref(), name);
-    #[cfg(not(feature = "zod"))]
+    #[cfg(all(
+        not(feature = "zod"),
+        any(feature = "typescript", feature = "jsonschema")
+    ))]
     let schema_example_method: Option<proc_macro2::TokenStream> = None;
 
     // Build schema module impl items (without schema_example)
@@ -1603,9 +1665,6 @@ fn process_plain_enum(
         #[cfg(feature = "zod")]
         zod_schema_method,
     ];
-
-    #[cfg(not(any(feature = "zod", feature = "typescript", feature = "jsonschema")))]
-    let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![];
 
     // Build delegating impl items; the plain-enum delegates match the branded ones, with the
     // `schema_example()` method chained on after them when an example exists.
@@ -1761,6 +1820,27 @@ fn render_discriminated_variants(
     (type_code_items, schema_code_items, json_schema_variants)
 }
 
+/// Builds the JSON-schema `oneOf` object expression for a discriminated enum from its per-variant
+/// JSON-schema fragments.
+#[cfg(feature = "jsonschema")]
+fn discriminated_main_schema_code(
+    json_schema_variants: &[proc_macro2::TokenStream],
+) -> proc_macro2::TokenStream {
+    quote! {
+        let mut schema_obj = serde_json::Map::new();
+        schema_obj.insert("type".to_string(), serde_json::Value::String("object".to_string()));
+        schema_obj.insert("oneOf".to_string(), {
+            let result: Vec<serde_json::Value> = vec![
+                #(#json_schema_variants), *
+            ];
+
+            serde_json::Value::Array(result)
+        });
+
+        serde_json::Value::Object(schema_obj)
+    }
+}
+
 /// Processes a discriminated enum (tagged union in TypeScript) and generates its definitions.
 fn process_discriminated_enum(
     mut item_enum: syn::ItemEnum,
@@ -1778,7 +1858,7 @@ fn process_discriminated_enum(
 
     // Register enum in alias registry so other types can find it
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    register_alias_info(&name.to_string(), item_name, module_name);
+    register_alias_info(&name.to_string(), item_name, &module_name);
 
     // Extract docs early for example extraction
     #[cfg(any(feature = "typescript", feature = "zod"))]
@@ -1791,48 +1871,36 @@ fn process_discriminated_enum(
 
     // Process each variant in the enum.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    let enum_module_name = format!("{}_schema", to_snake_case(item_name));
-    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    let enum_module_name_opt = Some(enum_module_name.as_str());
+    let enum_module_name_opt = Some(module_name.as_str());
     #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
     let enum_module_name_opt = None;
 
-    let (field_defs_by_variant, docs_by_variant, kinds_by_variant, enum_validation_fns) =
-        collect_discriminated_variants(&mut item_enum, rename_all, enum_module_name_opt);
-
-    // Generate TypeScript and Zod schema for each variant.
-    let (type_code_items, schema_code_items, json_schema_variants) = render_discriminated_variants(
+    // Bind both result tuples whole so feature-gated field access marks them used (no per-element
+    // guards): `variants` = (field_defs, docs, kinds, validation_fns); `rendered` = (ts, zod, json).
+    let variants = collect_discriminated_variants(&mut item_enum, rename_all, enum_module_name_opt);
+    let rendered = render_discriminated_variants(
         tag_name,
         content_name,
         item_name,
-        field_defs_by_variant,
-        &docs_by_variant,
-        &kinds_by_variant,
+        variants.0,
+        &variants.1,
+        &variants.2,
     );
+    #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+    let _: &_ = &(name, &rendered);
 
     #[cfg(feature = "jsonschema")]
-    let main_schema_code = quote! {
-        let mut schema_obj = serde_json::Map::new();
-        schema_obj.insert("type".to_string(), serde_json::Value::String("object".to_string()));
-        schema_obj.insert("oneOf".to_string(), {
-            let result: Vec<serde_json::Value> = vec![
-                #(#json_schema_variants), *
-            ];
-
-            serde_json::Value::Array(result)
-        });
-
-        serde_json::Value::Object(schema_obj)
-    };
+    let main_schema_code = discriminated_main_schema_code(&rendered.2);
 
     #[cfg(feature = "typescript")]
-    let type_code = type_code_items.join(" | ");
+    let type_code = rendered.0.join(" | ");
 
     // Generate Zod schema conditionally
     #[cfg(feature = "zod")]
     let schema_code = format!(
         "z.discriminatedUnion(\"{tag_name}\", [{}])",
-        schema_code_items
+        rendered
+            .1
             .iter()
             .map(|(v, _opts)| format!("z.strictObject({}){}", v, ""))
             .collect::<Vec<_>>()
@@ -1856,13 +1924,16 @@ fn process_discriminated_enum(
     let zod_schema_method = generate_discriminated_enum_zod_schema_method(item_name, &schema_code);
 
     #[cfg(not(any(feature = "typescript", feature = "zod")))]
-    let _ = item_name;
+    let _: &_ = &item_name;
 
     // schema_example must be directly on the type (not in the module) because the example code
     // uses type names that may not be accessible from the nested module.
     #[cfg(feature = "zod")]
     let schema_example_method = build_struct_schema_example(example_code.as_ref(), name);
-    #[cfg(not(feature = "zod"))]
+    #[cfg(all(
+        not(feature = "zod"),
+        any(feature = "typescript", feature = "jsonschema")
+    ))]
     let schema_example_method: Option<proc_macro2::TokenStream> = None;
 
     // Build schema module impl items (without schema_example)
@@ -1876,14 +1947,11 @@ fn process_discriminated_enum(
         zod_schema_method,
     ];
 
-    #[cfg(not(any(feature = "zod", feature = "typescript", feature = "jsonschema")))]
-    let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![];
-
     // Build delegating impl items; the discriminated-enum delegates match the struct ones (the
     // `zod_schema` example injection uses the same `.meta()`-before-`;` form), with no `validate()`.
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     let delegate_impl_items =
-        build_struct_delegate_items(&module_ident, schema_example_method, None);
+        build_struct_delegate_items(&module_ident, schema_example_method.as_ref(), None);
 
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     {
@@ -1892,7 +1960,7 @@ fn process_discriminated_enum(
             &module_ident,
             name,
             &schema_impl_items,
-            &enum_validation_fns,
+            &variants.3,
             &delegate_impl_items,
         )
     }
@@ -2247,7 +2315,7 @@ fn process_untagged_enum(
 
     // Register enum in alias registry so other types can find it
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    register_alias_info(&name.to_string(), item_name, module_name);
+    register_alias_info(&name.to_string(), item_name, &module_name);
 
     // Extract docs early for example extraction
     #[cfg(any(feature = "typescript", feature = "zod"))]
@@ -2260,10 +2328,12 @@ fn process_untagged_enum(
 
     // Render each variant into its union member (TS / Zod / JSON parts).
     let (ts_parts, zod_parts, json_parts) = collect_untagged_members(&mut item_enum);
+    #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+    let _: &_ = &name;
     #[cfg(not(feature = "zod"))]
-    let _ = &zod_parts;
+    let _: &_ = &&zod_parts;
     #[cfg(not(feature = "jsonschema"))]
-    let _ = &json_parts;
+    let _: &_ = &&json_parts;
 
     #[cfg(feature = "jsonschema")]
     let main_schema_code = quote! {
@@ -2282,7 +2352,7 @@ fn process_untagged_enum(
     #[cfg(feature = "typescript")]
     let type_code = ts_parts.join(" | ");
     #[cfg(not(feature = "typescript"))]
-    let _ = &ts_parts;
+    let _: &_ = &&ts_parts;
 
     #[cfg(feature = "zod")]
     let schema_code = format!("z.union([{}])", zod_parts.join(", "));
@@ -2302,11 +2372,14 @@ fn process_untagged_enum(
     let zod_schema_method = generate_discriminated_enum_zod_schema_method(item_name, &schema_code);
 
     #[cfg(not(any(feature = "typescript", feature = "zod")))]
-    let _ = item_name;
+    let _: &_ = &item_name;
 
     #[cfg(feature = "zod")]
     let schema_example_method = build_struct_schema_example(example_code.as_ref(), name);
-    #[cfg(not(feature = "zod"))]
+    #[cfg(all(
+        not(feature = "zod"),
+        any(feature = "typescript", feature = "jsonschema")
+    ))]
     let schema_example_method: Option<proc_macro2::TokenStream> = None;
 
     // Build schema module impl items (without schema_example)
@@ -2320,12 +2393,9 @@ fn process_untagged_enum(
         zod_schema_method,
     ];
 
-    #[cfg(not(any(feature = "zod", feature = "typescript", feature = "jsonschema")))]
-    let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![];
-
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     let delegate_impl_items =
-        build_struct_delegate_items(&module_ident, schema_example_method, None);
+        build_struct_delegate_items(&module_ident, schema_example_method.as_ref(), None);
 
     // Untagged enums have no per-field serde validation functions.
     let enum_validation_fns: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -2344,7 +2414,7 @@ fn process_untagged_enum(
 
     #[cfg(not(any(feature = "zod", feature = "typescript", feature = "jsonschema")))]
     {
-        let _ = (schema_impl_items, enum_validation_fns);
+        let _: &_ = &enum_validation_fns;
         let output = quote! {
             #item_enum
         };
@@ -2353,6 +2423,7 @@ fn process_untagged_enum(
     }
 }
 
+#[cfg(feature = "jsonschema")]
 fn generate_type_schema(
     fld: &FieldDef,
     field_name_str: &str,
@@ -2392,16 +2463,15 @@ fn generate_variant_code(
     discriminator_docs: &str,
     self_type_name: &str,
 ) -> (String, String, Vec<String>, proc_macro2::TokenStream) {
-    // Generate TypeScript type code - start with discriminator
-    let mut variant_type_code =
-        format!("{{  /**\n{discriminator_docs}\n**/\n  {tag_name}: \"{discriminator_value}\";\n");
-
-    // Generate Zod schema code - start with discriminator
-    let mut variant_schema_code =
-        format!("{{\n  {tag_name}: z.literal(\"{discriminator_value}\"),\n");
-
-    let mut optional_fields = Vec::new();
-    let mut json_schema_variant_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+    // Start the TypeScript type and Zod schema with the discriminator.
+    let mut parts = VariantParts {
+        json_fields: Vec::new(),
+        optional_fields: Vec::new(),
+        schema_code: format!("{{\n  {tag_name}: z.literal(\"{discriminator_value}\"),\n"),
+        type_code: format!(
+            "{{  /**\n{discriminator_docs}\n**/\n  {tag_name}: \"{discriminator_value}\";\n"
+        ),
+    };
 
     match variant_kind {
         VariantKind::Unit => {
@@ -2409,41 +2479,30 @@ fn generate_variant_code(
             // TypeScript: { type: "Variant" }
             // Zod: { type: z.literal("Variant") }
         }
-        VariantKind::Named => write_named_variant_fields(
-            field_defs,
-            tag_name,
-            self_type_name,
-            &mut variant_type_code,
-            &mut variant_schema_code,
-            &mut optional_fields,
-            &mut json_schema_variant_fields,
-        ),
-        VariantKind::TupleSingle => write_tuple_single_variant_fields(
-            field_defs,
-            content_name,
-            self_type_name,
-            &mut variant_type_code,
-            &mut variant_schema_code,
-            &mut optional_fields,
-            &mut json_schema_variant_fields,
-        ),
-        VariantKind::TupleMultiple => write_tuple_multiple_variant_fields(
-            field_defs,
-            content_name,
-            self_type_name,
-            &mut variant_type_code,
-            &mut variant_schema_code,
-            &mut json_schema_variant_fields,
-        ),
+        VariantKind::Named => {
+            write_named_variant_fields(field_defs, tag_name, self_type_name, &mut parts);
+        }
+        VariantKind::TupleSingle => {
+            write_tuple_single_variant_fields(field_defs, content_name, self_type_name, &mut parts);
+        }
+        VariantKind::TupleMultiple => {
+            write_tuple_multiple_variant_fields(
+                field_defs,
+                content_name,
+                self_type_name,
+                &mut parts,
+            );
+        }
     }
 
     // Complete the type and schema code
-    variant_type_code.push('}');
-    variant_schema_code.push('}');
+    parts.type_code.push('}');
+    parts.schema_code.push('}');
 
     // Create JSON schema for this variant
     #[cfg(feature = "jsonschema")]
     let json_schema_variant = {
+        let json_schema_variant_fields = &parts.json_fields;
         let discriminator_value_str = discriminator_value.to_owned();
         let tag_name_str = tag_name.to_owned();
 
@@ -2484,9 +2543,9 @@ fn generate_variant_code(
     let json_schema_variant = quote! {};
 
     (
-        variant_type_code,
-        variant_schema_code,
-        optional_fields,
+        parts.type_code,
+        parts.schema_code,
+        parts.optional_fields,
         json_schema_variant,
     )
 }
@@ -2496,11 +2555,12 @@ fn write_named_variant_fields(
     field_defs: &[FieldDef],
     tag_name: &str,
     self_type_name: &str,
-    variant_type_code: &mut String,
-    variant_schema_code: &mut String,
-    optional_fields: &mut Vec<String>,
-    json_schema_variant_fields: &mut Vec<proc_macro2::TokenStream>,
+    parts: &mut VariantParts,
 ) {
+    let variant_type_code = &mut parts.type_code;
+    let variant_schema_code = &mut parts.schema_code;
+    let optional_fields = &mut parts.optional_fields;
+    let json_schema_variant_fields = &mut parts.json_fields;
     for fld in field_defs {
         // Add TypeScript type definition
         let _ = writeln!(
@@ -2532,7 +2592,7 @@ fn write_named_variant_fields(
 
         #[cfg(not(feature = "zod"))]
         {
-            let _ = (&variant_schema_code, self_type_name);
+            let _: &_ = &(&variant_schema_code, self_type_name);
         }
 
         #[cfg(feature = "jsonschema")]
@@ -2540,7 +2600,7 @@ fn write_named_variant_fields(
             json_schema_variant_fields.push(build_field_schema(fld));
         }
         #[cfg(not(feature = "jsonschema"))]
-        let _ = (tag_name, &json_schema_variant_fields);
+        let _: &_ = &(tag_name, &json_schema_variant_fields);
 
         if fld.is_optional {
             optional_fields.push(fld.name.clone());
@@ -2568,11 +2628,12 @@ fn write_tuple_single_variant_fields(
     field_defs: &[FieldDef],
     content_name: &str,
     self_type_name: &str,
-    variant_type_code: &mut String,
-    variant_schema_code: &mut String,
-    optional_fields: &mut Vec<String>,
-    json_schema_variant_fields: &mut Vec<proc_macro2::TokenStream>,
+    parts: &mut VariantParts,
 ) {
+    let variant_type_code = &mut parts.type_code;
+    let variant_schema_code = &mut parts.schema_code;
+    let optional_fields = &mut parts.optional_fields;
+    let json_schema_variant_fields = &mut parts.json_fields;
     let Some(fld) = field_defs.first() else {
         let _: (&_, &_, &_) = (
             self_type_name,
@@ -2608,7 +2669,7 @@ fn write_tuple_single_variant_fields(
 
     #[cfg(not(feature = "zod"))]
     {
-        let _ = (&variant_schema_code, self_type_name);
+        let _: &_ = &(&variant_schema_code, self_type_name);
     }
 
     // JSON Schema for single tuple value
@@ -2627,10 +2688,11 @@ fn write_tuple_multiple_variant_fields(
     field_defs: &[FieldDef],
     content_name: &str,
     self_type_name: &str,
-    variant_type_code: &mut String,
-    variant_schema_code: &mut String,
-    json_schema_variant_fields: &mut Vec<proc_macro2::TokenStream>,
+    parts: &mut VariantParts,
 ) {
+    let variant_type_code = &mut parts.type_code;
+    let variant_schema_code = &mut parts.schema_code;
+    let json_schema_variant_fields = &mut parts.json_fields;
     // Multi-element tuple: use TypeScript tuple type `value: [T1, T2, ...]`
     let ts_tuple_types: Vec<String> = field_defs
         .iter()
@@ -2679,7 +2741,7 @@ fn write_tuple_multiple_variant_fields(
 
     #[cfg(not(feature = "zod"))]
     {
-        let _ = (&variant_schema_code, self_type_name);
+        let _: &_ = &(&variant_schema_code, self_type_name);
     }
 
     // JSON Schema for tuple (using prefixItems)
@@ -2702,7 +2764,7 @@ fn write_tuple_multiple_variant_fields(
         });
     }
     #[cfg(not(feature = "jsonschema"))]
-    let _ = &json_schema_variant_fields;
+    let _: &_ = &&json_schema_variant_fields;
 }
 
 /// Builds JSON schema for a tuple element (used for single tuple and multi-tuple variants).
@@ -3689,12 +3751,12 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
 /// The `self_type_name` parameter is used to detect recursive type references.
 /// When a field references the type being defined, we use JavaScript getter syntax
 /// to defer the reference and avoid "use before declaration" errors.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn write_field_type_and_schema(
     type_code: &mut String,
-    schema_code: &mut String,
     fld: &FieldDef,
     self_type_name: Option<&str>,
-) {
+) -> String {
     // Always write TypeScript type
     let _ = writeln!(
         type_code,
@@ -3705,7 +3767,7 @@ fn write_field_type_and_schema(
         fld.typescript_typename()
     );
 
-    // Conditionally write Zod schema
+    // Conditionally return the Zod schema fragment
     #[cfg(feature = "zod")]
     {
         let zod_type = fld.zod_type();
@@ -3715,22 +3777,18 @@ fn write_field_type_and_schema(
 
         if is_recursive {
             // Use getter syntax to defer the reference
-            let _ = writeln!(
-                schema_code,
-                "  get {}() {{ return {}; }},",
-                fld.name, zod_type
-            );
+            format!("  get {}() {{ return {}; }},\n", fld.name, zod_type)
         } else {
             // Normal property syntax
-            let _ = writeln!(schema_code, "  {}: {},", fld.name, zod_type);
+            format!("  {}: {},\n", fld.name, zod_type)
         }
     }
 
     #[cfg(not(feature = "zod"))]
     {
-        // When zod feature is disabled, don't write to schema_code
-        let _ = schema_code; // Suppress unused variable warning
-        let _ = self_type_name; // Suppress unused variable warning
+        // When zod feature is disabled, there is no schema fragment to emit
+        let _: &_ = &self_type_name; // Suppress unused variable warning
+        String::new()
     }
 }
 
@@ -4005,6 +4063,8 @@ fn process_field(
         Option<proc_macro2::TokenStream>,
         Option<proc_macro2::TokenStream>,
     ) = (None, None);
+    #[cfg(not(feature = "serde"))]
+    let _: &_ = &schema_module_name;
 
     field.attrs = new_attrs;
 
@@ -4335,7 +4395,7 @@ export const {}$Schema: ZodType<{}> = {}$RawSchema;"#, #item_name, #schema_code,
 
     #[cfg(not(feature = "zod"))]
     {
-        let _ = (item_name, schema_code, show_opts, flatten_schemas);
+        let _: &_ = &(item_name, schema_code, show_opts, flatten_schemas);
         quote::quote! {
             // Zod schema method not available - zod feature disabled
             // To enable: add "zod" to your features
@@ -4364,7 +4424,7 @@ fn generate_plain_enum_json_schema_method(
 
     #[cfg(not(feature = "jsonschema"))]
     {
-        let _ = enumerated; // Suppress unused variable warning
+        let _: &_ = &enumerated; // Suppress unused variable warning
         quote::quote! {
             // JSON schema method not available - jsonschema feature disabled
             // To enable: add "jsonschema" to your features
@@ -4450,7 +4510,7 @@ fn generate_plain_enum_zod_schema_method(
 
     #[cfg(not(feature = "zod"))]
     {
-        let _ = (item_name, schema_code, description);
+        let _: &_ = &(item_name, schema_code, description);
         quote::quote! {
             // Zod schema method not available - zod feature disabled
             // To enable: add "zod" to your features
@@ -4543,7 +4603,7 @@ fn generate_discriminated_enum_zod_schema_method(
 
     #[cfg(not(feature = "zod"))]
     {
-        let _ = (item_name, schema_code);
+        let _: &_ = &(item_name, schema_code);
         quote::quote! {
             // Zod schema method not available - zod feature disabled
             // To enable: add "zod" to your features
@@ -4582,6 +4642,7 @@ fn generate_ts_alias_method(
     }
 }
 
+#[cfg(feature = "typescript")]
 fn generate_alias_json_schema_stub() -> proc_macro2::TokenStream {
     quote! {
         #[cfg(feature = "jsonschema")]
@@ -4593,6 +4654,7 @@ fn generate_alias_json_schema_stub() -> proc_macro2::TokenStream {
     }
 }
 
+#[cfg(feature = "typescript")]
 fn generate_alias_zod_stub() -> proc_macro2::TokenStream {
     quote! {
         #[cfg(feature = "zod")]

@@ -89,6 +89,38 @@ struct UserWithSerde {
 }
 
 #[test]
+fn test_serde_types_constructible() {
+    let color = Color::Red;
+    assert!(matches!(color, Color::Red));
+    let event = Event::Deleted {
+        user_id: String::new(),
+    };
+    assert!(matches!(event, Event::Deleted { .. }));
+    let lowercase = Lowercase {
+        field_one: String::new(),
+        field_two: String::new(),
+    };
+    assert!(lowercase.field_one.is_empty());
+    let optional = OptionalFields {
+        another_optional: None,
+        optional_field: None,
+        required_field: String::new(),
+    };
+    assert!(optional.required_field.is_empty());
+    let status = Status::Active;
+    assert!(matches!(status, Status::Active));
+    let user = UserWithSerde {
+        created_at: String::new(),
+        email: String::new(),
+        first_name: String::new(),
+        is_verified: false,
+        last_name: String::new(),
+        user_id: String::new(),
+    };
+    assert!(user.user_id.is_empty());
+}
+
+#[test]
 #[cfg(feature = "jsonschema")]
 fn test_serde_rename_all_camel_case_json_schema() {
     let schema = UserWithSerde::json_schema();
