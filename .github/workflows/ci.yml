@@ -24,10 +24,10 @@ jobs:
         toolchain: stable
         components: clippy, rustfmt
 
-    - name: Install just and cargo-hack
+    - name: Install just, cargo-hack and cargo-audit
       uses: taiki-e/install-action@v2
       with:
-        tool: just,cargo-hack
+        tool: just,cargo-hack,cargo-audit
 
     - name: Cache cargo registry
       uses: actions/cache@v3
@@ -72,6 +72,14 @@ jobs:
         echo "🚀 Running extensive tests..."
         just test
 
+    - name: Run security audit
+      id: audit
+      # No Cargo.lock is committed (library crate), so generate one to scan.
+      run: |
+        echo "🛡️ Running security audit..."
+        cargo generate-lockfile
+        cargo audit
+
     - name: Send Discord notification
       if: always()
       # All GitHub context is passed via env (NOT interpolated into the script
@@ -98,6 +106,7 @@ jobs:
         LALL: ${{ steps.lint-all.outcome }}
         TBASIC: ${{ steps.test-basic.outcome }}
         TEXT: ${{ steps.test-extensive.outcome }}
+        AUDIT: ${{ steps.audit.outcome }}
       run: |
         # Validate repository to prevent forks from sending notifications
         if [[ "$REPO" != "tixena/tixschema" ]]; then
@@ -113,11 +122,12 @@ jobs:
         elif [[ "$LALL" == "failure" ]]; then JOB_STATUS="failure"; FAILED_STEP="Lint all features (just lint-all)";
         elif [[ "$TBASIC" == "failure" ]]; then JOB_STATUS="failure"; FAILED_STEP="Basic tests (cargo test)";
         elif [[ "$TEXT" == "failure" ]]; then JOB_STATUS="failure"; FAILED_STEP="Extensive tests (just test)";
+        elif [[ "$AUDIT" == "failure" ]]; then JOB_STATUS="failure"; FAILED_STEP="Security audit (cargo audit)";
         fi
 
         icon() { case "$1" in success) printf '✅';; failure) printf '❌';; *) printf '⏭️';; esac; }
-        STATUS_VALUE=$(printf '🏗️ Build: %s\n🔍 Check: %s\n🧹 Lint (all features): %s\n🧪 Basic Tests: %s\n🚀 Extensive Tests: %s' \
-          "$(icon "$BLD")" "$(icon "$CHK")" "$(icon "$LALL")" "$(icon "$TBASIC")" "$(icon "$TEXT")")
+        STATUS_VALUE=$(printf '🏗️ Build: %s\n🔍 Check: %s\n🧹 Lint (all features): %s\n🧪 Basic Tests: %s\n🚀 Extensive Tests: %s\n🛡️ Audit: %s' \
+          "$(icon "$BLD")" "$(icon "$CHK")" "$(icon "$LALL")" "$(icon "$TBASIC")" "$(icon "$TEXT")" "$(icon "$AUDIT")")
 
         # Per-event details: commit message / author / PR link
         if [[ "$EVENT_NAME" == "pull_request" ]]; then
