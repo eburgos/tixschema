@@ -45,6 +45,17 @@ enum NamedUnion {
     B { y: i64 },
 }
 
+#[test]
+fn test_untagged_entry_constructible() {
+    let entry = DataElementSampleValueEntry {
+        data_element_id: String::new(),
+        variant: DataElementSampleValueVariant::Date {
+            sample_values: Vec::new(),
+        },
+    };
+    assert!(entry.data_element_id.is_empty());
+}
+
 // ========================================================================
 // TypeScript
 // ========================================================================

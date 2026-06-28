@@ -64,6 +64,38 @@ struct NoFlatten {
     name: String,
 }
 
+#[test]
+fn test_flatten_structs_constructible() {
+    let base = BasePart {
+        owner: String::new(),
+    };
+    assert!(base.owner.is_empty());
+    let extra = ExtraPart { priority: 0 };
+    assert_eq!(extra.priority, 0_i64);
+    let flatten_only = FlattenOnly {
+        variant: DataElementSampleValueVariant::Alphanumeric {
+            sample_values: Vec::new(),
+        },
+    };
+    assert!(matches!(
+        flatten_only.variant,
+        DataElementSampleValueVariant::Alphanumeric { .. }
+    ));
+    let multi = MultiFlatten {
+        base: BasePart {
+            owner: String::new(),
+        },
+        extra: ExtraPart { priority: 0 },
+        id: String::new(),
+    };
+    assert!(multi.id.is_empty());
+    let no_flatten = NoFlatten {
+        id: String::new(),
+        name: String::new(),
+    };
+    assert!(no_flatten.id.is_empty());
+}
+
 // ========================================================================
 // TypeScript
 // ========================================================================

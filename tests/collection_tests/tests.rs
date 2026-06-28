@@ -71,6 +71,39 @@ fn assert_hashmap_array_type(
 }
 
 #[test]
+fn test_collection_structs_constructible() {
+    let comprehensive = ComprehensiveHashMapTest {
+        bool_array: HashMap::new(),
+        bool_value: HashMap::new(),
+        f64_array: HashMap::new(),
+        f64_value: HashMap::new(),
+        i64_array: HashMap::new(),
+        i64_value: HashMap::new(),
+        optional_u64: HashMap::new(),
+        optional_u64_array: HashMap::new(),
+        string_array: HashMap::new(),
+        string_value: HashMap::new(),
+        u64_array: HashMap::new(),
+        u64_value: HashMap::new(),
+    };
+    assert!(comprehensive.bool_value.is_empty());
+    let with_64bit = HashMapWith64Bit {
+        i64_map: HashMap::new(),
+        id: String::new(),
+        mixed_map: HashMap::new(),
+        u64_map: HashMap::new(),
+    };
+    assert!(with_64bit.id.is_empty());
+    let with_collections = UserWithCollections {
+        id: String::new(),
+        metadata: HashMap::new(),
+        scores: Vec::new(),
+        tags: Vec::new(),
+    };
+    assert!(with_collections.id.is_empty());
+}
+
+#[test]
 #[cfg(feature = "jsonschema")]
 fn test_collections_json_schema() {
     let schema = UserWithCollections::json_schema();

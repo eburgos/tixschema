@@ -52,6 +52,12 @@ jobs:
         echo "🔍 Running code checks..."
         just check
 
+    - name: Run lint across all feature combinations
+      id: lint-all
+      run: |
+        echo "🧹 Linting all feature combinations..."
+        just lint-all
+
     - name: Run basic tests
       id: test-basic
       run: |
@@ -89,6 +95,7 @@ jobs:
         TIMESTAMP: ${{ github.event.head_commit.timestamp }}
         BLD: ${{ steps.build.outcome }}
         CHK: ${{ steps.check.outcome }}
+        LALL: ${{ steps.lint-all.outcome }}
         TBASIC: ${{ steps.test-basic.outcome }}
         TEXT: ${{ steps.test-extensive.outcome }}
       run: |
@@ -103,13 +110,14 @@ jobs:
         FAILED_STEP="None"
         if [[ "$BLD" == "failure" ]]; then JOB_STATUS="failure"; FAILED_STEP="Build (cargo build)";
         elif [[ "$CHK" == "failure" ]]; then JOB_STATUS="failure"; FAILED_STEP="Code checks (just check)";
+        elif [[ "$LALL" == "failure" ]]; then JOB_STATUS="failure"; FAILED_STEP="Lint all features (just lint-all)";
         elif [[ "$TBASIC" == "failure" ]]; then JOB_STATUS="failure"; FAILED_STEP="Basic tests (cargo test)";
         elif [[ "$TEXT" == "failure" ]]; then JOB_STATUS="failure"; FAILED_STEP="Extensive tests (just test)";
         fi
 
         icon() { case "$1" in success) printf '✅';; failure) printf '❌';; *) printf '⏭️';; esac; }
-        STATUS_VALUE=$(printf '🏗️ Build: %s\n🔍 Check: %s\n🧪 Basic Tests: %s\n🚀 Extensive Tests: %s' \
-          "$(icon "$BLD")" "$(icon "$CHK")" "$(icon "$TBASIC")" "$(icon "$TEXT")")
+        STATUS_VALUE=$(printf '🏗️ Build: %s\n🔍 Check: %s\n🧹 Lint (all features): %s\n🧪 Basic Tests: %s\n🚀 Extensive Tests: %s' \
+          "$(icon "$BLD")" "$(icon "$CHK")" "$(icon "$LALL")" "$(icon "$TBASIC")" "$(icon "$TEXT")")
 
         # Per-event details: commit message / author / PR link
         if [[ "$EVENT_NAME" == "pull_request" ]]; then

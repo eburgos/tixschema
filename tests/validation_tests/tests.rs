@@ -1,4 +1,12 @@
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 use serde::{Deserialize, Serialize};
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 use tixschema::model_schema;
 
 // ==================== String constraint: maxLength ====================
