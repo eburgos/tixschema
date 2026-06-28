@@ -453,17 +453,17 @@ mod branded_in_struct_no_jsonschema_tests {
     use super::*;
 
     #[model_schema()]
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct TaskIdNJ(pub String);
 
     #[model_schema()]
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct TaskTypeIdNJ<T>(pub T);
 
     #[model_schema()]
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub struct TaskNJ {
         pub id: TaskIdNJ,
         pub name: String,
@@ -504,17 +504,17 @@ mod branded_in_struct_jsonschema_only_tests {
     use super::*;
 
     #[model_schema()]
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct TaskIdJO(pub String);
 
     #[model_schema()]
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct TaskTypeIdJO<T>(pub T);
 
     #[model_schema()]
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub struct TaskJO {
         pub id: TaskIdJO,
         pub name: String,
@@ -558,17 +558,17 @@ mod branded_in_struct_typescript_only_tests {
     use super::*;
 
     #[model_schema()]
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct TaskIdTO(pub String);
 
     #[model_schema()]
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct TaskTypeIdTO<T>(pub T);
 
     #[model_schema()]
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub struct TaskTO {
         pub id: TaskIdTO,
         pub name: String,
@@ -664,13 +664,13 @@ mod no_zod_tests {
     use super::*;
 
     #[model_schema()]
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct RoleIdNoZod<IdType>(pub IdType);
 
     // Non-generic branded newtype without Zod
     #[model_schema()]
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct SessionToken(pub String);
 
@@ -758,5 +758,17 @@ mod serde_tests {
     }
 }
 
+#[cfg(any(
+    feature = "serde",
+    feature = "zod",
+    feature = "typescript",
+    feature = "jsonschema"
+))]
 use serde::{Deserialize, Serialize};
+#[cfg(any(
+    feature = "serde",
+    feature = "zod",
+    feature = "typescript",
+    feature = "jsonschema"
+))]
 use tixschema::model_schema;

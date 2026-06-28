@@ -1,4 +1,8 @@
-#[cfg(all(test, feature = "serde"))]
+#[cfg(all(
+    test,
+    feature = "serde",
+    any(feature = "typescript", feature = "jsonschema", feature = "zod")
+))]
 use serde::{Deserialize, Serialize};
 #[cfg(all(test, feature = "jsonschema"))]
 use serde_json::Value;
@@ -9,23 +13,13 @@ use serde_json::Value;
 use std::collections::HashMap;
 #[cfg(all(
     test,
-    any(
-        feature = "typescript",
-        feature = "jsonschema",
-        feature = "zod",
-        feature = "serde"
-    )
+    any(feature = "typescript", feature = "jsonschema", feature = "zod")
 ))]
 use tixschema::model_schema;
 
 #[cfg(all(
     test,
-    any(
-        feature = "typescript",
-        feature = "jsonschema",
-        feature = "zod",
-        feature = "serde"
-    )
+    any(feature = "typescript", feature = "jsonschema", feature = "zod")
 ))]
 #[model_schema()]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -97,6 +91,64 @@ struct PrimitiveTypesShowcase {
     small_unsigned: u16,
     tiny_signed: i8,
     tiny_unsigned: u8,
+}
+
+#[cfg(any(feature = "typescript", feature = "jsonschema", feature = "zod"))]
+#[test]
+fn test_primitive_structs_constructible() {
+    let large = LargeNumbers {
+        array_of_i64: Vec::new(),
+        array_of_u64: Vec::new(),
+        id: String::new(),
+        large_signed: 0,
+        large_unsigned: 0,
+        optional_large_signed: None,
+        optional_large_unsigned: None,
+    };
+    assert!(large.id.is_empty());
+    let mixed = MixedIntegers {
+        isize_type: 0,
+        large_i64: 0,
+        large_u64: 0,
+        medium_i16: 0,
+        medium_u16: 0,
+        normal_i32: 0,
+        normal_u32: 0,
+        size_type: 0,
+        small_i8: 0,
+        small_u8: 0,
+    };
+    assert_eq!(mixed.normal_i32, 0_i32);
+    let showcase = PrimitiveTypesShowcase {
+        arch_signed: 0,
+        arch_unsigned: 0,
+        array_f64: Vec::new(),
+        array_i8: Vec::new(),
+        array_u64: Vec::new(),
+        float_double: 0.0,
+        float_single: 0.0,
+        large_signed: 0,
+        large_unsigned: 0,
+        map_to_f64: HashMap::new(),
+        map_to_f64_array: HashMap::new(),
+        map_to_i8: HashMap::new(),
+        map_to_i8_array: HashMap::new(),
+        map_to_u64: HashMap::new(),
+        map_to_u64_array: HashMap::new(),
+        medium_signed: 0,
+        medium_unsigned: 0,
+        opt_array_f64: None,
+        opt_array_i8: None,
+        opt_array_u64: None,
+        opt_f64: None,
+        opt_i8: None,
+        opt_u64: None,
+        small_signed: 0,
+        small_unsigned: 0,
+        tiny_signed: 0,
+        tiny_unsigned: 0,
+    };
+    assert!(showcase.array_f64.is_empty());
 }
 
 #[cfg(feature = "jsonschema")]

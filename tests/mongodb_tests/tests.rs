@@ -175,6 +175,67 @@ impl Serialize for ObjectId {
 }
 
 #[test]
+fn test_mongodb_structs_constructible() {
+    let complex = ComplexDocument {
+        author_id: ObjectId::new(),
+        id: ObjectId::new(),
+        metadata: HashMap::new(),
+        nested_refs: HashMap::new(),
+        parent_id: None,
+        references: Vec::new(),
+        title: String::new(),
+    };
+    assert!(complex.title.is_empty());
+    let document = Document {
+        author_id: ObjectId::new(),
+        id: ObjectId::new(),
+        metadata: HashMap::new(),
+        nested_refs: HashMap::new(),
+        parent_id: None,
+        references: Vec::new(),
+        title: String::new(),
+    };
+    assert!(document.title.is_empty());
+    let post = Post {
+        author_id: ObjectId::new(),
+        id: ObjectId::new(),
+        parent_id: None,
+        title: String::new(),
+    };
+    assert!(post.title.is_empty());
+    let hashmap_obj = UserWithHashMapObjectId {
+        id: ObjectId::new(),
+        name: String::new(),
+        relationships: HashMap::new(),
+    };
+    assert!(hashmap_obj.name.is_empty());
+    let array_obj = UserWithObjectIdArray {
+        friend_ids: Vec::new(),
+        id: ObjectId::new(),
+        name: String::new(),
+    };
+    assert!(array_obj.name.is_empty());
+    let map_obj = UserWithObjectIdMap {
+        id: ObjectId::new(),
+        name: String::new(),
+        relationships: HashMap::new(),
+    };
+    assert!(map_obj.name.is_empty());
+    let optional_id = UserWithOptionalId {
+        email: String::new(),
+        id: None,
+        name: String::new(),
+    };
+    assert!(optional_id.name.is_empty());
+    let other_map = UserWithOtherHashMapObjectId {
+        id: ObjectId::new(),
+        metadata: HashMap::new(),
+        name: String::new(),
+    };
+    assert!(other_map.name.is_empty());
+}
+
+#[test]
 #[cfg(all(feature = "object_id", feature = "typescript", feature = "zod"))]
 fn test_basic_object_id_types() {
     let ts_definition = User::ts_definition();

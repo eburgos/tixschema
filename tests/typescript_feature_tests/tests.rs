@@ -30,6 +30,23 @@ struct TypeScriptTestUser {
     name: String,
 }
 
+#[test]
+fn test_typescript_feature_types_constructible() {
+    let payment = TypeScriptTestPayment::PayPal {
+        email: String::new(),
+    };
+    assert!(matches!(payment, TypeScriptTestPayment::PayPal { .. }));
+    let status = TypeScriptTestStatus::Active;
+    assert_eq!(status, TypeScriptTestStatus::Active);
+    let user = TypeScriptTestUser {
+        active: false,
+        age: 0,
+        id: String::new(),
+        name: String::new(),
+    };
+    assert!(user.id.is_empty());
+}
+
 // Tests for when typescript feature is ENABLED (default configuration)
 #[test]
 #[cfg(feature = "typescript")]

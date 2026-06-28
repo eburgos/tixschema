@@ -71,6 +71,13 @@ lint:
     cargo clippy --all-targets -- -D warnings
     cargo fmt --check
 
+# Lint every feature combination (clippy over the full feature powerset). Fails on any
+# warning in any toggle, including feature-gated test code that `lint` (default features) misses.
+lint-all:
+    @echo "Linting all feature combinations..."
+    cargo hack clippy --feature-powerset --all-targets -- -D warnings
+    @echo "✅ All feature combinations lint passed!"
+
 # Check code without running tests
 check:
     @echo "Checking code..."
@@ -97,11 +104,11 @@ clean:
     @echo "✅ Build artifacts cleaned!"
 
 # Full pipeline (standardized `all` entry point across tixena repos).
-all: lint test
+all: lint lint-all test
     @echo "All checks completed successfully!"
 
 # Full CI pipeline - what CI would run
-ci: clean check-all test fmt
+ci: clean check-all lint-all test fmt
     @echo "Full CI pipeline completed successfully!"
 
 # Build documentation

@@ -1,7 +1,7 @@
 #[cfg(all(test, feature = "typescript", feature = "serde"))]
 use std::collections::HashMap;
 
-#[cfg(all(test, feature = "serde"))]
+#[cfg(all(test, feature = "typescript", feature = "serde"))]
 use serde::{Deserialize, Serialize};
 #[cfg(all(test, feature = "typescript"))]
 use tixschema::model_schema;
@@ -121,6 +121,8 @@ struct NestedAliasStruct {
 #[test]
 #[cfg(feature = "typescript")]
 fn test_string_alias_typescript() {
+    let document_id: DocumentId = String::new();
+    assert!(document_id.is_empty());
     let ts = document_id_schema::Schema::ts_definition();
 
     assert!(
@@ -136,6 +138,8 @@ fn test_string_alias_typescript() {
 #[test]
 #[cfg(feature = "typescript")]
 fn test_i64_alias_typescript() {
+    let revision: Revision = 0;
+    assert_eq!(revision, 0);
     let ts = revision_schema::Schema::ts_definition();
 
     assert!(
@@ -147,6 +151,8 @@ fn test_i64_alias_typescript() {
 #[test]
 #[cfg(feature = "typescript")]
 fn test_f32_alias_typescript() {
+    let score: Score = 0.0;
+    assert!(score.is_finite());
     let ts = score_schema::Schema::ts_definition();
 
     assert!(
@@ -158,6 +164,8 @@ fn test_f32_alias_typescript() {
 #[test]
 #[cfg(feature = "typescript")]
 fn test_bool_alias_typescript() {
+    let is_active = IsActive::default();
+    assert!(!is_active);
     let ts = is_active_schema::Schema::ts_definition();
 
     assert!(
@@ -169,6 +177,8 @@ fn test_bool_alias_typescript() {
 #[test]
 #[cfg(feature = "typescript")]
 fn test_optional_alias_typescript() {
+    let optional_note: OptionalNote = None;
+    assert!(optional_note.is_none());
     let ts = optional_note_schema::Schema::ts_definition();
 
     assert!(
@@ -180,6 +190,8 @@ fn test_optional_alias_typescript() {
 #[test]
 #[cfg(feature = "typescript")]
 fn test_vec_alias_typescript() {
+    let tags: Tags = Vec::new();
+    assert!(tags.is_empty());
     let ts = tags_schema::Schema::ts_definition();
 
     assert!(
@@ -235,6 +247,9 @@ fn test_double_generic_alias_typescript() {
 #[test]
 #[cfg(feature = "typescript")]
 fn test_nested_alias_typescript() {
+    let order_id = OrderId::default();
+    let audit_id: AuditId = order_id;
+    assert!(audit_id.is_empty());
     let ts = audit_id_schema::Schema::ts_definition();
 
     assert!(

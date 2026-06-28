@@ -126,6 +126,59 @@ struct UserWithAddress {
     name: String,
 }
 
+#[cfg(all(
+    test,
+    any(
+        feature = "typescript",
+        feature = "jsonschema",
+        feature = "zod",
+        feature = "serde"
+    )
+))]
+#[test]
+fn test_edge_case_structs_constructible() {
+    let address = Address {
+        city: String::new(),
+        street: String::new(),
+        zip_code: String::new(),
+    };
+    assert!(address.city.is_empty());
+    let original = OriginalBugReproduction {
+        problematic_map: HashMap::new(),
+        string_to_optional_vec_u64: HashMap::new(),
+        string_to_vec_bool: HashMap::new(),
+        string_to_vec_f64: HashMap::new(),
+        string_to_vec_i64: HashMap::new(),
+        string_to_vec_string: HashMap::new(),
+    };
+    assert!(original.problematic_map.is_empty());
+    let simple = SimpleComplexTest {
+        nested_map_of_arrays: HashMap::new(),
+    };
+    assert!(simple.nested_map_of_arrays.is_empty());
+    let user = UserWithAddress {
+        address,
+        backup_addresses: Vec::new(),
+        id: String::new(),
+        name: String::new(),
+    };
+    assert!(user.id.is_empty());
+}
+
+#[cfg(all(test, any(feature = "typescript", feature = "zod", feature = "serde")))]
+#[test]
+fn test_edge_case_aliases_and_complex_constructible() {
+    let optional_nested: OptionalNestedValue = Vec::new();
+    assert!(optional_nested.is_empty());
+    let quadruple: QuadrupleNestedValue = Vec::new();
+    assert!(quadruple.is_empty());
+    let complex = ReallyComplexTest {
+        optional_nested: None,
+        quadruple_nested: HashMap::new(),
+    };
+    assert!(complex.quadruple_nested.is_empty());
+}
+
 #[test]
 #[cfg(feature = "jsonschema")]
 fn test_nested_struct_json_schema() {
