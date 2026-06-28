@@ -128,7 +128,7 @@ jobs:
         if [[ "$JOB_STATUS" == "success" ]]; then
           TITLE="✅ CI Pipeline Success"; DESC="All tests passed successfully!"; COLOR=3066993; BTN_STYLE=5; BTN_LABEL="View Build"
         else
-          TITLE="❌ CI Pipeline Failed"; DESC="Build or tests failed!"; COLOR=15158332; BTN_STYLE=4; BTN_LABEL="View Failed Build"
+          TITLE="❌ CI Pipeline Failed"; DESC="Build or tests failed!"; COLOR=15158332; BTN_STYLE=5; BTN_LABEL="View Failed Build"
         fi
 
         # Assemble the payload with jq (safe escaping of all dynamic strings)
