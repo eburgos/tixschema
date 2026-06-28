@@ -130,12 +130,12 @@ test-name TEST_NAME:
 # Generate code coverage report (requires cargo-llvm-cov)
 test-coverage:
     @echo "Generating code coverage report..."
-    cargo llvm-cov --all-features
+    cargo llvm-cov --workspace --all-features
 
 # Generate code coverage HTML report (requires cargo-llvm-cov)
 test-coverage-html:
     @echo "Generating code coverage HTML report..."
-    cargo llvm-cov --all-features --html
+    cargo llvm-cov --workspace --all-features --html
     @echo "Coverage report generated in target/llvm-cov/html/"
 
 # Benchmark tests
