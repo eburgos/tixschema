@@ -201,7 +201,7 @@ pub struct BadConfig {
 - `String` → `string`
 - `bool` → `boolean`
 - Numeric types → `number`
-- `Option<T>` → `T | undefined` (Zod: `z.union([T, z.undefined()]).prefault(undefined)`)
+- `Option<T>` → `T | undefined` (Zod: `z.union([T, z.undefined()]).prefault(undefined)`); with `#[model_schema_prop(ts_optional)]` the TypeScript key becomes optional instead: `field?: T`
 - `Vec<T>` → `Array<T>`
 - `HashMap<String, T>` → `Partial<Record<string, T>>`
 - Custom types → Reference by name (Json suffix stripped if present)
@@ -274,9 +274,12 @@ All validation constraints generate checks in **Zod (frontend), JSON Schema, and
 | `maximum = N` | numeric | `.max(N)` | `"maximum"` | validator + deserializer |
 | `literal = "val"` | `String` | `z.literal("val")` | `"const"` | — |
 | `preprocess = ["fn"]` | any | `z.preprocess(fn, ...)` | — | — (Zod-only) |
+| `ts_optional` | `Option<T>` | — | — | — (TypeScript-only) |
 
 Multiple constraints on one field are combined. Multiple `preprocess` functions nest:
 `z.preprocess(fn1, z.preprocess(fn2, innerSchema))`.
+
+`ts_optional` is a bare flag (no value): it renders an `Option<T>` field as the optional TypeScript key `field?: T` instead of the default `field: T | undefined`. Zod and JSON Schema output are unchanged. It is only valid on `Option<T>` fields (non-`Option` is a compile error) and composes with `as = Type`.
 
 ```rust
 #[model_schema()]
