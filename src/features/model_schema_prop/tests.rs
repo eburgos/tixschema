@@ -63,6 +63,31 @@ fn test_parse_as_and_min_length() {
 }
 
 #[test]
+fn test_parse_ts_optional() {
+    let attr: Attribute = parse_quote! { #[model_schema_prop(ts_optional)] };
+    let meta = parse_model_schema_prop_attributes(&[attr]);
+    assert!(meta.ts_optional);
+    assert!(meta.as_type.is_none());
+    assert!(meta.literal.is_none());
+}
+
+#[test]
+fn test_parse_both_as_and_ts_optional() {
+    let attr: Attribute = parse_quote! { #[model_schema_prop(as = SomeBrand, ts_optional)] };
+    let meta = parse_model_schema_prop_attributes(&[attr]);
+    assert!(meta.as_type.is_some());
+    assert_eq!(meta.as_type.unwrap(), "SomeBrand");
+    assert!(meta.ts_optional);
+}
+
+#[test]
+fn test_parse_no_ts_optional_by_default() {
+    let attr: Attribute = parse_quote! { #[model_schema_prop(minLength = 1)] };
+    let meta = parse_model_schema_prop_attributes(&[attr]);
+    assert!(!meta.ts_optional);
+}
+
+#[test]
 fn test_parse_all_attributes() {
     let attr: Attribute =
         parse_quote! { #[model_schema_prop(as = String, literal = "test", minLength = 3)] };

@@ -847,6 +847,33 @@ pub struct Event {
 }
 ```
 
+### Optional TypeScript Keys (`ts_optional`)
+
+By default an `Option<T>` field renders as a required key carrying `| undefined` (`field: T | undefined`). Add the bare `ts_optional` flag to render it as an optional key instead (`field?: T`).
+
+This is a TypeScript-only knob -- the Zod schema and JSON Schema are unchanged (the field is already optional in both). The flag is only valid on `Option<T>` fields; applying it to a non-`Option` field is a compile error. It composes with `as = Type`.
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+pub struct Profile {
+    pub name: String,
+    #[model_schema_prop(ts_optional)]
+    pub nickname: Option<String>,
+}
+```
+
+Generated TypeScript:
+
+```typescript
+export type Profile = {
+  name: string;
+  nickname?: string;
+};
+```
+
+Without `ts_optional`, `nickname` would render as `nickname: string | undefined`.
+
 ## Compiler-Validated Examples
 
 You can provide compiler-validated example values for your types that will be embedded in the generated Zod schemas' `.meta()` field. Examples are written in doc comment code blocks and fully type-checked at compile time.
