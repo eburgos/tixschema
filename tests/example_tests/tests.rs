@@ -288,7 +288,7 @@ fn test_serde_attributes_in_example() {
 fn test_objectid_example() {
     use mongodb::bson::oid::ObjectId;
 
-    /// Document with ObjectId
+    /// Document with `ObjectId`
     /// ```rust example
     /// let oid = ObjectId::parse_str("507f1f77bcf86cd799439011").unwrap();
     /// let doc = Document {

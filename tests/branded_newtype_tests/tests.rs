@@ -342,7 +342,7 @@ mod constrained_objectid_branded_tests {
     use mongodb::bson::oid::ObjectId;
 
     #[model_schema(pattern = "^[0-9a-fA-F]{24}$")]
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct StrictObjectId(pub ObjectId);
 
@@ -350,7 +350,7 @@ mod constrained_objectid_branded_tests {
     fn test_objectid_branded_validate_pass() {
         let oid = ObjectId::parse_str("507f1f77bcf86cd799439011").unwrap();
         let valid = StrictObjectId(oid);
-        assert!(valid.validate().is_ok());
+        valid.validate().unwrap();
     }
 
     #[test]

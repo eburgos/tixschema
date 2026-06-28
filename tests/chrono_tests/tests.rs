@@ -385,17 +385,17 @@ fn test_enum_with_datetime_zod() {
 fn test_chrono_compilation_smoke_test() {
     // This test ensures all chrono types compile without panics.
     let event = EventWithDate {
-        name: "Test Event".to_string(),
+        name: "Test Event".to_owned(),
         date: NaiveDate::from_ymd_opt(2025, 11, 29).unwrap(),
     };
 
     let schedule = Schedule {
-        task: "Meeting".to_string(),
+        task: "Meeting".to_owned(),
         start_time: NaiveTime::from_hms_opt(14, 30, 0).unwrap(),
     };
 
     let timestamp = TimestampedRecord {
-        id: "123".to_string(),
+        id: "123".to_owned(),
         created_at: Utc::now(),
     };
 
