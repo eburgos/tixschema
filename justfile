@@ -127,12 +127,16 @@ test-name TEST_NAME:
     @echo "Running specific test: {{TEST_NAME}}"
     cargo test {{TEST_NAME}}
 
-# Show test coverage information
-coverage:
-    @echo "Generating test coverage..."
-    cargo install cargo-tarpaulin || echo "cargo-tarpaulin already installed"
-    cargo tarpaulin --all-features --out html
-    @echo "✅ Coverage report generated in tarpaulin-report.html"
+# Generate code coverage report (requires cargo-llvm-cov)
+test-coverage:
+    @echo "Generating code coverage report..."
+    cargo llvm-cov --all-features
+
+# Generate code coverage HTML report (requires cargo-llvm-cov)
+test-coverage-html:
+    @echo "Generating code coverage HTML report..."
+    cargo llvm-cov --all-features --html
+    @echo "Coverage report generated in target/llvm-cov/html/"
 
 # Benchmark tests
 bench:
