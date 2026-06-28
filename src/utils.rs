@@ -1,5 +1,5 @@
 use core::cell::RefCell;
-#[cfg(any(feature = "typescript", feature = "zod"))]
+#[cfg(feature = "typescript")]
 use core::iter;
 use std::collections::HashMap;
 use syn::{Attribute, Expr, Field, Lit, Meta, Variant};
@@ -10,6 +10,7 @@ use syn::{ItemEnum, ItemStruct};
 #[derive(Clone)]
 pub struct AliasInfo {
     pub export_name: String,
+    #[cfg(feature = "jsonschema")]
     pub module_name: String,
 }
 
@@ -17,13 +18,17 @@ thread_local! {
     static ALIAS_INFO: RefCell<HashMap<String, AliasInfo>> = RefCell::new(HashMap::new());
 }
 
-pub fn register_alias_info(rust_ident: &str, export_name: &str, module_name: String) {
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+pub fn register_alias_info(rust_ident: &str, export_name: &str, module_name: &str) {
+    #[cfg(not(feature = "jsonschema"))]
+    let _: &_ = &module_name;
     ALIAS_INFO.with(|map| {
         map.borrow_mut().insert(
             rust_ident.to_owned(),
             AliasInfo {
                 export_name: export_name.to_owned(),
-                module_name,
+                #[cfg(feature = "jsonschema")]
+                module_name: module_name.to_owned(),
             },
         );
     });
@@ -41,6 +46,7 @@ pub fn safe_type_name(key: &str) -> String {
     }
 }
 
+#[cfg(feature = "typescript")]
 pub fn compute_alias_export_name(rust_ident: &str, override_name: Option<String>) -> String {
     match override_name {
         Some(name) if name.trim().is_empty() => format!("{rust_ident}Type"),
@@ -49,7 +55,7 @@ pub fn compute_alias_export_name(rust_ident: &str, override_name: Option<String>
     }
 }
 
-#[cfg(any(feature = "typescript", feature = "zod"))]
+#[cfg(feature = "typescript")]
 pub fn format_docs_for_ts(docs: &[String], fallback_name: &str) -> String {
     if docs.is_empty() {
         format!(" * {fallback_name}\n * ")
@@ -91,7 +97,7 @@ pub fn get_field_docs(field: &Field) -> Option<Vec<String>> {
     collect_doc_lines(&field.attrs)
 }
 
-#[cfg(any(feature = "typescript", feature = "zod"))]
+#[cfg(feature = "typescript")]
 pub fn get_item_docs(attrs: &[Attribute]) -> Option<Vec<String>> {
     collect_doc_lines(attrs)
 }
@@ -123,6 +129,7 @@ fn collect_doc_lines(attrs: &[Attribute]) -> Option<Vec<String>> {
     }
 }
 
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 pub fn to_snake_case(name: &str) -> String {
     let mut result = String::new();
     let mut prev_lower = false;
@@ -155,6 +162,7 @@ pub fn to_snake_case(name: &str) -> String {
 ///
 /// An `Option<String>` containing the example code if found, or `None` if
 /// no example fence is present.
+#[cfg(feature = "zod")]
 pub fn extract_example_from_docs(docs: &[String]) -> Option<String> {
     let mut in_example_block = false;
     let mut example_lines = Vec::new();
@@ -204,6 +212,7 @@ pub fn extract_example_from_docs(docs: &[String]) -> Option<String> {
 /// - Strips `use` statements (type is already in scope in impl block)
 /// - `println!("...", value);` → `value`
 /// - `let _: Type = value;` → `value`
+#[cfg(feature = "zod")]
 fn transform_example_code(code: &str) -> String {
     let mut result = code.to_owned();
 
@@ -236,6 +245,7 @@ fn transform_example_code(code: &str) -> String {
 /// Strips example code blocks from documentation lines.
 ///
 /// This is used for descriptions to avoid including example code in the description field.
+#[cfg(any(feature = "typescript", feature = "zod"))]
 pub fn strip_examples_from_docs(docs: &[String]) -> Vec<String> {
     let mut result = Vec::new();
     let mut in_example_block = false;
@@ -269,4 +279,5 @@ pub fn strip_examples_from_docs(docs: &[String]) -> Vec<String> {
 }
 
 #[cfg(test)]
+#[cfg(any(feature = "typescript", feature = "zod"))]
 mod tests;

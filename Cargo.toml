@@ -50,6 +50,8 @@ all = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
 restriction = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }
+# Default trait methods (Drop::pin_drop, serde Visitor's private hooks) cannot be implemented.
+missing_trait_methods = "allow"
 blanket_clippy_restriction_lints = "allow"
 implicit_return = "allow"
 pub_with_shorthand = "allow"
