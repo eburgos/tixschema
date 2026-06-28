@@ -1981,7 +1981,14 @@ fn render_untagged_named(
     // TypeScript: `{ a: A; b: B }`
     let ts_fields = field_defs
         .iter()
-        .map(|fld| format!("{}: {}", fld.name, fld.typescript_typename()))
+        .map(|fld| {
+            format!(
+                "{}{}: {}",
+                fld.name,
+                fld.ts_optional_key_marker(),
+                fld.typescript_typename()
+            )
+        })
         .collect::<Vec<_>>()
         .join("; ");
     let ts = format!("{{ {ts_fields} }}");
@@ -2498,9 +2505,10 @@ fn write_named_variant_fields(
         // Add TypeScript type definition
         let _ = writeln!(
             variant_type_code,
-            "  /**\n{}\n**/\n  {}: {};",
+            "  /**\n{}\n**/\n  {}{}: {};",
             fld.docs,
             fld.name,
+            fld.ts_optional_key_marker(),
             fld.typescript_typename()
         );
 
@@ -3690,9 +3698,10 @@ fn write_field_type_and_schema(
     // Always write TypeScript type
     let _ = writeln!(
         type_code,
-        "  /**\n{}\n**/\n  {}: {};",
+        "  /**\n{}\n**/\n  {}{}: {};",
         fld.docs,
         fld.name,
+        fld.ts_optional_key_marker(),
         fld.typescript_typename()
     );
 
@@ -3932,6 +3941,18 @@ fn field_is_bare_string(field: &Field) -> bool {
     false
 }
 
+/// Validates the `#[model_schema_prop(ts_optional)]` flag against the field's optionality.
+///
+/// The flag only makes sense on `Option<T>` fields (where `field_optional == true`),
+/// because it controls the `field?: T` vs `field: T | undefined` rendering. Applying it
+/// to a non-`Option` field returns `Err` — the caller turns that into a compile error.
+fn validate_ts_optional_flag(field_optional: bool, flag_set: bool) -> Result<(), String> {
+    if flag_set && !field_optional {
+        return Err("#[model_schema_prop(ts_optional)] requires an Option<T> field".into());
+    }
+    Ok(())
+}
+
 /// Processes a field and returns its definition, optional module items (validators/deserializers),
 /// and optional `validate_body` (contribution to the type-level `validate()` method).
 fn process_field(
@@ -4010,8 +4031,21 @@ fn process_field(
         || model_schema_prop_meta.pattern.is_some()
         || model_schema_prop_meta.minimum.is_some()
         || model_schema_prop_meta.maximum.is_some()
+        || model_schema_prop_meta.ts_optional
         || !model_schema_prop_meta.preprocess.is_empty())
     .then_some(model_schema_prop_meta);
+
+    // `ts_optional` is only valid on `Option<T>` fields. Reject otherwise at
+    // macro-expansion time (failed assert = compile error). The pure validator
+    // `validate_ts_optional_flag` encodes the same rule and is unit-tested directly.
+    let ts_optional_flag = field_def
+        .model_schema_prop_meta
+        .as_ref()
+        .is_some_and(|m| m.ts_optional);
+    assert!(
+        validate_ts_optional_flag(field_def.is_optional, ts_optional_flag).is_ok(),
+        "#[model_schema_prop(ts_optional)] requires an Option<T> field on field `{final_name}`"
+    );
 
     // Apply type overrides based on model_schema_prop attributes
     if let Some(meta) = &field_def.model_schema_prop_meta
@@ -4574,3 +4608,6 @@ fn generate_alias_zod_stub() -> proc_macro2::TokenStream {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

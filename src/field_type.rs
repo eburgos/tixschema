@@ -211,6 +211,16 @@ impl FieldDef {
         }
     }
 
+    /// Returns `true` when this field is `Option<T>` and has opted into the
+    /// `#[model_schema_prop(ts_optional)]` flag.
+    fn has_ts_optional(&self) -> bool {
+        self.is_optional
+            && self
+                .model_schema_prop_meta
+                .as_ref()
+                .is_some_and(|m| m.ts_optional)
+    }
+
     /// Rewrites any `Self` type reference to the concrete enclosing type name.
     ///
     /// A recursive type may refer to itself with the `Self` keyword
@@ -265,6 +275,13 @@ impl FieldDef {
             | FieldDefType::NaiveDateTime
             | FieldDefType::DateTime => {}
         }
+    }
+
+    /// Returns the TypeScript object-key optionality marker for this field:
+    /// `"?"` when the field is `Option<T>` and has `ts_optional` set, else `""`.
+    /// Render sites insert this between the field name and the `:`.
+    pub fn ts_optional_key_marker(&self) -> &'static str {
+        if self.has_ts_optional() { "?" } else { "" }
     }
 
     /// Generates the TypeScript type name for this field.
@@ -363,7 +380,14 @@ impl FieldDef {
         };
 
         if self.is_optional {
-            format!("{pre_result} | undefined")
+            // When the field opts into `ts_optional`, the key itself is emitted as
+            // `field?: T` by the render sites, so the `| undefined` here would be
+            // redundant — omit it.
+            if self.has_ts_optional() {
+                pre_result
+            } else {
+                format!("{pre_result} | undefined")
+            }
         } else {
             pre_result
         }

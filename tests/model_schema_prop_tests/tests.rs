@@ -147,6 +147,63 @@ struct OptionalLiteral {
     pub optional_type: Option<String>,
 }
 
+// Inner sibling type referenced by ts_optional fields.
+#[cfg(all(
+    test,
+    any(
+        feature = "typescript",
+        feature = "jsonschema",
+        feature = "zod",
+        feature = "serde"
+    )
+))]
+#[model_schema()]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq)]
+struct Inner {
+    pub value: String,
+}
+
+// Struct exercising ts_optional on a plain Option<T> field, plus a control
+// Option<T> field without the flag, and a coexistence field with `as`.
+#[cfg(all(
+    test,
+    any(
+        feature = "typescript",
+        feature = "jsonschema",
+        feature = "zod",
+        feature = "serde"
+    )
+))]
+#[model_schema()]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq)]
+struct TsOptionalStruct {
+    #[model_schema_prop(ts_optional)]
+    pub f: Option<Inner>,
+    // Control: same shape, no flag.
+    pub g: Option<Inner>,
+    // Coexistence with `as` (a currently no-op override).
+    #[model_schema_prop(as = Inner, ts_optional)]
+    pub h: Option<Inner>,
+}
+
+// Discriminated-union enum exercising ts_optional on a named-variant field.
+#[cfg(all(
+    test,
+    any(feature = "typescript", feature = "jsonschema", feature = "zod")
+))]
+#[model_schema()]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", serde(tag = "type"))]
+enum TsOptionalVariant {
+    FilterPart {
+        #[model_schema_prop(ts_optional)]
+        filter: Option<Inner>,
+    },
+}
+
 #[test]
 #[cfg(feature = "typescript")]
 fn test_string_literal_typescript() {
@@ -417,4 +474,76 @@ fn test_combined_literal_minlength_json_schema() {
     assert_eq!(normal_prop["type"], "string");
     assert_eq!(normal_prop["minLength"], 1_i32);
     assert!(normal_prop.get("const").is_none());
+}
+
+#[test]
+#[cfg(feature = "typescript")]
+fn test_ts_optional_struct_typescript() {
+    let ts = TsOptionalStruct::ts_definition();
+
+    // ts_optional field uses the optional-key form, no `| undefined`.
+    assert!(ts.contains("f?: Inner;"), "expected `f?: Inner;` in:\n{ts}");
+    assert!(
+        !ts.contains("f: Inner | undefined"),
+        "did not expect required-key form for `f` in:\n{ts}"
+    );
+
+    // Control field without the flag keeps the required-key + `| undefined` form.
+    assert!(
+        ts.contains("g: Inner | undefined;"),
+        "expected control `g: Inner | undefined;` in:\n{ts}"
+    );
+
+    // Coexistence with `as`: still optional-key form, no panic.
+    assert!(ts.contains("h?: Inner;"), "expected `h?: Inner;` in:\n{ts}");
+}
+
+#[test]
+#[cfg(feature = "zod")]
+fn test_ts_optional_struct_zod_unchanged() {
+    let zod = TsOptionalStruct::zod_schema();
+
+    // Zod output for the ts_optional field is byte-identical to the default optional form.
+    assert!(
+        zod.contains("f: z.union([Inner$Schema, z.undefined()]).prefault(undefined)"),
+        "expected unchanged Zod for `f` in:\n{zod}"
+    );
+    assert!(
+        zod.contains("g: z.union([Inner$Schema, z.undefined()]).prefault(undefined)"),
+        "expected unchanged Zod for `g` in:\n{zod}"
+    );
+}
+
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_ts_optional_struct_json_schema_unchanged() {
+    let schema = TsOptionalStruct::json_schema();
+    let required_arr = schema["required"].as_array().unwrap();
+    let required: Vec<&str> = required_arr.iter().filter_map(|v| v.as_str()).collect();
+
+    // ts_optional does not change JSON Schema: optional fields are absent from `required`.
+    assert!(
+        !required.contains(&"f"),
+        "`f` should not be required: {required:?}"
+    );
+    assert!(
+        !required.contains(&"g"),
+        "`g` should not be required: {required:?}"
+    );
+}
+
+#[test]
+#[cfg(feature = "typescript")]
+fn test_ts_optional_variant_typescript() {
+    let ts = TsOptionalVariant::ts_definition();
+
+    // Covers the named-variant render path (write_named_variant_fields).
+    assert!(
+        ts.contains("filter?: Inner;"),
+        "expected `filter?: Inner;` in variant TS:\n{ts}"
+    );
+    assert!(
+        !ts.contains("filter: Inner | undefined"),
+        "did not expect required-key form for variant `filter` in:\n{ts}"
+    );
 }
