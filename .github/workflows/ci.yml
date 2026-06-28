@@ -13,22 +13,22 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-      
+
     - name: Setup Rust
       uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
         toolchain: stable
         components: clippy, rustfmt
-        
+
     - name: Install just and cargo-hack
       uses: taiki-e/install-action@v2
       with:
         tool: just,cargo-hack
-        
+
     - name: Cache cargo registry
       uses: actions/cache@v3
       with:
@@ -39,25 +39,25 @@ jobs:
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
           ${{ runner.os }}-cargo-
-          
+
     - name: Build project
       id: build
       run: |
         echo "🏗️ Building project..."
         cargo build --verbose
-        
+
     - name: Run code checks
       id: check
       run: |
         echo "🔍 Running code checks..."
         just check
-        
+
     - name: Run basic tests
       id: test-basic
       run: |
         echo "🧪 Running basic tests..."
         cargo test --verbose
-        
+
     - name: Run extensive tests
       id: test-extensive
       env:
@@ -65,147 +65,113 @@ jobs:
       run: |
         echo "🚀 Running extensive tests..."
         just test
-        
+
     - name: Send Discord notification
       if: always()
+      # All GitHub context is passed via env (NOT interpolated into the script
+      # body) so attacker-controllable strings like commit messages cannot break
+      # the JSON or inject shell. The payload is assembled with jq, which escapes
+      # everything safely.
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        REPO: ${{ github.repository }}
+        BRANCH: ${{ github.head_ref || github.ref_name }}
+        COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        PUSH_MSG: ${{ github.event.head_commit.message }}
+        PUSH_AUTHOR: ${{ github.event.head_commit.author.name }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        PR_URL: ${{ github.event.pull_request.html_url }}
+        PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        ACTOR: ${{ github.actor }}
+        SERVER_URL: ${{ github.server_url }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        TIMESTAMP: ${{ github.event.head_commit.timestamp }}
+        BLD: ${{ steps.build.outcome }}
+        CHK: ${{ steps.check.outcome }}
+        TBASIC: ${{ steps.test-basic.outcome }}
+        TEXT: ${{ steps.test-extensive.outcome }}
       run: |
         # Validate repository to prevent forks from sending notifications
-        if [[ "${{ github.repository }}" != "tixena/tixschema" ]]; then
-          echo "⏭️ Skipping Discord notification (repository is ${{ github.repository }}, not tixena/tixschema)"
+        if [[ "$REPO" != "tixena/tixschema" ]]; then
+          echo "⏭️ Skipping Discord notification (repository is $REPO, not tixena/tixschema)"
           exit 0
         fi
 
-        # Determine overall job status
+        # Overall status + which step failed
         JOB_STATUS="success"
-        if [[ "${{ steps.build.outcome }}" == "failure" || "${{ steps.check.outcome }}" == "failure" || "${{ steps.test-basic.outcome }}" == "failure" || "${{ steps.test-extensive.outcome }}" == "failure" ]]; then
-          JOB_STATUS="failure"
-        fi
-        
-        # Determine which step failed (if any)
         FAILED_STEP="None"
-        if [[ "${{ steps.build.outcome }}" == "failure" ]]; then
-          FAILED_STEP="Build (cargo build)"
-        elif [[ "${{ steps.check.outcome }}" == "failure" ]]; then
-          FAILED_STEP="Code checks (just check)"
-        elif [[ "${{ steps.test-basic.outcome }}" == "failure" ]]; then
-          FAILED_STEP="Basic tests (cargo test)"
-        elif [[ "${{ steps.test-extensive.outcome }}" == "failure" ]]; then
-          FAILED_STEP="Extensive tests (just test)"
+        if [[ "$BLD" == "failure" ]]; then JOB_STATUS="failure"; FAILED_STEP="Build (cargo build)";
+        elif [[ "$CHK" == "failure" ]]; then JOB_STATUS="failure"; FAILED_STEP="Code checks (just check)";
+        elif [[ "$TBASIC" == "failure" ]]; then JOB_STATUS="failure"; FAILED_STEP="Basic tests (cargo test)";
+        elif [[ "$TEXT" == "failure" ]]; then JOB_STATUS="failure"; FAILED_STEP="Extensive tests (just test)";
         fi
-        
-        # Create status indicators
-        BUILD_STATUS="${{ steps.build.outcome == 'success' && '✅' || steps.build.outcome == 'failure' && '❌' || '⏭️' }}"
-        CHECK_STATUS="${{ steps.check.outcome == 'success' && '✅' || steps.check.outcome == 'failure' && '❌' || '⏭️' }}"
-        TEST_BASIC_STATUS="${{ steps.test-basic.outcome == 'success' && '✅' || steps.test-basic.outcome == 'failure' && '❌' || '⏭️' }}"
-        TEST_EXTENSIVE_STATUS="${{ steps.test-extensive.outcome == 'success' && '✅' || steps.test-extensive.outcome == 'failure' && '❌' || '⏭️' }}"
-        
-        # Prepare JSON payload based on job status
-        if [[ "$JOB_STATUS" == "success" ]]; then
-          JSON_PAYLOAD='{
-            "embeds": [{
-              "title": "✅ CI Pipeline Success",
-              "description": "All tests passed successfully!",
-              "color": 3066993,
-              "fields": [
-                {
-                  "name": "Repository",
-                  "value": "${{ github.repository }}",
-                  "inline": true
-                },
-                {
-                  "name": "Branch", 
-                  "value": "${{ github.ref_name }}",
-                  "inline": true
-                },
-                {
-                  "name": "Commit",
-                  "value": "[`${{ github.sha }}`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})",
-                  "inline": true
-                },
-                {
-                  "name": "Build Status",
-                  "value": "🏗️ Build: '"$BUILD_STATUS"'\n🔍 Check: '"$CHECK_STATUS"'\n🧪 Basic Tests: '"$TEST_BASIC_STATUS"'\n🚀 Extensive Tests: '"$TEST_EXTENSIVE_STATUS"'",
-                  "inline": false
-                }
-              ],
-              "footer": {
-                "text": "Core Model Macros CI"
-              },
-              "timestamp": "${{ github.event.head_commit.timestamp }}"
-            }],
-            "components": [{
-              "type": 1,
-              "components": [{
-                "type": 2,
-                "style": 5,
-                "label": "View Build",
-                "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-              }]
-            }]
-          }'
+
+        icon() { case "$1" in success) printf '✅';; failure) printf '❌';; *) printf '⏭️';; esac; }
+        STATUS_VALUE=$(printf '🏗️ Build: %s\n🔍 Check: %s\n🧪 Basic Tests: %s\n🚀 Extensive Tests: %s' \
+          "$(icon "$BLD")" "$(icon "$CHK")" "$(icon "$TBASIC")" "$(icon "$TEXT")")
+
+        # Per-event details: commit message / author / PR link
+        if [[ "$EVENT_NAME" == "pull_request" ]]; then
+          COMMIT_MSG="$PR_TITLE"
+          AUTHOR="${PR_AUTHOR:-$ACTOR}"
+          PR_MD="[#${PR_NUMBER}: ${PR_TITLE}](${PR_URL})"
         else
-          JSON_PAYLOAD='{
-            "embeds": [{
-              "title": "❌ CI Pipeline Failed",
-              "description": "Build or tests failed!",
-              "color": 15158332,
-              "fields": [
-                {
-                  "name": "Repository",
-                  "value": "${{ github.repository }}",
-                  "inline": true
-                },
-                {
-                  "name": "Branch",
-                  "value": "${{ github.ref_name }}",
-                  "inline": true
-                },
-                {
-                  "name": "Commit",
-                  "value": "[`${{ github.sha }}`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})",
-                  "inline": true
-                },
-                {
-                  "name": "Failed Step",
-                  "value": "'"$FAILED_STEP"'",
-                  "inline": false
-                },
-                {
-                  "name": "Build Status",
-                  "value": "🏗️ Build: '"$BUILD_STATUS"'\n🔍 Check: '"$CHECK_STATUS"'\n🧪 Basic Tests: '"$TEST_BASIC_STATUS"'\n🚀 Extensive Tests: '"$TEST_EXTENSIVE_STATUS"'",
-                  "inline": false
-                }
-              ],
-              "footer": {
-                "text": "Core Model Macros CI"
-              },
-              "timestamp": "${{ github.event.head_commit.timestamp }}"
-            }],
-            "components": [{
-              "type": 1,
-              "components": [{
-                "type": 2,
-                "style": 4,
-                "label": "View Failed Build",
-                "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-              }]
-            }]
-          }'
+          COMMIT_MSG=$(printf '%s' "$PUSH_MSG" | head -n1)
+          AUTHOR="${PUSH_AUTHOR:-$ACTOR}"
+          PR_MD=""
         fi
-        
-        # Send Discord webhook with error handling
+        [[ -z "$COMMIT_MSG" ]] && COMMIT_MSG="(no message)"
+        SHORT_SHA="${COMMIT_SHA:0:7}"
+        COMMIT_MD="[\`${SHORT_SHA}\`](${SERVER_URL}/${REPO}/commit/${COMMIT_SHA})"
+
+        if [[ "$JOB_STATUS" == "success" ]]; then
+          TITLE="✅ CI Pipeline Success"; DESC="All tests passed successfully!"; COLOR=3066993; BTN_STYLE=5; BTN_LABEL="View Build"
+        else
+          TITLE="❌ CI Pipeline Failed"; DESC="Build or tests failed!"; COLOR=15158332; BTN_STYLE=4; BTN_LABEL="View Failed Build"
+        fi
+
+        # Assemble the payload with jq (safe escaping of all dynamic strings)
+        PAYLOAD=$(jq -n \
+          --arg title "$TITLE" --arg desc "$DESC" --argjson color "$COLOR" \
+          --arg repo "$REPO" --arg branch "$BRANCH" --arg author "$AUTHOR" \
+          --arg commit "$COMMIT_MD" --arg msg "$COMMIT_MSG" \
+          --arg pr "$PR_MD" --arg failed "$FAILED_STEP" --arg status "$STATUS_VALUE" \
+          --arg ts "$TIMESTAMP" \
+          --arg run_url "$RUN_URL" --argjson btn_style "$BTN_STYLE" --arg btn_label "$BTN_LABEL" \
+          '{
+            embeds: [
+              ({
+                title: $title,
+                description: $desc,
+                color: $color,
+                fields: (
+                  [ {name: "Repository", value: $repo, inline: true},
+                    {name: "Branch", value: $branch, inline: true},
+                    {name: "Author", value: $author, inline: true},
+                    {name: "Commit", value: ($commit + "  " + $msg), inline: false} ]
+                  + (if $pr != "" then [ {name: "Pull Request", value: $pr, inline: false} ] else [] end)
+                  + (if $failed != "None" then [ {name: "Failed Step", value: $failed, inline: false} ] else [] end)
+                  + [ {name: "Build Status", value: $status, inline: false} ]
+                ),
+                footer: {text: "Core Model Macros CI"}
+              } + (if $ts != "" then {timestamp: $ts} else {} end))
+            ],
+            components: [
+              {type: 1, components: [ {type: 2, style: $btn_style, label: $btn_label, url: $run_url} ]}
+            ]
+          }')
+
         echo "Sending Discord notification..."
         echo "Job Status: $JOB_STATUS"
         echo "Failed Step: $FAILED_STEP"
-        
-        RESPONSE=$(curl -s -w "HTTPSTATUS:%{http_code}" -H "Content-Type: application/json" -d "$JSON_PAYLOAD" "$DISCORD_WEBHOOK")
-        
-        # Extract HTTP status code
-        HTTP_STATUS=$(echo $RESPONSE | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
-        
+
+        RESPONSE=$(curl -s -w "HTTPSTATUS:%{http_code}" -H "Content-Type: application/json" -d "$PAYLOAD" "$DISCORD_WEBHOOK")
+        HTTP_STATUS=$(echo "$RESPONSE" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
+
         if [[ $HTTP_STATUS -eq 200 || $HTTP_STATUS -eq 204 ]]; then
           echo "✅ Discord notification sent successfully (HTTP $HTTP_STATUS)"
         else
           echo "❌ Discord notification failed (HTTP $HTTP_STATUS)"
           echo "Response: $RESPONSE"
-        fi 
+        fi
