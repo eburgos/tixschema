@@ -225,6 +225,7 @@ fn process_type_alias(item_type: ItemType, args: &ModelSchemaArgs) -> TokenStrea
         pub mod #module_ident {
             use super::*;
 
+            #[non_exhaustive]
             pub struct Schema;
 
             impl Schema {
@@ -394,6 +395,7 @@ where
         pub mod #module_ident {
             use super::*;
 
+            #[non_exhaustive]
             pub struct Schema;
 
             impl Schema {
@@ -1235,6 +1237,7 @@ fn assemble_branded_output(parts: &BrandedNewtypeOutput) -> TokenStream {
         pub mod #module_ident {
             use super::*;
 
+            #[non_exhaustive]
             pub struct Schema;
 
             impl Schema {
@@ -1685,6 +1688,7 @@ fn process_plain_enum(
         pub mod #module_ident {
             use super::*;
 
+            #[non_exhaustive]
             pub struct Schema;
 
             impl Schema {
