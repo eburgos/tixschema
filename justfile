@@ -96,6 +96,10 @@ clean:
     cargo clean
     @echo "✅ Build artifacts cleaned!"
 
+# Full pipeline (standardized `all` entry point across tixena repos).
+all: lint test
+    @echo "All checks completed successfully!"
+
 # Full CI pipeline - what CI would run
 ci: clean check-all test fmt
     @echo "Full CI pipeline completed successfully!"
