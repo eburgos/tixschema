@@ -199,6 +199,80 @@ enum TsOptionalVariant {
     },
 }
 
+#[cfg(all(
+    test,
+    any(
+        feature = "typescript",
+        feature = "jsonschema",
+        feature = "zod",
+        feature = "serde"
+    )
+))]
+#[test]
+fn test_model_schema_prop_structs_constructible() {
+    let account = AccountContext {
+        aud: String::new(),
+        exp: 0,
+        iat: 0,
+        iss: String::new(),
+        jti: String::new(),
+        nbf: 0,
+        sub: String::new(),
+    };
+    assert!(account.aud.is_empty());
+    let array_literal = ArrayLiteral {
+        id: String::new(),
+        literal_array: Vec::new(),
+    };
+    assert!(array_literal.id.is_empty());
+    let combined = CombinedTest {
+        fixed_field: String::new(),
+        normal_field: String::new(),
+    };
+    assert!(combined.fixed_field.is_empty());
+    let min_length = MinLengthTest {
+        description: String::new(),
+        name: String::new(),
+        nickname: None,
+        password: String::new(),
+        tags: Vec::new(),
+        username: String::new(),
+    };
+    assert!(min_length.description.is_empty());
+    let multiple = MultipleLiterals {
+        id: String::new(),
+        name: String::new(),
+        type_field: String::new(),
+        version: String::new(),
+    };
+    assert!(multiple.id.is_empty());
+    let optional_literal = OptionalLiteral {
+        id: String::new(),
+        optional_type: None,
+    };
+    assert!(optional_literal.id.is_empty());
+    let inner = Inner {
+        value: String::new(),
+    };
+    assert!(inner.value.is_empty());
+    let ts_optional = TsOptionalStruct {
+        f: None,
+        g: None,
+        h: None,
+    };
+    assert!(ts_optional.f.is_none());
+}
+
+#[cfg(all(
+    test,
+    any(feature = "typescript", feature = "jsonschema", feature = "zod")
+))]
+#[test]
+fn test_ts_optional_variant_constructible() {
+    let variant = TsOptionalVariant::FilterPart { filter: None };
+    assert!(matches!(variant, TsOptionalVariant::FilterPart { .. }));
+}
+
 #[test]
 #[cfg(feature = "typescript")]
 fn test_string_literal_typescript() {

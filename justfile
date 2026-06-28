@@ -71,6 +71,13 @@ lint:
     cargo clippy --all-targets -- -D warnings
     cargo fmt --check
 
+# Lint every feature combination (clippy over the full feature powerset). Fails on any
+# warning in any toggle, including feature-gated test code that `lint` (default features) misses.
+lint-all:
+    @echo "Linting all feature combinations..."
+    cargo hack clippy --feature-powerset --all-targets -- -D warnings
+    @echo "✅ All feature combinations lint passed!"
+
 # Check code without running tests
 check:
     @echo "Checking code..."
@@ -97,11 +104,11 @@ clean:
     @echo "✅ Build artifacts cleaned!"
 
 # Full pipeline (standardized `all` entry point across tixena repos).
-all: lint test
+all: lint lint-all test
     @echo "All checks completed successfully!"
 
 # Full CI pipeline - what CI would run
-ci: clean check-all test fmt
+ci: clean check-all lint-all test fmt
     @echo "Full CI pipeline completed successfully!"
 
 # Build documentation
@@ -120,12 +127,16 @@ test-name TEST_NAME:
     @echo "Running specific test: {{TEST_NAME}}"
     cargo test {{TEST_NAME}}
 
-# Show test coverage information
-coverage:
-    @echo "Generating test coverage..."
-    cargo install cargo-tarpaulin || echo "cargo-tarpaulin already installed"
-    cargo tarpaulin --all-features --out html
-    @echo "✅ Coverage report generated in tarpaulin-report.html"
+# Generate code coverage report (requires cargo-llvm-cov)
+test-coverage:
+    @echo "Generating code coverage report..."
+    cargo llvm-cov --all-features
+
+# Generate code coverage HTML report (requires cargo-llvm-cov)
+test-coverage-html:
+    @echo "Generating code coverage HTML report..."
+    cargo llvm-cov --all-features --html
+    @echo "Coverage report generated in target/llvm-cov/html/"
 
 # Benchmark tests
 bench:

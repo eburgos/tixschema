@@ -139,6 +139,71 @@ enum UserStatus {
     Suspended,
 }
 
+#[cfg(all(test, any(feature = "typescript", feature = "zod", feature = "serde")))]
+#[test]
+fn test_ts_zod_serde_enums_constructible() {
+    let actions = [
+        ActionWithLiteralEnum::Generate {
+            value: DocumentLiteralValue::Document,
+        },
+        ActionWithLiteralEnum::Upload {
+            value: String::new(),
+        },
+    ];
+    assert_eq!(actions.len(), 2);
+    let operators = [
+        CalculatedExpressionOperator::Add,
+        CalculatedExpressionOperator::Divide,
+        CalculatedExpressionOperator::Modulus,
+        CalculatedExpressionOperator::Multiply,
+        CalculatedExpressionOperator::None,
+        CalculatedExpressionOperator::Subtract,
+    ];
+    assert_eq!(operators.len(), 6);
+    let statuses = [
+        UserStatus::Active,
+        UserStatus::Inactive,
+        UserStatus::Pending,
+        UserStatus::Suspended,
+    ];
+    assert_eq!(statuses.len(), 4);
+}
+
+#[cfg(all(test, feature = "serde", any(feature = "typescript", feature = "zod")))]
+#[test]
+fn test_serde_mime_enums_constructible() {
+    let distributions = [
+        DistributionValidMimeType::ApplicationDocx,
+        DistributionValidMimeType::ApplicationPdf,
+    ];
+    assert_eq!(distributions.len(), 2);
+    let mimes = [MimeType::ApplicationDocx, MimeType::ApplicationPdf];
+    assert_eq!(mimes.len(), 2);
+}
+
+#[cfg(all(
+    test,
+    any(feature = "typescript", feature = "jsonschema", feature = "zod")
+))]
+#[test]
+fn test_payment_method_constructible() {
+    let payments = [
+        PaymentMethod::BankTransfer {
+            account_number: String::new(),
+            routing_number: String::new(),
+        },
+        PaymentMethod::CreditCard {
+            card_number: String::new(),
+            cvv: String::new(),
+            expiry_date: String::new(),
+        },
+        PaymentMethod::PayPal {
+            email: String::new(),
+        },
+    ];
+    assert_eq!(payments.len(), 3);
+}
+
 #[test]
 #[cfg(all(feature = "jsonschema", feature = "serde"))]
 fn test_plain_enum_json_schema() {

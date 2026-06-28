@@ -105,6 +105,59 @@ struct TimestampedRecord {
     id: String,
 }
 
+#[test]
+fn test_chrono_types_constructible() {
+    let date = NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
+    let time = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
+    let naive_dt = date.and_time(time);
+    let utc_dt = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+    let local_dt = utc_dt.with_timezone(&Local);
+
+    let all = AllChronoTypes {
+        date,
+        local_datetime: naive_dt,
+        local_timestamp: local_dt,
+        time,
+        utc_datetime: utc_dt,
+    };
+    assert_eq!(all.date, date);
+    let date_list = DateList {
+        dates: Vec::new(),
+        name: String::new(),
+    };
+    assert!(date_list.dates.is_empty());
+    let date_map = DateMap {
+        events: HashMap::new(),
+        name: String::new(),
+    };
+    assert!(date_map.events.is_empty());
+    let values = [
+        FixedValue::Alphanumeric(String::new()),
+        FixedValue::Boolean(false),
+        FixedValue::Date(date),
+        FixedValue::DateTime(local_dt),
+        FixedValue::Decimal(0.0),
+        FixedValue::Integer(0),
+        FixedValue::Time(time),
+    ];
+    assert_eq!(values.len(), 7);
+    let local_event = LocalEvent {
+        local_datetime: naive_dt,
+        title: String::new(),
+    };
+    assert!(local_event.title.is_empty());
+    let local_timestamp = LocalTimestamp {
+        id: String::new(),
+        local_time: local_dt,
+    };
+    assert!(local_timestamp.id.is_empty());
+    let optional_timestamp = OptionalTimestamp {
+        id: String::new(),
+        updated_at: None,
+    };
+    assert!(optional_timestamp.updated_at.is_none());
+}
+
 // ========== TypeScript Type Tests ==========
 
 #[test]
@@ -385,17 +438,17 @@ fn test_enum_with_datetime_zod() {
 fn test_chrono_compilation_smoke_test() {
     // This test ensures all chrono types compile without panics.
     let event = EventWithDate {
-        name: "Test Event".to_string(),
+        name: "Test Event".to_owned(),
         date: NaiveDate::from_ymd_opt(2025, 11, 29).unwrap(),
     };
 
     let schedule = Schedule {
-        task: "Meeting".to_string(),
+        task: "Meeting".to_owned(),
         start_time: NaiveTime::from_hms_opt(14, 30, 0).unwrap(),
     };
 
     let timestamp = TimestampedRecord {
-        id: "123".to_string(),
+        id: "123".to_owned(),
         created_at: Utc::now(),
     };
 

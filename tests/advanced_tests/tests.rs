@@ -182,6 +182,77 @@ enum RetirementPlan {
     },
 }
 
+#[test]
+fn test_advanced_types_constructible() {
+    let address = Address {
+        city: String::new(),
+        country: String::new(),
+        state: String::new(),
+        street: String::new(),
+        zip_code: String::new(),
+    };
+    assert!(address.city.is_empty());
+    let settings = CompanySettings {
+        allow_remote_work: false,
+        health_insurance_provider: None,
+        max_vacation_days: 0,
+        retirement_plan: None,
+    };
+    assert!(!settings.allow_remote_work);
+    let company = Company {
+        department_names: Vec::new(),
+        employees: Vec::new(),
+        headquarters: address,
+        id: String::new(),
+        name: String::new(),
+        settings,
+    };
+    assert!(company.id.is_empty());
+    let event = ComplexEvent::SystemMaintenance {
+        affected_services: Vec::new(),
+        estimated_duration: 0,
+        notification_sent: false,
+        scheduled_start: String::new(),
+    };
+    assert!(matches!(event, ComplexEvent::SystemMaintenance { .. }));
+    let documented = DocumentedUser {
+        email: String::new(),
+        id: String::new(),
+        is_active: false,
+        metadata: None,
+        name: String::new(),
+    };
+    assert!(documented.id.is_empty());
+    let edge = EdgeCases {
+        booleans: Vec::new(),
+        float_number: 0.0,
+        medium_number: 0,
+        nested_array: Vec::new(),
+        nested_optional: None,
+        numbers: Vec::new(),
+        optional_nested_array: None,
+        optional_numbers: None,
+        optional_strings: None,
+        small_number: 0,
+        string_map: HashMap::new(),
+        strings: Vec::new(),
+        tiny_number: 0,
+    };
+    assert!(edge.booleans.is_empty());
+    let item = PurchaseItem {
+        discount_applied: None,
+        product_id: String::new(),
+        quantity: 0,
+        unit_price: 0,
+    };
+    assert!(item.product_id.is_empty());
+    let plan = RetirementPlan::Roth {
+        contribution_limit: 0,
+        employer_contribution: false,
+    };
+    assert!(matches!(plan, RetirementPlan::Roth { .. }));
+}
+
 #[cfg(all(feature = "typescript", feature = "zod"))]
 fn assert_ts_contains_fields(ts_definition: &str, assertions: &[(&str, &str)]) {
     for (field, expected_type) in assertions {

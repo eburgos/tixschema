@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(feature = "zod")]
 #[test]
 fn test_extract_example_simple() {
     let docs = vec![
@@ -17,6 +18,7 @@ fn test_extract_example_simple() {
     );
 }
 
+#[cfg(feature = "zod")]
 #[test]
 fn test_extract_example_multiline() {
     let docs = vec![
@@ -36,6 +38,7 @@ fn test_extract_example_multiline() {
     assert!(code.contains("User { age: x + y }"));
 }
 
+#[cfg(feature = "zod")]
 #[test]
 fn test_extract_example_first_only() {
     let docs = vec![
@@ -54,6 +57,7 @@ fn test_extract_example_first_only() {
     assert_eq!(example.unwrap(), "User { age: 25 }");
 }
 
+#[cfg(feature = "zod")]
 #[test]
 fn test_extract_example_none() {
     let docs = vec!["User profile".to_owned(), "No examples here".to_owned()];
@@ -62,6 +66,7 @@ fn test_extract_example_none() {
     assert!(example.is_none());
 }
 
+#[cfg(feature = "zod")]
 #[test]
 fn test_extract_example_empty_docs() {
     let docs: Vec<String> = vec![];
@@ -69,6 +74,7 @@ fn test_extract_example_empty_docs() {
     assert!(example.is_none());
 }
 
+#[cfg(feature = "zod")]
 #[test]
 fn test_extract_example_regular_code_fence_ignored() {
     let docs = vec![
@@ -82,6 +88,7 @@ fn test_extract_example_regular_code_fence_ignored() {
     assert!(example.is_none());
 }
 
+#[cfg(feature = "zod")]
 #[test]
 fn test_transform_println_pattern() {
     let code = concat!(
@@ -93,6 +100,7 @@ fn test_transform_println_pattern() {
     assert_eq!(result, "let data_type = DataType::Integer;\ndata_type");
 }
 
+#[cfg(feature = "zod")]
 #[test]
 fn test_transform_let_underscore_pattern() {
     let code = "let _: DataType = DataType::Integer;";
@@ -100,6 +108,7 @@ fn test_transform_let_underscore_pattern() {
     assert_eq!(result, "DataType::Integer");
 }
 
+#[cfg(feature = "zod")]
 #[test]
 fn test_transform_let_underscore_no_type() {
     let code = "let _ = DataType::Integer;";
@@ -107,6 +116,7 @@ fn test_transform_let_underscore_no_type() {
     assert_eq!(result, "DataType::Integer");
 }
 
+#[cfg(feature = "zod")]
 #[test]
 fn test_transform_no_pattern_match() {
     let code = "DataType::Integer";
@@ -114,6 +124,7 @@ fn test_transform_no_pattern_match() {
     assert_eq!(result, "DataType::Integer");
 }
 
+#[cfg(feature = "zod")]
 #[test]
 fn test_transform_strips_use_statements() {
     let code = concat!(
@@ -126,6 +137,7 @@ fn test_transform_strips_use_statements() {
     assert_eq!(result, "let data_type = DataType::Integer;\ndata_type");
 }
 
+#[cfg(feature = "zod")]
 #[test]
 fn test_transform_strips_multiple_use_statements() {
     let code = concat!(
