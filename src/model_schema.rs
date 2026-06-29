@@ -4003,6 +4003,21 @@ fn field_is_bare_string(field: &Field) -> bool {
     false
 }
 
+fn validate_as_number_flag(field_type: &FieldDefType, flag_set: bool) -> Result<(), String> {
+    #[cfg(not(feature = "chrono"))]
+    let _: &FieldDefType = field_type;
+
+    #[cfg(feature = "chrono")]
+    let is_datetime = matches!(field_type, FieldDefType::DateTime);
+    #[cfg(not(feature = "chrono"))]
+    let is_datetime = false;
+
+    if flag_set && !is_datetime {
+        return Err("#[model_schema_prop(as_number)] requires a chrono DateTime<Tz> field".into());
+    }
+    Ok(())
+}
+
 fn validate_ts_optional_flag(field_optional: bool, flag_set: bool) -> Result<(), String> {
     if flag_set && !field_optional {
         return Err("#[model_schema_prop(ts_optional)] requires an Option<T> field".into());
@@ -4091,6 +4106,7 @@ fn process_field(
         || model_schema_prop_meta.minimum.is_some()
         || model_schema_prop_meta.maximum.is_some()
         || model_schema_prop_meta.ts_optional
+        || model_schema_prop_meta.as_number
         || !model_schema_prop_meta.preprocess.is_empty())
     .then_some(model_schema_prop_meta);
 
@@ -4102,6 +4118,15 @@ fn process_field(
     assert!(
         validate_ts_optional_flag(field_def.is_optional, ts_optional_flag).is_ok(),
         "#[model_schema_prop(ts_optional)] requires an Option<T> field on field `{final_name}`"
+    );
+
+    let as_number_flag = field_def
+        .model_schema_prop_meta
+        .as_ref()
+        .is_some_and(|m| m.as_number);
+    assert!(
+        validate_as_number_flag(&field_def.field_type, as_number_flag).is_ok(),
+        "#[model_schema_prop(as_number)] requires a chrono DateTime<Tz> field on field `{final_name}`"
     );
 
     // Apply type overrides based on model_schema_prop attributes
