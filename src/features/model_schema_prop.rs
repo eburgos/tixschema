@@ -70,13 +70,14 @@ use syn::{Attribute, LitStr, Type};
 /// ```
 #[derive(Clone, Debug, Default)]
 pub struct ModelSchemaPropMeta {
-    pub as_type: Option<String>,   // e.g., "String" from as = String
-    pub literal: Option<String>,   // e.g., "Tixena" from literal = "Tixena"
+    pub as_number: bool, // DateTime<Tz>: epoch-number + codegen coercer instead of the native Date default
+    pub as_type: Option<String>, // e.g., "String" from as = String
+    pub literal: Option<String>, // e.g., "Tixena" from literal = "Tixena"
     pub max_length: Option<usize>, // e.g., 50 from maxLength = 50
-    pub maximum: Option<f64>,      // e.g., 100.0 from maximum = 100
+    pub maximum: Option<f64>, // e.g., 100.0 from maximum = 100
     pub min_length: Option<usize>, // e.g., 1 from minLength = 1
-    pub minimum: Option<f64>,      // e.g., 0.0 from minimum = 0
-    pub pattern: Option<String>,   // e.g., "^[0-9a-fA-F]{24}$" from pattern = "^[0-9a-fA-F]{24}$"
+    pub minimum: Option<f64>, // e.g., 0.0 from minimum = 0
+    pub pattern: Option<String>, // e.g., "^[0-9a-fA-F]{24}$" from pattern = "^[0-9a-fA-F]{24}$"
     pub preprocess: Vec<String>, // e.g., ["epoch_to_date", "trim"] from preprocess = ["epoch_to_date", "trim"]
     pub ts_optional: bool,
 }
@@ -175,6 +176,8 @@ pub fn parse_model_schema_prop_attributes(attrs: &[Attribute]) -> ModelSchemaPro
                     meta.preprocess = fns;
                 } else if nested.path.is_ident("ts_optional") {
                     meta.ts_optional = true;
+                } else if nested.path.is_ident("as_number") {
+                    meta.as_number = true;
                 } else {
                     // Ignore unknown model_schema_prop keys.
                 }

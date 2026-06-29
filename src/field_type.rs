@@ -216,6 +216,13 @@ impl FieldDef {
         }
     }
 
+    #[cfg(feature = "chrono")]
+    fn has_as_number(&self) -> bool {
+        self.model_schema_prop_meta
+            .as_ref()
+            .is_some_and(|m| m.as_number)
+    }
+
     fn has_ts_optional(&self) -> bool {
         self.is_optional
             && self
@@ -369,7 +376,13 @@ impl FieldDef {
             #[cfg(feature = "chrono")]
             FieldDefType::NaiveDateTime => chrono::get_naive_datetime_typescript_type(),
             #[cfg(feature = "chrono")]
-            FieldDefType::DateTime => chrono::get_datetime_typescript_type(),
+            FieldDefType::DateTime => {
+                if self.has_as_number() {
+                    chrono::get_datetime_number_typescript_type()
+                } else {
+                    chrono::get_datetime_typescript_type()
+                }
+            }
         };
         let pre_result = if self.is_array {
             format!("Array<{result}>")
@@ -500,7 +513,13 @@ impl FieldDef {
             #[cfg(feature = "chrono")]
             FieldDefType::NaiveDateTime => chrono::get_naive_datetime_zod_schema(),
             #[cfg(feature = "chrono")]
-            FieldDefType::DateTime => chrono::get_datetime_zod_schema(),
+            FieldDefType::DateTime => {
+                if self.has_as_number() {
+                    chrono::get_datetime_number_zod_schema()
+                } else {
+                    chrono::get_datetime_native_zod_schema()
+                }
+            }
         };
         let array_result = if self.is_array {
             format!("z.array({result})")

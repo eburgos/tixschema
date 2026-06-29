@@ -206,6 +206,8 @@ pub struct BadConfig {
 - `HashMap<String, T>` → `Partial<Record<string, T>>`
 - Custom types → Reference by name (Json suffix stripped if present)
 - `ObjectId` → `ObjectId` (with $oid validation)
+- `DateTime<Tz>` → `Date` (Zod `z.coerce.date()`); with `#[model_schema_prop(as_number)]` → `number` (inline epoch-ms coercer)
+- `NaiveTime` → `string` (Zod `z.iso.time()` wrapped in an inline preprocessor that also accepts millis-since-start-of-day)
 - `#[serde(flatten)]` field → TypeScript intersection (`A & B`), Zod `.and(...)`
 - `#[serde(untagged)]` enum → TypeScript union (`A | B`), Zod `z.union([...])`, JSON Schema `anyOf`
 
@@ -275,11 +277,14 @@ All validation constraints generate checks in **Zod (frontend), JSON Schema, and
 | `literal = "val"` | `String` | `z.literal("val")` | `"const"` | — |
 | `preprocess = ["fn"]` | any | `z.preprocess(fn, ...)` | — | — (Zod-only) |
 | `ts_optional` | `Option<T>` | — | — | — (TypeScript-only) |
+| `as_number` | `DateTime<Tz>` | inline `z.preprocess(..., z.number())` | — | — (TS+Zod) |
 
 Multiple constraints on one field are combined. Multiple `preprocess` functions nest:
 `z.preprocess(fn1, z.preprocess(fn2, innerSchema))`.
 
 `ts_optional` is a bare flag (no value): it renders an `Option<T>` field as the optional TypeScript key `field?: T` instead of the default `field: T | undefined`. Zod and JSON Schema output are unchanged. It is only valid on `Option<T>` fields (non-`Option` is a compile error) and composes with `as = Type`.
+
+`as_number` is a bare flag (no value): it renders a `DateTime<Tz>` field as a `number` (epoch milliseconds) with an inline self-contained Zod coercer, instead of the default native `Date` (`z.coerce.date()`). It is only valid on `DateTime<Tz>` fields (anything else is a compile error) and is honored on a tuple-variant `DateTime<Tz>` enum payload.
 
 ```rust
 #[model_schema()]

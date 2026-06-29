@@ -1035,16 +1035,19 @@ Supported types and mappings:
 | Rust Type | TypeScript | Zod Schema | JSON Schema Format |
 |-----------|------------|------------|--------------------|
 | `NaiveDate` | `string` | `z.iso.date()` | `"date"` |
-| `NaiveTime` | `string` | `z.iso.time()` | `"time"` |
+| `NaiveTime` | `string` | `z.preprocess(<millis arrow>, z.iso.time())` | `"time"` |
 | `NaiveDateTime` | `string` | `z.iso.datetime({ local: true })` | `"date-time"` |
-| `DateTime<Utc>` | `string` | `z.iso.datetime({ offset: true })` | `"date-time"` |
-| `DateTime<Local>` | `string` | `z.iso.datetime({ offset: true })` | `"date-time"` |
-| `DateTime<FixedOffset>` | `string` | `z.iso.datetime({ offset: true })` | `"date-time"` |
+| `DateTime<Tz>` (default) | `Date` | `z.coerce.date()` | `"date-time"` |
+| `DateTime<Tz>` + `#[model_schema_prop(as_number)]` | `number` | `z.preprocess(<epoch arrow>, z.number())` | `"date-time"` |
+
+`DateTime<Tz>` renders as a native TypeScript `Date` (`z.coerce.date()`) by default, which is what MongoDB needs to expire a BSON `Date` via TTL. The bare `as_number` flag opts a single `DateTime<Tz>` field into an epoch-milliseconds `number` instead, validated by a self-contained inline coercer (no imported helper). `as_number` is only valid on a `DateTime<Tz>` field — using it elsewhere is a compile error.
+
+`NaiveTime` stays a TypeScript `string`, but its Zod schema also accepts millis-since-start-of-day, converting them to an `HH:MM:SS` string before validation.
 
 Example:
 
 ```rust
-use tixschema::model_schema;
+use tixschema::{model_schema, model_schema_prop};
 use serde::{Deserialize, Serialize};
 use chrono::{NaiveDate, NaiveTime, NaiveDateTime, DateTime, Utc};
 
@@ -1056,6 +1059,8 @@ pub struct Event {
     pub time: NaiveTime,
     pub local_datetime: NaiveDateTime,
     pub created_at: DateTime<Utc>,
+    #[model_schema_prop(as_number)]
+    pub epoch_ms: DateTime<Utc>,
     pub updated_at: Option<DateTime<Utc>>,
 }
 ```
@@ -1068,8 +1073,9 @@ export type Event = {
   date: string;
   time: string;
   local_datetime: string;
-  created_at: string;
-  updated_at: string | undefined;
+  created_at: Date;
+  epoch_ms: number;
+  updated_at: Date | undefined;
 };
 ```
 
@@ -1079,14 +1085,15 @@ Generated Zod:
 export const Event$Schema: ZodType<Event> = z.strictObject({
   name: z.string(),
   date: z.iso.date(),
-  time: z.iso.time(),
+  time: z.preprocess((arg) => { if (typeof arg === "number") { const s = Math.floor(arg / 1000); const hh = String(Math.floor(s / 3600)).padStart(2, "0"); const mm = String(Math.floor((s % 3600) / 60)).padStart(2, "0"); const ss = String(s % 60).padStart(2, "0"); return `${hh}:${mm}:${ss}`; } return arg; }, z.iso.time()),
   local_datetime: z.iso.datetime({ local: true }),
-  created_at: z.iso.datetime({ offset: true }),
-  updated_at: z.union([z.iso.datetime({ offset: true }), z.undefined()]).prefault(undefined),
+  created_at: z.coerce.date(),
+  epoch_ms: z.preprocess((arg) => { if (arg instanceof Date) return arg.getTime(); if (typeof arg === "string") return Date.parse(arg); return arg; }, z.number()),
+  updated_at: z.union([z.coerce.date(), z.undefined()]).prefault(undefined),
 });
 ```
 
-Chrono types also work in collections (`Vec<NaiveDate>` generates `z.array(z.iso.date())`) and in enums as tuple variant elements.
+Chrono types also work in collections (`Vec<NaiveDate>` generates `z.array(z.iso.date())`) and in enums as tuple variant elements (`as_number` is honored on a tuple-variant `DateTime<Tz>` payload).
 
 ## Feature Flags
 
