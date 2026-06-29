@@ -105,6 +105,27 @@ struct TimestampedRecord {
     id: String,
 }
 
+// Test struct mixing the default Date rendering with the `as_number` opt-out.
+#[model_schema()]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Sample {
+    #[model_schema_prop(as_number)]
+    created_at: DateTime<Utc>,
+    due_at: DateTime<Utc>,
+    start_time: NaiveTime,
+}
+
+// Test enum with a TupleSingle DateTime variant honoring the as_number opt-out.
+#[model_schema()]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", serde(tag = "type"))]
+pub enum DynamicValue {
+    Native(DateTime<Utc>),
+    Number(#[model_schema_prop(as_number)] DateTime<Utc>),
+}
+
 #[test]
 fn test_chrono_types_constructible() {
     let date = NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
@@ -195,8 +216,8 @@ fn test_naive_datetime_typescript() {
 fn test_datetime_utc_typescript() {
     let ts = TimestampedRecord::ts_definition();
     assert!(
-        ts.contains("created_at: string;"),
-        "DateTime<Utc> should map to string. Got: {ts}"
+        ts.contains("created_at: Date;"),
+        "DateTime<Utc> should map to Date. Got: {ts}"
     );
 }
 
@@ -205,8 +226,8 @@ fn test_datetime_utc_typescript() {
 fn test_datetime_local_typescript() {
     let ts = LocalTimestamp::ts_definition();
     assert!(
-        ts.contains("local_time: string;"),
-        "DateTime<Local> should map to string. Got: {ts}"
+        ts.contains("local_time: Date;"),
+        "DateTime<Local> should map to Date. Got: {ts}"
     );
 }
 
@@ -215,8 +236,8 @@ fn test_datetime_local_typescript() {
 fn test_optional_datetime_typescript() {
     let ts = OptionalTimestamp::ts_definition();
     assert!(
-        ts.contains("updated_at: string | undefined;"),
-        "Option<DateTime<Utc>> should map to string | undefined. Got: {ts}"
+        ts.contains("updated_at: Date | undefined;"),
+        "Option<DateTime<Utc>> should map to Date | undefined. Got: {ts}"
     );
 }
 
@@ -235,8 +256,8 @@ fn test_vec_date_typescript() {
 fn test_hashmap_datetime_typescript() {
     let ts = DateMap::ts_definition();
     assert!(
-        ts.contains("events: Partial<Record<string, string>>;"),
-        "HashMap<String, DateTime<Utc>> should map to Partial<Record<string, string>>. Got: {ts}"
+        ts.contains("events: Partial<Record<string, Date>>;"),
+        "HashMap<String, DateTime<Utc>> should map to Partial<Record<string, Date>>. Got: {ts}"
     );
 }
 
@@ -257,12 +278,12 @@ fn test_all_chrono_types_typescript() {
         "NaiveDateTime should be string. Got: {ts}"
     );
     assert!(
-        ts.contains("utc_datetime: string;"),
-        "DateTime<Utc> should be string. Got: {ts}"
+        ts.contains("utc_datetime: Date;"),
+        "DateTime<Utc> should be Date. Got: {ts}"
     );
     assert!(
-        ts.contains("local_timestamp: string;"),
-        "DateTime<Local> should be string. Got: {ts}"
+        ts.contains("local_timestamp: Date;"),
+        "DateTime<Local> should be Date. Got: {ts}"
     );
 }
 
@@ -283,8 +304,12 @@ fn test_naive_date_zod() {
 fn test_naive_time_zod() {
     let zod = Schedule::zod_schema();
     assert!(
-        zod.contains("start_time: z.iso.time(),"),
-        "NaiveTime should use z.iso.time(). Got: {zod}"
+        zod.contains("start_time: z.preprocess((arg) =>"),
+        "NaiveTime should be wrapped in a millis-accepting preprocessor. Got: {zod}"
+    );
+    assert!(
+        zod.contains("}, z.iso.time()),"),
+        "NaiveTime preprocessor should validate with z.iso.time(). Got: {zod}"
     );
 }
 
@@ -303,8 +328,8 @@ fn test_naive_datetime_zod() {
 fn test_datetime_utc_zod() {
     let zod = TimestampedRecord::zod_schema();
     assert!(
-        zod.contains("created_at: z.iso.datetime({ offset: true }),"),
-        "DateTime<Utc> should use z.iso.datetime({{ offset: true }}). Got: {zod}"
+        zod.contains("created_at: z.coerce.date(),"),
+        "DateTime<Utc> should use z.coerce.date(). Got: {zod}"
     );
 }
 
@@ -313,8 +338,8 @@ fn test_datetime_utc_zod() {
 fn test_datetime_local_zod() {
     let zod = LocalTimestamp::zod_schema();
     assert!(
-        zod.contains("local_time: z.iso.datetime({ offset: true }),"),
-        "DateTime<Local> should use z.iso.datetime({{ offset: true }}). Got: {zod}"
+        zod.contains("local_time: z.coerce.date(),"),
+        "DateTime<Local> should use z.coerce.date(). Got: {zod}"
     );
 }
 
@@ -323,10 +348,8 @@ fn test_datetime_local_zod() {
 fn test_optional_datetime_zod() {
     let zod = OptionalTimestamp::zod_schema();
     assert!(
-        zod.contains(
-            "updated_at: z.union([z.iso.datetime({ offset: true }), z.undefined()]).prefault(undefined),"
-        ),
-        "Option<DateTime<Utc>> should use z.union([...datetime({{ offset: true }}), z.undefined()]). Got: {zod}"
+        zod.contains("updated_at: z.union([z.coerce.date(), z.undefined()]).prefault(undefined),"),
+        "Option<DateTime<Utc>> should use z.union([z.coerce.date(), z.undefined()]). Got: {zod}"
     );
 }
 
@@ -345,8 +368,8 @@ fn test_vec_date_zod() {
 fn test_hashmap_datetime_zod() {
     let zod = DateMap::zod_schema();
     assert!(
-        zod.contains("events: z.record(z.string(), z.iso.datetime({ offset: true })),"),
-        "HashMap<String, DateTime<Utc>> should use z.record(z.string(), z.iso.datetime({{ offset: true }})). Got: {zod}"
+        zod.contains("events: z.record(z.string(), z.coerce.date()),"),
+        "HashMap<String, DateTime<Utc>> should use z.record(z.string(), z.coerce.date()). Got: {zod}"
     );
 }
 
@@ -456,4 +479,92 @@ fn test_chrono_compilation_smoke_test() {
     assert_eq!(event.name, "Test Event");
     assert_eq!(schedule.task, "Meeting");
     assert!(!timestamp.id.is_empty());
+}
+
+// ========== as_number opt-out + native Date default ==========
+
+#[test]
+#[cfg(feature = "typescript")]
+fn test_sample_typescript_mixes_date_and_number() {
+    let ts = Sample::ts_definition();
+    assert!(
+        ts.contains("due_at: Date;"),
+        "default DateTime<Utc> should be Date. Got: {ts}"
+    );
+    assert!(
+        ts.contains("created_at: number;"),
+        "as_number DateTime<Utc> should be number. Got: {ts}"
+    );
+    assert!(
+        ts.contains("start_time: string;"),
+        "NaiveTime should stay string. Got: {ts}"
+    );
+}
+
+#[test]
+#[cfg(feature = "zod")]
+fn test_sample_zod_mixes_coerce_date_and_inline_number() {
+    let zod = Sample::zod_schema();
+    assert!(
+        zod.contains("due_at: z.coerce.date(),"),
+        "default DateTime<Utc> should use z.coerce.date(). Got: {zod}"
+    );
+    assert!(
+        zod.contains("created_at: z.preprocess((arg) =>"),
+        "as_number DateTime<Utc> should use an inline preprocess arrow. Got: {zod}"
+    );
+    assert!(
+        zod.contains("arg instanceof Date) return arg.getTime();"),
+        "as_number coercer should map Date -> getTime(). Got: {zod}"
+    );
+    assert!(
+        zod.contains("}, z.number()),"),
+        "as_number coercer should validate with z.number(). Got: {zod}"
+    );
+    // It must not fall back to the ISO datetime renderer or a named fn.
+    assert!(
+        !zod.contains("created_at: z.iso.datetime"),
+        "as_number field must not use z.iso.datetime. Got: {zod}"
+    );
+}
+
+#[test]
+#[cfg(feature = "typescript")]
+fn test_tuple_variant_datetime_honors_as_number() {
+    let ts = DynamicValue::ts_definition();
+    assert!(
+        ts.contains("Date"),
+        "Native variant payload should render Date. Got: {ts}"
+    );
+    assert!(
+        ts.contains("number"),
+        "Number variant payload should render number via as_number. Got: {ts}"
+    );
+}
+
+#[test]
+#[cfg(feature = "zod")]
+fn test_tuple_variant_datetime_zod_honors_as_number() {
+    let zod = DynamicValue::zod_schema();
+    assert!(
+        zod.contains("z.coerce.date()"),
+        "Native variant payload should use z.coerce.date(). Got: {zod}"
+    );
+    assert!(
+        zod.contains("}, z.number())"),
+        "Number variant payload should use the inline as_number coercer. Got: {zod}"
+    );
+}
+
+#[test]
+fn test_as_number_types_constructible() {
+    let dt = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+    let sample = Sample {
+        created_at: dt,
+        due_at: dt,
+        start_time: NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+    };
+    assert_eq!(sample.created_at, dt);
+    let values = [DynamicValue::Native(dt), DynamicValue::Number(dt)];
+    assert_eq!(values.len(), 2);
 }
