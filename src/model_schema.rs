@@ -217,7 +217,7 @@ fn process_type_alias(item_type: ItemType, args: &ModelSchemaArgs) -> TokenStrea
     let ts_method =
         generate_ts_alias_method(&docs_formatted, &export_name, &generics, &alias_field_def);
     let json_schema_method = generate_alias_json_schema_stub();
-    let zod_method = generate_alias_zod_stub();
+    let zod_method = generate_alias_zod_method(&export_name, &alias_field_def);
 
     let output = quote! {
         #alias
@@ -4703,12 +4703,30 @@ fn generate_alias_json_schema_stub() -> proc_macro2::TokenStream {
 }
 
 #[cfg(feature = "typescript")]
-fn generate_alias_zod_stub() -> proc_macro2::TokenStream {
-    quote! {
-        #[cfg(feature = "zod")]
-        pub fn zod_schema() -> String {
-            String::from("// Zod schema generation for aliases is not yet supported")
+fn generate_alias_zod_method(export_name: &str, field_def: &FieldDef) -> proc_macro2::TokenStream {
+    #[cfg(feature = "zod")]
+    {
+        // The alias's rendered Zod is its FieldDef expression (a tuple alias yields
+        // the null-flavored `z.tuple([...])`, a scalar yields `z.string()`, a sibling
+        // yields `Name$Schema`). Bind it to `$RawSchema` and re-export the annotated
+        // `$Schema`, mirroring how struct/enum schemas expose their const.
+        let schema_code = field_def.zod_type();
+        quote! {
+            #[cfg(feature = "zod")]
+            pub fn zod_schema() -> String {
+                format!(
+                    "const {}$RawSchema = {};\n\nexport const {}$Schema: ZodType<{}> = {}$RawSchema;",
+                    #export_name, #schema_code, #export_name, #export_name, #export_name
+                )
+            }
         }
+    }
+    #[cfg(not(feature = "zod"))]
+    {
+        // Without the `zod` feature, `FieldDef::zod_type` does not exist; nothing in
+        // this build has zod enabled, so the schema method would be cfg'd out anyway.
+        let _: &_ = &(export_name, field_def);
+        quote! {}
     }
 }
 
