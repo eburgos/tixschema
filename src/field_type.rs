@@ -130,7 +130,8 @@ pub enum FieldDefType {
 /// `model_schema.rs` to build the full type definitions.
 ///
 /// Fields:
-/// - `is_optional`: If true, adds | undefined in TS and z.union([type, `z.undefined()`]) in Zod (v4 syntax)
+/// - `is_optional`: In struct-field position, adds `| undefined` / `z.union([type, z.undefined()])`.
+///   In tuple-element position, adds `| null` / `z.nullable(type)` — a positional `None` serializes as `null`.
 /// - name: Safe field name (uses serde rename if feature enabled)
 /// - docs: Doc comments from Rust - included in generated TS as `JSDoc`
 /// - `field_type`: The core type classification (see `FieldDefType`)
@@ -291,31 +292,24 @@ impl FieldDef {
         if self.has_ts_optional() { "?" } else { "" }
     }
 
-    /// Generates the TypeScript type name for this field.
-    ///
-    /// This method is the core of TypeScript type generation. It recursively builds
-    /// the TS type string based on `field_type`, `is_array`, and `is_optional`.
-    ///
-    /// Process:
-    /// 1. Match on `field_type` to get base type
-    /// 2. If `is_array`, wrap in Array<...>
-    /// 3. If `is_optional`, add | undefined
-    ///
-    /// Feature notes:
-    /// - "`object_id"`: Uses special `ObjectId` type
-    /// - Ignores `model_schema_prop_meta` currently (except implicitly through `field_type`)
-    /// - For `StringLiteral`, generates quoted string literal
-    /// - All Rust numbers map to 'number' in TS
-    ///
-    /// See generation/typescript.rs for how this is used in full type defs.
-    /// Examples in README.md show generated output.
-    pub fn typescript_typename(&self) -> String {
+    /// Builds the TypeScript type before the struct-field optional wrap: the type match
+    /// plus the `is_array` wrap. The `| undefined` wrap lives in `typescript_typename`.
+    /// An optional tuple element is null-flavored here (`{base} | null`): a positional
+    /// slot cannot be omitted, so serde emits `null` for a `None`.
+    fn typescript_base(&self) -> String {
         let result = match &self.field_type {
             FieldDefType::Unknown => "unknown".to_owned(),
             FieldDefType::Tuple(lst) => {
                 let elements = lst
                     .iter()
-                    .map(Self::typescript_typename)
+                    .map(|element| {
+                        let base = element.typescript_base();
+                        if element.is_optional {
+                            format!("{base} | null")
+                        } else {
+                            base
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("[{elements}]")
@@ -384,12 +378,34 @@ impl FieldDef {
                 }
             }
         };
-        let pre_result = if self.is_array {
+        if self.is_array {
             format!("Array<{result}>")
         } else {
             result
-        };
+        }
+    }
 
+    /// Generates the TypeScript type name for this field.
+    ///
+    /// This method is the core of TypeScript type generation. It recursively builds
+    /// the TS type string based on `field_type`, `is_array`, and `is_optional`.
+    ///
+    /// Process:
+    /// 1. Match on `field_type` to get base type
+    /// 2. If `is_array`, wrap in Array<...>
+    /// 3. If `is_optional`: struct-field position adds `| undefined`; tuple-element position adds `| null`
+    ///    (a positional `None` serializes as `null`, so a tuple slot cannot be omitted like an object key)
+    ///
+    /// Feature notes:
+    /// - "`object_id"`: Uses special `ObjectId` type
+    /// - Ignores `model_schema_prop_meta` currently (except implicitly through `field_type`)
+    /// - For `StringLiteral`, generates quoted string literal
+    /// - All Rust numbers map to 'number' in TS
+    ///
+    /// See generation/typescript.rs for how this is used in full type defs.
+    /// Examples in README.md show generated output.
+    pub fn typescript_typename(&self) -> String {
+        let pre_result = self.typescript_base();
         if self.is_optional {
             // `ts_optional` renders the key as `field?: T`, so the `| undefined` is redundant.
             if self.has_ts_optional() {
@@ -402,69 +418,26 @@ impl FieldDef {
         }
     }
 
+    /// Builds the Zod schema before the struct-field optional wrap: the type match, the
+    /// `is_array` wrap, and the preprocess wrap. The
+    /// `z.union([…, z.undefined()]).prefault(undefined)` wrap lives in `zod_type`. An
+    /// optional tuple element is null-flavored here (`z.nullable({base})`): a positional
+    /// slot cannot be omitted, so serde emits `null` for a `None`.
     #[cfg(feature = "zod")]
-    /// Generates the Zod schema string for this field (requires "zod" feature).
-    ///
-    /// Similar to `typescript_typename()` but generates Zod validation schema.
-    /// Uses z.* functions appropriate to the type.
-    ///
-    /// Additional logic:
-    /// - For String: Adds .`min(min_len)` if `model_schema_prop_meta` has `min_length`
-    /// - For literals: Uses z.literal(...)
-    /// - For `ObjectId`: Uses regex validation for hex string
-    /// - Wraps with `z.array()` if `is_array`
-    /// - Adds z.union([type, `z.undefined()`]) if `is_optional` (Zod v4 syntax)
-    ///
-    /// Requires Zod v4 in frontend - generates v4-compatible syntax.
-    /// See `notes/20250706_features.md` for Zod feature details.
-    /// Builds the Zod schema string for a numeric field, applying any min/max constraints.
-    #[cfg(feature = "zod")]
-    fn zod_number_type(&self, base: &str) -> String {
-        let mut result = base.to_owned();
-        if let Some(meta) = &self.model_schema_prop_meta {
-            if let Some(min) = meta.minimum {
-                result = format!("{result}.min({min})");
-            }
-            if let Some(max) = meta.maximum {
-                result = format!("{result}.max({max})");
-            }
-        }
-        result
-    }
-
-    /// Builds the Zod schema string for a string field, applying any length/pattern constraints.
-    #[cfg(feature = "zod")]
-    fn zod_string_type(&self) -> String {
-        let mut result = "z.string()".to_owned();
-        // Add min length validation if specified
-        if let Some(meta) = &self.model_schema_prop_meta
-            && let Some(min_len) = meta.min_length
-        {
-            result = format!("{result}.min({min_len})");
-        }
-        // Add max length validation if specified
-        if let Some(meta) = &self.model_schema_prop_meta
-            && let Some(max_len) = meta.max_length
-        {
-            result = format!("{result}.max({max_len})");
-        }
-        // Add pattern validation if specified
-        if let Some(meta) = &self.model_schema_prop_meta
-            && let Some(pattern) = &meta.pattern
-        {
-            result = format!("{result}.check(z.regex(/{pattern}/))");
-        }
-        result
-    }
-
-    #[cfg(feature = "zod")]
-    pub fn zod_type(&self) -> String {
+    fn zod_base(&self) -> String {
         let result = match &self.field_type {
             FieldDefType::Unknown => "z.unknown()".to_owned(),
             FieldDefType::Tuple(lst) => {
                 let elements = lst
                     .iter()
-                    .map(Self::zod_type)
+                    .map(|element| {
+                        let base = element.zod_base();
+                        if element.is_optional {
+                            format!("z.nullable({base})")
+                        } else {
+                            base
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("z.tuple([{elements}])")
@@ -528,7 +501,7 @@ impl FieldDef {
         };
 
         // Wrap with preprocess if specified
-        let pre_result = if let Some(meta) = &self.model_schema_prop_meta
+        if let Some(meta) = &self.model_schema_prop_meta
             && !meta.preprocess.is_empty()
         {
             let mut wrapped = array_result;
@@ -538,8 +511,67 @@ impl FieldDef {
             wrapped
         } else {
             array_result
-        };
+        }
+    }
 
+    /// Builds the Zod schema string for a numeric field, applying any min/max constraints.
+    #[cfg(feature = "zod")]
+    fn zod_number_type(&self, base: &str) -> String {
+        let mut result = base.to_owned();
+        if let Some(meta) = &self.model_schema_prop_meta {
+            if let Some(min) = meta.minimum {
+                result = format!("{result}.min({min})");
+            }
+            if let Some(max) = meta.maximum {
+                result = format!("{result}.max({max})");
+            }
+        }
+        result
+    }
+
+    /// Builds the Zod schema string for a string field, applying any length/pattern constraints.
+    #[cfg(feature = "zod")]
+    fn zod_string_type(&self) -> String {
+        let mut result = "z.string()".to_owned();
+        // Add min length validation if specified
+        if let Some(meta) = &self.model_schema_prop_meta
+            && let Some(min_len) = meta.min_length
+        {
+            result = format!("{result}.min({min_len})");
+        }
+        // Add max length validation if specified
+        if let Some(meta) = &self.model_schema_prop_meta
+            && let Some(max_len) = meta.max_length
+        {
+            result = format!("{result}.max({max_len})");
+        }
+        // Add pattern validation if specified
+        if let Some(meta) = &self.model_schema_prop_meta
+            && let Some(pattern) = &meta.pattern
+        {
+            result = format!("{result}.check(z.regex(/{pattern}/))");
+        }
+        result
+    }
+
+    #[cfg(feature = "zod")]
+    /// Generates the Zod schema string for this field (requires "zod" feature).
+    ///
+    /// Similar to `typescript_typename()` but generates Zod validation schema.
+    /// Uses z.* functions appropriate to the type.
+    ///
+    /// Additional logic:
+    /// - For String: Adds .`min(min_len)` if `model_schema_prop_meta` has `min_length`
+    /// - For literals: Uses z.literal(...)
+    /// - For `ObjectId`: Uses regex validation for hex string
+    /// - Wraps with `z.array()` if `is_array`
+    /// - If `is_optional`: struct-field position wraps `z.union([type, z.undefined()])`;
+    ///   tuple-element position wraps `z.nullable(type)` (a positional `None` serializes as `null`)
+    ///
+    /// Requires Zod v4 in frontend - generates v4-compatible syntax.
+    /// See `notes/20250706_features.md` for Zod feature details.
+    pub fn zod_type(&self) -> String {
+        let pre_result = self.zod_base();
         if self.is_optional {
             format!("z.union([{pre_result}, z.undefined()]).prefault(undefined)")
         } else {
