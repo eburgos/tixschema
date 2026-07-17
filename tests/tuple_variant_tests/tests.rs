@@ -648,6 +648,49 @@ fn test_empty_tuple_variant() {
     // This is verified by ensuring the total schema structure is correct
 }
 
+/// Test 16: enum tuple variant with an `Option` element gets null flavor in the
+/// generated JSON Schema, via the same shared element builder used by struct
+/// tuple fields. A positional tuple slot serializes `None` as `null`, so the
+/// optional element renders `anyOf [<base>, null]`; arity is unchanged.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn test_optional_tuple_variant_element_json_schema_null_flavor() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub enum Row {
+        Link(Option<String>, Vec<usize>, String, Option<String>),
+    }
+
+    let schema = Row::json_schema();
+    let variant = schema["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["properties"]["type"]["const"] == "Link")
+        .unwrap();
+
+    let value = &variant["properties"]["value"];
+    assert_eq!(value["type"].as_str(), Some("array"));
+
+    let prefix = value["prefixItems"].as_array().unwrap();
+    assert_eq!(prefix.len(), 4, "Arity stays 4. Got: {prefix:?}");
+
+    let nullable_string =
+        serde_json::json!({ "anyOf": [{ "type": "string" }, { "type": "null" }] });
+    assert_eq!(
+        prefix[0], nullable_string,
+        "Slot 0 (Option<String>) should be anyOf null. Got: {}",
+        prefix[0]
+    );
+    assert_eq!(
+        prefix[3], nullable_string,
+        "Slot 3 (Option<String>) should be anyOf null. Got: {}",
+        prefix[3]
+    );
+    // Non-optional slot stays plain — no null wrapping.
+    assert_eq!(prefix[2], serde_json::json!({ "type": "string" }));
+}
+
 /// Test 15: `JSDoc` comments in generated TypeScript.
 #[test]
 fn test_jsdoc_comments() {
