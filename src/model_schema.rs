@@ -2771,9 +2771,11 @@ fn write_tuple_multiple_variant_fields(
     let _: &_ = &&json_schema_variant_fields;
 }
 
-/// Builds JSON schema for a tuple element (used for single tuple and multi-tuple variants).
+/// Builds the base JSON schema for a tuple element, ignoring `is_optional`.
+///
+/// The nullable wrap is applied by `build_tuple_element_json_schema`.
 #[cfg(feature = "jsonschema")]
-fn build_tuple_element_json_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
+fn build_tuple_element_base_json_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
     let field_type = &fld.field_type;
 
     match field_type {
@@ -2872,6 +2874,23 @@ fn build_tuple_element_json_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
             // For unknown/sibling types, use a generic object schema
             quote! { serde_json::json!({ "type": "object" }) }
         }
+    }
+}
+
+/// Builds JSON schema for a tuple element (used for single tuple and multi-tuple variants).
+///
+/// An `Option` element renders as `anyOf [<base>, null]`: a tuple slot is positional, so
+/// serde serializes `None` as JSON `null` (the slot cannot be omitted the way an object key
+/// can).
+#[cfg(feature = "jsonschema")]
+fn build_tuple_element_json_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
+    let base = build_tuple_element_base_json_schema(fld);
+    if fld.is_optional {
+        quote! {
+            serde_json::json!({ "anyOf": [#base, { "type": "null" }] })
+        }
+    } else {
+        base
     }
 }
 
