@@ -14,6 +14,13 @@ use tixschema::model_schema;
 #[model_schema(name = "AuditId")]
 pub type AuditId = OrderId;
 
+/// Tuple type alias mirroring remargin's compact link row: two optional string
+/// slots (null-flavored inside a positional tuple), a `Vec<usize>`, and a
+/// required string.
+#[cfg(all(test, feature = "typescript"))]
+#[model_schema(name = "CompactLinkRow")]
+pub type CompactLinkRow = (Option<String>, Vec<usize>, String, Option<String>);
+
 /// Simple string-based type alias.
 #[cfg(all(test, feature = "typescript"))]
 #[model_schema(name = "DocumentId")]
@@ -84,6 +91,13 @@ struct ComplexAliasStruct {
     mapped_scores: HashMap<String, Vec<Score>>,
     nested_ids: Vec<Vec<DocumentId>>,
     optional_id: Option<DocumentId>,
+}
+
+#[cfg(all(test, feature = "zod", feature = "typescript", feature = "serde"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct CompactRowHolder {
+    rows: Vec<CompactLinkRow>,
 }
 
 #[cfg(all(test, feature = "typescript", feature = "serde"))]
@@ -197,6 +211,21 @@ fn test_vec_alias_typescript() {
     assert!(
         ts.contains("export type Tags = Array<string>;"),
         "Should generate Array type alias. Got: {ts}"
+    );
+}
+
+#[test]
+#[cfg(feature = "typescript")]
+fn test_tuple_alias_typescript() {
+    let row: CompactLinkRow = (None, Vec::new(), String::new(), None);
+    assert!(row.0.is_none());
+    let ts = compact_link_row_schema::Schema::ts_definition();
+
+    assert!(
+        ts.contains(
+            "export type CompactLinkRow = [string | null, Array<number>, string, string | null];"
+        ),
+        "Tuple alias should render a null-flavored TS tuple. Got: {ts}"
     );
 }
 
@@ -348,14 +377,63 @@ fn test_alias_in_hashmap() {
 
 #[test]
 #[cfg(all(feature = "zod", feature = "typescript"))]
-fn test_alias_zod_schema_exists() {
-    // Zod schema generation for aliases currently returns a stub
+fn test_scalar_alias_zod_schema() {
     let zod = document_id_schema::Schema::zod_schema();
 
-    // Verify the method exists and returns something
     assert!(
-        !zod.is_empty(),
-        "Zod schema should return a non-empty string"
+        zod.contains("const DocumentId$RawSchema = z.string();"),
+        "Scalar alias should bind its Zod to $RawSchema. Got: {zod}"
+    );
+    assert!(
+        zod.contains("export const DocumentId$Schema: ZodType<DocumentId> = DocumentId$RawSchema;"),
+        "Scalar alias should re-export an annotated $Schema. Got: {zod}"
+    );
+    assert!(
+        !zod.contains("not yet supported"),
+        "Alias Zod must no longer be a stub. Got: {zod}"
+    );
+}
+
+/// Tuple alias emits a valid `$Schema` whose Zod is the null-flavored tuple —
+/// the exact shape a struct field `Vec<CompactLinkRow>` references.
+#[test]
+#[cfg(all(feature = "zod", feature = "typescript"))]
+fn test_tuple_alias_zod_schema() {
+    let zod = compact_link_row_schema::Schema::zod_schema();
+
+    assert!(
+        zod.contains(
+            "const CompactLinkRow$RawSchema = z.tuple([z.nullable(z.string()), z.array(z.number().int()), z.string(), z.nullable(z.string())]);"
+        ),
+        "Tuple alias should render the null-flavored z.tuple. Got: {zod}"
+    );
+    assert!(
+        zod.contains(
+            "export const CompactLinkRow$Schema: ZodType<CompactLinkRow> = CompactLinkRow$RawSchema;"
+        ),
+        "Tuple alias should re-export an annotated $Schema. Got: {zod}"
+    );
+    assert!(
+        !zod.contains("not yet supported"),
+        "Alias Zod must no longer be a stub. Got: {zod}"
+    );
+}
+
+/// A struct field `Vec<CompactLinkRow>` references the alias's now-defined
+/// `$Schema` via `z.array(...)` in Zod and `Array<...>` in TS.
+#[test]
+#[cfg(all(feature = "zod", feature = "typescript", feature = "serde"))]
+fn test_vec_of_alias_references_schema() {
+    let zod = CompactRowHolder::zod_schema();
+    assert!(
+        zod.contains("rows: z.array(CompactLinkRow$Schema)"),
+        "Vec<CompactLinkRow> should reference the alias $Schema. Got: {zod}"
+    );
+
+    let ts = CompactRowHolder::ts_definition();
+    assert!(
+        ts.contains("rows: Array<CompactLinkRow>;"),
+        "Vec<CompactLinkRow> should render Array<CompactLinkRow> in TS. Got: {ts}"
     );
 }
 
