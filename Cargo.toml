@@ -17,14 +17,14 @@ syn = { version = "2", features = ["full", "parsing", "extra-traits"] }
 quote = "1"
 proc-macro2 = "1"
 log = "0.4"
-regex = "1"
+regex = ">=1.10"
 
 [dev-dependencies]
-mongodb = "3"
+mongodb = ">=3.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-chrono = { version = "0.4", features = ["serde"] }
-regex = "1"
+chrono = { version = ">=0.4.40", features = ["serde"] }
+regex = ">=1.10"
 
 # Transitive dep floors — pinned to fix known vulnerabilities:
 # - bytes >=1.11.1: RUSTSEC-2026-0007 (integer overflow in BytesMut::reserve)
