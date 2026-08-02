@@ -199,7 +199,7 @@ struct TsOptionalStruct {
 ))]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", serde(tag = "type"))]
+#[serde(tag = "type")]
 enum TsOptionalVariant {
     FilterPart {
         #[model_schema_prop(ts_optional)]

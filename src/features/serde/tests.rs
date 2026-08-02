@@ -28,6 +28,7 @@ fn test_rename_all_transformations() {
 #[test]
 fn test_final_field_name() {
     let type_meta = SerdeTypeMeta {
+        cfg_attr_rejection: None,
         tag: None,
         content: None,
         rename_all: Some("camelCase".to_owned()),
@@ -36,6 +37,7 @@ fn test_final_field_name() {
 
     // Test field with explicit rename
     let field_meta_with_rename = SerdeFieldMeta {
+        cfg_attr_rejection: None,
         rename: Some("customName".to_owned()),
         skip: false,
         omits_none: false,
@@ -48,6 +50,7 @@ fn test_final_field_name() {
 
     // Test field with rename_all
     let field_meta_no_rename = SerdeFieldMeta {
+        cfg_attr_rejection: None,
         rename: None,
         skip: false,
         omits_none: false,
@@ -140,6 +143,71 @@ fn test_omits_none_not_set_by_skip_deserializing() {
 fn test_omits_none_default_is_false() {
     let meta = SerdeFieldMeta::default();
     assert!(!meta.omits_none);
+}
+
+#[test]
+fn test_cfg_attr_wrapped_serde_field_attribute_is_rejected() {
+    let item: syn::ItemStruct = syn::parse_quote! {
+        struct S {
+            #[cfg_attr(feature = "serde", serde(rename = "renamed"))]
+            foo: String,
+        }
+    };
+    let meta = field_meta(&item);
+    let message = meta.cfg_attr_rejection.unwrap().to_string();
+    assert!(message.contains("cfg_attr"));
+    assert!(message.contains("#[serde(...)]"));
+    // The wrapper is precisely why the rename never reached the meta.
+    assert!(meta.rename.is_none());
+}
+
+#[test]
+fn test_cfg_attr_wrapped_serde_type_attribute_is_rejected() {
+    let item: syn::ItemEnum = syn::parse_quote! {
+        #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+        enum E {
+            FirstOne,
+        }
+    };
+    let meta = parse_serde_type_attributes(&item.attrs);
+    let message = meta.cfg_attr_rejection.unwrap().to_string();
+    assert!(message.contains("cfg_attr"));
+    assert!(message.contains("#[serde(...)]"));
+    assert!(meta.rename_all.is_none());
+}
+
+#[test]
+fn test_cfg_attr_without_serde_payload_is_accepted() {
+    let item: syn::ItemStruct = syn::parse_quote! {
+        #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+        struct S {
+            #[cfg_attr(feature = "serde", doc = "only documented in serde builds")]
+            foo: String,
+        }
+    };
+    assert!(
+        parse_serde_type_attributes(&item.attrs)
+            .cfg_attr_rejection
+            .is_none()
+    );
+    assert!(field_meta(&item).cfg_attr_rejection.is_none());
+}
+
+#[test]
+fn test_plain_serde_attributes_carry_no_rejection() {
+    let item: syn::ItemStruct = syn::parse_quote! {
+        #[serde(rename_all = "camelCase")]
+        struct S {
+            #[serde(rename = "renamed")]
+            foo: String,
+        }
+    };
+    let type_meta = parse_serde_type_attributes(&item.attrs);
+    let meta = field_meta(&item);
+    assert_eq!(type_meta.rename_all.as_deref(), Some("camelCase"));
+    assert!(type_meta.cfg_attr_rejection.is_none());
+    assert_eq!(meta.rename.as_deref(), Some("renamed"));
+    assert!(meta.cfg_attr_rejection.is_none());
 }
 
 #[test]

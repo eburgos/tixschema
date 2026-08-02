@@ -46,9 +46,8 @@ struct EventWithDate {
 
 // Test enum with DateTime variant (the original use case!).
 #[model_schema()]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", serde(tag = "type"))]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "type")]
 pub enum FixedValue {
     Alphanumeric(String),
     Boolean(bool),
@@ -117,9 +116,8 @@ struct Sample {
 
 // Test enum with a TupleSingle DateTime variant honoring the as_number opt-out.
 #[model_schema()]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", serde(tag = "type"))]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "type")]
 pub enum DynamicValue {
     Native(DateTime<Utc>),
     Number(#[model_schema_prop(as_number)] DateTime<Utc>),
