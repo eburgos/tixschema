@@ -31,8 +31,10 @@ struct Company {
 #[serde(rename_all = "camelCase")]
 struct CompanySettings {
     allow_remote_work: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     health_insurance_provider: Option<String>,
     max_vacation_days: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
     retirement_plan: Option<RetirementPlan>,
 }
 
@@ -45,6 +47,7 @@ enum ComplexEvent {
         items: Vec<PurchaseItem>,
         order_id: String,
         payment_method: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
         shipping_address: Option<Address>,
         total_amount: u32,
         user_id: String,
@@ -68,7 +71,9 @@ enum ComplexEvent {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct ContactInfo {
     email: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     emergency_contact: Option<EmergencyContact>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     phone: Option<String>,
 }
 
@@ -84,6 +89,7 @@ struct DocumentedUser {
     /// Whether the user's account is active.
     is_active: bool,
     /// Optional additional metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
     metadata: Option<HashMap<String, String>>,
     /// The user's full name.
     name: String,
@@ -98,11 +104,15 @@ struct EdgeCases {
     medium_number: u32,
     nested_array: Vec<ContactInfo>,
     // Nested optional structures
+    #[serde(skip_serializing_if = "Option::is_none")]
     nested_optional: Option<ContactInfo>,
     numbers: Vec<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     optional_nested_array: Option<Vec<ContactInfo>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     optional_numbers: Option<Vec<u32>>,
     // Optional collections
+    #[serde(skip_serializing_if = "Option::is_none")]
     optional_strings: Option<Vec<String>>,
     small_number: u16,
     // Simple maps (only string keys and values supported)
@@ -126,6 +136,7 @@ struct EmergencyContact {
 struct Employee {
     contact: ContactInfo,
     id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     manager: Option<String>, // Manager ID
     name: String,
     position: String,
@@ -137,7 +148,9 @@ struct Employee {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct Project {
     assigned_employees: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     budget: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     deadline: Option<String>,
     id: String,
     name: String,
@@ -158,6 +171,7 @@ enum ProjectStatus {
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct PurchaseItem {
+    #[serde(skip_serializing_if = "Option::is_none")]
     discount_applied: Option<u32>,
     product_id: String,
     quantity: u32,

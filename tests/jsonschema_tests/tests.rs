@@ -31,6 +31,7 @@ struct AllNumericTypes {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct ArrayFields {
     numbers: Vec<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     optional_array: Option<Vec<String>>,
     tags: Vec<String>,
 }
@@ -48,6 +49,7 @@ struct BasicStruct {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct ComplexCollections {
     map_of_arrays: HashMap<String, Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     optional_map: Option<HashMap<String, i32>>,
 }
 
@@ -73,8 +75,11 @@ struct MapFields {
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct OptionalFields {
+    #[serde(skip_serializing_if = "Option::is_none")]
     optional_bool: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     optional_number: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     optional_string: Option<String>,
     required: String,
 }
@@ -338,6 +343,7 @@ fn test_objectid_generates_proper_schema() {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
     struct Document {
+        #[serde(skip_serializing_if = "Option::is_none")]
         author_id: Option<ObjectId>,
         id: ObjectId,
         tag_ids: Vec<ObjectId>,

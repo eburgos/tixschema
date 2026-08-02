@@ -40,6 +40,7 @@ use utils::safe_type_name;
 ///     pub id: String,
 ///     pub first_name: String,
 ///     pub last_name: String,
+///     #[serde(skip_serializing_if = "Option::is_none")]
 ///     pub age: Option<u32>,
 ///     pub roles: Vec<String>,
 /// }
@@ -101,6 +102,7 @@ use utils::safe_type_name;
 ///     },
 ///     UserDeleted {
 ///         user_id: String,
+///         #[serde(skip_serializing_if = "Option::is_none")]
 ///         reason: Option<String>,
 ///     }
 /// }
@@ -141,6 +143,7 @@ pub struct Document {
     pub author_id: ObjectId,
     pub tags: Vec<ObjectId>,
     pub metadata: HashMap<String, ObjectId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<ObjectId>,
 }
 

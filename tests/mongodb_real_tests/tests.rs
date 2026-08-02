@@ -17,6 +17,7 @@ struct RealDocument {
     id: ObjectId,
     metadata: HashMap<String, ObjectId>,
     nested_refs: HashMap<String, Vec<ObjectId>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     parent_id: Option<ObjectId>,
     references: Vec<ObjectId>,
     title: String,
@@ -26,6 +27,7 @@ struct RealDocument {
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct RealUser {
+    #[serde(skip_serializing_if = "Option::is_none")]
     email: Option<String>,
     id: ObjectId,
     name: String,

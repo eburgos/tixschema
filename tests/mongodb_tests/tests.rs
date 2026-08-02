@@ -1,21 +1,18 @@
-#[cfg(feature = "serde")]
 use core::fmt;
-#[cfg(feature = "serde")]
 use serde::de::{self, MapAccess, Visitor};
-#[cfg(feature = "serde")]
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use tixschema::model_schema;
 
 // Test struct with more complex ObjectId nesting
 #[model_schema()]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct ComplexDocument {
     author_id: ObjectId,
     id: ObjectId,
     metadata: HashMap<String, ObjectId>,
     nested_refs: HashMap<String, Vec<ObjectId>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     parent_id: Option<ObjectId>,
     references: Vec<ObjectId>,
     title: String,
@@ -23,13 +20,13 @@ struct ComplexDocument {
 
 // Test struct with complex ObjectId usage
 #[model_schema()]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct Document {
     author_id: ObjectId,
     id: ObjectId,
     metadata: HashMap<String, ObjectId>,
     nested_refs: HashMap<String, Vec<ObjectId>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     parent_id: Option<ObjectId>,
     references: Vec<ObjectId>,
     title: String,
@@ -43,20 +40,20 @@ pub struct ObjectId(String);
 
 // Test struct with optional nested ObjectId
 #[model_schema()]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct Post {
     author_id: ObjectId,
     id: ObjectId,
+    #[serde(skip_serializing_if = "Option::is_none")]
     parent_id: Option<ObjectId>,
     title: String,
 }
 
 // Test struct with ObjectId field
 #[model_schema()]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct User {
+    #[serde(skip_serializing_if = "Option::is_none")]
     email: Option<String>,
     id: ObjectId,
     name: String,
@@ -94,10 +91,10 @@ struct UserWithObjectIdMap {
 
 // Test struct with optional ObjectId field
 #[model_schema()]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct UserWithOptionalId {
     email: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     id: Option<ObjectId>,
     name: String,
 }
@@ -112,7 +109,6 @@ struct UserWithOtherHashMapObjectId {
     name: String,
 }
 
-#[cfg(feature = "serde")]
 impl<'de> Deserialize<'de> for ObjectId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -160,7 +156,6 @@ impl ObjectId {
     }
 }
 
-#[cfg(feature = "serde")]
 impl Serialize for ObjectId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
