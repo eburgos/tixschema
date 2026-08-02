@@ -1,4 +1,12 @@
-#[cfg(all(test, feature = "serde"))]
+#[cfg(all(
+    test,
+    any(
+        feature = "typescript",
+        feature = "jsonschema",
+        feature = "zod",
+        feature = "serde"
+    )
+))]
 use serde::{Deserialize, Serialize};
 #[cfg(all(
     test,
@@ -87,8 +95,7 @@ struct CombinedTest {
     )
 ))]
 #[model_schema()]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct MinLengthTest {
     // Regular string without minLength
     pub description: String,
@@ -96,6 +103,7 @@ struct MinLengthTest {
     pub name: String,
     // Optional string with minLength
     #[model_schema_prop(as = String, minLength = 3)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub nickname: Option<String>,
     #[model_schema_prop(as = String, minLength = 10)]
     pub password: String,
@@ -139,11 +147,11 @@ struct MultipleLiterals {
     )
 ))]
 #[model_schema()]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct OptionalLiteral {
     pub id: String,
     #[model_schema_prop(literal = "optional_literal")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub optional_type: Option<String>,
 }
 
@@ -157,8 +165,7 @@ struct OptionalLiteral {
     )
 ))]
 #[model_schema()]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct Inner {
     pub value: String,
 }
@@ -173,14 +180,16 @@ struct Inner {
     )
 ))]
 #[model_schema()]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct TsOptionalStruct {
     #[model_schema_prop(ts_optional)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub f: Option<Inner>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub g: Option<Inner>,
     // `as` is currently a no-op override; this field guards their coexistence.
     #[model_schema_prop(as = Inner, ts_optional)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub h: Option<Inner>,
 }
 
@@ -189,12 +198,12 @@ struct TsOptionalStruct {
     any(feature = "typescript", feature = "jsonschema", feature = "zod")
 ))]
 #[model_schema()]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", serde(tag = "type"))]
 enum TsOptionalVariant {
     FilterPart {
         #[model_schema_prop(ts_optional)]
+        #[serde(skip_serializing_if = "Option::is_none")]
         filter: Option<Inner>,
     },
 }

@@ -1,6 +1,5 @@
 #[cfg(all(
     test,
-    feature = "serde",
     any(feature = "typescript", feature = "jsonschema", feature = "zod")
 ))]
 use serde::{Deserialize, Serialize};
@@ -22,15 +21,16 @@ use tixschema::model_schema;
     any(feature = "typescript", feature = "jsonschema", feature = "zod")
 ))]
 #[model_schema()]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct LargeNumbers {
     array_of_i64: Vec<i64>,
     array_of_u64: Vec<u64>,
     id: String,
     large_signed: i64,
     large_unsigned: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
     optional_large_signed: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     optional_large_unsigned: Option<u64>,
 }
 
@@ -61,8 +61,7 @@ struct MixedIntegers {
 ))]
 // Test edge cases with all primitive integer types in various contexts
 #[model_schema()]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct PrimitiveTypesShowcase {
     arch_signed: isize,
     arch_unsigned: usize,
@@ -81,11 +80,17 @@ struct PrimitiveTypesShowcase {
     map_to_u64_array: HashMap<String, Vec<u64>>,
     medium_signed: i32,
     medium_unsigned: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
     opt_array_f64: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     opt_array_i8: Option<Vec<i8>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     opt_array_u64: Option<Vec<u64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     opt_f64: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     opt_i8: Option<i8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     opt_u64: Option<u64>,
     small_signed: i16,
     small_unsigned: u16,

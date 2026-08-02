@@ -1,4 +1,4 @@
-#[cfg(all(test, feature = "serde"))]
+#[cfg(all(test, any(feature = "typescript", feature = "zod", feature = "serde")))]
 use serde::{Deserialize, Serialize};
 
 #[cfg(all(
@@ -79,10 +79,10 @@ type QuadrupleNestedValue = Vec<HashMap<String, Vec<HashMap<String, u64>>>>;
 #[cfg(all(test, any(feature = "typescript", feature = "zod", feature = "serde")))]
 // Now let's try the really complex case
 #[model_schema()]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct ReallyComplexTest {
     // Another challenging case with optional nested structures
+    #[serde(skip_serializing_if = "Option::is_none")]
     optional_nested: Option<HashMap<String, OptionalNestedValue>>,
 
     // The quadruple nested case that was causing issues

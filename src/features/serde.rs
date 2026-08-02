@@ -19,7 +19,10 @@ pub struct SerdeTypeMeta {
 /// Metadata for serde attributes applied to a field.
 #[derive(Clone, Debug, Default)]
 pub struct SerdeFieldMeta {
-    pub flatten: bool,          // Whether the field is `#[serde(flatten)]`
+    pub flatten: bool, // Whether the field is `#[serde(flatten)]`
+    /// Whether a `None` is left out of the serialized output entirely. `skip_deserializing`
+    /// does not qualify: it still writes `null` on the way out.
+    pub omits_none: bool,
     pub rename: Option<String>, // e.g., "new_name"
     pub skip: bool,             // Whether to skip the field
 }
@@ -82,9 +85,14 @@ pub fn parse_serde_field_attributes(attrs: &[Attribute]) -> SerdeFieldMeta {
                 // Handle `skip` or `skip_serializing_if`
                 else if nested.path.is_ident("skip")
                     || nested.path.is_ident("skip_serializing")
-                    || nested.path.is_ident("skip_deserializing")
                     || nested.path.is_ident("skip_serializing_if")
                 {
+                    meta.skip = true;
+                    meta.omits_none = true;
+                }
+                // `skip_deserializing` belongs to the `skip` lump but never suppresses a
+                // serialized `null`, so it must not set `omits_none`.
+                else if nested.path.is_ident("skip_deserializing") {
                     meta.skip = true;
                 }
                 // Handle `flatten`

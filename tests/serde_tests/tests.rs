@@ -52,10 +52,27 @@ struct Lowercase {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct OptionalFields {
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "customOptional")]
     another_optional: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     optional_field: Option<String>,
     required_field: String,
+}
+
+// ========================================================================
+// Option Fields That Satisfy the None-Serialization Guard
+// ========================================================================
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct CompliantOptionals {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
+    #[model_schema_prop(ts_optional)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tag: Option<String>,
 }
 
 // ========================================================================
@@ -282,4 +299,54 @@ fn test_discriminated_union_with_serde_zod() {
     assert!(zod.contains("userId"));
     assert!(zod.contains("userName"));
     assert!(zod.contains("newEmail"));
+}
+
+#[test]
+#[cfg(feature = "typescript")]
+fn test_compliant_optionals_typescript() {
+    let ts = CompliantOptionals::ts_definition();
+
+    assert!(
+        ts.contains("tag?: string;"),
+        "expected `tag?: string;`:\n{ts}"
+    );
+    assert!(
+        ts.contains("note: string | undefined;"),
+        "expected `note: string | undefined;`:\n{ts}"
+    );
+}
+
+#[test]
+#[cfg(feature = "zod")]
+fn test_compliant_optionals_zod_keeps_undefined_union() {
+    let zod = CompliantOptionals::zod_schema();
+
+    assert!(zod.contains("z.strictObject"));
+    assert!(zod.contains("z.union([z.string(), z.undefined()]).prefault(undefined)"));
+    assert!(!zod.contains("z.nullable"));
+}
+
+/// The guard exists so the wire form matches the schema: `None` must leave the key out.
+#[test]
+fn test_compliant_optionals_serialize_absent_and_parse_absent() {
+    let none = CompliantOptionals {
+        name: "n".to_owned(),
+        note: None,
+        tag: None,
+    };
+    let json = serde_json::to_string(&none).unwrap();
+    assert_eq!(json, r#"{"name":"n"}"#);
+
+    let parsed: CompliantOptionals = serde_json::from_str(r#"{"name":"n"}"#).unwrap();
+    assert_eq!(parsed, none);
+
+    let some = CompliantOptionals {
+        name: "n".to_owned(),
+        note: Some("here".to_owned()),
+        tag: None,
+    };
+    assert_eq!(
+        serde_json::to_string(&some).unwrap(),
+        r#"{"name":"n","note":"here"}"#
+    );
 }

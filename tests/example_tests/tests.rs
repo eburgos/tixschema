@@ -122,6 +122,7 @@ fn test_nested_types_example() {
     #[derive(Serialize, Deserialize, Debug, Clone)]
     pub struct Profile {
         pub metadata: HashMap<String, String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         pub optional_field: Option<String>,
         pub tags: Vec<String>,
     }
