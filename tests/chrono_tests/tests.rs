@@ -1,7 +1,6 @@
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use std::collections::HashMap;
 
-#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 use tixschema::model_schema;
@@ -80,10 +79,10 @@ struct LocalTimestamp {
 
 // Test struct with optional DateTime.
 #[model_schema()]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct OptionalTimestamp {
     id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     updated_at: Option<DateTime<Utc>>,
 }
 

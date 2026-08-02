@@ -45,6 +45,20 @@ enum NamedUnion {
     B { y: i64 },
 }
 
+// Untagged enum whose struct variant carries an `Option` that keeps `None` off the wire, matching
+// the absent form the union member renders.
+#[model_schema()]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum CompliantUnion {
+    Count(i64),
+    Note {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+}
+
 #[test]
 fn test_untagged_entry_constructible() {
     let entry = DataElementSampleValueEntry {
@@ -76,6 +90,16 @@ fn test_named_union_typescript() {
     let ts = NamedUnion::ts_definition();
     assert!(
         ts.contains("export type NamedUnion = { x: string } | { y: number };"),
+        "Got:\n{ts}"
+    );
+}
+
+#[test]
+#[cfg(feature = "typescript")]
+fn test_compliant_union_typescript() {
+    let ts = CompliantUnion::ts_definition();
+    assert!(
+        ts.contains("number | { id: string; note: string | undefined };"),
         "Got:\n{ts}"
     );
 }
@@ -143,6 +167,20 @@ fn test_named_union_zod() {
 
 #[test]
 #[cfg(feature = "zod")]
+fn test_compliant_union_zod() {
+    let zod = CompliantUnion::zod_schema();
+    assert!(
+        zod.contains(
+            "z.strictObject({ id: z.string(), \
+             note: z.union([z.string(), z.undefined()]).prefault(undefined), })"
+        ),
+        "Got:\n{zod}"
+    );
+    assert!(!zod.contains("z.nullable"), "Got:\n{zod}");
+}
+
+#[test]
+#[cfg(feature = "zod")]
 fn test_flatten_end_to_end_zod() {
     let zod = DataElementSampleValueVariant::zod_schema();
     assert!(
@@ -182,6 +220,22 @@ fn test_named_union_json_schema() {
 
 #[test]
 #[cfg(feature = "jsonschema")]
+fn test_compliant_union_json_schema() {
+    let schema = CompliantUnion::json_schema();
+    let any_of = schema["anyOf"].as_array().unwrap();
+    let required = any_of[1]["required"].as_array().unwrap();
+    assert!(
+        required.contains(&serde_json::json!("id")),
+        "Got:\n{schema}"
+    );
+    assert!(
+        !required.contains(&serde_json::json!("note")),
+        "Got:\n{schema}"
+    );
+}
+
+#[test]
+#[cfg(feature = "jsonschema")]
 fn test_flatten_end_to_end_json_schema() {
     // A single-variant flattened entry collapses to a flat object (no `oneOf`); the untagged
     // `Vec<DateValue>` still renders its `anyOf` under `sampleValues.items`.
@@ -204,6 +258,20 @@ fn test_serde_round_trip_string_member() {
     let json = serde_json::to_string(&value).unwrap();
     assert_eq!(json, "\"2026-06-26\"");
     let back: DateValue = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, value);
+}
+
+/// The guard exists so the wire form matches the schema: `None` must leave the key out, and the
+/// absent form must parse back through the untagged union.
+#[test]
+fn test_serde_round_trip_compliant_union_omits_none() {
+    let value = CompliantUnion::Note {
+        id: "a".to_owned(),
+        note: None,
+    };
+    let json = serde_json::to_string(&value).unwrap();
+    assert_eq!(json, r#"{"id":"a"}"#);
+    let back: CompliantUnion = serde_json::from_str(&json).unwrap();
     assert_eq!(back, value);
 }
 

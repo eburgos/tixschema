@@ -1,6 +1,5 @@
 #[cfg(all(
     test,
-    feature = "serde",
     any(feature = "typescript", feature = "jsonschema", feature = "zod")
 ))]
 use serde::{Deserialize, Serialize};
@@ -43,13 +42,15 @@ struct EmptyStruct;
 ))]
 // Test struct with optional fields.
 #[model_schema()]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct UserWithOptionals {
+    #[serde(skip_serializing_if = "Option::is_none")]
     age: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     email: Option<String>,
     id: String,
     name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     nickname: Option<String>,
 }
 

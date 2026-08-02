@@ -173,6 +173,7 @@ fn test_optional_tuple_field_zod() {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
     pub struct OptionalPair {
+        #[serde(skip_serializing_if = "Option::is_none")]
         pub values: Option<(String, String)>,
     }
 

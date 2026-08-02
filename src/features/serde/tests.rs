@@ -38,6 +38,7 @@ fn test_final_field_name() {
     let field_meta_with_rename = SerdeFieldMeta {
         rename: Some("customName".to_owned()),
         skip: false,
+        omits_none: false,
         flatten: false,
     };
     assert_eq!(
@@ -49,6 +50,7 @@ fn test_final_field_name() {
     let field_meta_no_rename = SerdeFieldMeta {
         rename: None,
         skip: false,
+        omits_none: false,
         flatten: false,
     };
     assert_eq!(
@@ -90,6 +92,54 @@ fn test_parse_non_flatten_field_attribute() {
 fn test_flatten_default_is_false() {
     let meta = SerdeFieldMeta::default();
     assert!(!meta.flatten);
+}
+
+fn field_meta(item: &syn::ItemStruct) -> SerdeFieldMeta {
+    parse_serde_field_attributes(&item.fields.iter().next().unwrap().attrs)
+}
+
+#[test]
+fn test_omits_none_set_by_serialization_skips() {
+    let skip: syn::ItemStruct = syn::parse_quote! {
+        struct S {
+            #[serde(skip)]
+            note: Option<String>,
+        }
+    };
+    let skip_serializing: syn::ItemStruct = syn::parse_quote! {
+        struct S {
+            #[serde(skip_serializing)]
+            note: Option<String>,
+        }
+    };
+    let skip_serializing_if: syn::ItemStruct = syn::parse_quote! {
+        struct S {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            note: Option<String>,
+        }
+    };
+    assert!(field_meta(&skip).omits_none);
+    assert!(field_meta(&skip_serializing).omits_none);
+    assert!(field_meta(&skip_serializing_if).omits_none);
+}
+
+#[test]
+fn test_omits_none_not_set_by_skip_deserializing() {
+    let item: syn::ItemStruct = syn::parse_quote! {
+        struct S {
+            #[serde(skip_deserializing)]
+            note: Option<String>,
+        }
+    };
+    let meta = field_meta(&item);
+    assert!(!meta.omits_none);
+    assert!(meta.skip);
+}
+
+#[test]
+fn test_omits_none_default_is_false() {
+    let meta = SerdeFieldMeta::default();
+    assert!(!meta.omits_none);
 }
 
 #[test]

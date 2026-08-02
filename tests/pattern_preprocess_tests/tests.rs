@@ -230,6 +230,7 @@ fn test_pattern_optional_field_zod() {
     #[derive(Serialize, Deserialize)]
     pub struct PatternOptional {
         #[model_schema_prop(pattern = "^[0-9]+$")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         pub code: Option<String>,
     }
 
@@ -299,6 +300,7 @@ fn test_preprocess_optional_field_zod() {
     #[derive(Serialize, Deserialize)]
     pub struct PreprocessOptional {
         #[model_schema_prop(preprocess = ["trim"])]
+        #[serde(skip_serializing_if = "Option::is_none")]
         pub nickname: Option<String>,
     }
 

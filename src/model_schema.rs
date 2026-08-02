@@ -31,6 +31,9 @@ use crate::utils::extract_example_from_docs;
 use crate::utils::lookup_alias_info;
 
 #[cfg(feature = "serde")]
+use crate::features::serde::SerdeFieldMeta;
+
+#[cfg(feature = "serde")]
 use crate::field_type::{parse_serde_field_attributes, parse_serde_type_attributes};
 
 use crate::features::model_schema_prop::parse_model_schema_prop_attributes;
@@ -59,11 +62,13 @@ use crate::utils::to_snake_case;
 use crate::rename_rule::resolve_rename_rule;
 
 /// Per-variant data collected from a discriminated enum: field defs, doc strings, and variant
-/// kinds (each keyed by serialized discriminator value), plus the collected serde validators.
+/// kinds (each keyed by serialized discriminator value), plus the collected serde validators and
+/// the `compile_error!` tokens for any field-level guard violations.
 type DiscriminatedVariantData = (
     HashMap<String, Vec<FieldDef>>,
     HashMap<String, String>,
     HashMap<String, VariantKind>,
+    Vec<proc_macro2::TokenStream>,
     Vec<proc_macro2::TokenStream>,
 );
 
@@ -72,6 +77,28 @@ type DiscriminatedVariantData = (
 type RenderedVariants = (
     Vec<String>,
     Vec<(String, Vec<String>)>,
+    Vec<proc_macro2::TokenStream>,
+);
+
+/// Per-member data collected from an untagged enum: the TypeScript member types, the Zod member
+/// schemas, the JSON-schema value tokens, and the `compile_error!` tokens for any field-level
+/// guard violations.
+#[cfg(feature = "serde")]
+type UntaggedMemberData = (
+    Vec<String>,
+    Vec<String>,
+    Vec<proc_macro2::TokenStream>,
+    Vec<proc_macro2::TokenStream>,
+);
+
+/// Per-field data collected from a struct: the regular field defs, the `#[serde(flatten)]` field
+/// defs, the serde validation functions, the `validate()` body fragments, and the
+/// `compile_error!` tokens for any field-level guard violations.
+type StructFieldData = (
+    Vec<FieldDef>,
+    Vec<FieldDef>,
+    Vec<proc_macro2::TokenStream>,
+    Vec<proc_macro2::TokenStream>,
     Vec<proc_macro2::TokenStream>,
 );
 
@@ -504,23 +531,44 @@ fn render_struct_field_bodies(
     (type_code, schema_code, json_schema_fields, fields_empty)
 }
 
+/// Emits the original item followed by the `compile_error!` tokens of every violated field guard,
+/// or `None` when there are none.
+///
+/// The item itself is kept so downstream references still resolve and the guard message stays the
+/// primary error; the schema surface is deliberately dropped, since it would encode a contract the
+/// field has already been shown to break.
+fn guard_failure_output<ItemT>(
+    item: &ItemT,
+    guard_errors: &[proc_macro2::TokenStream],
+) -> Option<TokenStream>
+where
+    ItemT: quote::ToTokens,
+{
+    if guard_errors.is_empty() {
+        return None;
+    }
+    let output = quote! {
+        #item
+        #(#guard_errors)*
+    };
+    log::trace!("{output}");
+    Some(TokenStream::from(output))
+}
+
 /// Processes every field of a struct, returning the regular field defs, the `#[serde(flatten)]`
-/// field defs, and the per-field serde validation functions and `validate()` body fragments.
+/// field defs, the per-field serde validation functions and `validate()` body fragments, and the
+/// `compile_error!` tokens for any field-level guard violations.
 fn collect_struct_fields(
     fields: &mut syn::Fields,
     rename_all: Option<&str>,
     module_name_opt: Option<&str>,
     type_name: &str,
-) -> (
-    Vec<FieldDef>,
-    Vec<FieldDef>,
-    Vec<proc_macro2::TokenStream>,
-    Vec<proc_macro2::TokenStream>,
-) {
+) -> StructFieldData {
     let mut field_defs = Vec::new();
     let mut flattened_fields: Vec<FieldDef> = Vec::new();
     let mut validation_fns: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut validate_bodies: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut guard_errors: Vec<proc_macro2::TokenStream> = Vec::new();
 
     for field in fields.iter_mut() {
         #[cfg(feature = "serde")]
@@ -528,8 +576,12 @@ fn collect_struct_fields(
         #[cfg(not(feature = "serde"))]
         let is_flatten = false;
 
-        let (f_def, validation_fn, validate_body) =
+        let (f_def, validation_fn, validate_body, guard_error) =
             process_field(rename_all, field, module_name_opt, type_name);
+
+        if let Some(err) = guard_error {
+            guard_errors.push(err);
+        }
 
         if is_flatten {
             let _: (&_, &_) = (&validation_fn, &validate_body);
@@ -551,6 +603,7 @@ fn collect_struct_fields(
         flattened_fields,
         validation_fns,
         validate_bodies,
+        guard_errors,
     )
 }
 
@@ -625,9 +678,10 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
     #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
     let module_name_opt: Option<&str> = None;
 
-    // `collected`: (field_defs, flattened_fields, validation_fns, validate_bodies). Bound as a
-    // whole so feature-gated field access (`.0`/`.2`/`.3`) marks it used without per-element
-    // unused warnings; `collect_struct_fields` is always called for its `item_struct` mutation.
+    // `collected`: (field_defs, flattened_fields, validation_fns, validate_bodies, guard_errors).
+    // Bound as a whole so feature-gated field access (`.0`/`.2`/`.3`) marks it used without
+    // per-element unused warnings; `collect_struct_fields` is always called for its `item_struct`
+    // mutation.
     let collected = collect_struct_fields(
         &mut item_struct.fields,
         rename_all.as_deref(),
@@ -636,6 +690,12 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
     );
     #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
     let _: &_ = &&collected;
+
+    // A violated field guard makes the whole contract unsound, so the schema surface is dropped
+    // and only the original item plus the errors are emitted.
+    if let Some(output) = guard_failure_output(&item_struct, &collected.4) {
+        return output;
+    }
 
     #[cfg(feature = "typescript")]
     let docs = build_item_jsdoc(docs_and_example.0.as_deref(), name);
@@ -1739,6 +1799,7 @@ fn collect_discriminated_variants(
     let mut docs_by_variant: HashMap<String, String> = HashMap::new();
     let mut kinds_by_variant: HashMap<String, VariantKind> = HashMap::new();
     let mut enum_validation_fns: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut guard_errors: Vec<proc_macro2::TokenStream> = Vec::new();
     let enum_type_name = item_enum.ident.to_string();
 
     for item in &mut item_enum.variants {
@@ -1753,10 +1814,13 @@ fn collect_discriminated_variants(
 
         let mut field_defs: Vec<FieldDef> = Vec::new();
         for field in &mut item.fields {
-            let (f_def, validation_fn, _validate_body) =
+            let (f_def, validation_fn, _validate_body, guard_error) =
                 process_field(rename_all, field, enum_module_name_opt, &enum_type_name);
             if let Some(vfn) = validation_fn {
                 enum_validation_fns.push(vfn);
+            }
+            if let Some(err) = guard_error {
+                guard_errors.push(err);
             }
             field_defs.push(f_def);
         }
@@ -1789,6 +1853,7 @@ fn collect_discriminated_variants(
         docs_by_variant,
         kinds_by_variant,
         enum_validation_fns,
+        guard_errors,
     )
 }
 
@@ -1882,8 +1947,12 @@ fn process_discriminated_enum(
     let enum_module_name_opt = None;
 
     // Bind both result tuples whole so feature-gated field access marks them used (no per-element
-    // guards): `variants` = (field_defs, docs, kinds, validation_fns); `rendered` = (ts, zod, json).
+    // guards): `variants` = (field_defs, docs, kinds, validation_fns, guard_errors);
+    // `rendered` = (ts, zod, json).
     let variants = collect_discriminated_variants(&mut item_enum, rename_all, enum_module_name_opt);
+    if let Some(output) = guard_failure_output(&item_enum, &variants.4) {
+        return output;
+    }
     let rendered = render_discriminated_variants(
         tag_name,
         content_name,
@@ -2266,16 +2335,20 @@ fn field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
 }
 
 /// Collects each untagged variant's union-member parts: the TypeScript member type, the Zod member
-/// schema, and the JSON-schema value token. All three are always returned; the caller selects which
-/// to use based on the enabled features.
+/// schema, and the JSON-schema value token, plus the `compile_error!` tokens for any field-level
+/// guard violations. The first three are always returned; the caller selects which to use based on
+/// the enabled features.
+///
+/// This path builds its field defs directly rather than through [`process_field`], so it runs
+/// [`check_optional_field_serialization`] itself — a named `Option` in a struct variant renders in
+/// the absent form here exactly as it does in a struct, and must carry the same guarantee.
 #[cfg(feature = "serde")]
-fn collect_untagged_members(
-    item_enum: &mut syn::ItemEnum,
-) -> (Vec<String>, Vec<String>, Vec<proc_macro2::TokenStream>) {
+fn collect_untagged_members(item_enum: &mut syn::ItemEnum) -> UntaggedMemberData {
     let enum_type_name = item_enum.ident.to_string();
     let mut ts_parts: Vec<String> = Vec::new();
     let mut zod_parts: Vec<String> = Vec::new();
     let mut json_parts: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut guard_errors: Vec<proc_macro2::TokenStream> = Vec::new();
 
     for variant in &mut item_enum.variants {
         let kind = classify_variant(variant);
@@ -2289,6 +2362,12 @@ fn collect_untagged_members(
                 .map(ToString::to_string)
                 .unwrap_or_default();
             let mut field_def = get_field_def(&field_name, &field.ty, "");
+            let serde_field_meta = parse_serde_field_attributes(&field.attrs);
+            if let Err(err) =
+                check_optional_field_serialization(field, field_def.is_optional, &serde_field_meta)
+            {
+                guard_errors.push(err.to_compile_error());
+            }
             field_def.resolve_self_references(&enum_type_name);
             field_defs.push(field_def);
         }
@@ -2300,7 +2379,7 @@ fn collect_untagged_members(
         json_parts.push(json_val);
     }
 
-    (ts_parts, zod_parts, json_parts)
+    (ts_parts, zod_parts, json_parts, guard_errors)
 }
 
 /// Processes an untagged enum (`#[serde(untagged)]`) and generates its definitions.
@@ -2333,7 +2412,14 @@ fn process_untagged_enum(
         .and_then(|docs| extract_example_from_docs(docs));
 
     // Render each variant into its union member (TS / Zod / JSON parts).
-    let (ts_parts, zod_parts, json_parts) = collect_untagged_members(&mut item_enum);
+    let (ts_parts, zod_parts, json_parts, guard_errors) = collect_untagged_members(&mut item_enum);
+
+    // A violated field guard makes the whole contract unsound, so the schema surface is dropped
+    // and only the original item plus the errors are emitted.
+    if let Some(output) = guard_failure_output(&item_enum, &guard_errors) {
+        return output;
+    }
+
     #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
     let _: &_ = &name;
     #[cfg(not(feature = "zod"))]
@@ -4046,8 +4132,39 @@ fn validate_ts_optional_flag(field_optional: bool, flag_set: bool) -> Result<(),
     Ok(())
 }
 
+/// Rejects a named `Option` field whose serde attributes let a `None` reach the wire as `null`.
+///
+/// The generated contract renders such a field in the absent form — `T | undefined` and a
+/// `z.union([T, z.undefined()]).prefault(undefined)` inside a `z.strictObject` — which admits a
+/// missing key but never `null`. `is_optional` is the same signal that drives that rendering,
+/// which keeps the guard and the contract from ever disagreeing. Positional fields are exempt: a
+/// tuple slot cannot be omitted, so there `None` correctly renders as nullable.
+#[cfg(feature = "serde")]
+fn check_optional_field_serialization(
+    field: &Field,
+    is_optional: bool,
+    meta: &SerdeFieldMeta,
+) -> Result<(), syn::Error> {
+    let Some(ident) = field.ident.as_ref() else {
+        return Ok(());
+    };
+    if !is_optional || meta.omits_none {
+        return Ok(());
+    }
+    Err(syn::Error::new_spanned(
+        field,
+        format!(
+            "model_schema: field `{ident}` is `Option` but is serialized as `null` when `None`, \
+             while the generated schema only accepts the key being absent. Add \
+             #[serde(skip_serializing_if = \"Option::is_none\")] (plus `default` if the type \
+             derives Deserialize), or `skip` / `skip_serializing`."
+        ),
+    ))
+}
+
 /// Processes a field and returns its definition, optional module items (validators/deserializers),
-/// and optional `validate_body` (contribution to the type-level `validate()` method).
+/// optional `validate_body` (contribution to the type-level `validate()` method), and the
+/// `compile_error!` tokens for any guard the field violates.
 fn process_field(
     rename_all: Option<&str>,
     field: &mut Field,
@@ -4057,11 +4174,14 @@ fn process_field(
     FieldDef,
     Option<proc_macro2::TokenStream>,
     Option<proc_macro2::TokenStream>,
+    Option<proc_macro2::TokenStream>,
 ) {
     let mut new_attrs = Vec::new();
 
     #[cfg(feature = "serde")]
-    let field_rename = parse_serde_field_attributes(&field.attrs).rename;
+    let serde_field_meta = parse_serde_field_attributes(&field.attrs);
+    #[cfg(feature = "serde")]
+    let field_rename = serde_field_meta.rename.clone();
     #[cfg(not(feature = "serde"))]
     let field_rename: Option<String> = None;
 
@@ -4115,6 +4235,15 @@ fn process_field(
 
     // Create the field definition and apply any model_schema_prop overrides
     let mut field_def = get_field_def(&final_name, field_type, &field_docs);
+
+    #[cfg(feature = "serde")]
+    let guard_error =
+        check_optional_field_serialization(field, field_def.is_optional, &serde_field_meta)
+            .err()
+            .map(|err| err.to_compile_error());
+    #[cfg(not(feature = "serde"))]
+    let guard_error: Option<proc_macro2::TokenStream> = None;
+
     // Resolve `Self` references to the concrete type name so recursive fields
     // (e.g. `Vec<Self>`) are treated exactly like `Vec<EnclosingType>`.
     field_def.resolve_self_references(type_name);
@@ -4161,7 +4290,7 @@ fn process_field(
     // Update field docs to include length/range constraint information
     apply_constraint_docs(&mut field_def, &final_name);
 
-    (field_def, validation_fn, validate_body)
+    (field_def, validation_fn, validate_body, guard_error)
 }
 
 /// Generates per-field serde validation code (static validator + `deserialize_with`) and, when

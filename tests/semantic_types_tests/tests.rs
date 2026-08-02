@@ -90,6 +90,7 @@ struct CollectionAlias {
 struct ComplexAliasStruct {
     mapped_scores: HashMap<String, Vec<Score>>,
     nested_ids: Vec<Vec<DocumentId>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     optional_id: Option<DocumentId>,
 }
 
