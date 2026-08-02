@@ -56,6 +56,8 @@ use crate::utils::register_alias_info;
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::to_snake_case;
 
+use crate::rename_rule::resolve_rename_rule;
+
 /// Per-variant data collected from a discriminated enum: field defs, doc strings, and variant
 /// kinds (each keyed by serialized discriminator value), plus the collected serde validators.
 type DiscriminatedVariantData = (
@@ -1534,7 +1536,7 @@ fn collect_plain_enum_options(
         let field_rename: Option<String> = None;
 
         let final_name =
-            get_final_name(item.ident.to_string(), field_rename.as_deref(), rename_all);
+            get_final_variant_name(&item.ident.to_string(), field_rename.as_deref(), rename_all);
         enum_options.push(final_name);
 
         #[cfg(feature = "typescript")]
@@ -1746,7 +1748,7 @@ fn collect_discriminated_variants(
         let field_rename: Option<String> = None;
 
         let final_name =
-            get_final_name(item.ident.to_string(), field_rename.as_deref(), rename_all);
+            get_final_variant_name(&item.ident.to_string(), field_rename.as_deref(), rename_all);
         let variant_kind = classify_variant(item);
 
         let mut field_defs: Vec<FieldDef> = Vec::new();
@@ -4107,9 +4109,8 @@ fn process_field(
     field.attrs = new_attrs;
 
     let field_type: &syn::Type = &field.ty;
-    let name = raw_field_ident;
 
-    let final_name = get_final_name(name, field_rename.as_deref(), rename_all);
+    let final_name = get_final_field_name(&raw_field_ident, field_rename.as_deref(), rename_all);
     let field_docs = build_field_docs(field, &final_name);
 
     // Create the field definition and apply any model_schema_prop overrides
@@ -4280,44 +4281,28 @@ fn apply_constraint_docs(field_def: &mut FieldDef, final_name: &str) {
     }
 }
 
-/// Gets the final name for a field or enum variant, considering serde attributes.
-fn get_final_name(name: String, field_rename: Option<&str>, rename_all: Option<&str>) -> String {
+/// Gets the serialized name of a struct field. serde cases fields by different rules than enum
+/// variants, so the two must not share one entry point.
+fn get_final_field_name(
+    name: &str,
+    field_rename: Option<&str>,
+    rename_all: Option<&str>,
+) -> String {
     field_rename.map_or_else(
-        || {
-            if rename_all == Some("camelCase") {
-                snake_to_camel(&name)
-            } else if rename_all == Some("lowercase") {
-                name.to_lowercase()
-            } else {
-                name
-            }
-        },
+        || resolve_rename_rule(rename_all).apply_to_field(name),
         str::to_owned,
     )
 }
 
-/// Converts a `snake_case` string to camelCase.
-fn snake_to_camel(s: &str) -> String {
-    let mut result = String::new();
-    let mut capitalize_next = false;
-
-    for (i, c) in s.chars().enumerate() {
-        if c == '_' {
-            capitalize_next = true;
-        } else if i == 0 {
-            // Force the first character to lowercase
-            result.push(c.to_lowercase().next().unwrap());
-        } else if capitalize_next {
-            // Capitalize after an underscore
-            result.push(c.to_uppercase().next().unwrap());
-            capitalize_next = false;
-        } else {
-            // Keep other characters as is
-            result.push(c);
-        }
-    }
-
-    result
+fn get_final_variant_name(
+    name: &str,
+    variant_rename: Option<&str>,
+    rename_all: Option<&str>,
+) -> String {
+    variant_rename.map_or_else(
+        || resolve_rename_rule(rename_all).apply_to_variant(name),
+        str::to_owned,
+    )
 }
 
 #[cfg(feature = "jsonschema")]

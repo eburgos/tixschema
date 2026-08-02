@@ -3,6 +3,8 @@
 //! This module handles serde attribute parsing and field name transformation
 //! when the "serde" feature is enabled.
 
+#[cfg(test)]
+use crate::rename_rule::resolve_rename_rule;
 use syn::{Attribute, LitStr};
 
 /// Metadata for serde attributes applied to a struct or enum.
@@ -105,15 +107,7 @@ pub fn parse_serde_field_attributes(attrs: &[Attribute]) -> SerdeFieldMeta {
 /// Applies serde `rename_all` transformation to a field name.
 #[cfg(test)]
 pub fn apply_rename_all(field_name: &str, rename_all: Option<&str>) -> String {
-    match rename_all {
-        Some("camelCase") => to_camel_case(field_name),
-        Some("PascalCase") => to_pascal_case(field_name),
-        Some("SCREAMING_SNAKE_CASE" | "UPPERCASE") => field_name.to_uppercase(),
-        Some("kebab-case") => to_kebab_case(field_name),
-        Some("lowercase") => field_name.to_lowercase(),
-        // snake_case and unknown values keep the original snake_case name
-        _ => field_name.to_owned(),
-    }
+    resolve_rename_rule(rename_all).apply_to_field(field_name)
 }
 
 /// Get the final field name after applying serde transformations.
@@ -130,44 +124,6 @@ pub fn get_final_field_name(
 
     // Otherwise apply rename_all transformation
     apply_rename_all(original_name, type_meta.rename_all.as_deref())
-}
-
-/// Convert `snake_case` to camelCase.
-#[cfg(test)]
-fn to_camel_case(s: &str) -> String {
-    let mut result = String::new();
-    let mut capitalize_next = false;
-
-    for (i, c) in s.chars().enumerate() {
-        if c == '_' {
-            capitalize_next = true;
-        } else if capitalize_next && i > 0 {
-            result.push(c.to_ascii_uppercase());
-            capitalize_next = false;
-        } else {
-            result.push(c);
-            capitalize_next = false;
-        }
-    }
-
-    result
-}
-
-/// Convert `snake_case` to `PascalCase`.
-#[cfg(test)]
-fn to_pascal_case(s: &str) -> String {
-    let camel = to_camel_case(s);
-    if let Some(first_char) = camel.chars().next() {
-        format!("{}{}", first_char.to_ascii_uppercase(), &camel[1..])
-    } else {
-        camel
-    }
-}
-
-/// Convert `snake_case` to kebab-case.
-#[cfg(test)]
-fn to_kebab_case(s: &str) -> String {
-    s.replace('_', "-")
 }
 
 #[cfg(test)]

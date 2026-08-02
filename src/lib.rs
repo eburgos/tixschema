@@ -2,6 +2,7 @@ mod features;
 mod field_type;
 mod generation;
 mod model_schema;
+mod rename_rule;
 mod utils;
 
 use model_schema::exec_model_schema;
