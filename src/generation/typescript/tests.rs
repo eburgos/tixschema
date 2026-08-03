@@ -20,6 +20,8 @@ fn test_generate_struct_type_with_fields() {
             array_lengths: Vec::new(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            #[cfg(feature = "jsonschema")]
+            type_span: proc_macro2::Span::call_site(),
         },
         FieldDef {
             name: "name".to_owned(),
@@ -29,6 +31,8 @@ fn test_generate_struct_type_with_fields() {
             array_lengths: Vec::new(),
             model_schema_prop_meta: None,
             nullable_levels: vec![0],
+            #[cfg(feature = "jsonschema")]
+            type_span: proc_macro2::Span::call_site(),
         },
     ];
 
