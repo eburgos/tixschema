@@ -63,6 +63,28 @@ struct EnumKeyedSiblingValueMaps {
     sample_value: HashMap<MetricSlot, MetricSample>,
 }
 
+// A String key enumerates nothing, so one `additionalProperties` schema stands for every member —
+// and it is the value type's own, which is what the enum-keyed twin above spells out per key.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct StringKeyedSiblingValueMaps {
+    optional_sample: HashMap<String, Option<MetricSample>>,
+    sample_array: HashMap<String, Vec<MetricSample>>,
+    sample_value: HashMap<String, MetricSample>,
+}
+
+/// An alias of a sibling: its schema module is named after the registered export name, not the
+/// alias ident, so the member reference has to be resolved through the registry.
+#[model_schema()]
+type MetricSampleRef = MetricSample;
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct StringKeyedAliasValueMaps {
+    sample_array: HashMap<String, Vec<MetricSampleRef>>,
+    sample_value: HashMap<String, MetricSampleRef>,
+}
+
 // A map entry cannot be dropped the way an object key can, so an `Option` value is spelled `null`
 // on the wire rather than omitted — the same twin type on both key paths pins that both agree.
 #[model_schema()]
@@ -503,6 +525,189 @@ fn test_enum_keyed_sibling_value_maps_typescript_generation() {
     assert!(
         zod_schema
             .contains("sample_array: z.record(MetricSlot$Schema, z.array(MetricSample$Schema))"),
+        "Got: {zod_schema}"
+    );
+}
+
+#[test]
+fn test_string_keyed_sibling_value_maps_constructible() {
+    let maps = StringKeyedSiblingValueMaps {
+        optional_sample: HashMap::from([("m".to_owned(), None)]),
+        sample_array: HashMap::from([(
+            "d".to_owned(),
+            vec![MetricSample {
+                label: "d".to_owned(),
+            }],
+        )]),
+        sample_value: HashMap::new(),
+    };
+    assert_eq!(maps.sample_array["d"].len(), 1);
+    assert_eq!(maps.optional_sample["m"], None);
+}
+
+/// A `String` key never widens the value: the member is the sibling's own schema, arrayed when the
+/// value is a `Vec` and nullable when it is an `Option` — the same schema the enum-key path writes
+/// under each key, never the open object that admits every payload alike.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_string_keyed_sibling_value_maps_json_schema() {
+    let sample_schema = MetricSample::json_schema();
+    let schema = StringKeyedSiblingValueMaps::json_schema();
+    let properties = schema["properties"].as_object().unwrap();
+
+    for (field_name, expected) in [
+        ("sample_value", sample_schema.clone()),
+        (
+            "sample_array",
+            serde_json::json!({ "type": "array", "items": sample_schema }),
+        ),
+        (
+            "optional_sample",
+            serde_json::json!({ "anyOf": [sample_schema, { "type": "null" }] }),
+        ),
+    ] {
+        let field = &properties[field_name];
+        assert_eq!(field["type"], "object", "in: {field}");
+        assert_eq!(field["additionalProperties"], expected, "in: {field}");
+    }
+}
+
+/// The member schema is held against what serde writes: an array of siblings for the `Vec` field,
+/// a single sibling object for the plain one. An open member would have accepted either.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_string_keyed_sibling_members_match_the_serialized_form() {
+    let sample = MetricSample {
+        label: "d".to_owned(),
+    };
+    let maps = StringKeyedSiblingValueMaps {
+        optional_sample: HashMap::from([("m".to_owned(), None)]),
+        sample_array: HashMap::from([("d".to_owned(), vec![sample.clone()])]),
+        sample_value: HashMap::from([("s".to_owned(), sample)]),
+    };
+    let payload = serde_json::to_value(&maps).unwrap();
+    let schema = StringKeyedSiblingValueMaps::json_schema();
+
+    let arrayed = &schema["properties"]["sample_array"]["additionalProperties"];
+    assert_eq!(
+        arrayed["type"],
+        json_type_name(&payload["sample_array"]["d"]),
+        "in: {arrayed}"
+    );
+    assert_eq!(
+        arrayed["items"],
+        MetricSample::json_schema(),
+        "in: {arrayed}"
+    );
+
+    let single = &schema["properties"]["sample_value"]["additionalProperties"];
+    assert_eq!(
+        single["type"],
+        json_type_name(&payload["sample_value"]["s"]),
+        "in: {single}"
+    );
+    assert_eq!(*single, MetricSample::json_schema(), "in: {single}");
+
+    let optional = &schema["properties"]["optional_sample"]["additionalProperties"];
+    assert_eq!(
+        optional["anyOf"][1]["type"],
+        json_type_name(&payload["optional_sample"]["m"]),
+        "in: {optional}"
+    );
+}
+
+#[test]
+#[cfg(all(feature = "typescript", feature = "zod"))]
+fn test_string_keyed_sibling_value_maps_typescript_generation() {
+    let ts_definition = StringKeyedSiblingValueMaps::ts_definition();
+
+    assert!(
+        ts_definition.contains("sample_value: Partial<Record<string, MetricSample>>;"),
+        "Got: {ts_definition}"
+    );
+    assert!(
+        ts_definition.contains("sample_array: Partial<Record<string, Array<MetricSample>>>;"),
+        "Got: {ts_definition}"
+    );
+    assert!(
+        ts_definition.contains("optional_sample: Partial<Record<string, MetricSample | null>>;"),
+        "Got: {ts_definition}"
+    );
+
+    let zod_schema = StringKeyedSiblingValueMaps::zod_schema();
+    assert!(
+        zod_schema.contains("sample_value: z.record(z.string(), MetricSample$Schema)"),
+        "Got: {zod_schema}"
+    );
+    assert!(
+        zod_schema.contains("sample_array: z.record(z.string(), z.array(MetricSample$Schema))"),
+        "Got: {zod_schema}"
+    );
+    assert!(
+        zod_schema
+            .contains("optional_sample: z.record(z.string(), z.nullable(MetricSample$Schema))"),
+        "Got: {zod_schema}"
+    );
+}
+
+#[test]
+fn test_string_keyed_alias_value_maps_constructible() {
+    let maps = StringKeyedAliasValueMaps {
+        sample_array: HashMap::new(),
+        sample_value: HashMap::from([(
+            "s".to_owned(),
+            MetricSampleRef {
+                label: "s".to_owned(),
+            },
+        )]),
+    };
+    assert_eq!(maps.sample_value["s"].label, "s");
+}
+
+/// An alias's schema module is named after its registered export name, so the member reference is
+/// only resolvable through the registry — deriving it from the alias ident names a module that was
+/// never emitted, and the expansion no longer compiles.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_string_keyed_alias_value_maps_resolve_the_registered_module() {
+    let alias_schema = metric_sample_ref_type_schema::Schema::json_schema();
+    let schema = StringKeyedAliasValueMaps::json_schema();
+    let properties = schema["properties"].as_object().unwrap();
+
+    assert_eq!(
+        properties["sample_value"]["additionalProperties"], alias_schema,
+        "in: {schema}"
+    );
+    assert_eq!(
+        properties["sample_array"]["additionalProperties"],
+        serde_json::json!({ "type": "array", "items": alias_schema }),
+        "in: {schema}"
+    );
+}
+
+#[test]
+#[cfg(all(feature = "typescript", feature = "zod"))]
+fn test_string_keyed_alias_value_maps_typescript_generation() {
+    let ts_definition = StringKeyedAliasValueMaps::ts_definition();
+
+    assert!(
+        ts_definition.contains("sample_value: Partial<Record<string, MetricSampleRefType>>;"),
+        "Got: {ts_definition}"
+    );
+    assert!(
+        ts_definition
+            .contains("sample_array: Partial<Record<string, Array<MetricSampleRefType>>>;"),
+        "Got: {ts_definition}"
+    );
+
+    let zod_schema = StringKeyedAliasValueMaps::zod_schema();
+    assert!(
+        zod_schema.contains("sample_value: z.record(z.string(), MetricSampleRefType$Schema)"),
+        "Got: {zod_schema}"
+    );
+    assert!(
+        zod_schema
+            .contains("sample_array: z.record(z.string(), z.array(MetricSampleRefType$Schema))"),
         "Got: {zod_schema}"
     );
 }

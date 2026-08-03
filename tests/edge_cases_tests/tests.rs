@@ -68,12 +68,16 @@ struct OriginalBugReproduction {
     string_to_vec_string: HashMap<String, Vec<String>>,
 }
 
+// A named map value is rendered as the schema module its own `#[model_schema()]` expansion emits,
+// so an alias standing in a map value has to carry the attribute like any other referenced type.
 #[cfg(all(test, any(feature = "typescript", feature = "zod", feature = "serde")))]
 // Inner value type for the optional deeply nested map.
+#[model_schema()]
 type OptionalNestedValue = Vec<Option<HashMap<String, Option<Vec<i64>>>>>;
 
 #[cfg(all(test, any(feature = "typescript", feature = "zod", feature = "serde")))]
 // Inner value type for the quadruple nested map.
+#[model_schema()]
 type QuadrupleNestedValue = Vec<HashMap<String, Vec<HashMap<String, u64>>>>;
 
 #[cfg(all(test, any(feature = "typescript", feature = "zod", feature = "serde")))]
