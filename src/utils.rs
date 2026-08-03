@@ -309,6 +309,31 @@ pub fn strip_examples_from_docs(docs: &[String]) -> Vec<String> {
     result
 }
 
+/// Escapes a regex pattern for splicing between the `/` delimiters of a JavaScript regex literal.
+///
+/// The pattern is already a regex, so the delimiter is the only character the literal syntax adds
+/// a meaning to: every unescaped `/` becomes `\/`. A backslash escape is consumed whole, which
+/// keeps an authored `\/` from gaining a second backslash and keeps a literal `\\` from being read
+/// as the escape for the `/` that follows it.
+#[cfg(feature = "zod")]
+pub fn escape_js_regex_literal(pattern: &str) -> String {
+    let mut result = String::with_capacity(pattern.len());
+    let mut chars = pattern.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => {
+                result.push('\\');
+                if let Some(escaped) = chars.next() {
+                    result.push(escaped);
+                }
+            }
+            '/' => result.push_str("\\/"),
+            _ => result.push(ch),
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 #[cfg(any(feature = "typescript", feature = "zod"))]
 mod tests;

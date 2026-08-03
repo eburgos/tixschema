@@ -30,7 +30,7 @@ use crate::{
 };
 
 #[cfg(feature = "zod")]
-use crate::utils::extract_example_from_docs;
+use crate::utils::{escape_js_regex_literal, extract_example_from_docs};
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::{AliasKind, lookup_alias_info};
@@ -1707,7 +1707,8 @@ fn branded_zod_inner(args: &ModelSchemaArgs, is_generic: bool, inner_ty: &syn::T
         result = format!("{result}.max({max_len})");
     }
     if let Some(pattern) = &args.pattern {
-        result = format!("{result}.check(z.regex(/{pattern}/))");
+        let literal_body = escape_js_regex_literal(pattern);
+        result = format!("{result}.check(z.regex(/{literal_body}/))");
     }
     result
 }
