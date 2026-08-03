@@ -163,6 +163,14 @@ struct ConstrainedShape {
 enum ConstraintLeaf {
     /// The bare Rust numeric type, which is the validator's parameter type.
     Number(&'static str),
+    /// A filesystem path, whose checks read its `to_string_lossy` rendering.
+    ///
+    /// serde writes a path as the string its `to_str` yields and refuses to write one that has
+    /// none, so that rendering is the exact wire value for every path a payload can carry, and the
+    /// paths where it substitutes replacement characters are the ones no payload holds. That is
+    /// what lets a length or a pattern land on a path at all: it measures what the three surfaces
+    /// render a constrained string for.
+    Path,
     Str,
 }
 
@@ -2803,6 +2811,10 @@ fn render_untagged_variant(
 }
 
 /// Renders a `TupleSingle` (`S(T)`) untagged variant as a union member (`T` / `T$Schema` / value).
+///
+/// The inner value is a slot: untagged, the variant carries no key of its own, so the content *is*
+/// the whole serialized value and a `None` there reaches the wire as a bare `null` rather than
+/// going absent. All three surfaces read it through the slot spellings for that reason.
 #[cfg(feature = "serde")]
 fn render_untagged_tuple_single(
     variant_name: &str,
@@ -2815,15 +2827,15 @@ fn render_untagged_tuple_single(
     );
     let fld = &field_defs[0];
 
-    let ts = fld.typescript_typename();
+    let ts = fld.typescript_slot_typename();
 
     #[cfg(feature = "zod")]
-    let zod = fld.zod_type();
+    let zod = fld.zod_slot_type();
     #[cfg(not(feature = "zod"))]
     let zod = String::new();
 
     #[cfg(feature = "jsonschema")]
-    let json_val = field_json_schema_value(fld);
+    let json_val = nullable_slot_json_schema_value(fld, field_json_schema_value(fld));
     #[cfg(not(feature = "jsonschema"))]
     let json_val = quote! {};
 
@@ -3476,6 +3488,12 @@ fn write_tuple_single_variant_fields(
 }
 
 /// Writes the multi-element tuple portion of a discriminated enum variant.
+///
+/// Every element is a slot: serde writes each position of the tuple, so a `None` there reaches the
+/// wire as a `null` in place rather than shortening the tuple. All three surfaces read the elements
+/// through the slot spellings for that reason, and the content array is the one
+/// [`tuple_json_schema_value`] renders for a tuple field — serde writes the same array in both
+/// positions.
 fn write_tuple_multiple_variant_fields(
     field_defs: &[FieldDef],
     content_name: &str,
@@ -3488,7 +3506,7 @@ fn write_tuple_multiple_variant_fields(
     // Multi-element tuple: use TypeScript tuple type `value: [T1, T2, ...]`
     let ts_tuple_types: Vec<String> = field_defs
         .iter()
-        .map(super::field_type::FieldDef::typescript_typename)
+        .map(super::field_type::FieldDef::typescript_slot_typename)
         .collect();
     let ts_tuple = format!("[{}]", ts_tuple_types.join(", "));
 
@@ -3511,7 +3529,7 @@ fn write_tuple_multiple_variant_fields(
     {
         let zod_tuple_types: Vec<String> = field_defs
             .iter()
-            .map(super::field_type::FieldDef::zod_type)
+            .map(super::field_type::FieldDef::zod_slot_type)
             .collect();
         let zod_tuple = format!("z.tuple([{}])", zod_tuple_types.join(", "));
 
@@ -3540,19 +3558,9 @@ fn write_tuple_multiple_variant_fields(
     #[cfg(feature = "jsonschema")]
     {
         let content_name_str = content_name.to_owned();
-        match field_defs
-            .iter()
-            .map(build_tuple_element_json_schema)
-            .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(tuple_schemas) => json_schema_variant_fields.push(quote! {
-                properties.insert(#content_name_str.to_string(), {
-                    serde_json::json!({
-                        "type": "array",
-                        "prefixItems": [#(#tuple_schemas),*],
-                        "items": false
-                    })
-                });
+        match tuple_json_schema_value(field_defs) {
+            Ok(tuple_schema) => json_schema_variant_fields.push(quote! {
+                properties.insert(#content_name_str.to_string(), #tuple_schema);
                 required.push(serde_json::Value::String(#content_name_str.to_string()));
             }),
             Err(rejection) => {
@@ -3786,8 +3794,11 @@ fn build_tuple_element_json_schema(
 /// The fixed-arity array a tuple describes as — the form serde writes it in — or the rejection when
 /// any element holds a value the dispatch cannot render.
 ///
-/// A tuple field and a tuple nested in a slot are the same array, so both are built here rather
-/// than each spelling the bounds itself.
+/// A tuple field, a tuple nested in a slot, and a multi-element tuple variant's content are the
+/// same array, so all three are built here rather than each spelling the bounds itself. The bounds
+/// are what pins the minimum an array of `prefixItems` leaves open: draft 2020-12's `"items": false`
+/// closes the tail, so without `minItems` a shorter array — one serde can neither write nor read
+/// back — still validates.
 #[cfg(feature = "jsonschema")]
 fn tuple_json_schema_value(
     elements: &[FieldDef],
@@ -4329,10 +4340,8 @@ fn build_string_format_field_schema(
 /// Builds JSON schema for a tuple struct field.
 ///
 /// A Rust tuple field `(A, B, ...)` serializes (via serde) as a fixed-length JSON array, which is
-/// what [`tuple_json_schema_value`] renders — the same array a tuple nested in a slot renders, so
-/// the two positions cannot drift apart. The tuple **variant** path
-/// (`write_tuple_multiple_variant_fields`) shares the per-element builder but spells its own array,
-/// without the arity bounds.
+/// what [`tuple_json_schema_value`] renders — the same array a tuple nested in a slot and a
+/// multi-element tuple variant's content render, so the positions cannot drift apart.
 ///
 /// An element the dispatch cannot render replaces the whole insertion with the lone diagnostic,
 /// as an unrenderable map value does: a schema left in place would describe a field the expansion
@@ -4630,9 +4639,13 @@ fn helper_name_stem(field_ident: &str, variant_ident: Option<&str>) -> String {
     )
 }
 
-/// Generates the static validator for a String field with constraints, plus the serde deserializer
-/// — written against the constrained value itself when the field is bare, and against the field's
-/// declared type when it is wrapped.
+/// Generates the static validator for a string-shaped field with constraints, plus the serde
+/// deserializer — written against the constrained value itself when the field is bare, and against
+/// the field's declared type when it is wrapped.
+///
+/// A path leaf differs only in how the checked value is reached: the validator takes the borrowed
+/// path — which every wrap of the walk already ends at — and renders it once, so the checks below
+/// are the very ones a `String` field is held to, over the string serde writes for that path.
 ///
 /// Returns (`module_items`, `validate_body`) — both go into the schema module and `validate()` respectively.
 #[cfg(feature = "serde")]
@@ -4650,6 +4663,19 @@ fn generate_string_validation_code(
     let deserialize_fn_name = format!("deserialize_{helper_stem}");
     let deserialize_fn_ident =
         proc_macro2::Ident::new(&deserialize_fn_name, proc_macro2::Span::call_site());
+
+    let measures_path = matches!(shape.leaf, ConstraintLeaf::Path);
+    let (checked_param, rendering) = if measures_path {
+        (
+            quote! { path: &std::path::Path },
+            quote! {
+                let rendered = path.to_string_lossy();
+                let value: &str = &rendered;
+            },
+        )
+    } else {
+        (quote! { value: &str }, quote! {})
+    };
 
     let field_name_lit = field_ident.to_owned();
 
@@ -4697,13 +4723,20 @@ fn generate_string_validation_code(
     }
 
     let deserializer = if wraps.is_empty() {
+        // The owned form of the leaf, which is what a bare field of it is declared as: the
+        // borrowed form is unsized and cannot be a field by value.
+        let owned = if measures_path {
+            quote! { std::path::PathBuf }
+        } else {
+            quote! { String }
+        };
         quote! {
-            pub fn #deserialize_fn_ident<'de, D>(deserializer: D) -> Result<String, D::Error>
+            pub fn #deserialize_fn_ident<'de, D>(deserializer: D) -> Result<#owned, D::Error>
             where
                 D: serde::Deserializer<'de>,
             {
                 use serde::Deserialize;
-                let s = String::deserialize(deserializer)?;
+                let s = #owned::deserialize(deserializer)?;
                 #validate_value_fn_ident(&s).map_err(serde::de::Error::custom)?;
                 Ok(s)
             }
@@ -4719,7 +4752,8 @@ fn generate_string_validation_code(
     };
 
     let module_items = quote! {
-        pub fn #validate_value_fn_ident(value: &str) -> Result<(), String> {
+        pub fn #validate_value_fn_ident(#checked_param) -> Result<(), String> {
+            #rendering
             #(#checks)*
             Ok(())
         }
@@ -4916,12 +4950,14 @@ fn sole_type_argument(args: &syn::AngleBracketedGenericArguments) -> Option<&syn
     types.next().is_none().then_some(only)
 }
 
-/// The leaf a bare type name stands for. `str` is `String`'s borrowed form and answers as one; the
-/// numerics name themselves, since the validator's parameter is written from the name.
+/// The leaf a bare type name stands for. `str` is `String`'s borrowed form and answers as one, as
+/// `Path` does for `PathBuf`; the numerics name themselves, since the validator's parameter is
+/// written from the name.
 #[cfg(feature = "serde")]
 fn leaf_for_ident(ident: &str) -> Option<ConstraintLeaf> {
     match ident {
         "String" | "str" => Some(ConstraintLeaf::Str),
+        "PathBuf" | "Path" => Some(ConstraintLeaf::Path),
         "u8" => Some(ConstraintLeaf::Number("u8")),
         "u16" => Some(ConstraintLeaf::Number("u16")),
         "u32" => Some(ConstraintLeaf::Number("u32")),
@@ -5287,7 +5323,7 @@ fn generate_field_validation(
 
     let helper_stem = helper_name_stem(raw_field_ident, variant_ident);
     let generated = match shape.leaf {
-        ConstraintLeaf::Str => has_string_constraints.then(|| {
+        ConstraintLeaf::Path | ConstraintLeaf::Str => has_string_constraints.then(|| {
             generate_string_validation_code(
                 raw_field_ident,
                 &helper_stem,

@@ -29,6 +29,16 @@ pub enum SlotContent {
     Plain(String),
 }
 
+/// Every position of a multi-element tuple variant is a slot for the same reason: serde writes each
+/// one, so a `None` among them reaches the wire as a `null` in place rather than shortening the
+/// tuple. The non-`Option` element beside it carries no null.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "type", content = "value")]
+pub enum SlotElements {
+    Pair(String, Option<u32>),
+}
+
 /// Test 1: Single-element tuple variants.
 /// Each variant has exactly one tuple element.
 #[test]
@@ -489,9 +499,9 @@ fn test_optional_in_tuple() {
         "Maybe should have nullable string"
     );
 
-    // Multi tuple with optional element
+    // Multi tuple with optional element: each position is a slot too, so the same null flavor.
     assert!(
-        ts.contains("[string, number | undefined]"),
+        ts.contains("[string, number | null]"),
         "MaybePair should have tuple with optional element"
     );
 }
@@ -848,4 +858,150 @@ fn test_single_tuple_variant_option_content_json_schema_null_flavor() {
         variant_of("Plain")["properties"]["value"],
         serde_json::json!({ "type": "string" })
     );
+}
+
+/// Test 18: what serde writes for a multi-element tuple variant whose second element is an
+/// `Option` — the capture the three surfaces below are read against.
+#[test]
+fn test_multi_tuple_variant_option_element_writes_null_in_place() {
+    assert_eq!(
+        serde_json::to_value(SlotElements::Pair("a".to_owned(), None)).unwrap(),
+        serde_json::json!({ "type": "Pair", "value": ["a", null] }),
+        "A `None` element keeps its position and writes `null` there"
+    );
+}
+
+/// Test 18a: TypeScript describes those elements as the slots they are.
+#[test]
+fn test_multi_tuple_variant_option_element_typescript_null_flavor() {
+    let ts = SlotElements::ts_definition();
+
+    assert!(
+        ts.contains("value: [string, number | null]"),
+        "Pair's second element is the slot the `None` fills with `null`. Got: {ts}"
+    );
+}
+
+/// Test 18b: the Zod schema of that tuple admits the `null` serde writes. A `z.tuple` element
+/// cannot be omitted, so an undefined-flavored union there would leave `["a", null]` unmatched.
+#[cfg(feature = "zod")]
+#[test]
+fn test_multi_tuple_variant_option_element_zod_null_flavor() {
+    let zod = SlotElements::zod_schema();
+
+    assert!(
+        zod.contains("value: z.tuple([z.string(), z.nullable(z.number().int())])"),
+        "Pair's tuple admits the `null` in place. Got: {zod}"
+    );
+}
+
+/// Test 18c: the JSON schema already said so, and keeps saying it — now over the fixed-arity array
+/// every other tuple position writes, bounds included.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn test_multi_tuple_variant_option_element_json_schema_null_flavor() {
+    let schema = SlotElements::json_schema();
+    let variant = schema["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["properties"]["type"]["const"] == "Pair")
+        .unwrap();
+
+    assert_eq!(
+        variant["properties"]["value"],
+        serde_json::json!({
+            "type": "array",
+            "prefixItems": [
+                { "type": "string" },
+                { "anyOf": [{ "type": "integer" }, { "type": "null" }] }
+            ],
+            "items": false,
+            "minItems": 2_u64,
+            "maxItems": 2_u64
+        })
+    );
+}
+
+/// The two-element tuple a variant carries and the two-element tuple a field carries are the same
+/// JSON array, so they describe as the same schema — bounds included.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn test_multi_tuple_variant_json_schema_matches_tuple_field() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub struct ArityField {
+        pub pair: (u32, u32),
+    }
+
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub enum ArityVariant {
+        Pair(u32, u32),
+    }
+
+    let schema = ArityVariant::json_schema();
+    let variant_value = &schema["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["properties"]["type"]["const"] == "Pair")
+        .unwrap()["properties"]["value"];
+
+    assert_eq!(
+        *variant_value,
+        ArityField::json_schema()["properties"]["pair"],
+        "A variant's tuple array must describe as the tuple field does. Got: {variant_value}"
+    );
+    assert_eq!(
+        *variant_value,
+        serde_json::json!({
+            "type": "array",
+            "prefixItems": [{ "type": "integer" }, { "type": "integer" }],
+            "items": false,
+            "minItems": 2_u64,
+            "maxItems": 2_u64
+        })
+    );
+}
+
+/// The bounds are read against real payloads: the array serde writes for the variant sits inside
+/// them, and the short and long arrays serde can neither write nor read back sit outside.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn test_multi_tuple_variant_arity_bounds_reject_wrong_length_arrays() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    #[serde(tag = "type", content = "value")]
+    pub enum ArityProbe {
+        Pair(u32, u32),
+    }
+
+    let schema = ArityProbe::json_schema();
+    let value = &schema["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["properties"]["type"]["const"] == "Pair")
+        .unwrap()["properties"]["value"];
+    let admitted = value["minItems"].as_u64().unwrap()..=value["maxItems"].as_u64().unwrap();
+
+    let written = serde_json::to_value(ArityProbe::Pair(1, 2)).unwrap();
+    let written_len = u64::try_from(written["value"].as_array().unwrap().len()).unwrap();
+    assert!(
+        admitted.contains(&written_len),
+        "What serde writes must validate. Got length {written_len} against {admitted:?}"
+    );
+
+    for rejected in [
+        serde_json::json!([]),
+        serde_json::json!([1_u32]),
+        serde_json::json!([1_u32, 2_u32, 3_u32]),
+    ] {
+        let len = u64::try_from(rejected.as_array().unwrap().len()).unwrap();
+        assert!(
+            !admitted.contains(&len),
+            "An array of {len} elements is not the tuple. Got {admitted:?}"
+        );
+    }
 }
