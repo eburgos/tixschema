@@ -895,7 +895,8 @@ fn test_multi_tuple_variant_option_element_zod_null_flavor() {
     );
 }
 
-/// Test 18c: the JSON schema already said so, and keeps saying it unchanged.
+/// Test 18c: the JSON schema already said so, and keeps saying it — now over the fixed-arity array
+/// every other tuple position writes, bounds included.
 #[cfg(feature = "jsonschema")]
 #[test]
 fn test_multi_tuple_variant_option_element_json_schema_null_flavor() {
@@ -915,7 +916,92 @@ fn test_multi_tuple_variant_option_element_json_schema_null_flavor() {
                 { "type": "string" },
                 { "anyOf": [{ "type": "integer" }, { "type": "null" }] }
             ],
-            "items": false
+            "items": false,
+            "minItems": 2_u64,
+            "maxItems": 2_u64
         })
     );
+}
+
+/// The two-element tuple a variant carries and the two-element tuple a field carries are the same
+/// JSON array, so they describe as the same schema — bounds included.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn test_multi_tuple_variant_json_schema_matches_tuple_field() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub struct ArityField {
+        pub pair: (u32, u32),
+    }
+
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub enum ArityVariant {
+        Pair(u32, u32),
+    }
+
+    let schema = ArityVariant::json_schema();
+    let variant_value = &schema["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["properties"]["type"]["const"] == "Pair")
+        .unwrap()["properties"]["value"];
+
+    assert_eq!(
+        *variant_value,
+        ArityField::json_schema()["properties"]["pair"],
+        "A variant's tuple array must describe as the tuple field does. Got: {variant_value}"
+    );
+    assert_eq!(
+        *variant_value,
+        serde_json::json!({
+            "type": "array",
+            "prefixItems": [{ "type": "integer" }, { "type": "integer" }],
+            "items": false,
+            "minItems": 2_u64,
+            "maxItems": 2_u64
+        })
+    );
+}
+
+/// The bounds are read against real payloads: the array serde writes for the variant sits inside
+/// them, and the short and long arrays serde can neither write nor read back sit outside.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn test_multi_tuple_variant_arity_bounds_reject_wrong_length_arrays() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    #[serde(tag = "type", content = "value")]
+    pub enum ArityProbe {
+        Pair(u32, u32),
+    }
+
+    let schema = ArityProbe::json_schema();
+    let value = &schema["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["properties"]["type"]["const"] == "Pair")
+        .unwrap()["properties"]["value"];
+    let admitted = value["minItems"].as_u64().unwrap()..=value["maxItems"].as_u64().unwrap();
+
+    let written = serde_json::to_value(ArityProbe::Pair(1, 2)).unwrap();
+    let written_len = u64::try_from(written["value"].as_array().unwrap().len()).unwrap();
+    assert!(
+        admitted.contains(&written_len),
+        "What serde writes must validate. Got length {written_len} against {admitted:?}"
+    );
+
+    for rejected in [
+        serde_json::json!([]),
+        serde_json::json!([1_u32]),
+        serde_json::json!([1_u32, 2_u32, 3_u32]),
+    ] {
+        let len = u64::try_from(rejected.as_array().unwrap().len()).unwrap();
+        assert!(
+            !admitted.contains(&len),
+            "An array of {len} elements is not the tuple. Got {admitted:?}"
+        );
+    }
 }
