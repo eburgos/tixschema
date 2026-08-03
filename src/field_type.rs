@@ -1019,14 +1019,20 @@ fn get_field_def_from_generic_type(
             #[cfg(feature = "jsonschema")]
             type_span: type_ident.span(),
         }
-    } else if arg_types.len() == 1 && ident == "Option" {
+    }
+    // A collapse keeps the field and drops only the wrapper. The docs were written where the field
+    // was, not around what it holds, so they cross onto the element the field's own name crosses
+    // onto — the element was parsed with none of its own to lose.
+    else if arg_types.len() == 1 && ident == "Option" {
         let mut result = arg_types[0].clone();
         result.name = safe_name;
+        field_docs.clone_into(&mut result.docs);
         result.mark_nullable_at(result.array_depth);
         result
     } else if arg_types.len() == 1 && ident == "Vec" {
         let mut result = arg_types[0].clone();
         result.name = safe_name;
+        field_docs.clone_into(&mut result.docs);
         result.array_depth = result.array_depth.saturating_add(1);
         result
     }

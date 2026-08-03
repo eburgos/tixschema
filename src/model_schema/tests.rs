@@ -31,6 +31,21 @@ use syn::spanned::Spanned as _;
 /// The variants of [`rendered_discriminated_union`]'s enum, in the order they are declared.
 const DECLARED_VARIANTS: [&str; 6] = ["Upload", "Generate", "Delete", "Rename", "Move", "Archive"];
 
+/// Every pattern the `pattern` guards must decide, invalid ones first, then the valid shapes the
+/// shipped tests write.
+const PROBE_PATTERNS: [&str; 10] = [
+    r"^ab\",
+    "^ab(",
+    "*ab",
+    "^[a-",
+    r"\p{NotAClass}",
+    "^[a-z]+$",
+    r"^\d{3}\.\d{3}$",
+    r"^a\n[a-z]+$",
+    "^/[a-z]+$",
+    r"^\/[a-z]+$",
+];
+
 /// The covered wrappers, under the names a dispatch reads them by.
 #[cfg(any(feature = "jsonschema", feature = "serde"))]
 const SEQUENCE_WRAPPERS: [&str; 6] = [
@@ -651,6 +666,137 @@ fn a_path_field_is_left_alone() {
     }
 }
 
+/// Runs the field walk the way [`super::process_field`] does and renders the guard failures its
+/// `model_schema_prop` attributes earn, so a refused key and an unparseable `pattern` are read off
+/// the same channel that carries them to the emitted item.
+fn field_prop_guard_errors(item: &syn::ItemStruct) -> Vec<String> {
+    let field = item.fields.iter().next().unwrap();
+    let name = field
+        .ident
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    let field_def = get_field_def(&name, &field.ty, "");
+    let meta = super::parse_model_schema_prop_attributes(&field.attrs);
+    super::collect_field_guard_errors(field, &field_def, &name, &meta, Vec::new())
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// The guard's verdict is the `regex` crate's verdict: the parse the generated validator's
+/// `Regex::new` would run, moved to expansion. Driving the expectation off `Regex::new` itself is
+/// what keeps the two from drifting as the crate's grammar changes.
+#[test]
+fn the_field_pattern_guard_follows_the_regex_crate() {
+    for pattern in PROBE_PATTERNS {
+        let rejected = regex::Regex::new(pattern).is_err();
+        let errors = field_prop_guard_errors(&syn::parse_quote! {
+            struct Report {
+                #[model_schema_prop(pattern = #pattern)]
+                name: String,
+            }
+        });
+        assert_eq!(
+            errors.len(),
+            usize::from(rejected),
+            "for {pattern}, got: {errors:?}"
+        );
+    }
+}
+
+/// The trailing backslash from the report: it terminates no escape, so `Regex::new` fails and the
+/// Zod literal it would otherwise feed swallows its own closing delimiter.
+#[test]
+fn a_field_pattern_the_regex_crate_rejects_names_the_field_and_quotes_the_parse_error() {
+    let errors = field_prop_guard_errors(&syn::parse_quote! {
+        struct Report {
+            #[model_schema_prop(pattern = r"^ab\")]
+            name: String,
+        }
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    for needle in [
+        "compile_error",
+        "field `name`",
+        "pattern",
+        "regex parse error",
+        "incomplete escape sequence",
+    ] {
+        assert!(
+            errors[0].contains(needle),
+            "{needle} missing: {}",
+            errors[0]
+        );
+    }
+}
+
+/// A field carrying no `pattern` at all must not acquire one of these errors.
+#[test]
+fn an_unpatterned_field_is_left_alone() {
+    let errors = field_prop_guard_errors(&syn::parse_quote! {
+        struct Report {
+            #[model_schema_prop(minLength = 3)]
+            name: String,
+        }
+    });
+    assert!(errors.is_empty(), "got: {errors:?}");
+}
+
+/// The reported repro: two misspelled keys, which emitted `z.string()` with nothing on it. The
+/// misspelling reaches the author on the same channel the `pattern` guard uses, naming the field
+/// and the key as written; parsing stops there, so the second misspelling is not reached.
+#[test]
+fn a_misspelled_field_prop_key_names_the_field_and_the_key_as_written() {
+    let errors = field_prop_guard_errors(&syn::parse_quote! {
+        struct Report {
+            #[model_schema_prop(patern = "^[a-z]+$", minLenght = 3)]
+            name: String,
+        }
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    for needle in ["compile_error", "field `name`", "patern", "pattern"] {
+        assert!(
+            errors[0].contains(needle),
+            "{needle} missing: {}",
+            errors[0]
+        );
+    }
+}
+
+/// A value the parser cannot read is the same class of loss as a key it cannot read — the
+/// constraint reaches no surface — and leaves by the same channel.
+#[test]
+fn a_field_prop_value_the_parser_cannot_read_names_the_field() {
+    let errors = field_prop_guard_errors(&syn::parse_quote! {
+        struct Report {
+            #[model_schema_prop(minLength = "3")]
+            name: String,
+        }
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(errors[0].contains("field `name`"), "got: {}", errors[0]);
+}
+
+/// The two `model_schema_prop` guards are independent: a refused key does not swallow the
+/// unparseable `pattern` the same attribute already carried.
+#[test]
+fn a_refused_key_and_an_unparseable_pattern_are_both_reported() {
+    let errors = field_prop_guard_errors(&syn::parse_quote! {
+        struct Report {
+            #[model_schema_prop(pattern = r"^ab\", patern = "^[a-z]+$")]
+            name: String,
+        }
+    });
+    assert_eq!(errors.len(), 2, "got: {errors:?}");
+    assert!(errors[0].contains("patern"), "got: {}", errors[0]);
+    assert!(
+        errors[1].contains("regex parse error"),
+        "got: {}",
+        errors[1]
+    );
+}
+
 #[cfg(feature = "serde")]
 #[test]
 fn cfg_attr_without_serde_leaves_a_field_alone() {
@@ -899,6 +1045,55 @@ fn branded_errors_with(item: &syn::ItemStruct, args: &super::ModelSchemaArgs) ->
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn pattern_args() -> super::ModelSchemaArgs {
     super::parse_model_schema_args(quote::quote! { pattern = "^[a-z]+$" })
+}
+
+/// A brand's guard failures for the given `pattern`, over a `String` inner that clears every other
+/// guard.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn brand_pattern_errors(pattern: &str) -> Vec<String> {
+    branded_errors_with(
+        &syn::parse_quote! {
+            #[serde(transparent)]
+            struct UserId(pub String);
+        },
+        &super::parse_model_schema_args(quote::quote! { pattern = #pattern }),
+    )
+}
+
+/// The brand splice reaches the same three surfaces the field splice does, so it answers to the
+/// same parse.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn the_brand_pattern_guard_follows_the_regex_crate() {
+    for pattern in PROBE_PATTERNS {
+        let rejected = regex::Regex::new(pattern).is_err();
+        let errors = brand_pattern_errors(pattern);
+        assert_eq!(
+            errors.len(),
+            usize::from(rejected),
+            "for {pattern}, got: {errors:?}"
+        );
+    }
+}
+
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_brand_pattern_the_regex_crate_rejects_names_the_type_and_quotes_the_parse_error() {
+    let errors = brand_pattern_errors(r"^ab\");
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    for needle in [
+        "compile_error",
+        "type `UserId`",
+        "pattern",
+        "regex parse error",
+        "incomplete escape sequence",
+    ] {
+        assert!(
+            errors[0].contains(needle),
+            "{needle} missing: {}",
+            errors[0]
+        );
+    }
 }
 
 /// Every constraint the guard reacts to, applied one at a time: `has_string_constraints` is an
@@ -2306,6 +2501,30 @@ fn a_sibling_string_keyed_map_value_emits_the_sibling_schema() {
         assert!(
             !tokens.contains(r#""additionalProperties" : true"#),
             "for {map_type}, got: {tokens}"
+        );
+    }
+}
+
+/// A map is a `Map` wherever it is written, never a sibling named after the container: the parser
+/// claims both 2-argument map idents ahead of the sibling fallback, and the wrappers a map can be
+/// written under either collapse onto it or hold it as a value. The sibling dispatch therefore
+/// renders no map of its own — a rendering there answers for nothing, and is free to drift from the
+/// one the map arm states.
+#[test]
+fn a_map_never_parses_as_a_sibling_named_after_its_container() {
+    for spelling in [
+        "HashMap<String, u32>",
+        "BTreeMap<String, u32>",
+        "std::collections::BTreeMap<String, u32>",
+        "Option<HashMap<String, u32>>",
+        "Box<HashMap<String, u32>>",
+        "Vec<BTreeMap<String, u32>>",
+    ] {
+        let ty: syn::Type = syn::parse_str(spelling).unwrap();
+        let field_type = get_field_def("m", &ty, "").field_type;
+        assert!(
+            matches!(field_type, FieldDefType::Map(..)),
+            "for {spelling}, got: {field_type:?}"
         );
     }
 }
