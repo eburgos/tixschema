@@ -160,6 +160,22 @@ pub struct FieldDef {
 }
 
 impl FieldDef {
+    /// The element of a collection wrapper, as the field the wrapper's own serialization makes it.
+    ///
+    /// A `Vec<T>` and a set of `T` both write a JSON array of `T`, so the element carries the
+    /// array-ness and answers for what the array holds. The field's own constraints ride along:
+    /// they have nothing but the element to land on, exactly as on the `Vec` spelling, which the
+    /// parser hands over already collapsed onto its element.
+    pub fn collection_element_field(&self, element: &Self) -> Self {
+        let mut arrayed = element.clone();
+        arrayed.name.clone_from(&self.name);
+        arrayed.is_array = true;
+        arrayed
+            .model_schema_prop_meta
+            .clone_from(&self.model_schema_prop_meta);
+        arrayed
+    }
+
     #[cfg(feature = "zod")]
     /// Checks if this field contains a reference to the given type name.
     ///
@@ -307,7 +323,13 @@ impl FieldDef {
                 format!("[{elements}]")
             }
             FieldDefType::SiblingType(name, lst) => {
-                if let Some(info) = lookup_alias_info(name) {
+                if let [element] = lst.as_slice()
+                    && is_set_wrapper(name)
+                {
+                    // The element re-enters the whole per-type rendering as the arrayed field it
+                    // stands for, so a set renders exactly as the `Vec` of that element does.
+                    self.collection_element_field(element).typescript_base()
+                } else if let Some(info) = lookup_alias_info(name) {
                     if lst.is_empty() {
                         info.export_name
                     } else {
@@ -424,11 +446,13 @@ impl FieldDef {
         }
     }
 
-    /// Builds the Zod schema before the struct-field optional wrap: the type match, the
-    /// `is_array` wrap, and the preprocess wrap. The
-    /// `z.union([…, z.undefined()]).prefault(undefined)` wrap lives in `zod_type`.
+    /// The type match plus the `is_array` wrap, before the preprocess wrap.
+    ///
+    /// A set's element re-enters the rendering here rather than at `zod_base`: it carries a copy of
+    /// the field's own metadata, and the preprocess wrap belongs once, outside the array — where
+    /// the `Vec` spelling of the same field puts it.
     #[cfg(feature = "zod")]
-    fn zod_base(&self) -> String {
+    fn zod_array_base(&self) -> String {
         let result = match &self.field_type {
             FieldDefType::Unknown => "z.unknown()".to_owned(),
             FieldDefType::Tuple(lst) => {
@@ -440,7 +464,11 @@ impl FieldDef {
                 format!("z.tuple([{elements}])")
             }
             FieldDefType::SiblingType(name, lst) => {
-                if let Some(info) = lookup_alias_info(name) {
+                if let [element] = lst.as_slice()
+                    && is_set_wrapper(name)
+                {
+                    self.collection_element_field(element).zod_array_base()
+                } else if let Some(info) = lookup_alias_info(name) {
                     // Always reference the $Schema, regardless of generic params.
                     // For branded wrappers like DocumentTypeId<String>, the Zod
                     // schema is defined on the wrapper itself.
@@ -491,11 +519,19 @@ impl FieldDef {
                 }
             }
         };
-        let array_result = if self.is_array {
+        if self.is_array {
             format!("z.array({result})")
         } else {
             result
-        };
+        }
+    }
+
+    /// Builds the Zod schema before the struct-field optional wrap: the type match, the
+    /// `is_array` wrap, and the preprocess wrap. The
+    /// `z.union([…, z.undefined()]).prefault(undefined)` wrap lives in `zod_type`.
+    #[cfg(feature = "zod")]
+    fn zod_base(&self) -> String {
+        let array_result = self.zod_array_base();
 
         // Wrap with preprocess if specified
         if let Some(meta) = &self.model_schema_prop_meta
@@ -590,6 +626,14 @@ impl FieldDef {
             pre_result
         }
     }
+}
+
+/// The std set wrappers, which each write a JSON array of their element.
+///
+/// `Vec` is absent because it never reaches a wrapper name: the parser collapses it onto its
+/// element with `is_array` set, long before anything asks what the wrapper is called.
+fn is_set_wrapper(name: &str) -> bool {
+    matches!(name, "BTreeSet" | "HashSet")
 }
 
 /// Classifies a `syn::Variant` into its `VariantKind`.
@@ -943,3 +987,6 @@ fn handle_datetime_generic_type(safe_name: String, field_docs: &str) -> FieldDef
         model_schema_prop_meta: None,
     }
 }
+
+#[cfg(test)]
+mod tests;
