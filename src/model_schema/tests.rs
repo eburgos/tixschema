@@ -13,6 +13,17 @@ use super::{AliasKind, branded_guard_errors, register_alias_info};
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use syn::spanned::Spanned as _;
 
+/// The covered wrappers, under the names a dispatch reads them by.
+#[cfg(feature = "jsonschema")]
+const SEQUENCE_WRAPPERS: [&str; 6] = [
+    "BTreeSet",
+    "BinaryHeap",
+    "HashSet",
+    "LinkedList",
+    "Vec",
+    "VecDeque",
+];
+
 #[test]
 fn ts_optional_ok_on_option_field() {
     validate_ts_optional_flag(true, true).unwrap();
@@ -1629,13 +1640,13 @@ fn an_aliased_string_keyed_map_value_resolves_its_module_through_the_registry() 
     }
 }
 
-/// A field spelled as a wrapper around `u32`, built rather than parsed: the parser collapses a
+/// A value spelled as a wrapper around `u32`, built rather than parsed: the parser collapses a
 /// `Vec` onto its element before any wrapper name is read, so the `Vec` spelling of a wrapper name
-/// can only be put in front of the dispatch this way.
+/// can only be put in front of a dispatch this way.
 #[cfg(feature = "jsonschema")]
-fn wrapped_u32_field_schema(wrapper: &str) -> String {
+fn wrapped_u32_value(wrapper: &str) -> super::FieldDef {
     let element = super::get_field_def("", &syn::parse_quote!(u32), "");
-    let field = super::FieldDef {
+    super::FieldDef {
         array_num: None,
         docs: String::new(),
         field_type: FieldDefType::SiblingType(wrapper.to_owned(), vec![element]),
@@ -1643,8 +1654,13 @@ fn wrapped_u32_field_schema(wrapper: &str) -> String {
         is_optional: false,
         model_schema_prop_meta: None,
         name: "items".to_owned(),
-    };
-    super::build_field_type_schema(&field, "items").to_string()
+    }
+}
+
+/// The `Vec<u32>` value every wrapper spelling of the same thing is held against.
+#[cfg(feature = "jsonschema")]
+fn parsed_u32_vec_value() -> super::FieldDef {
+    super::get_field_def("items", &syn::parse_quote!(Vec<u32>), "")
 }
 
 /// Every wrapper serde writes as a JSON array describes as the `Vec` of its element does, that
@@ -1653,22 +1669,57 @@ fn wrapped_u32_field_schema(wrapper: &str) -> String {
 #[cfg(feature = "jsonschema")]
 #[test]
 fn every_sequence_wrapper_describes_as_the_vec_of_its_element() {
-    let parsed: syn::Type = syn::parse_quote!(Vec<u32>);
-    let expected =
-        super::build_field_type_schema(&super::get_field_def("items", &parsed, ""), "items")
-            .to_string();
-    for wrapper in [
-        "BTreeSet",
-        "BinaryHeap",
-        "HashSet",
-        "LinkedList",
-        "Vec",
-        "VecDeque",
-    ] {
+    let expected = super::build_field_type_schema(&parsed_u32_vec_value(), "items").to_string();
+    for wrapper in SEQUENCE_WRAPPERS {
         assert_eq!(
-            wrapped_u32_field_schema(wrapper),
+            super::build_field_type_schema(&wrapped_u32_value(wrapper), "items").to_string(),
             expected,
             "for: {wrapper}"
         );
     }
+}
+
+/// And in the two slot positions, where a value is dispatched instead of a field: a map member and
+/// a tuple element each hold whatever the value writes, so each describes a covered wrapper as the
+/// `Vec` of its element too — a slot reached by a name the field position covers alone is a slot
+/// that renders an array on one surface and a schema module of its own on another.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn every_sequence_wrapper_describes_as_the_vec_of_its_element_in_a_slot() {
+    let parsed = parsed_u32_vec_value();
+    let expected_member = super::build_map_member_schema(&parsed).unwrap().to_string();
+    let expected_element = super::build_tuple_element_json_schema(&parsed).to_string();
+    for wrapper in SEQUENCE_WRAPPERS {
+        let value = wrapped_u32_value(wrapper);
+        assert_eq!(
+            super::build_map_member_schema(&value).unwrap().to_string(),
+            expected_member,
+            "for: {wrapper}"
+        );
+        assert_eq!(
+            super::build_tuple_element_json_schema(&value).to_string(),
+            expected_element,
+            "for: {wrapper}"
+        );
+    }
+}
+
+/// A slot cannot be dropped the way an object key can, so a `None` in one is written as `null` —
+/// and the wrapper the `None` stands around does not change that. The nullability belongs to the
+/// slot, and survives the wrapper being normalized away.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_optional_sequence_wrapper_member_stays_nullable() {
+    let mut optional_set = wrapped_u32_value("HashSet");
+    optional_set.is_optional = true;
+    let mut optional_vec = parsed_u32_vec_value();
+    optional_vec.is_optional = true;
+    assert_eq!(
+        super::build_map_member_schema(&optional_set)
+            .unwrap()
+            .to_string(),
+        super::build_map_member_schema(&optional_vec)
+            .unwrap()
+            .to_string()
+    );
 }

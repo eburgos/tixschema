@@ -3379,10 +3379,13 @@ fn scalar_field_json_schema_value(fld: &FieldDef) -> Option<proc_macro2::TokenSt
 
 /// Builds the base JSON schema for a tuple element, ignoring `is_optional`.
 ///
-/// The nullable wrap is applied by `build_tuple_element_json_schema`.
+/// The element is dispatched in the form its slot normalizes it to, so a sequence wrapper here
+/// describes as the `Vec` of the same element does rather than falling through to the composite
+/// object every unrenderable type lands on. The nullable wrap is applied by
+/// `build_tuple_element_json_schema`, off the element as it was written.
 #[cfg(feature = "jsonschema")]
 fn build_tuple_element_base_json_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
-    scalar_field_json_schema_value(fld)
+    scalar_field_json_schema_value(&normalized_slot_value(fld))
         .unwrap_or_else(|| quote! { serde_json::json!({ "type": "object" }) })
 }
 
@@ -3502,20 +3505,26 @@ fn map_member_slot_value(
     nullable_slot_json_schema_value(value, arrayed_json_schema_value(value, item_value))
 }
 
-/// The `FieldDef` a map value dispatches as.
+/// The `FieldDef` a value in a slot — a map member, a tuple element — dispatches as.
 ///
-/// The parser collapses `Vec<T>` to `T` with `is_array` set, so a `Vec` type name reaches a map
-/// value only on a value built by hand: moving the array-ness onto the element puts that value in
-/// the one form every parsed `Vec` value already arrives in, at whatever nesting it was written.
+/// Every sequence wrapper writes a JSON array of its element, so the value describes as the `Vec`
+/// of that element does: the array-ness moves onto the element, which is the one form a parsed
+/// `Vec` value already arrives in, at whatever nesting it was written. Which wrappers those are is
+/// the surfaces' one shared answer, so no name reaches a slot as an array on one surface and a
+/// schema module of its own on another.
+///
+/// Nullability is carried across rather than taken from the element: a slot cannot be dropped the
+/// way an object key can, so a `None` on either side of the wrapper is written as `null` and the
+/// member schema has to admit it.
 #[cfg(feature = "jsonschema")]
-fn normalized_map_value(value: &FieldDef) -> FieldDef {
+fn normalized_slot_value(value: &FieldDef) -> FieldDef {
     let mut normalized = value.clone();
-    while let FieldDefType::SiblingType(value_type_name, value_args) = &normalized.field_type
-        && value_type_name == "Vec"
-        && let [element] = value_args.as_slice()
+    while let FieldDefType::SiblingType(wrapper_name, wrapper_args) = &normalized.field_type
+        && is_sequence_wrapper(wrapper_name)
+        && let [element] = wrapper_args.as_slice()
     {
-        let mut arrayed = element.clone();
-        arrayed.is_array = true;
+        let mut arrayed = normalized.collection_element_field(element);
+        arrayed.is_optional |= normalized.is_optional;
         normalized = arrayed;
     }
     normalized
@@ -3587,7 +3596,7 @@ fn build_map_member_item(value: &FieldDef) -> Option<MapMemberItem> {
 /// the value type has no rendering here.
 #[cfg(feature = "jsonschema")]
 fn build_map_member_schema(value: &FieldDef) -> Option<proc_macro2::TokenStream> {
-    let normalized = normalized_map_value(value);
+    let normalized = normalized_slot_value(value);
     Some(build_map_member_item(&normalized)?.into_member_schema(&normalized))
 }
 
@@ -3650,7 +3659,7 @@ fn build_enum_key_map_member_item(value: &FieldDef) -> Option<MapMemberItem> {
 /// rather than the key path's.
 #[cfg(feature = "jsonschema")]
 fn build_enum_key_map_value_binding(value: &FieldDef) -> Option<proc_macro2::TokenStream> {
-    let normalized = normalized_map_value(value);
+    let normalized = normalized_slot_value(value);
     let value_schema = build_enum_key_map_member_item(&normalized)?.into_member_value(&normalized);
     Some(quote! { let value_schema = #value_schema; })
 }
