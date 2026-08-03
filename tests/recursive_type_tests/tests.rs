@@ -6,7 +6,10 @@
 /// status the parent asserts on, so a regression fails one test instead of killing the suite.
 #[cfg(feature = "jsonschema")]
 mod describes {
-    use super::{ChainNode, DynamicValueTest, RecursiveMapEnum, TreeNode};
+    use super::{
+        ChainNode, CycleA, DynamicValueTest, Holder, Nest, Ping, Pong, RecursiveMapEnum, Registry,
+        TreeNode,
+    };
     use serde_json::{Value, json};
     use std::env;
     use std::process::Command;
@@ -38,6 +41,42 @@ mod describes {
         }
     }
 
+    /// The pointer every `$ref` anywhere in a description carries, in document order.
+    fn references(value: &Value) -> Vec<String> {
+        match value {
+            Value::Object(members) => members
+                .iter()
+                .flat_map(|(key, member)| {
+                    if key == "$ref" {
+                        member.as_str().map(ToOwned::to_owned).into_iter().collect()
+                    } else {
+                        references(member)
+                    }
+                })
+                .collect(),
+            Value::Array(items) => items.iter().flat_map(references).collect(),
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => Vec::new(),
+        }
+    }
+
+    /// Walks every reference in a description against the description itself, which is what a
+    /// validator reading it does. A pointer landing on nothing — or on the null a definition
+    /// reserved but never filled would leave — is the dangling reference.
+    fn every_reference_resolves(document: &Value) -> usize {
+        let found = references(document);
+        for reference in &found {
+            let resolved = reference
+                .strip_prefix('#')
+                .and_then(|path| document.pointer(path))
+                .filter(|target| !target.is_null());
+            assert!(
+                resolved.is_some(),
+                "`{reference}` resolves to nothing in {document}"
+            );
+        }
+        found.len()
+    }
+
     fn produce(description: &str) -> String {
         match description {
             "vec_self_json" => serde_json::to_string(&TreeNode::json_schema()).unwrap(),
@@ -47,6 +86,13 @@ mod describes {
             "map_self_json" => serde_json::to_string(&RecursiveMapEnum::json_schema()).unwrap(),
             "enum_self_json" => serde_json::to_string(&DynamicValueTest::json_schema()).unwrap(),
             "enum_self_ts" => DynamicValueTest::ts_definition(),
+            "mutual_ping_json" => serde_json::to_string(&Ping::json_schema()).unwrap(),
+            "mutual_pong_json" => serde_json::to_string(&Pong::json_schema()).unwrap(),
+            "mutual_ping_ts" => Ping::ts_definition(),
+            "cycle_json" => serde_json::to_string(&CycleA::json_schema()).unwrap(),
+            "held_json" => serde_json::to_string(&Holder::json_schema()).unwrap(),
+            "registry_json" => serde_json::to_string(&Registry::json_schema()).unwrap(),
+            "nested_json" => serde_json::to_string(&Nest::json_schema()).unwrap(),
             other => format!("no description named `{other}`"),
         }
     }
@@ -156,6 +202,108 @@ mod describes {
         );
     }
 
+    /// Neither expansion can see the cycle: each is written before the other exists, and a type
+    /// names the other by inlining it. Only the run knows it has come back around.
+    #[test]
+    fn two_types_naming_each_other_terminate_and_resolve() {
+        for (description, def_name) in [("mutual_ping_json", "Ping"), ("mutual_pong_json", "Pong")]
+        {
+            let document: Value = serde_json::from_str(&produced(description)).unwrap();
+
+            assert_eq!(document["$ref"], json!(format!("#/$defs/{def_name}")));
+            assert!(
+                every_reference_resolves(&document) >= 2,
+                "the pair should name each other by reference: {document}"
+            );
+            assert!(
+                depth(&document) <= 12,
+                "unrolled rather than named: {document}"
+            );
+        }
+    }
+
+    /// A cycle longer than a pair closes just the same, and closes on the one name the run
+    /// re-entered rather than on every name it passed through.
+    #[test]
+    fn a_three_type_cycle_terminates_and_resolves() {
+        let document: Value = serde_json::from_str(&produced("cycle_json")).unwrap();
+
+        assert_eq!(document["$ref"], json!("#/$defs/CycleA"));
+        assert_eq!(
+            document["$defs"].as_object().map(serde_json::Map::len),
+            Some(1),
+            "only the re-entered name needs a definition: {document}"
+        );
+        assert!(every_reference_resolves(&document) >= 1);
+        assert!(
+            depth(&document) <= 16,
+            "unrolled rather than named: {document}"
+        );
+    }
+
+    /// A recursive type carries references that are pointers from a document root. Held by another
+    /// type, the root is the holder's, so that is where its definition has to be.
+    #[test]
+    fn a_recursive_type_held_by_another_resolves_in_the_holders_document() {
+        let document: Value = serde_json::from_str(&produced("held_json")).unwrap();
+
+        assert_eq!(document["type"], json!("object"));
+        assert_eq!(
+            document["properties"]["root"],
+            json!({ "$ref": "#/$defs/Node" })
+        );
+        assert_eq!(document["required"], json!(["root"]));
+        assert_eq!(
+            document["$defs"]["Node"]["properties"]["children"],
+            json!({ "type": "array", "items": { "$ref": "#/$defs/Node" } })
+        );
+        assert!(every_reference_resolves(&document) >= 2);
+    }
+
+    /// The definition is hoisted once however many positions name the type, and every position
+    /// points at that one entry — a field, an array element, a map value.
+    #[test]
+    fn a_recursive_type_named_from_several_positions_is_hoisted_once() {
+        let document: Value = serde_json::from_str(&produced("registry_json")).unwrap();
+
+        let reference = json!({ "$ref": "#/$defs/Node" });
+        assert_eq!(document["properties"]["primary"], reference);
+        assert_eq!(document["properties"]["spares"]["items"], reference);
+        assert_eq!(
+            document["properties"]["by_name"]["additionalProperties"],
+            reference
+        );
+        assert_eq!(
+            document["$defs"].as_object().map(serde_json::Map::len),
+            Some(1),
+            "one name, one definition: {document}"
+        );
+        assert_eq!(
+            document["$defs"]["Node"]["properties"]["val"],
+            json!({ "type": "string" }),
+            "the hoisted entry is the body, not the place held for it: {document}"
+        );
+        assert!(every_reference_resolves(&document) >= 4);
+    }
+
+    /// A recursive type holding another one puts two definitions at the same root, and the
+    /// document is the reference into its own.
+    #[test]
+    fn a_recursive_type_holding_another_hoists_both_definitions() {
+        let document: Value = serde_json::from_str(&produced("nested_json")).unwrap();
+
+        assert_eq!(document["$ref"], json!("#/$defs/Nest"));
+        assert_eq!(
+            document["$defs"]["Nest"]["properties"]["inner"],
+            json!({ "$ref": "#/$defs/Node" })
+        );
+        assert_eq!(
+            document["$defs"]["Nest"]["properties"]["kids"],
+            json!({ "type": "array", "items": { "$ref": "#/$defs/Nest" } })
+        );
+        assert!(every_reference_resolves(&document) >= 3);
+    }
+
     #[test]
     fn typescript_names_the_type_it_is_defining() {
         let vec_self = produced("vec_self_ts");
@@ -174,6 +322,14 @@ mod describes {
         assert!(
             enum_self.contains("Array<DynamicValueTest>"),
             "a recursive variant names the enum: {enum_self}"
+        );
+
+        // The JSDoc embeds the JSON schema, so a pair that cannot be described takes the
+        // TypeScript surface down with it.
+        let mutual = produced("mutual_ping_ts");
+        assert!(
+            mutual.contains("pong: Array<Pong>;"),
+            "a mutually recursive field names the other type: {mutual}"
         );
     }
 }
@@ -199,6 +355,84 @@ pub struct ChainNode {
 pub struct Address {
     pub city: String,
     pub street: String,
+}
+
+// The types below exist to be described as JSON schema and nothing else — the Zod and TypeScript
+// surfaces they also carry are read off the types above. So they are written only where something
+// asks them what they describe as.
+
+/// One half of a pair that names the other half, written before that half exists.
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Ping {
+    pub pong: Vec<Pong>,
+}
+
+/// The other half, which names the first back.
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Pong {
+    pub ping: Vec<Ping>,
+}
+
+/// The head of a cycle three types long.
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CycleA {
+    pub b: CycleB,
+}
+
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CycleB {
+    pub c: CycleC,
+}
+
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CycleC {
+    pub a: Vec<CycleA>,
+}
+
+/// A type that names itself, held by types that are not recursive themselves.
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Node {
+    pub children: Vec<Self>,
+    pub val: String,
+}
+
+/// Holds one recursive type in one field.
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Holder {
+    pub root: Node,
+}
+
+/// Names the same recursive type from a field, an array element, and a map value.
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Registry {
+    pub by_name: HashMap<String, Node>,
+    pub primary: Node,
+    pub spares: Vec<Node>,
+}
+
+/// Names itself and another recursive type, so one document holds both definitions.
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Nest {
+    pub inner: Node,
+    pub kids: Vec<Self>,
 }
 
 /// Complex `DynamicValue`-like enum with multiple recursive variants.
