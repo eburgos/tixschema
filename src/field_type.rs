@@ -722,7 +722,7 @@ pub fn is_sequence_wrapper(name: &str) -> bool {
 /// not a type argument and never reaches the collected arguments, so a `Cow` arrives with the one
 /// argument a `Box` arrives with. The interior-mutability wrappers are absent — that is a wider
 /// list than this defect was measured over, not a claim that they write anything else.
-fn is_transparent_wrapper(name: &str) -> bool {
+pub fn is_transparent_wrapper(name: &str) -> bool {
     matches!(name, "Arc" | "Box" | "Cow" | "Rc")
 }
 

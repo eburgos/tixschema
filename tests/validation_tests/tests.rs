@@ -2,6 +2,11 @@
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
 ))]
+use alloc::sync::Arc;
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 use serde::{Deserialize, Serialize};
 #[cfg(all(
     feature = "serde",
@@ -1133,5 +1138,257 @@ fn test_pattern_empty_string_match() {
     assert!(
         errors[0].contains("does not match pattern"),
         "Error should mention 'does not match pattern': {errors:?}"
+    );
+}
+
+// ==================== Constraints under Option / wrappers / sequences ====================
+
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_validate_optional_string_some_too_short() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct OptionalConstrained {
+        #[model_schema_prop(minLength = 3)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub nickname: Option<String>,
+    }
+
+    let instance = OptionalConstrained {
+        nickname: Some("a".to_owned()),
+    };
+    let result = instance.validate();
+    assert!(
+        result.is_err(),
+        "validate() should reject a Some holding a too-short string"
+    );
+    let errors = result.unwrap_err();
+    assert_eq!(
+        errors,
+        vec!["'nickname' is too short: minimum length is 3, got 1"],
+        "Unexpected errors: {errors:?}"
+    );
+}
+
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_validate_optional_string_none_is_ok() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct OptionalAbsent {
+        #[model_schema_prop(minLength = 3)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub nickname: Option<String>,
+    }
+
+    let instance = OptionalAbsent { nickname: None };
+    let result = instance.validate();
+    assert!(
+        result.is_ok(),
+        "A None writes no string, so nothing constrains it: {:?}",
+        result.err()
+    );
+}
+
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_validate_boxed_string_too_short() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct BoxedConstrained {
+        #[model_schema_prop(minLength = 3)]
+        pub label: Box<str>,
+    }
+
+    let instance = BoxedConstrained { label: "a".into() };
+    let result = instance.validate();
+    assert!(
+        result.is_err(),
+        "validate() should reject a too-short string under a Box"
+    );
+    let errors = result.unwrap_err();
+    assert_eq!(
+        errors,
+        vec!["'label' is too short: minimum length is 3, got 1"],
+        "Unexpected errors: {errors:?}"
+    );
+}
+
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_validate_vec_string_per_element() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct VecConstrained {
+        #[model_schema_prop(minLength = 3)]
+        pub tags: Vec<String>,
+    }
+
+    let instance = VecConstrained {
+        tags: vec!["ok!".to_owned(), "a".to_owned(), "b".to_owned()],
+    };
+    let result = instance.validate();
+    let errors = result.unwrap_err();
+    assert_eq!(
+        errors,
+        vec![
+            "'tags' is too short: minimum length is 3, got 1",
+            "'tags' is too short: minimum length is 3, got 1",
+        ],
+        "Each failing element reports: {errors:?}"
+    );
+}
+
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_validate_optional_vec_string() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct OptionalVecConstrained {
+        #[model_schema_prop(minLength = 3)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub tags: Option<Vec<String>>,
+    }
+
+    let present = OptionalVecConstrained {
+        tags: Some(vec!["a".to_owned()]),
+    };
+    let errors = present.validate().unwrap_err();
+    assert_eq!(
+        errors,
+        vec!["'tags' is too short: minimum length is 3, got 1"],
+        "Unexpected errors: {errors:?}"
+    );
+
+    let absent = OptionalVecConstrained { tags: None };
+    assert!(
+        absent.validate().is_ok(),
+        "A None holds no elements to constrain"
+    );
+}
+
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_validate_nested_vec_string() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct NestedVecConstrained {
+        #[model_schema_prop(minLength = 3)]
+        pub rows: Vec<Vec<String>>,
+    }
+
+    let instance = NestedVecConstrained {
+        rows: vec![vec!["ok!".to_owned()], vec!["a".to_owned()]],
+    };
+    let errors = instance.validate().unwrap_err();
+    assert_eq!(
+        errors,
+        vec!["'rows' is too short: minimum length is 3, got 1"],
+        "The constraint lands on the innermost element: {errors:?}"
+    );
+}
+
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_validate_optional_numeric_minimum() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct OptionalNumeric {
+        #[model_schema_prop(minimum = 18)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub age: Option<u32>,
+    }
+
+    let too_small = OptionalNumeric { age: Some(5) };
+    let errors = too_small.validate().unwrap_err();
+    assert_eq!(
+        errors,
+        vec!["'age' is too small: minimum is 18, got 5"],
+        "Unexpected errors: {errors:?}"
+    );
+
+    assert!(
+        OptionalNumeric { age: None }.validate().is_ok(),
+        "A None writes no number to constrain"
+    );
+}
+
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_validate_arc_slice_mixed_wrappers() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct MixedWrappers {
+        #[model_schema_prop(maxLength = 2)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub codes: Option<Arc<[String]>>,
+    }
+
+    let instance = MixedWrappers {
+        codes: Some(Arc::from(["ok".to_owned(), "toolong".to_owned()])),
+    };
+    let errors = instance.validate().unwrap_err();
+    assert_eq!(
+        errors,
+        vec!["'codes' is too long: maximum length is 2, got 7"],
+        "Unexpected errors: {errors:?}"
+    );
+}
+
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_validate_boxed_option_string() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct BoxedOption {
+        #[model_schema_prop(minLength = 3)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub nickname: Box<Option<String>>,
+    }
+
+    let instance = BoxedOption {
+        nickname: Box::new(Some("a".to_owned())),
+    };
+    let errors = instance.validate().unwrap_err();
+    assert_eq!(
+        errors,
+        vec!["'nickname' is too short: minimum length is 3, got 1"],
+        "Unexpected errors: {errors:?}"
+    );
+
+    assert!(
+        BoxedOption {
+            nickname: Box::new(None)
+        }
+        .validate()
+        .is_ok(),
+        "A None under a Box still writes nothing to constrain"
     );
 }
