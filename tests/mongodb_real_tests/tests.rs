@@ -23,6 +23,21 @@ struct RealDocument {
     title: String,
 }
 
+// An enum-keyed map enumerates its keys, so every member carries the value schema outright
+// instead of the open `additionalProperties` the String-keyed maps above use.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum RefSlot {
+    Author,
+    Reviewer,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct SlottedRefs {
+    by_slot: HashMap<RefSlot, ObjectId>,
+}
+
 // Basic struct with real ObjectId
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -202,6 +217,45 @@ fn test_real_objectid_json_schema_structure() {
     );
     assert_eq!(meta_additional_props["required"][0], "$oid");
     assert_eq!(meta_additional_props["additionalProperties"], false);
+}
+
+#[test]
+fn test_slotted_refs_constructible() {
+    let slotted = SlottedRefs {
+        by_slot: HashMap::from([
+            (RefSlot::Author, ObjectId::new()),
+            (RefSlot::Reviewer, ObjectId::new()),
+        ]),
+    };
+    assert_eq!(slotted.by_slot.len(), 2);
+}
+
+#[test]
+#[cfg(all(feature = "object_id", feature = "jsonschema"))]
+fn test_enum_keyed_objectid_map_json_schema() {
+    let schema = SlottedRefs::json_schema();
+    let by_slot = &schema["properties"]["by_slot"];
+
+    assert_eq!(by_slot["type"], "object");
+    assert_eq!(by_slot["additionalProperties"], false);
+    let members = RefSlot::enum_members();
+    assert_eq!(
+        by_slot["properties"].as_object().unwrap().len(),
+        members.len(),
+        "in: {by_slot}"
+    );
+    for member in members {
+        let value = &by_slot["properties"][&member];
+        assert_eq!(value["type"], "object", "member {member} in: {by_slot}");
+        assert_eq!(
+            value["properties"]["$oid"]["type"], "string",
+            "member {member} in: {by_slot}"
+        );
+        assert_eq!(
+            value["required"][0], "$oid",
+            "member {member} in: {by_slot}"
+        );
+    }
 }
 
 #[test]
