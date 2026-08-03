@@ -1103,3 +1103,96 @@ fn a_map_key_that_may_have_enum_members_expands_exactly_as_before() {
         );
     }
 }
+
+/// The `String`-key branch's output for a map value built by hand, for the value types no source
+/// type produces: the `literal` override rewrites a *field's* type, never a map value's.
+#[cfg(feature = "jsonschema")]
+fn string_key_map_value_schema(field_type: FieldDefType) -> String {
+    let ty: syn::Type = syn::parse_str("String").unwrap();
+    let mut value = super::get_field_def("m", &ty, "");
+    value.field_type = field_type;
+    super::build_string_key_map_value_schema(&value, "m").to_string()
+}
+
+/// A `String` key says nothing about the value it holds, so a value type the crate renders is
+/// rendered here too — the same mapping the field position uses, not an open member schema.
+#[cfg(all(feature = "chrono", feature = "jsonschema"))]
+#[test]
+fn a_chrono_string_keyed_map_value_keeps_its_format() {
+    for (map_type, format) in [
+        ("HashMap<String, NaiveDate>", "date"),
+        ("HashMap<String, NaiveTime>", "time"),
+        ("HashMap<String, NaiveDateTime>", "date-time"),
+        ("HashMap<String, DateTime<Utc>>", "date-time"),
+    ] {
+        let tokens = map_field_schema(map_type).to_string();
+        assert!(
+            tokens.contains(&format!(
+                r#""additionalProperties" : {{ "type" : "string" , "format" : "{format}" }}"#
+            )),
+            "for {map_type}, got: {tokens}"
+        );
+    }
+}
+
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_string_literal_string_keyed_map_value_keeps_its_const() {
+    let tokens = string_key_map_value_schema(FieldDefType::StringLiteral("Tixena".to_owned()));
+    assert!(
+        tokens.contains(r#""additionalProperties" : { "type" : "string" , "const" : "Tixena" }"#),
+        "got: {tokens}"
+    );
+}
+
+/// An opaque value has no type name to narrow with, so the member schema stays permissive — the
+/// empty schema the crate settled on, in both the bare and the collection form.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_opaque_string_keyed_map_value_stays_permissive() {
+    let tokens = string_key_map_value_schema(FieldDefType::Unknown);
+    assert!(
+        tokens.contains(r#""additionalProperties" : { }"#),
+        "got: {tokens}"
+    );
+}
+
+/// A value the branch cannot render must yield the `compile_error!` *instead of* the property
+/// insertion, so exactly one diagnostic reaches the author — and it names the field, which is all
+/// the author can act on.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_unsupported_string_keyed_map_value_emits_only_the_compile_error() {
+    let tokens = map_field_schema("HashMap<String, (String, u32)>").to_string();
+    assert!(tokens.starts_with("compile_error !"), "got: {tokens}");
+    assert!(!tokens.contains("properties . insert"), "got: {tokens}");
+    assert!(tokens.contains("field `m`"), "got: {tokens}");
+    assert!(
+        tokens.contains("a tuple is not supported as a map value"),
+        "got: {tokens}"
+    );
+}
+
+/// The value types the branch already rendered keep the tokens they have always produced: the
+/// shared mapping is a reuse of the same renderings, not a rewrite of them.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_scalar_string_keyed_map_value_expands_exactly_as_before() {
+    for (map_type, expected) in [
+        ("HashMap<String, String>", r#"{ "type" : "string" }"#),
+        ("HashMap<String, u64>", r#"{ "type" : "integer" }"#),
+        ("HashMap<String, i8>", r#"{ "type" : "integer" }"#),
+        ("HashMap<String, f32>", r#"{ "type" : "number" }"#),
+        ("HashMap<String, bool>", r#"{ "type" : "boolean" }"#),
+        (
+            "HashMap<String, Vec<String>>",
+            r#"{ "type" : "array" , "items" : { "type" : "string" } }"#,
+        ),
+    ] {
+        let tokens = map_field_schema(map_type).to_string();
+        assert!(
+            tokens.contains(&format!(r#""additionalProperties" : {expected}"#)),
+            "for {map_type}, got: {tokens}"
+        );
+    }
+}
