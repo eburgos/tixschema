@@ -14,13 +14,13 @@ fn test_format_docs() {
 #[test]
 fn test_typescript_field_formatting() {
     let field = FieldDef {
-        is_optional: false,
         name: "test_field".to_owned(),
         docs: "Test documentation".to_owned(),
         field_type: FieldDefType::String,
         array_depth: 0,
         array_num: None,
         model_schema_prop_meta: None,
+        nullable_levels: Vec::new(),
     };
 
     let formatted = GenerationUtils::format_typescript_field(&field);

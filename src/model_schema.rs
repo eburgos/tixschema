@@ -767,7 +767,7 @@ fn branded_option_inner_error(
     inner_field: &Field,
 ) -> Option<proc_macro2::TokenStream> {
     get_field_def("_inner", &inner_field.ty, "")
-        .is_optional
+        .is_optional()
         .then(|| {
             syn::Error::new_spanned(
                 inner_field,
@@ -2670,7 +2670,7 @@ fn untagged_named_json_value(field_defs: &[FieldDef]) -> proc_macro2::TokenStrea
     let property_inserts = field_defs.iter().map(|fld| {
         let name_str = fld.name.clone();
         let value = field_json_schema_value(fld);
-        let required_insert = if fld.is_optional {
+        let required_insert = if fld.is_optional() {
             quote! {}
         } else {
             quote! {
@@ -2843,9 +2843,11 @@ fn collect_untagged_members(item_enum: &mut syn::ItemEnum) -> UntaggedMemberData
             let serde_field_meta = parse_serde_field_attributes(&field.attrs);
             if let Some(rejection) = serde_field_meta.cfg_attr_rejection.as_ref() {
                 guard_errors.push(cfg_attr_guard_error(rejection, &field_label(&field_name)));
-            } else if let Err(err) =
-                check_optional_field_serialization(field, field_def.is_optional, &serde_field_meta)
-            {
+            } else if let Err(err) = check_optional_field_serialization(
+                field,
+                field_def.is_optional(),
+                &serde_field_meta,
+            ) {
                 guard_errors.push(err.to_compile_error());
             } else {
                 // No guard violated by this field.
@@ -3161,7 +3163,7 @@ fn write_named_variant_fields(
         #[cfg(not(feature = "jsonschema"))]
         let _: &_ = &(tag_name, &json_schema_variant_fields);
 
-        if fld.is_optional {
+        if fld.is_optional() {
             optional_fields.push(fld.name.clone());
         }
     }
@@ -3243,7 +3245,7 @@ fn write_tuple_single_variant_fields(
     #[cfg(not(feature = "jsonschema"))]
     let _: &_ = &json_schema_variant_fields;
 
-    if fld.is_optional {
+    if fld.is_optional() {
         optional_fields.push(content_name.to_owned());
     }
 }
@@ -3346,6 +3348,10 @@ fn write_tuple_multiple_variant_fields(
 /// once instead of in each renderer. The levels are the ones the field was written at, so a
 /// `Vec<Vec<T>>` describes as the array of arrays serde writes for it.
 ///
+/// A level written as an `Option` admits `null` where it sits — inside the array that holds it,
+/// which is always written — rather than around the array, which is what the outermost level does
+/// and is the caller's to apply.
+///
 /// `item_schema` is a `serde_json::Value` expression, as is the result. Callers holding a literal
 /// fragment want [`arrayed_json_schema_fragment`].
 #[cfg(feature = "jsonschema")]
@@ -3353,7 +3359,12 @@ fn arrayed_json_schema_value(
     fld: &FieldDef,
     item_schema: proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
-    (0..fld.array_depth).fold(item_schema, |items, _| {
+    (0..fld.array_depth).fold(item_schema, |level_schema, level| {
+        let items = if fld.is_nullable_at(level) {
+            quote! { serde_json::json!({ "anyOf": [#level_schema, { "type": "null" }] }) }
+        } else {
+            level_schema
+        };
         quote! { serde_json::json!({ "type": "array", "items": #items }) }
     })
 }
@@ -3365,7 +3376,12 @@ fn arrayed_json_schema_fragment(
     fld: &FieldDef,
     item_schema: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
-    (0..fld.array_depth).fold(item_schema.clone(), |items, _| {
+    (0..fld.array_depth).fold(item_schema.clone(), |level_schema, level| {
+        let items = if fld.is_nullable_at(level) {
+            quote! { { "anyOf": [#level_schema, { "type": "null" }] } }
+        } else {
+            level_schema
+        };
         quote! { { "type": "array", "items": #items } }
     })
 }
@@ -3478,7 +3494,7 @@ fn nullable_slot_json_schema(
     fld: &FieldDef,
     base: &proc_macro2::TokenStream,
 ) -> Option<proc_macro2::TokenStream> {
-    fld.is_optional
+    fld.is_optional()
         .then(|| quote! { { "anyOf": [#base, { "type": "null" }] } })
 }
 
@@ -3677,9 +3693,10 @@ fn map_member_slot_value(
 /// the surfaces' one shared answer, so no name reaches a slot as an array on one surface and a
 /// schema module of its own on another.
 ///
-/// Nullability is carried across rather than taken from the element: a slot cannot be dropped the
-/// way an object key can, so a `None` on either side of the wrapper is written as `null` and the
-/// member schema has to admit it.
+/// An `Option` on either side of the wrapper survives the normalization at the level it was
+/// written at — inside, it is a `null` among the array's items; outside, it stands in place of the
+/// whole array, which a slot cannot drop the way an object key can. The two are different values on
+/// the wire, so the member schema keeps them apart.
 #[cfg(feature = "jsonschema")]
 fn normalized_slot_value(value: &FieldDef) -> FieldDef {
     let mut normalized = value.clone();
@@ -3687,9 +3704,7 @@ fn normalized_slot_value(value: &FieldDef) -> FieldDef {
         && is_sequence_wrapper(wrapper_name)
         && let [element] = wrapper_args.as_slice()
     {
-        let mut arrayed = normalized.collection_element_field(element);
-        arrayed.is_optional |= normalized.is_optional;
-        normalized = arrayed;
+        normalized = normalized.collection_element_field(element);
     }
     normalized
 }
@@ -4186,7 +4201,7 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
     let field_name_str = fld.name.clone();
     let schema_code = build_field_type_schema(fld, &field_name_str);
 
-    let required_code = if fld.is_optional {
+    let required_code = if fld.is_optional() {
         quote! {}
     } else {
         quote! {
@@ -4615,6 +4630,11 @@ fn validate_ts_optional_flag(field_optional: bool, flag_set: bool) -> Result<(),
 /// missing key but never `null`. `is_optional` is the same signal that drives that rendering,
 /// which keeps the guard and the contract from ever disagreeing. Positional fields are exempt: a
 /// tuple slot cannot be omitted, so there `None` correctly renders as nullable.
+///
+/// The subject is the outermost `Option` and only that one, `is_optional` being the question asked
+/// of that level. An `Option` written inside a sequence wrapper has no bare `null` to write: the
+/// array around it is always written, so the key is always present and the `None` is an item, which
+/// the field's own schema describes as nullable.
 #[cfg(feature = "serde")]
 fn check_optional_field_serialization(
     field: &Field,
@@ -4717,7 +4737,7 @@ fn process_field(
     #[cfg(feature = "serde")]
     let guard_error = serde_field_meta.cfg_attr_rejection.as_ref().map_or_else(
         || {
-            check_optional_field_serialization(field, field_def.is_optional, &serde_field_meta)
+            check_optional_field_serialization(field, field_def.is_optional(), &serde_field_meta)
                 .err()
                 .map(|err| err.to_compile_error())
         },
@@ -4752,7 +4772,7 @@ fn process_field(
         .is_some_and(|m| m.ts_optional);
     // A failed assert here surfaces as a compile error at macro-expansion time.
     assert!(
-        validate_ts_optional_flag(field_def.is_optional, ts_optional_flag).is_ok(),
+        validate_ts_optional_flag(field_def.is_optional(), ts_optional_flag).is_ok(),
         "#[model_schema_prop(ts_optional)] requires an Option<T> field on field `{final_name}`"
     );
 
