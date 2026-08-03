@@ -48,6 +48,15 @@ pub struct UsesAliasAsMapKey {
     pub by_slot: HashMap<DocumentSlotAlias, ReferencedDocumentId>,
 }
 
+#[model_schema()]
+pub type ReferencedDocumentIds = Vec<ReferencedDocumentId>;
+
+#[model_schema()]
+pub type DocumentIdsByName = HashMap<String, ReferencedDocumentId>;
+
+#[model_schema()]
+pub type DocumentIdsBySlot = HashMap<DocumentSlot, ReferencedDocumentId>;
+
 #[test]
 fn struct_referencing_an_alias_expands_in_this_feature_combination() {
     let value = UsesAliasByValue {
@@ -68,6 +77,21 @@ fn struct_referencing_an_alias_expands_in_this_feature_combination() {
     assert_eq!(
         map.by_slot.get(&DocumentSlot::Primary),
         Some(&"doc-3".to_owned())
+    );
+}
+
+#[test]
+fn collection_aliases_expand_in_this_feature_combination() {
+    let ids: ReferencedDocumentIds = vec!["doc-5".to_owned()];
+    assert_eq!(ids, vec!["doc-5".to_owned()]);
+
+    let by_name: DocumentIdsByName = HashMap::from([("n".to_owned(), "doc-6".to_owned())]);
+    assert_eq!(by_name.get("n"), Some(&"doc-6".to_owned()));
+
+    let by_slot: DocumentIdsBySlot = HashMap::from([(DocumentSlot::Primary, "doc-7".to_owned())]);
+    assert_eq!(
+        by_slot.get(&DocumentSlot::Primary),
+        Some(&"doc-7".to_owned())
     );
 }
 
@@ -130,6 +154,93 @@ fn alias_keyed_map_enumerates_the_members_of_the_aliased_enum() {
             DocumentSlot::enum_members().len(),
             "{field}: {keyed}"
         );
+    }
+}
+
+/// An alias names a type, so the schema it publishes is that type's own — the same one the scalar
+/// mapping gives a field written as the target directly.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_aliased_scalar_publishes_the_targets_schema() {
+    assert_eq!(
+        referenced_document_id_type_schema::Schema::json_schema(),
+        serde_json::json!({ "type": "string" })
+    );
+}
+
+/// A sibling target is carried by the one reference every position that names it carries, so the
+/// alias and the type it names describe the same values.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_aliased_sibling_publishes_the_siblings_own_schema() {
+    assert_eq!(
+        document_slot_alias_type_schema::Schema::json_schema(),
+        document_slot_schema::Schema::json_schema()
+    );
+}
+
+/// The reference resolves through the registry, which answers with whatever the named alias
+/// registered — so a chain of aliases lands on the enum at the end of it rather than on a link.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_alias_of_an_alias_resolves_to_the_type_at_the_end_of_the_chain() {
+    assert_eq!(
+        document_slot_alias_chain_type_schema::Schema::json_schema(),
+        document_slot_schema::Schema::json_schema()
+    );
+}
+
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_aliased_sequence_publishes_the_array_of_its_element() {
+    assert_eq!(
+        referenced_document_ids_type_schema::Schema::json_schema(),
+        serde_json::json!({
+            "type": "array",
+            "items": referenced_document_id_type_schema::Schema::json_schema()
+        })
+    );
+}
+
+/// A map target describes as its own key and value do, at the alias exactly as in field position:
+/// a `String` key leaves the members open under one value schema, an enum key enumerates them.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_aliased_map_publishes_the_object_its_key_and_value_describe() {
+    let member = referenced_document_id_type_schema::Schema::json_schema();
+    assert_eq!(
+        document_ids_by_name_type_schema::Schema::json_schema(),
+        serde_json::json!({ "type": "object", "additionalProperties": member })
+    );
+
+    let by_slot = document_ids_by_slot_type_schema::Schema::json_schema();
+    let properties = by_slot.get("properties").unwrap();
+    for slot in DocumentSlot::enum_members() {
+        assert_eq!(properties.get(&slot).unwrap(), &member, "in: {by_slot}");
+    }
+    assert_eq!(
+        properties.as_object().unwrap().len(),
+        DocumentSlot::enum_members().len(),
+        "in: {by_slot}"
+    );
+    assert_eq!(by_slot["additionalProperties"], false, "in: {by_slot}");
+}
+
+/// The stub this replaced answered every alias with an object carrying a lone `warning` key, which
+/// under JSON Schema constrains nothing and so accepts every payload a slot could hold.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn no_alias_publishes_a_schema_that_validates_nothing() {
+    for schema in [
+        referenced_document_id_type_schema::Schema::json_schema(),
+        referenced_document_ids_type_schema::Schema::json_schema(),
+        document_slot_alias_type_schema::Schema::json_schema(),
+        document_slot_alias_chain_type_schema::Schema::json_schema(),
+        document_ids_by_name_type_schema::Schema::json_schema(),
+        document_ids_by_slot_type_schema::Schema::json_schema(),
+    ] {
+        assert!(schema.get("warning").is_none(), "got: {schema}");
+        assert!(schema.get("type").is_some(), "got: {schema}");
     }
 }
 
