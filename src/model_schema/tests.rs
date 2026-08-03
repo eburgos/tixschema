@@ -1092,7 +1092,7 @@ fn constrained_brand_inner_spanned_tokens(source: &str, inner: &str) -> (usize, 
             .filter(|text| text.as_str() == inner)
             .count()
     };
-    (count(&validation.1), count(&validate_method))
+    (count(&validation.deserialize_fn), count(&validate_method))
 }
 
 /// Neither `to_string()` the constrained path emits may carry the inner field's span. Spanned
@@ -1118,43 +1118,103 @@ fn neither_constrained_to_string_call_carries_the_inner_fields_span() {
     );
 }
 
-/// The constrained path's generated text is what it has always been.
+/// A constrained brand's emitted text for an inner spelled `inner`, as the three streams it is made
+/// of: the validator, the deserializer, and the `validate()` method that calls into the first.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+fn constrained_brand_emission(inner: &str, module: &str) -> (String, String, String) {
+    let ty: syn::Type = syn::parse_str(inner).unwrap();
+    let item: syn::ItemStruct = syn::parse_quote!(
+        pub struct Branded(pub #ty);
+    );
+    let args = super::parse_model_schema_args(quote::quote! { pattern = "^[a-z]+$" });
+    let validation =
+        super::build_branded_validation(&args, false, &item.fields.iter().next().unwrap().ty)
+            .unwrap();
+    let module_ident = syn::Ident::new(module, proc_macro2::Span::call_site());
+    let (_, _, validate_method) = super::inject_branded_serde_attrs(
+        item,
+        Some(&validation),
+        false,
+        &[],
+        module,
+        &module_ident,
+    );
+    (
+        validation.validate_fn.to_string(),
+        validation.deserialize_fn.to_string(),
+        validate_method.to_string(),
+    )
+}
+
+/// The constrained path's generated text is what it has always been. A wrapper that is not
+/// transparent stays here too: only a deref reaches a path from outside it, and an `Option` or a
+/// sequence has none to offer.
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
 ))]
 #[test]
 fn the_constrained_path_renders_the_same_to_string_calls_it_always_has() {
-    let item: syn::ItemStruct = syn::parse_quote!(
-        pub struct SlugId(pub String);
-    );
-    let args = super::parse_model_schema_args(quote::quote! { pattern = "^[a-z]+$" });
-    let validation =
-        super::build_branded_validation(&args, false, &item.fields.iter().next().unwrap().ty)
-            .unwrap();
-    let module_ident = syn::Ident::new("slug_id_schema", proc_macro2::Span::call_site());
-    let (_, _, validate_method) = super::inject_branded_serde_attrs(
-        item,
-        Some(&validation),
-        false,
-        &[],
-        "slug_id_schema",
-        &module_ident,
-    );
-    assert!(
-        validation
-            .1
-            .to_string()
-            .contains("validate_value (& v . to_string ())"),
-        "got: {}",
-        validation.1
-    );
-    assert!(
-        validate_method
-            .to_string()
-            .contains("slug_id_schema :: validate_value (& self . 0 . to_string ())"),
-        "got: {validate_method}"
-    );
+    for spelling in ["String", "Option<PathBuf>", "Vec<PathBuf>"] {
+        let (validate_fn, deserialize_fn, validate_method) =
+            constrained_brand_emission(spelling, "slug_id_schema");
+        assert!(
+            validate_fn
+                .starts_with("pub fn validate_value (value : & str) -> Result < () , String > {"),
+            "for {spelling}, got: {validate_fn}"
+        );
+        assert!(
+            deserialize_fn.contains("validate_value (& v . to_string ())"),
+            "for {spelling}, got: {deserialize_fn}"
+        );
+        assert!(
+            validate_method
+                .contains("slug_id_schema :: validate_value (& self . 0 . to_string ())"),
+            "for {spelling}, got: {validate_method}"
+        );
+    }
+}
+
+/// A brand's constrained value is its inner field, so a path inner is reached the way a path field
+/// is: the validator takes the borrowed path and renders it once, and neither call site names a
+/// `to_string()` a path has none of. A transparent wrapper adds no call of its own — the borrow the
+/// bare spelling already writes is what deref coercion carries through it.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn a_path_brand_is_checked_through_its_lossy_rendering() {
+    for spelling in [
+        "PathBuf",
+        "std::path::PathBuf",
+        "Arc<Path>",
+        "Box<Path>",
+        "Cow<'static, Path>",
+        "Rc<std::path::Path>",
+        "Box<Arc<Path>>",
+    ] {
+        let (validate_fn, deserialize_fn, validate_method) =
+            constrained_brand_emission(spelling, "asset_path_schema");
+        assert!(
+            validate_fn.starts_with(
+                "pub fn validate_value (path : & std :: path :: Path) -> Result < () , String > { \
+                 let rendered = path . to_string_lossy () ; let value : & str = & rendered ;"
+            ),
+            "for {spelling}, got: {validate_fn}"
+        );
+        assert!(
+            deserialize_fn.contains("validate_value (& v)"),
+            "for {spelling}, got: {deserialize_fn}"
+        );
+        assert!(
+            validate_method.contains("asset_path_schema :: validate_value (& self . 0)"),
+            "for {spelling}, got: {validate_method}"
+        );
+    }
 }
 
 /// The JSON schema statements a map-typed field expands to, parsed from the map type's source and
