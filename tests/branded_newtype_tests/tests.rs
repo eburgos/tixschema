@@ -771,6 +771,163 @@ mod constrained_path_brand_tests {
     }
 }
 
+// A transparent wrapper writes nothing of its own and derefs to what it holds, so a path branded
+// under one is the same path on every surface a bare one is — and the constrained checks reach it
+// through that deref, not through a `Display` none of these spellings has. Compiling this module is
+// the assertion that each spelling is emitted at all.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+mod wrapped_path_brand_tests {
+    use super::*;
+    use alloc::borrow::Cow;
+    use alloc::rc::Rc;
+    use alloc::sync::Arc;
+    use core::fmt::Debug;
+    use serde::de::DeserializeOwned;
+    use std::path::{Path, PathBuf};
+
+    #[model_schema(no_display, minLength = 3, pattern = "^/[a-z]+$")]
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct ArcedPath(pub Arc<Path>);
+
+    #[model_schema(no_display, minLength = 3, pattern = "^/[a-z]+$")]
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct BoxedPath(pub Box<Path>);
+
+    #[model_schema(no_display, minLength = 3, pattern = "^/[a-z]+$")]
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct CowedPath(pub Cow<'static, Path>);
+
+    #[model_schema(no_display, minLength = 3, pattern = "^/[a-z]+$")]
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct RcedPath(pub Rc<Path>);
+
+    /// The wire criterion each spelling is held to: the bound rejects, the accepted payload is the
+    /// path it spelled, and what the wire admits `validate()` admits too.
+    fn assert_wire_bound<Brand>(
+        name: &str,
+        inner: fn(&Brand) -> &Path,
+        validate: fn(&Brand) -> Result<(), Vec<String>>,
+    ) where
+        Brand: Debug + DeserializeOwned,
+    {
+        let too_short = serde_json::from_str::<Brand>("\"/a\"").unwrap_err();
+        assert!(
+            too_short
+                .to_string()
+                .contains("value is too short: minimum length is 3, got 2"),
+            "for {name}, unexpected error: {too_short}"
+        );
+
+        let unmatched = serde_json::from_str::<Brand>("\"etc\"").unwrap_err();
+        assert!(
+            unmatched
+                .to_string()
+                .contains("value does not match pattern '^/[a-z]+$'"),
+            "for {name}, unexpected error: {unmatched}"
+        );
+
+        let accepted = serde_json::from_str::<Brand>("\"/etc\"").unwrap();
+        assert_eq!(inner(&accepted), Path::new("/etc"), "for {name}");
+        assert!(
+            validate(&accepted).is_ok(),
+            "for {name}, a payload the wire admits must be one validate() admits: {:?}",
+            validate(&accepted).err()
+        );
+    }
+
+    /// The same bound reached from Rust rather than the wire, on a value built directly.
+    fn assert_validate_bound<Brand>(
+        name: &str,
+        wrap: fn(&str) -> Brand,
+        validate: fn(&Brand) -> Result<(), Vec<String>>,
+    ) {
+        validate(&wrap("/etc")).unwrap();
+        assert_eq!(
+            validate(&wrap("/a")).unwrap_err(),
+            vec!["value is too short: minimum length is 3, got 2"],
+            "for {name}"
+        );
+        assert_eq!(
+            validate(&wrap("etcetera")).unwrap_err(),
+            vec!["value does not match pattern '^/[a-z]+$'"],
+            "for {name}"
+        );
+    }
+
+    #[test]
+    fn test_every_wrapped_path_brand_is_held_to_its_bound_on_the_wire() {
+        assert_wire_bound::<ArcedPath>("ArcedPath", |brand| &brand.0, ArcedPath::validate);
+        assert_wire_bound::<BoxedPath>("BoxedPath", |brand| &brand.0, BoxedPath::validate);
+        assert_wire_bound::<CowedPath>("CowedPath", |brand| &brand.0, CowedPath::validate);
+        assert_wire_bound::<RcedPath>("RcedPath", |brand| &brand.0, RcedPath::validate);
+    }
+
+    #[test]
+    fn test_every_wrapped_path_brand_is_held_to_its_bound_by_validate() {
+        assert_validate_bound(
+            "ArcedPath",
+            |raw| ArcedPath(Arc::from(Path::new(raw))),
+            ArcedPath::validate,
+        );
+        assert_validate_bound(
+            "BoxedPath",
+            |raw| BoxedPath(Box::from(Path::new(raw))),
+            BoxedPath::validate,
+        );
+        assert_validate_bound(
+            "CowedPath",
+            |raw| CowedPath(Cow::Owned(PathBuf::from(raw))),
+            CowedPath::validate,
+        );
+        assert_validate_bound(
+            "RcedPath",
+            |raw| RcedPath(Rc::from(Path::new(raw))),
+            RcedPath::validate,
+        );
+    }
+
+    // The wrapper is nothing on the wire, so what a wrapped path brand renders is what the bare one
+    // renders; a bound that moved with the spelling would be one the three surfaces no longer share.
+    #[cfg(feature = "zod")]
+    #[test]
+    fn test_a_wrapped_path_brand_renders_the_bare_brands_zod_schema() {
+        let bare = super::constrained_path_brand_tests::AssetPath::zod_schema();
+        for (rendered, name) in [
+            (ArcedPath::zod_schema(), "ArcedPath"),
+            (BoxedPath::zod_schema(), "BoxedPath"),
+            (CowedPath::zod_schema(), "CowedPath"),
+            (RcedPath::zod_schema(), "RcedPath"),
+        ] {
+            assert_eq!(
+                rendered,
+                bare.replace("AssetPath", name),
+                "for {name}, got:\n{rendered}"
+            );
+        }
+    }
+
+    #[cfg(feature = "jsonschema")]
+    #[test]
+    fn test_a_wrapped_path_brand_renders_the_bare_brands_json_schema() {
+        let bare = super::constrained_path_brand_tests::AssetPath::json_schema();
+        for (rendered, name) in [
+            (ArcedPath::json_schema(), "ArcedPath"),
+            (BoxedPath::json_schema(), "BoxedPath"),
+            (CowedPath::json_schema(), "CowedPath"),
+            (RcedPath::json_schema(), "RcedPath"),
+        ] {
+            assert_eq!(rendered, bare, "for {name}, got:\n{rendered}");
+        }
+    }
+}
+
 // `no_display` drops the `Display` impl, not the `Display` requirement: a brand whose checks read
 // the inner's `to_string()` still needs it to render. Compiling this module is the assertion that
 // the combination is accepted and still wired to the constraints.

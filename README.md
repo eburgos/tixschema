@@ -606,7 +606,7 @@ You can add `pattern`, `minLength`, and `maxLength` constraints directly on the 
 
 **The inner type also has to implement `Display`,** since validation runs against `to_string()`. That holds whether or not the brand passes `no_display`: the flag drops the `Display` impl, not the requirement.
 
-A `PathBuf` inner is the one exception, and needs no `Display`: its checks read the path's `to_string_lossy` rendering — the string serde writes for it — exactly as a constrained `PathBuf` field's do. Such a brand still passes `no_display`, since the impl a brand gets by default has no inner `Display` to delegate to:
+A path inner is the one exception, and needs no `Display`: its checks read the path's `to_string_lossy` rendering — the string serde writes for it — exactly as a constrained path field's do. Such a brand still passes `no_display`, since the impl a brand gets by default has no inner `Display` to delegate to:
 
 ```rust
 #[model_schema(no_display, minLength = 3, pattern = "^/[a-z]+$")]
@@ -614,6 +614,8 @@ A `PathBuf` inner is the one exception, and needs no `Display`: its checks read 
 #[serde(transparent)]
 pub struct AssetPath(pub std::path::PathBuf);
 ```
+
+That holds for every spelling of a path: a transparent wrapper writes nothing of its own on the wire and derefs to what it holds, so `Arc<Path>`, `Box<Path>`, `Cow<'static, Path>`, and `Rc<Path>` are branded and bounded exactly as `PathBuf` is.
 
 ```rust
 #[model_schema(pattern = "^[a-z0-9_]+$", minLength = 3, maxLength = 50)]
