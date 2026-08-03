@@ -109,8 +109,8 @@ jobs:
         AUDIT: ${{ steps.audit.outcome }}
       run: |
         # Validate repository to prevent forks from sending notifications
-        if [[ "$REPO" != "tixena/tixschema" ]]; then
-          echo "⏭️ Skipping Discord notification (repository is $REPO, not tixena/tixschema)"
+        if [[ "$REPO" != "eburgos/tixschema" && "$REPO" != "tixena/tixschema" ]]; then
+          echo "⏭️ Skipping Discord notification (repository is $REPO, a fork)"
           exit 0
         fi
 
