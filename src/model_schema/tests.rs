@@ -1214,7 +1214,7 @@ fn a_scalar_enum_keyed_map_value_expands_to_the_per_member_loop() {
     );
 }
 
-/// A `Vec` of siblings is the inner sibling with `is_array` set, so the member schema has to array
+/// A `Vec` of siblings is the inner sibling with an array level counted onto it, so the member schema has to array
 /// the sibling's own schema — bound bare, it types the member as one sibling and turns away every
 /// payload serde produces.
 #[cfg(feature = "jsonschema")]
@@ -1454,14 +1454,14 @@ fn a_scalar_string_keyed_map_value_expands_exactly_as_before() {
 /// map holding `inner_type`, bare or behind a `Vec`, for the inner value types no source type
 /// produces.
 #[cfg(feature = "jsonschema")]
-fn nested_string_key_map_value_schema(inner_type: FieldDefType, is_array: bool) -> String {
+fn nested_string_key_map_value_schema(inner_type: FieldDefType, array_depth: u8) -> String {
     let ty: syn::Type = syn::parse_str("String").unwrap();
     let inner_key = super::get_field_def("m", &ty, "");
     let mut inner_value = inner_key.clone();
     inner_value.field_type = inner_type;
     let mut value = inner_key.clone();
     value.field_type = FieldDefType::Map(Box::new(inner_key), Box::new(inner_value));
-    value.is_array = is_array;
+    value.array_depth = array_depth;
     super::string_key_map_json_schema_value(&value)
         .unwrap()
         .to_string()
@@ -1580,14 +1580,14 @@ fn a_nested_chrono_map_value_keeps_its_format() {
 fn a_nested_string_literal_map_value_keeps_its_const() {
     let inner_member = r#"{ "type" : "object" , "additionalProperties" : { "type" : "string" , "const" : "Tixena" } }"#;
     let bare =
-        nested_string_key_map_value_schema(FieldDefType::StringLiteral("Tixena".to_owned()), false);
+        nested_string_key_map_value_schema(FieldDefType::StringLiteral("Tixena".to_owned()), 0);
     assert!(
         bare.contains(&format!(r#""additionalProperties" : {inner_member}"#)),
         "got: {bare}"
     );
 
     let arrayed =
-        nested_string_key_map_value_schema(FieldDefType::StringLiteral("Tixena".to_owned()), true);
+        nested_string_key_map_value_schema(FieldDefType::StringLiteral("Tixena".to_owned()), 1);
     assert!(
         arrayed.contains(&format!(
             r#""additionalProperties" : {{ "type" : "array" , "items" : {inner_member} }}"#
@@ -1601,13 +1601,13 @@ fn a_nested_string_literal_map_value_keeps_its_const() {
 #[test]
 fn a_nested_object_id_map_value_keeps_its_oid_object() {
     let inner_member = r#"{ "type" : "object" , "additionalProperties" : { "type" : "object" , "properties" : { "$oid" : { "type" : "string" } } , "required" : ["$oid"] , "additionalProperties" : false } }"#;
-    let bare = nested_string_key_map_value_schema(FieldDefType::ObjectId, false);
+    let bare = nested_string_key_map_value_schema(FieldDefType::ObjectId, 0);
     assert!(
         bare.contains(&format!(r#""additionalProperties" : {inner_member}"#)),
         "got: {bare}"
     );
 
-    let arrayed = nested_string_key_map_value_schema(FieldDefType::ObjectId, true);
+    let arrayed = nested_string_key_map_value_schema(FieldDefType::ObjectId, 1);
     assert!(
         arrayed.contains(&format!(
             r#""additionalProperties" : {{ "type" : "array" , "items" : {inner_member} }}"#
@@ -1849,17 +1849,18 @@ fn map_value_def(map_type: &str) -> super::FieldDef {
 }
 
 /// `Vec`-ness rides on the `FieldDef`, never in the type name: the parser collapses `Vec<T>` to
-/// `T` with `is_array` set. A map value's type name is therefore the sibling's own in both forms,
-/// so a member schema predicated on a `Vec` type name can never fire.
+/// `T` with an array level counted onto it. A map value's type name is therefore the sibling's own
+/// at every nesting, so a member schema predicated on a `Vec` type name can never fire.
 #[cfg(feature = "jsonschema")]
 #[test]
-fn a_vec_sibling_map_value_parses_as_the_sibling_with_is_array_set() {
-    for (map_type, is_array) in [
-        ("HashMap<String, Inner>", false),
-        ("HashMap<String, Vec<Inner>>", true),
+fn a_vec_sibling_map_value_parses_as_the_sibling_at_the_depth_it_is_written() {
+    for (map_type, array_depth) in [
+        ("HashMap<String, Inner>", 0_u8),
+        ("HashMap<String, Vec<Inner>>", 1),
+        ("HashMap<String, Vec<Vec<Inner>>>", 2),
     ] {
         let value = map_value_def(map_type);
-        assert_eq!(value.is_array, is_array, "for {map_type}");
+        assert_eq!(value.array_depth, array_depth, "for {map_type}");
         assert!(
             matches!(&value.field_type, FieldDefType::SiblingType(name, args) if name == "Inner" && args.is_empty()),
             "for {map_type}, got: {:?}",
@@ -1935,7 +1936,7 @@ fn wrapped_u32_value(wrapper: &str) -> super::FieldDef {
         array_num: None,
         docs: String::new(),
         field_type: FieldDefType::SiblingType(wrapper.to_owned(), vec![element]),
-        is_array: false,
+        array_depth: 0,
         is_optional: false,
         model_schema_prop_meta: None,
         name: "items".to_owned(),

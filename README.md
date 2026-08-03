@@ -103,7 +103,7 @@ pub struct UserWithOptionals {
 
 ### Collections and Maps
 
-`Vec<T>` becomes `Array<T>`, and so does every other std wrapper serde writes as a JSON array of its element: `VecDeque<T>`, `LinkedList<T>`, `BinaryHeap<T>`, `HashSet<T>`, and `BTreeSet<T>`. Each is that array on the wire, so each is typed and validated as that array — the element decides what the array holds. Only `HashMap<String, T>` is supported (non-string keys will cause compilation errors).
+`Vec<T>` becomes `Array<T>`, and so does every other std wrapper serde writes as a JSON array of its element: `VecDeque<T>`, `LinkedList<T>`, `BinaryHeap<T>`, `HashSet<T>`, and `BTreeSet<T>`. Each is that array on the wire, so each is typed and validated as that array — the element decides what the array holds. Nesting is kept at whatever depth it is written: a `Vec<Vec<T>>` (or `HashSet<Vec<T>>`, or any other mix of those wrappers) writes an array of arrays, so it becomes `Array<Array<T>>`, `z.array(z.array(...))`, and a JSON schema whose `items` is itself an array. Only `HashMap<String, T>` is supported (non-string keys will cause compilation errors).
 
 ```rust
 use std::collections::HashMap;
@@ -1309,7 +1309,7 @@ If the `serde` feature is disabled but serde attributes are present, you will se
 
 3. **HashMap Keys**: Only `HashMap<String, T>` is supported. Non-string keys will cause compilation errors.
 
-4. **Array Types**: `Vec<T>` becomes `Array<T>` in TypeScript.
+4. **Array Types**: `Vec<T>` becomes `Array<T>` in TypeScript, one `Array<...>` per level written — `Vec<Vec<T>>` is `Array<Array<T>>`.
 
 5. **Optional Fields**: `Option<T>` becomes `T | undefined` in TypeScript and `z.union([type, z.undefined()]).prefault(undefined)` in Zod v4.
 

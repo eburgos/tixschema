@@ -48,7 +48,7 @@ pub enum VariantKind {
 ///
 /// Key points from crate documentation:
 /// - Primitives map to TS equivalents (e.g., String -> string, numbers -> number)
-/// - Collections like Vec<T> become Array<T> (handled via `FieldDef`'s `is_array` flag)
+/// - Collections like Vec<T> become Array<T> (handled via `FieldDef`'s `array_depth` count)
 /// - `HashMap`<String, T> becomes Partial<Record<string, T>> (Map variant)
 /// - Enums and nested structs use `SiblingType`
 /// - All types must follow naming conventions (e.g., end with Json suffix for structs)
@@ -136,7 +136,8 @@ pub enum FieldDefType {
 /// - name: Safe field name (uses serde rename if feature enabled)
 /// - docs: Doc comments from Rust - included in generated TS as `JSDoc`
 /// - `field_type`: The core type classification (see `FieldDefType`)
-/// - `is_array`: If true, wraps type in Array<...> (for Vec<T>, slices, arrays)
+/// - `array_depth`: How many array levels wrap the type — one per `Vec`/slice/array/set the field
+///   was written under, so `Vec<Vec<T>>` is 2. Zero is a bare value, which is what `is_array` asks.
 /// - `array_num`: Unused currently (future fixed-size array support?)
 /// - `model_schema_prop_meta`: Optional metadata from #[`model_schema_prop`] attribute
 ///   - Used for overrides like literals, minLength, etc.
@@ -150,10 +151,10 @@ pub enum FieldDefType {
 /// - Feature "zod" enables `zod_type()` method
 #[derive(Clone, Debug)]
 pub struct FieldDef {
+    pub array_depth: u8,
     pub array_num: Option<u16>,
     pub docs: String,
     pub field_type: FieldDefType,
-    pub is_array: bool,
     pub is_optional: bool,
     pub model_schema_prop_meta: Option<ModelSchemaPropMeta>,
     pub name: String,
@@ -166,10 +167,17 @@ impl FieldDef {
     /// array-ness and answers for what the array holds. The field's own constraints ride along:
     /// they have nothing but the element to land on, exactly as on the `Vec` spelling, which the
     /// parser hands over already collapsed onto its element.
+    ///
+    /// Every array level survives the move: the element's own, the one this wrapper adds, and the
+    /// ones the wrapper itself sits under. The result therefore stands for the whole field, and a
+    /// caller must not re-apply the field's own levels on top of it.
     pub fn collection_element_field(&self, element: &Self) -> Self {
         let mut arrayed = element.clone();
         arrayed.name.clone_from(&self.name);
-        arrayed.is_array = true;
+        arrayed.array_depth = element
+            .array_depth
+            .saturating_add(1)
+            .saturating_add(self.array_depth);
         arrayed
             .model_schema_prop_meta
             .clone_from(&self.model_schema_prop_meta);
@@ -186,7 +194,7 @@ impl FieldDef {
     /// - `SiblingType` direct references
     /// - `Map` key and value types
     /// - `Tuple` element types
-    /// - `is_array` wrappers (Vec<T>)
+    /// - array wrappers (Vec<T>)
     /// - `is_optional` wrappers (Option<T>)
     pub fn contains_type_reference(&self, type_name: &str) -> bool {
         match &self.field_type {
@@ -307,6 +315,13 @@ impl FieldDef {
                 .is_some_and(|m| m.ts_optional)
     }
 
+    /// Whether the field describes an array at all — the question every surface asked of the
+    /// boolean this depth replaced. Asked only where a schema is generated.
+    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+    pub const fn is_array(&self) -> bool {
+        self.array_depth > 0
+    }
+
     /// Rewrites any `Self` type reference to the concrete enclosing type name.
     ///
     /// A recursive type may refer to itself with the `Self` keyword
@@ -367,8 +382,8 @@ impl FieldDef {
         if self.has_ts_optional() { "?" } else { "" }
     }
 
-    /// Builds the TypeScript type before the struct-field optional wrap: the type match
-    /// plus the `is_array` wrap. The `| undefined` wrap lives in `typescript_typename`.
+    /// Builds the TypeScript type before the struct-field optional wrap: the type match plus one
+    /// `Array<…>` per array level. The `| undefined` wrap lives in `typescript_typename`.
     fn typescript_base(&self) -> String {
         let result = match &self.field_type {
             FieldDefType::Unknown => "unknown".to_owned(),
@@ -385,8 +400,10 @@ impl FieldDef {
                     && is_sequence_wrapper(name)
                 {
                     // The element re-enters the whole per-type rendering as the arrayed field it
-                    // stands for, so a set renders exactly as the `Vec` of that element does.
-                    self.collection_element_field(element).typescript_base()
+                    // stands for, so a set renders exactly as the `Vec` of that element does. It
+                    // carries this field's own array levels with it, so the wrap below is its to
+                    // apply and not this pass's.
+                    return self.collection_element_field(element).typescript_base();
                 } else if let Some(info) = lookup_alias_info(name) {
                     if lst.is_empty() {
                         info.export_name
@@ -450,11 +467,7 @@ impl FieldDef {
                 }
             }
         };
-        if self.is_array {
-            format!("Array<{result}>")
-        } else {
-            result
-        }
+        (0..self.array_depth).fold(result, |wrapped, _| format!("Array<{wrapped}>"))
     }
 
     /// The TypeScript type for a value in a slot that cannot be dropped — a tuple element or a
@@ -473,11 +486,11 @@ impl FieldDef {
     /// Generates the TypeScript type name for this field.
     ///
     /// This method is the core of TypeScript type generation. It recursively builds
-    /// the TS type string based on `field_type`, `is_array`, and `is_optional`.
+    /// the TS type string based on `field_type`, `array_depth`, and `is_optional`.
     ///
     /// Process:
     /// 1. Match on `field_type` to get base type
-    /// 2. If `is_array`, wrap in Array<...>
+    /// 2. Wrap in Array<...> once per `array_depth` level
     /// 3. If `is_optional`: struct-field position adds `| undefined`; tuple-element and map-value
     ///    positions add `| null` (neither can be omitted like an object key, so a `None` there
     ///    serializes as `null`)
@@ -504,7 +517,7 @@ impl FieldDef {
         }
     }
 
-    /// The type match plus the `is_array` wrap, before the preprocess wrap.
+    /// The type match plus one `z.array(…)` per array level, before the preprocess wrap.
     ///
     /// A set's element re-enters the rendering here rather than at `zod_base`: it carries a copy of
     /// the field's own metadata, and the preprocess wrap belongs once, outside the array — where
@@ -525,7 +538,8 @@ impl FieldDef {
                 if let [element] = lst.as_slice()
                     && is_sequence_wrapper(name)
                 {
-                    self.collection_element_field(element).zod_array_base()
+                    // The element carries this field's own array levels, so it applies the wrap.
+                    return self.collection_element_field(element).zod_array_base();
                 } else if let Some(info) = lookup_alias_info(name) {
                     // Always reference the $Schema, regardless of generic params.
                     // For branded wrappers like DocumentTypeId<String>, the Zod
@@ -577,15 +591,11 @@ impl FieldDef {
                 }
             }
         };
-        if self.is_array {
-            format!("z.array({result})")
-        } else {
-            result
-        }
+        (0..self.array_depth).fold(result, |wrapped, _| format!("z.array({wrapped})"))
     }
 
     /// Builds the Zod schema before the struct-field optional wrap: the type match, the
-    /// `is_array` wrap, and the preprocess wrap. The
+    /// array wraps, and the preprocess wrap. The
     /// `z.union([…, z.undefined()]).prefault(undefined)` wrap lives in `zod_type`.
     #[cfg(feature = "zod")]
     fn zod_base(&self) -> String {
@@ -669,7 +679,7 @@ impl FieldDef {
     /// - For String: Adds .`min(min_len)` if `model_schema_prop_meta` has `min_length`
     /// - For literals: Uses z.literal(...)
     /// - For `ObjectId`: Uses regex validation for hex string
-    /// - Wraps with `z.array()` if `is_array`
+    /// - Wraps with `z.array()` once per `array_depth` level
     /// - If `is_optional`: struct-field position wraps `z.union([type, z.undefined()])`;
     ///   tuple-element and map-value positions wrap `z.nullable(type)` (neither can be omitted like
     ///   an object key, so a `None` there serializes as `null`)
@@ -691,7 +701,7 @@ impl FieldDef {
 /// Membership is decided on the wire and nothing else: serde writes each of these as a JSON array
 /// of its single element type, so each describes as the `Vec` of that element does. The maps are
 /// absent because they write objects; `Vec` is listed even though the parser collapses it onto its
-/// element with `is_array` set long before anything asks a wrapper's name, so that a `Vec` written
+/// element as an array level long before anything asks a wrapper's name, so that a `Vec` written
 /// where a wrapper name is read still takes the wrapper path.
 pub fn is_sequence_wrapper(name: &str) -> bool {
     matches!(
@@ -737,7 +747,7 @@ pub fn classify_variant(variant: &Variant) -> VariantKind {
 ///
 /// Key behaviors:
 /// - Strips references (&T -> T)
-/// - Sets `is_array` for Vec, slices, arrays
+/// - Counts an `array_depth` level for each Vec, slice, array
 /// - Sets `is_optional` for Option
 /// - Only supports `HashMap`<String, T> (panics or errors otherwise per rules)
 /// - Uses `safe_type_name()` to strip Json suffix
@@ -758,7 +768,7 @@ fn get_field_def_from_type_path(
             name: safe_name,
             is_optional: false,
             field_type: FieldDefType::Unknown,
-            is_array: false,
+            array_depth: 0,
             array_num: None,
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
@@ -770,7 +780,7 @@ fn get_field_def_from_type_path(
             is_optional: false,
             name: safe_name,
             field_type: get_field_def_type_or_sibling(&ident),
-            is_array: false,
+            array_depth: 0,
             array_num: None,
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
@@ -793,7 +803,7 @@ fn get_field_def_from_type_path(
                     is_optional: false,
                     name: safe_name,
                     field_type: FieldDefType::SiblingType(ident, vec![]),
-                    is_array: false,
+                    array_depth: 0,
                     array_num: None,
                     docs: field_docs.to_owned(),
                     model_schema_prop_meta: None,
@@ -806,7 +816,7 @@ fn get_field_def_from_type_path(
             } else if arg_types.len() == 1 && &ident == "Vec" {
                 let mut result = arg_types[0].clone();
                 result.name = safe_name;
-                result.is_array = true;
+                result.array_depth = result.array_depth.saturating_add(1);
                 result
             } else if arg_types.len() == 2 && (ident == "HashMap" || ident == "BTreeMap") {
                 // Debug print to see what's happening
@@ -816,7 +826,7 @@ fn get_field_def_from_type_path(
                     arg_types[1]
                 );
                 FieldDef {
-                    is_array: false,
+                    array_depth: 0,
                     is_optional: false,
                     array_num: None,
                     name: safe_name,
@@ -839,7 +849,7 @@ fn get_field_def_from_type_path(
                     is_optional: false,
                     name: safe_name,
                     field_type: FieldDefType::SiblingType(ident, arg_types),
-                    is_array: false,
+                    array_depth: 0,
                     array_num: None,
                     docs: field_docs.to_owned(),
                     model_schema_prop_meta: None,
@@ -851,7 +861,7 @@ fn get_field_def_from_type_path(
             is_optional: false,
             name: safe_name,
             field_type: FieldDefType::Unknown,
-            is_array: false,
+            array_depth: 0,
             array_num: None,
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
@@ -872,12 +882,12 @@ pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
         get_field_def(name, type_ref.elem.as_ref(), field_docs)
     } else if let Type::Array(type_array) = ty {
         let mut def = get_field_def(name, &type_array.elem, field_docs);
-        def.is_array = true;
+        def.array_depth = def.array_depth.saturating_add(1);
         def.array_num = None; // type_array.len;
         def
     } else if let Type::Slice(type_slice) = ty {
         let mut def = get_field_def(name, &type_slice.elem, field_docs);
-        def.is_array = true;
+        def.array_depth = def.array_depth.saturating_add(1);
         def.array_num = None; // type_array.len;
         def
     } else if let Type::Tuple(type_tuple) = ty {
@@ -891,7 +901,7 @@ pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
             name: safe_name,
             is_optional: false,
             field_type: FieldDefType::Tuple(elements),
-            is_array: false,
+            array_depth: 0,
             array_num: None,
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
@@ -902,7 +912,7 @@ pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
             name: safe_name,
             is_optional: false,
             field_type: FieldDefType::Unknown,
-            is_array: false,
+            array_depth: 0,
             array_num: None,
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
@@ -1031,7 +1041,7 @@ fn handle_datetime_generic_type(safe_name: String, field_docs: &str) -> FieldDef
         is_optional: false,
         name: safe_name,
         field_type: FieldDefType::DateTime,
-        is_array: false,
+        array_depth: 0,
         array_num: None,
         docs: field_docs.to_owned(),
         model_schema_prop_meta: None,
@@ -1045,7 +1055,7 @@ fn handle_datetime_generic_type(safe_name: String, field_docs: &str) -> FieldDef
         is_optional: false,
         name: safe_name,
         field_type: FieldDefType::SiblingType("DateTime".to_owned(), vec![]),
-        is_array: false,
+        array_depth: 0,
         array_num: None,
         docs: field_docs.to_owned(),
         model_schema_prop_meta: None,
