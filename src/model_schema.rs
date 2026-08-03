@@ -3288,7 +3288,9 @@ fn write_tuple_single_variant_fields(
 ///
 /// Every element is a slot: serde writes each position of the tuple, so a `None` there reaches the
 /// wire as a `null` in place rather than shortening the tuple. All three surfaces read the elements
-/// through the slot spellings for that reason.
+/// through the slot spellings for that reason, and the content array is the one
+/// [`tuple_json_schema_value`] renders for a tuple field — serde writes the same array in both
+/// positions.
 fn write_tuple_multiple_variant_fields(
     field_defs: &[FieldDef],
     content_name: &str,
@@ -3353,19 +3355,9 @@ fn write_tuple_multiple_variant_fields(
     #[cfg(feature = "jsonschema")]
     {
         let content_name_str = content_name.to_owned();
-        match field_defs
-            .iter()
-            .map(build_tuple_element_json_schema)
-            .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(tuple_schemas) => json_schema_variant_fields.push(quote! {
-                properties.insert(#content_name_str.to_string(), {
-                    serde_json::json!({
-                        "type": "array",
-                        "prefixItems": [#(#tuple_schemas),*],
-                        "items": false
-                    })
-                });
+        match tuple_json_schema_value(field_defs) {
+            Ok(tuple_schema) => json_schema_variant_fields.push(quote! {
+                properties.insert(#content_name_str.to_string(), #tuple_schema);
                 required.push(serde_json::Value::String(#content_name_str.to_string()));
             }),
             Err(rejection) => {
@@ -3599,8 +3591,11 @@ fn build_tuple_element_json_schema(
 /// The fixed-arity array a tuple describes as — the form serde writes it in — or the rejection when
 /// any element holds a value the dispatch cannot render.
 ///
-/// A tuple field and a tuple nested in a slot are the same array, so both are built here rather
-/// than each spelling the bounds itself.
+/// A tuple field, a tuple nested in a slot, and a multi-element tuple variant's content are the
+/// same array, so all three are built here rather than each spelling the bounds itself. The bounds
+/// are what pins the minimum an array of `prefixItems` leaves open: draft 2020-12's `"items": false`
+/// closes the tail, so without `minItems` a shorter array — one serde can neither write nor read
+/// back — still validates.
 #[cfg(feature = "jsonschema")]
 fn tuple_json_schema_value(
     elements: &[FieldDef],
@@ -4142,10 +4137,8 @@ fn build_string_format_field_schema(
 /// Builds JSON schema for a tuple struct field.
 ///
 /// A Rust tuple field `(A, B, ...)` serializes (via serde) as a fixed-length JSON array, which is
-/// what [`tuple_json_schema_value`] renders — the same array a tuple nested in a slot renders, so
-/// the two positions cannot drift apart. The tuple **variant** path
-/// (`write_tuple_multiple_variant_fields`) shares the per-element builder but spells its own array,
-/// without the arity bounds.
+/// what [`tuple_json_schema_value`] renders — the same array a tuple nested in a slot and a
+/// multi-element tuple variant's content render, so the positions cannot drift apart.
 ///
 /// An element the dispatch cannot render replaces the whole insertion with the lone diagnostic,
 /// as an unrenderable map value does: a schema left in place would describe a field the expansion
