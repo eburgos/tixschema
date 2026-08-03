@@ -33,6 +33,21 @@ pub struct UsesAliasAsMapValue {
     pub by_slot: HashMap<DocumentSlot, ReferencedDocumentId>,
 }
 
+#[model_schema()]
+pub type DocumentSlotAlias = DocumentSlot;
+
+#[model_schema()]
+pub type DocumentSlotAliasChain = DocumentSlotAlias;
+
+/// A map key written as an alias: the generated `enum_members()` call is a *type path*, so it
+/// resolves through every link of the chain back to the enum that has the method.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UsesAliasAsMapKey {
+    pub by_chained_slot: HashMap<DocumentSlotAliasChain, ReferencedDocumentId>,
+    pub by_slot: HashMap<DocumentSlotAlias, ReferencedDocumentId>,
+}
+
 #[test]
 fn struct_referencing_an_alias_expands_in_this_feature_combination() {
     let value = UsesAliasByValue {
@@ -53,6 +68,20 @@ fn struct_referencing_an_alias_expands_in_this_feature_combination() {
     assert_eq!(
         map.by_slot.get(&DocumentSlot::Primary),
         Some(&"doc-3".to_owned())
+    );
+}
+
+#[test]
+fn struct_keying_a_map_by_an_alias_of_an_enum_expands_in_this_feature_combination() {
+    let mut by_slot = HashMap::new();
+    by_slot.insert(DocumentSlot::Secondary, "doc-4".to_owned());
+    let keyed = UsesAliasAsMapKey {
+        by_slot,
+        by_chained_slot: HashMap::new(),
+    };
+    assert_eq!(
+        keyed.by_slot.get(&DocumentSlot::Secondary),
+        Some(&"doc-4".to_owned())
     );
 }
 
@@ -79,6 +108,27 @@ fn alias_module_backs_the_map_value_reference() {
             by_slot.get("properties").unwrap().get(&slot).unwrap(),
             &alias_schema,
             "slot {slot} in: {by_slot}"
+        );
+    }
+}
+
+/// The alias key must enumerate the same members the enum itself would, at both link depths —
+/// nothing about the key going through an alias changes the object's properties.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn alias_keyed_map_enumerates_the_members_of_the_aliased_enum() {
+    let schema = UsesAliasAsMapKey::json_schema();
+    let properties = schema.get("properties").unwrap();
+    let alias_schema = referenced_document_id_type_schema::Schema::json_schema();
+    for field in ["by_slot", "by_chained_slot"] {
+        let keyed = properties.get(field).unwrap().get("properties").unwrap();
+        for slot in DocumentSlot::enum_members() {
+            assert_eq!(keyed.get(&slot).unwrap(), &alias_schema, "{field}: {keyed}");
+        }
+        assert_eq!(
+            keyed.as_object().unwrap().len(),
+            DocumentSlot::enum_members().len(),
+            "{field}: {keyed}"
         );
     }
 }
