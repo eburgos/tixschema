@@ -39,6 +39,84 @@ pub enum SlotElements {
     Pair(String, Option<u32>),
 }
 
+/// An enum carrying no `#[serde(tag = ..., content = ...)]` is externally tagged: serde writes the
+/// variant name as the sole key of an object holding the content, and a unit variant as the bare
+/// name. The four variants below are the four contents that key can hold, plus the one that has no
+/// key at all.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum External {
+    Bare,
+    Fields { a: String, b: bool },
+    Pair(u32, u32),
+    Single(String),
+}
+
+/// The same variants written with the tagging attributes, which keeps the adjacent form beside the
+/// external one so the two can be read against each other.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "type", content = "value")]
+pub enum Adjacent {
+    Bare,
+    Fields { a: String, b: bool },
+    Pair(u32, u32),
+    Single(String),
+}
+
+/// A variant's key is its wire name, and a rename can spell that as something no JavaScript
+/// identifier can hold.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RenamedExternal {
+    BigThing(u32),
+    #[serde(rename = "application/pdf")]
+    Mime(String),
+    UnitThing,
+}
+
+/// A recursive enum with no tagging attributes: what sits under a key is the enum itself. Only the
+/// Zod surface spells the deferral, so the fixture is declared where it is read.
+#[cfg(feature = "zod")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum RecursiveExternal {
+    Arr(Vec<Self>),
+    Txt(String),
+}
+
+/// The `oneOf` member an externally tagged variant renders as: the one whose sole required key is
+/// the variant's name.
+#[cfg(feature = "jsonschema")]
+fn external_member(schema: &serde_json::Value, variant: &str) -> serde_json::Value {
+    let member = schema["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["required"] == serde_json::json!([variant]))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    assert!(
+        !member.is_null(),
+        "No member keyed `{variant}`. Got: {schema}"
+    );
+    member
+}
+
+/// The JSON type name a value carries, as a schema spells it.
+#[cfg(feature = "jsonschema")]
+const fn json_type_name(value: &serde_json::Value) -> &'static str {
+    match *value {
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Null => "null",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::Object(_) => "object",
+        serde_json::Value::String(_) => "string",
+    }
+}
+
 /// Test 1: Single-element tuple variants.
 /// Each variant has exactly one tuple element.
 #[test]
@@ -54,22 +132,17 @@ fn test_single_tuple_variant_typescript() {
 
     let ts = SingleTuple::ts_definition();
 
-    // Verify discriminator field
-    assert!(ts.contains("type: \"Text\""), "Missing Text discriminator");
+    // The variant name is the key and its content sits under it, unwrapped.
+    assert!(ts.contains("\"Text\": string"), "Missing Text. Got: {ts}");
     assert!(
-        ts.contains("type: \"Number\""),
-        "Missing Number discriminator"
+        ts.contains("\"Number\": number"),
+        "Missing Number. Got: {ts}"
     );
-    assert!(ts.contains("type: \"Flag\""), "Missing Flag discriminator");
+    assert!(ts.contains("\"Flag\": boolean"), "Missing Flag. Got: {ts}");
     assert!(
-        ts.contains("type: \"Decimal\""),
-        "Missing Decimal discriminator"
+        ts.contains("\"Decimal\": number"),
+        "Missing Decimal. Got: {ts}"
     );
-
-    // Verify value field with correct types
-    assert!(ts.contains("value: string"), "Missing string value");
-    assert!(ts.contains("value: number"), "Missing number value");
-    assert!(ts.contains("value: boolean"), "Missing boolean value");
 }
 
 /// Test 1b: Single-element tuple variants Zod schema.
@@ -86,25 +159,26 @@ fn test_single_tuple_variant_zod() {
 
     let zod = SingleTupleZod::zod_schema();
 
-    // Verify Zod schema structure
+    // The key carries the discriminator, so there is no one field every member shares for
+    // `z.discriminatedUnion` to switch on.
+    assert!(zod.contains("z.union(["), "Missing union. Got: {zod}");
     assert!(
-        zod.contains("z.discriminatedUnion"),
-        "Missing discriminatedUnion"
+        !zod.contains("z.discriminatedUnion"),
+        "No shared field to discriminate on. Got: {zod}"
     );
-    assert!(zod.contains("z.literal(\"Text\")"), "Missing Text literal");
-    assert!(
-        zod.contains("z.literal(\"Number\")"),
-        "Missing Number literal"
-    );
-    assert!(zod.contains("z.literal(\"Flag\")"), "Missing Flag literal");
 
-    // Verify value types
-    assert!(zod.contains("value: z.string()"), "Missing string value");
     assert!(
-        zod.contains("value: z.number().int()"),
-        "Missing int value for i64"
+        zod.contains("\"Text\": z.string()"),
+        "Missing Text. Got: {zod}"
     );
-    assert!(zod.contains("value: z.boolean()"), "Missing boolean value");
+    assert!(
+        zod.contains("\"Number\": z.number().int()"),
+        "Missing Number. Got: {zod}"
+    );
+    assert!(
+        zod.contains("\"Flag\": z.boolean()"),
+        "Missing Flag. Got: {zod}"
+    );
 }
 
 /// Test 2: Multi-element tuple variants.
@@ -121,18 +195,18 @@ fn test_multi_tuple_variant_typescript() {
 
     let ts = MultiTuple::ts_definition();
 
-    // Verify tuple syntax
+    // The elements are the array under the variant's key.
     assert!(
-        ts.contains("value: [string, number]"),
-        "Missing Pair tuple type"
+        ts.contains("\"Pair\": [string, number]"),
+        "Missing Pair tuple type. Got: {ts}"
     );
     assert!(
-        ts.contains("value: [string, number, boolean]"),
-        "Missing Triple tuple type"
+        ts.contains("\"Triple\": [string, number, boolean]"),
+        "Missing Triple tuple type. Got: {ts}"
     );
     assert!(
-        ts.contains("value: [string, number, boolean, number]"),
-        "Missing Quad tuple type"
+        ts.contains("\"Quad\": [string, number, boolean, number]"),
+        "Missing Quad tuple type. Got: {ts}"
     );
 }
 
@@ -233,30 +307,27 @@ fn test_mixed_variants_typescript() {
 
     let ts = Mixed::ts_definition();
 
-    // Unit variant should only have discriminator
+    // Unit variant is the bare name: serde writes no key for it.
+    assert!(ts.contains("\"Empty\""), "Missing Empty. Got: {ts}");
     assert!(
-        ts.contains("type: \"Empty\""),
-        "Missing Empty discriminator"
+        !ts.contains("\"Empty\":"),
+        "A unit variant carries no key. Got: {ts}"
     );
 
-    // Single tuple should have value field
-    assert!(ts.contains("type: \"Text\""), "Missing Text discriminator");
-    assert!(ts.contains("value: string"), "Missing Text value");
+    assert!(ts.contains("\"Text\": string"), "Missing Text. Got: {ts}");
 
-    // Multi tuple should have tuple value
-    assert!(ts.contains("type: \"Pair\""), "Missing Pair discriminator");
     assert!(
-        ts.contains("value: [string, number]"),
-        "Missing Pair tuple value"
+        ts.contains("\"Pair\": [string, number]"),
+        "Missing Pair tuple. Got: {ts}"
     );
 
-    // Named struct should have individual fields
+    // A struct variant's fields sit in an object under its key.
+    assert!(ts.contains("\"Named\": {"), "Missing Named. Got: {ts}");
+    assert!(ts.contains("field_a: string"), "Missing field_a. Got: {ts}");
     assert!(
-        ts.contains("type: \"Named\""),
-        "Missing Named discriminator"
+        ts.contains("field_b: boolean"),
+        "Missing field_b. Got: {ts}"
     );
-    assert!(ts.contains("field_a: string"), "Missing field_a");
-    assert!(ts.contains("field_b: boolean"), "Missing field_b");
 }
 
 /// Test 4b: Mixed variants Zod schema.
@@ -274,33 +345,36 @@ fn test_mixed_variants_zod() {
 
     let zod = MixedZod::zod_schema();
 
-    // Should use discriminatedUnion since not all variants are unit
-    assert!(
-        zod.contains("z.discriminatedUnion"),
-        "Should use discriminatedUnion"
-    );
+    assert!(zod.contains("z.union(["), "Missing union. Got: {zod}");
 
-    // Unit variant
+    // A unit variant is the bare name, so it is a literal rather than an object.
     assert!(
         zod.contains("z.literal(\"Empty\")"),
-        "Missing Empty literal"
+        "Missing Empty literal. Got: {zod}"
     );
 
-    // Single tuple
-    assert!(zod.contains("z.literal(\"Text\")"), "Missing Text literal");
-    assert!(zod.contains("value: z.string()"), "Missing Text value");
-
-    // Multi tuple
-    assert!(zod.contains("z.literal(\"Pair\")"), "Missing Pair literal");
-    assert!(zod.contains("z.tuple("), "Missing tuple");
-
-    // Named struct
     assert!(
-        zod.contains("z.literal(\"Named\")"),
-        "Missing Named literal"
+        zod.contains("\"Text\": z.string()"),
+        "Missing Text. Got: {zod}"
     );
-    assert!(zod.contains("field_a: z.string()"), "Missing field_a");
-    assert!(zod.contains("field_b: z.boolean()"), "Missing field_b");
+
+    assert!(
+        zod.contains("\"Pair\": z.tuple("),
+        "Missing Pair tuple. Got: {zod}"
+    );
+
+    assert!(
+        zod.contains("\"Named\": z.strictObject("),
+        "Missing Named object. Got: {zod}"
+    );
+    assert!(
+        zod.contains("field_a: z.string()"),
+        "Missing field_a. Got: {zod}"
+    );
+    assert!(
+        zod.contains("field_b: z.boolean()"),
+        "Missing field_b. Got: {zod}"
+    );
 }
 
 /// Test 5: JSON Schema generation for tuple variants.
@@ -317,16 +391,24 @@ fn test_tuple_json_schema() {
     let schema = TupleSchema::json_schema();
     let schema_str = serde_json::to_string_pretty(&schema).unwrap();
 
-    // Should have oneOf for discriminated union
     assert!(schema_str.contains("\"oneOf\""), "Missing oneOf");
 
-    // Should have value property
-    assert!(schema_str.contains("\"value\""), "Missing value property");
-
-    // Multi-tuple should use prefixItems
+    // The variant name is the property; there is no content key beside a tag.
     assert!(
-        schema_str.contains("prefixItems"),
-        "Multi-tuple should use prefixItems"
+        !schema_str.contains("\"value\""),
+        "Externally tagged members carry no content key. Got: {schema_str}"
+    );
+    assert_eq!(
+        external_member(&schema, "Double")["properties"]["Double"]["prefixItems"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2,
+        "Multi-tuple should use prefixItems. Got: {schema_str}"
+    );
+    assert_eq!(
+        external_member(&schema, "Single")["properties"]["Single"],
+        serde_json::json!({ "type": "string" })
     );
 }
 
@@ -402,16 +484,14 @@ fn test_tuple_with_vec() {
 
     let ts = TupleWithVec::ts_definition();
 
-    // Image should have tuple with string and array
     assert!(
-        ts.contains("value: [string, Array<number>]"),
-        "Image should have [string, Array<number>]"
+        ts.contains("\"Image\": [string, Array<number>]"),
+        "Image should have [string, Array<number>]. Got: {ts}"
     );
 
-    // Data should have array value (single tuple)
     assert!(
-        ts.contains("value: Array<string>"),
-        "Data should have Array<string>"
+        ts.contains("\"Data\": Array<string>"),
+        "Data should have Array<string>. Got: {ts}"
     );
 }
 
@@ -428,22 +508,20 @@ fn test_tuple_with_vec_zod() {
 
     let zod = TupleWithVecZod::zod_schema();
 
-    // Image tuple
     assert!(
-        zod.contains("z.tuple([z.string(), z.array(z.number().int())])"),
-        "Image should have z.tuple"
+        zod.contains("\"Image\": z.tuple([z.string(), z.array(z.number().int())])"),
+        "Image should have z.tuple. Got: {zod}"
     );
 
-    // Data single tuple
     assert!(
-        zod.contains("value: z.array(z.string())"),
-        "Data should have z.array"
+        zod.contains("\"Data\": z.array(z.string())"),
+        "Data should have z.array. Got: {zod}"
     );
 }
 
-/// Test 8: Regression - discriminated union with named struct still works.
+/// Test 8: a struct variant's fields sit in an object under the variant's key.
 #[test]
-fn test_named_struct_regression() {
+fn test_named_struct_variant_content_is_an_object_under_the_key() {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug, Clone)]
     pub enum PaymentMethod {
@@ -459,25 +537,27 @@ fn test_named_struct_regression() {
 
     let ts = PaymentMethod::ts_definition();
 
-    // Should still work as before
     assert!(
-        ts.contains("type: \"CreditCard\""),
-        "Missing CreditCard discriminator"
+        ts.contains("\"CreditCard\": {"),
+        "Missing CreditCard. Got: {ts}"
     );
-    assert!(ts.contains("card_number: string"), "Missing card_number");
-    assert!(ts.contains("expiry: string"), "Missing expiry");
+    assert!(
+        ts.contains("card_number: string"),
+        "Missing card_number. Got: {ts}"
+    );
+    assert!(ts.contains("expiry: string"), "Missing expiry. Got: {ts}");
 
     assert!(
-        ts.contains("type: \"BankTransfer\""),
-        "Missing BankTransfer discriminator"
+        ts.contains("\"BankTransfer\": {"),
+        "Missing BankTransfer. Got: {ts}"
     );
     assert!(
         ts.contains("account_number: string"),
-        "Missing account_number"
+        "Missing account_number. Got: {ts}"
     );
     assert!(
         ts.contains("routing_number: string"),
-        "Missing routing_number"
+        "Missing routing_number. Got: {ts}"
     );
 }
 
@@ -493,16 +573,16 @@ fn test_optional_in_tuple() {
 
     let ts = OptionalTuple::ts_definition();
 
-    // Single optional tuple: the content key is a slot, so the `None` is a `null` under it.
+    // The variant's key is a slot, so the `None` is a `null` under it.
     assert!(
-        ts.contains("value: string | null"),
-        "Maybe should have nullable string"
+        ts.contains("\"Maybe\": string | null"),
+        "Maybe should have nullable string. Got: {ts}"
     );
 
     // Multi tuple with optional element: each position is a slot too, so the same null flavor.
     assert!(
-        ts.contains("[string, number | null]"),
-        "MaybePair should have tuple with optional element"
+        ts.contains("\"MaybePair\": [string, number | null]"),
+        "MaybePair should have tuple with optional element. Got: {ts}"
     );
 }
 
@@ -513,12 +593,12 @@ fn test_tuple_with_custom_type() {
 
     // Should reference the inner type
     assert!(
-        ts.contains("value: Inner"),
-        "Wrapped should reference Inner type"
+        ts.contains("\"Wrapped\": Inner"),
+        "Wrapped should reference Inner type. Got: {ts}"
     );
     assert!(
-        ts.contains("value: [Inner, number]"),
-        "Paired should have tuple with Inner"
+        ts.contains("\"Paired\": [Inner, number]"),
+        "Paired should have tuple with Inner. Got: {ts}"
     );
 }
 
@@ -527,16 +607,10 @@ fn test_tuple_with_custom_type() {
 #[cfg(feature = "jsonschema")]
 #[test]
 fn test_tuple_variant_sibling_element_carries_the_sibling_schema() {
-    let schema = Outer::json_schema();
-    let variant = schema["oneOf"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|member| member["properties"]["type"]["const"] == "Paired")
-        .unwrap();
+    let variant = external_member(&Outer::json_schema(), "Paired");
 
     assert_eq!(
-        variant["properties"]["value"]["prefixItems"][0],
+        variant["properties"]["Paired"]["prefixItems"][0],
         Inner::json_schema()
     );
 }
@@ -591,36 +665,37 @@ fn test_fixed_value_original_issue() {
 
     // Verify NO empty field names (the original bug)
     // Empty field names would look like "  : string;" (space before colon, no field name)
-    // Valid output has field names like "value: string;"
     assert!(
         !ts.contains("\n  : "),
         "Should not have empty field name (found line starting with colon)"
     );
-    // Also verify we don't have the old pattern of empty property names in the schema
     assert!(
         !ts.contains("\"\":"),
         "JSON Schema should not have empty property names"
     );
 
-    // Verify proper structure
     assert!(
-        ts.contains("type: \"Alphanumeric\""),
-        "Missing Alphanumeric"
-    );
-    assert!(
-        ts.contains("value: string"),
-        "Alphanumeric should have value"
+        ts.contains("\"Alphanumeric\": string"),
+        "Missing Alphanumeric. Got: {ts}"
     );
 
-    assert!(ts.contains("type: \"Image\""), "Missing Image");
     assert!(
-        ts.contains("[string, Array<number>]"),
-        "Image should have tuple"
+        ts.contains("\"Image\": [string, Array<number>]"),
+        "Image should have tuple. Got: {ts}"
     );
 
-    assert!(ts.contains("type: \"Decimal\""), "Missing Decimal");
-    assert!(ts.contains("type: \"Integer\""), "Missing Integer");
-    assert!(ts.contains("type: \"Boolean\""), "Missing Boolean");
+    assert!(
+        ts.contains("\"Decimal\": number"),
+        "Missing Decimal. Got: {ts}"
+    );
+    assert!(
+        ts.contains("\"Integer\": number"),
+        "Missing Integer. Got: {ts}"
+    );
+    assert!(
+        ts.contains("\"Boolean\": boolean"),
+        "Missing Boolean. Got: {ts}"
+    );
 }
 
 /// Test 13: `FixedValueExt` with all variant types.
@@ -643,29 +718,34 @@ fn test_fixed_value_ext_comprehensive() {
 
     // Single tuple variants
     assert!(
-        ts.contains("type: \"Alphanumeric\""),
-        "Missing Alphanumeric"
-    );
-    assert!(
-        ts.contains("value: string") || ts.contains("value: number"),
-        "Single tuple should have value"
+        ts.contains("\"Alphanumeric\": string"),
+        "Missing Alphanumeric. Got: {ts}"
     );
 
     // Multi-element tuple
-    assert!(ts.contains("type: \"Image\""), "Missing Image");
-    assert!(ts.contains("type: \"Tuple\""), "Missing Tuple");
     assert!(
-        ts.contains("[number, boolean]"),
-        "Tuple should have [number, boolean]"
+        ts.contains("\"Image\": [string, Array<number>]"),
+        "Missing Image. Got: {ts}"
+    );
+    assert!(
+        ts.contains("\"Tuple\": [number, boolean]"),
+        "Missing Tuple. Got: {ts}"
     );
 
-    // Unit variant
-    assert!(ts.contains("type: \"SingleValue\""), "Missing SingleValue");
+    // Unit variant carries no key at all.
+    assert!(
+        ts.contains("\"SingleValue\""),
+        "Missing SingleValue. Got: {ts}"
+    );
+    assert!(
+        !ts.contains("\"SingleValue\":"),
+        "A unit variant carries no key. Got: {ts}"
+    );
 
     // Named struct variant
-    assert!(ts.contains("type: \"Complex\""), "Missing Complex");
-    assert!(ts.contains("a: string"), "Missing field a");
-    assert!(ts.contains("b: boolean"), "Missing field b");
+    assert!(ts.contains("\"Complex\": {"), "Missing Complex. Got: {ts}");
+    assert!(ts.contains("a: string"), "Missing field a. Got: {ts}");
+    assert!(ts.contains("b: boolean"), "Missing field b. Got: {ts}");
 }
 
 /// Test 14: Empty tuple variant (edge case).
@@ -683,13 +763,15 @@ fn test_empty_tuple_variant() {
 
     let ts = EmptyTuple::ts_definition();
 
-    // Both should be in discriminated union
-    assert!(ts.contains("type: \"Normal\""), "Missing Normal");
-    assert!(ts.contains("type: \"Unit\""), "Missing Unit");
-
-    // Unit should not have value field
-    // The Unit variant's object should just have `type: "Unit"` without a value field
-    // This is verified by ensuring the total schema structure is correct
+    assert!(
+        ts.contains("\"Normal\": string"),
+        "Missing Normal. Got: {ts}"
+    );
+    assert!(ts.contains("\"Unit\""), "Missing Unit. Got: {ts}");
+    assert!(
+        !ts.contains("\"Unit\":"),
+        "A unit variant carries no key. Got: {ts}"
+    );
 }
 
 /// Test 16: enum tuple variant with an `Option` element gets null flavor in the
@@ -705,15 +787,9 @@ fn test_optional_tuple_variant_element_json_schema_null_flavor() {
         Link(Option<String>, Vec<usize>, String, Option<String>),
     }
 
-    let schema = Row::json_schema();
-    let variant = schema["oneOf"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|member| member["properties"]["type"]["const"] == "Link")
-        .unwrap();
+    let variant = external_member(&Row::json_schema(), "Link");
 
-    let value = &variant["properties"]["value"];
+    let value = &variant["properties"]["Link"];
     assert_eq!(value["type"].as_str(), Some("array"));
 
     let prefix = value["prefixItems"].as_array().unwrap();
@@ -751,10 +827,22 @@ fn test_jsdoc_comments() {
     assert!(ts.contains("/**"), "Should have JSDoc comments");
     assert!(ts.contains("*/"), "Should have JSDoc end");
 
-    // Multi-tuple should have tuple description
+    // Each member carries its variant's own docs above the key it is named by.
     assert!(
-        ts.contains("Tuple:") || ts.contains("Tuple value"),
-        "Multi-tuple should have tuple documentation"
+        ts.contains("* Multi\n"),
+        "Multi should be documented. Got: {ts}"
+    );
+    assert!(
+        ts.contains("\"Multi\": [string, number]"),
+        "Missing Multi. Got: {ts}"
+    );
+    assert!(
+        ts.contains("* Single\n"),
+        "Single should be documented. Got: {ts}"
+    );
+    assert!(
+        ts.contains("\"Single\": string"),
+        "Missing Single. Got: {ts}"
     );
 }
 
@@ -940,13 +1028,8 @@ fn test_multi_tuple_variant_json_schema_matches_tuple_field() {
         Pair(u32, u32),
     }
 
-    let schema = ArityVariant::json_schema();
-    let variant_value = &schema["oneOf"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|member| member["properties"]["type"]["const"] == "Pair")
-        .unwrap()["properties"]["value"];
+    let member = external_member(&ArityVariant::json_schema(), "Pair");
+    let variant_value = &member["properties"]["Pair"];
 
     assert_eq!(
         *variant_value,
@@ -1004,4 +1087,351 @@ fn test_multi_tuple_variant_arity_bounds_reject_wrong_length_arrays() {
             "An array of {len} elements is not the tuple. Got {admitted:?}"
         );
     }
+}
+
+/// Test 19: what serde writes for an enum carrying no tagging attributes — the capture every
+/// surface assertion below is read against.
+#[test]
+fn test_attribute_less_enum_writes_the_externally_tagged_form() {
+    assert_eq!(
+        serde_json::to_value(External::Pair(1, 2)).unwrap(),
+        serde_json::json!({ "Pair": [1_u32, 2_u32] }),
+        "A tuple variant's name is the key and its elements are the array under it"
+    );
+    assert_eq!(
+        serde_json::to_value(External::Single("a".to_owned())).unwrap(),
+        serde_json::json!({ "Single": "a" }),
+        "A newtype variant's content sits under the key, unwrapped"
+    );
+    assert_eq!(
+        serde_json::to_value(External::Fields {
+            a: "a".to_owned(),
+            b: true
+        })
+        .unwrap(),
+        serde_json::json!({ "Fields": { "a": "a", "b": true } }),
+        "A struct variant's fields sit in an object under the key"
+    );
+    assert_eq!(
+        serde_json::to_value(External::Bare).unwrap(),
+        serde_json::json!("Bare"),
+        "A unit variant carries no key at all: it is the bare name"
+    );
+}
+
+/// Test 19a: TypeScript describes that form: a union of single-key objects, plus the bare name for
+/// the variant that writes no key.
+#[test]
+fn test_attribute_less_enum_typescript_is_the_externally_tagged_union() {
+    let ts = External::ts_definition();
+
+    assert!(
+        ts.contains("\"Pair\": [number, number]"),
+        "The tuple sits under the variant's key. Got: {ts}"
+    );
+    assert!(
+        ts.contains("\"Single\": string"),
+        "The newtype content sits under the key, unwrapped. Got: {ts}"
+    );
+    assert!(
+        ts.contains("\"Fields\": {"),
+        "The struct fields sit in an object under the key. Got: {ts}"
+    );
+    assert!(ts.contains("\"Bare\""), "Missing Bare. Got: {ts}");
+    assert!(
+        !ts.contains("\"Bare\":"),
+        "A unit variant carries no key. Got: {ts}"
+    );
+    assert!(
+        !ts.contains("type: \"Pair\""),
+        "Nothing writes a tag beside the content. Got: {ts}"
+    );
+}
+
+/// Test 19b: the Zod schema admits the same union. The discriminator is the key itself, so the
+/// members are plain `z.strictObject`s in a `z.union` rather than a `z.discriminatedUnion`.
+#[cfg(feature = "zod")]
+#[test]
+fn test_attribute_less_enum_zod_is_the_externally_tagged_union() {
+    let zod = External::zod_schema();
+
+    assert!(zod.contains("z.union(["), "Missing union. Got: {zod}");
+    assert!(
+        !zod.contains("z.discriminatedUnion"),
+        "No shared field to discriminate on. Got: {zod}"
+    );
+    assert!(
+        zod.contains(
+            "z.strictObject({\n  \"Pair\": z.tuple([z.number().int(), z.number().int()]),\n})"
+        ),
+        "Pair's member is the closed object holding its tuple. Got: {zod}"
+    );
+    assert!(
+        zod.contains("z.strictObject({\n  \"Single\": z.string(),\n})"),
+        "Single's member holds its content unwrapped. Got: {zod}"
+    );
+    assert!(
+        zod.contains("\"Fields\": z.strictObject("),
+        "Fields' content is the object its fields sit in. Got: {zod}"
+    );
+    assert!(
+        zod.contains("z.literal(\"Bare\")"),
+        "Bare is the name alone. Got: {zod}"
+    );
+}
+
+/// Test 19c: the JSON schema is a `oneOf` over closed single-key objects, plus the string constant
+/// the unit variant writes. Each key holds the content the wire capture writes under it.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn test_attribute_less_enum_json_schema_is_the_externally_tagged_union() {
+    let schema = External::json_schema();
+
+    assert_eq!(
+        external_member(&schema, "Pair")["properties"]["Pair"],
+        serde_json::json!({
+            "type": "array",
+            "prefixItems": [{ "type": "integer" }, { "type": "integer" }],
+            "items": false,
+            "minItems": 2_u64,
+            "maxItems": 2_u64
+        })
+    );
+    assert_eq!(
+        external_member(&schema, "Single")["properties"]["Single"],
+        serde_json::json!({ "type": "string" })
+    );
+    assert_eq!(
+        external_member(&schema, "Fields")["properties"]["Fields"],
+        serde_json::json!({
+            "type": "object",
+            "properties": { "a": { "type": "string" }, "b": { "type": "boolean" } },
+            "required": ["a", "b"],
+            "additionalProperties": false
+        })
+    );
+
+    // Every keyed member is closed around its one key, which is what serde's single-key map
+    // deserializer accepts.
+    for variant in ["Pair", "Single", "Fields"] {
+        let member = external_member(&schema, variant);
+        assert_eq!(member["type"], "object", "Got: {member}");
+        assert_eq!(member["additionalProperties"], false, "Got: {member}");
+        assert_eq!(
+            member["properties"].as_object().unwrap().len(),
+            1,
+            "A member carries the one key serde writes. Got: {member}"
+        );
+    }
+
+    assert!(
+        schema["oneOf"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!({ "type": "string", "const": "Bare" })),
+        "The unit variant is the bare name. Got: {schema}"
+    );
+}
+
+/// Test 19d: the round trip both schemas owe. Every payload serde writes lands in the member the
+/// JSON schema names for it, with the content that member declares; and a payload built from what
+/// a member admits reads back into the value it describes.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn test_attribute_less_enum_round_trips_against_its_schema() {
+    let schema = External::json_schema();
+
+    for (variant, value) in [
+        ("Pair", External::Pair(1, 2)),
+        ("Single", External::Single("a".to_owned())),
+        (
+            "Fields",
+            External::Fields {
+                a: "a".to_owned(),
+                b: true,
+            },
+        ),
+    ] {
+        let written = serde_json::to_value(&value).unwrap();
+        let member = external_member(&schema, variant);
+        let content = &written[variant];
+
+        assert_eq!(
+            written.as_object().unwrap().len(),
+            1,
+            "A closed member admits exactly the one key. Got: {written}"
+        );
+        let declared = &member["properties"][variant];
+        assert_eq!(
+            declared["type"],
+            json_type_name(content),
+            "The key holds what serde writes under it. Got: {declared}"
+        );
+
+        assert_eq!(
+            serde_json::from_value::<External>(written.clone()).unwrap(),
+            value,
+            "What serde writes must read back. Got: {written}"
+        );
+    }
+
+    // The bare name is the whole value, and reads back as the variant it names.
+    let bare = serde_json::to_value(External::Bare).unwrap();
+    assert_eq!(
+        serde_json::from_value::<External>(bare).unwrap(),
+        External::Bare
+    );
+
+    // A payload the schema admits deserializes: the key the member requires, holding the content
+    // it declares.
+    assert_eq!(
+        serde_json::from_value::<External>(serde_json::json!({ "Pair": [7_u32, 8_u32] })).unwrap(),
+        External::Pair(7, 8)
+    );
+
+    // And the adjacent form the schema no longer describes is one the type cannot read either.
+    assert!(
+        serde_json::from_value::<External>(
+            serde_json::json!({ "type": "Pair", "value": [1_u32, 2_u32] })
+        )
+        .is_err(),
+        "The adjacent form is not what this enum reads"
+    );
+}
+
+/// Test 19e: naming the tagging attributes keeps the adjacent form untouched. The variants are the
+/// same ones the external form renders above, so what differs is placement and nothing else.
+#[test]
+fn test_explicitly_tagged_twin_keeps_the_adjacent_form() {
+    assert_eq!(
+        serde_json::to_value(Adjacent::Pair(1, 2)).unwrap(),
+        serde_json::json!({ "type": "Pair", "value": [1_u32, 2_u32] })
+    );
+
+    let ts = Adjacent::ts_definition();
+    assert!(ts.contains("type: \"Pair\""), "Got: {ts}");
+    assert!(ts.contains("value: [number, number]"), "Got: {ts}");
+    assert!(ts.contains("type: \"Bare\""), "Got: {ts}");
+    assert!(ts.contains("a: string"), "Got: {ts}");
+}
+
+/// Test 20: what serde writes for a renamed variant, and the keys the surfaces carry for it. The
+/// key is quoted because a rename can spell it as something no bare identifier can hold.
+#[test]
+fn test_renamed_variant_key_is_the_wire_name() {
+    assert_eq!(
+        serde_json::to_value(RenamedExternal::Mime("x".to_owned())).unwrap(),
+        serde_json::json!({ "application/pdf": "x" })
+    );
+    assert_eq!(
+        serde_json::to_value(RenamedExternal::BigThing(1)).unwrap(),
+        serde_json::json!({ "bigThing": 1_u32 })
+    );
+    assert_eq!(
+        serde_json::to_value(RenamedExternal::UnitThing).unwrap(),
+        serde_json::json!("unitThing")
+    );
+
+    let ts = RenamedExternal::ts_definition();
+    assert!(
+        ts.contains("\"application/pdf\": string"),
+        "The renamed key is held as written. Got: {ts}"
+    );
+    assert!(
+        ts.contains("\"bigThing\": number"),
+        "`rename_all` reaches the key. Got: {ts}"
+    );
+    assert!(
+        ts.contains("\"unitThing\""),
+        "The unit variant is its renamed name. Got: {ts}"
+    );
+}
+
+/// Test 20a: the Zod schema holds the same keys.
+#[cfg(feature = "zod")]
+#[test]
+fn test_renamed_variant_key_is_the_wire_name_in_zod() {
+    let zod = RenamedExternal::zod_schema();
+
+    assert!(
+        zod.contains("\"application/pdf\": z.string()"),
+        "Got: {zod}"
+    );
+    assert!(zod.contains("\"bigThing\": z.number().int()"), "Got: {zod}");
+    assert!(zod.contains("z.literal(\"unitThing\")"), "Got: {zod}");
+}
+
+/// Test 20b: and the JSON schema names the same keys, required and closed.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn test_renamed_variant_key_is_the_wire_name_in_json_schema() {
+    let schema = RenamedExternal::json_schema();
+
+    assert_eq!(
+        external_member(&schema, "application/pdf")["properties"]["application/pdf"],
+        serde_json::json!({ "type": "string" })
+    );
+    assert_eq!(
+        external_member(&schema, "bigThing")["properties"]["bigThing"],
+        serde_json::json!({ "type": "integer" })
+    );
+    assert!(
+        schema["oneOf"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!({ "type": "string", "const": "unitThing" })),
+        "Got: {schema}"
+    );
+}
+
+/// Test 21: a member whose content references the enum defers it through a getter, as the adjacent
+/// form's content key does. The member beside it holds no reference and needs none.
+#[cfg(feature = "zod")]
+#[test]
+fn test_recursive_external_variant_defers_its_reference() {
+    let zod = RecursiveExternal::zod_schema();
+
+    assert!(
+        zod.contains("get \"Arr\"() { return z.array(RecursiveExternal$Schema); },"),
+        "Got: {zod}"
+    );
+    assert!(zod.contains("\"Txt\": z.string()"), "Got: {zod}");
+}
+
+/// Test 19f: and the tagged twin's Zod schema still switches on the tag it names.
+#[cfg(feature = "zod")]
+#[test]
+fn test_explicitly_tagged_twin_keeps_the_adjacent_zod_form() {
+    let zod = Adjacent::zod_schema();
+
+    assert!(zod.contains("z.discriminatedUnion(\"type\""), "Got: {zod}");
+    assert!(
+        zod.contains("value: z.tuple([z.number().int(), z.number().int()])"),
+        "Got: {zod}"
+    );
+}
+
+/// Test 19g: and its JSON schema still holds the tuple under the content key.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn test_explicitly_tagged_twin_keeps_the_adjacent_json_schema_form() {
+    let schema = Adjacent::json_schema();
+
+    assert_eq!(schema["type"], "object");
+    let variant = schema["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["properties"]["type"]["const"] == "Pair")
+        .unwrap();
+    assert_eq!(
+        variant["properties"]["value"],
+        serde_json::json!({
+            "type": "array",
+            "prefixItems": [{ "type": "integer" }, { "type": "integer" }],
+            "items": false,
+            "minItems": 2_u64,
+            "maxItems": 2_u64
+        })
+    );
 }

@@ -198,3 +198,56 @@ fn test_strip_examples_no_examples() {
     assert_eq!(result.len(), 2);
     assert_eq!(result, docs);
 }
+
+#[cfg(feature = "zod")]
+#[test]
+fn test_escape_js_regex_literal_escapes_a_bare_delimiter() {
+    assert_eq!(escape_js_regex_literal("^/[a-z]+$"), r"^\/[a-z]+$");
+    assert_eq!(escape_js_regex_literal("a/b/c"), r"a\/b\/c");
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn test_escape_js_regex_literal_leaves_a_slashless_pattern_untouched() {
+    assert_eq!(
+        escape_js_regex_literal(r"^\d{3}\.\d{3}-\d{2}$"),
+        r"^\d{3}\.\d{3}-\d{2}$"
+    );
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn test_escape_js_regex_literal_does_not_double_escape() {
+    assert_eq!(escape_js_regex_literal(r"^\/[a-z]+$"), r"^\/[a-z]+$");
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn test_escape_js_regex_literal_consumes_a_backslash_escape_whole() {
+    assert_eq!(escape_js_regex_literal(r"^\\/x$"), r"^\\\/x$");
+    assert_eq!(escape_js_regex_literal(r"trailing\"), r"trailing\");
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn test_escape_js_regex_literal_escapes_every_raw_line_terminator() {
+    assert_eq!(escape_js_regex_literal("^a\nb$"), r"^a\nb$");
+    assert_eq!(escape_js_regex_literal("^a\rb$"), r"^a\rb$");
+    assert_eq!(escape_js_regex_literal("^a\u{2028}b$"), r"^a\u2028b$");
+    assert_eq!(escape_js_regex_literal("^a\u{2029}b$"), r"^a\u2029b$");
+    assert_eq!(escape_js_regex_literal("a\r\nb"), r"a\r\nb");
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn test_escape_js_regex_literal_leaves_an_authored_line_terminator_escape_alone() {
+    assert_eq!(escape_js_regex_literal(r"^a\nb$"), r"^a\nb$");
+    assert_eq!(escape_js_regex_literal(r"^a\u2028b$"), r"^a\u2028b$");
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn test_escape_js_regex_literal_rewrites_an_identity_escaped_line_terminator() {
+    assert_eq!(escape_js_regex_literal("^a\\\nb$"), r"^a\nb$");
+    assert_eq!(escape_js_regex_literal("^a\\\\\nb$"), r"^a\\\nb$");
+}

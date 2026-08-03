@@ -30,7 +30,7 @@ use crate::{
 };
 
 #[cfg(feature = "zod")]
-use crate::utils::extract_example_from_docs;
+use crate::utils::{escape_js_regex_literal, extract_example_from_docs};
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::{AliasKind, lookup_alias_info};
@@ -1707,7 +1707,8 @@ fn branded_zod_inner(args: &ModelSchemaArgs, is_generic: bool, inner_ty: &syn::T
         result = format!("{result}.max({max_len})");
     }
     if let Some(pattern) = &args.pattern {
-        result = format!("{result}.check(z.regex(/{pattern}/))");
+        let literal_body = escape_js_regex_literal(pattern);
+        result = format!("{result}.check(z.regex(/{literal_body}/))");
     }
     result
 }
@@ -2319,6 +2320,19 @@ fn process_enum(item_enum: syn::ItemEnum) -> TokenStream {
             return process_untagged_enum(item_enum, &name, &item_name);
         }
 
+        // Neither tagging key named, so serde writes the externally tagged form and that is what
+        // the surfaces describe. Only the attributes the `serde` feature reads tell the two forms
+        // apart; without it no declaration can be distinguished and the adjacent form stands.
+        #[cfg(feature = "serde")]
+        if serde_type_meta.tag.is_none() && serde_type_meta.content.is_none() {
+            return process_externally_tagged_enum(
+                item_enum,
+                &name,
+                serde_type_meta.rename_all.as_deref(),
+                &item_name,
+            );
+        }
+
         #[cfg(feature = "serde")]
         let (tag_name, content_name, rename_all) = (
             serde_type_meta
@@ -2844,6 +2858,397 @@ fn process_discriminated_enum(
     }
 }
 
+/// The object schema a struct variant's fields sit in when they are written under a key of their
+/// own rather than beside a discriminator.
+///
+/// The per-field entries are the ones the adjacent form writes, so the two placements describe the
+/// same fields identically and only differ in where the object sits.
+#[cfg(all(feature = "serde", feature = "jsonschema"))]
+fn named_content_json_value(json_fields: &[proc_macro2::TokenStream]) -> proc_macro2::TokenStream {
+    quote! {
+        {
+            let mut properties = serde_json::Map::new();
+            let mut required: Vec<serde_json::Value> = Vec::new();
+            #(#json_fields)*
+            serde_json::json!({
+                "type": "object",
+                "properties": serde_json::Value::Object(properties),
+                "required": serde_json::Value::Array(required),
+                "additionalProperties": false
+            })
+        }
+    }
+}
+
+/// The diagnostic a variant whose content has no rendering produces, in the value position the
+/// content itself would have occupied.
+#[cfg(all(feature = "serde", feature = "jsonschema"))]
+fn external_content_rejection_value(
+    discriminator_value: &str,
+    rejection: &MapMemberRejection,
+) -> proc_macro2::TokenStream {
+    let message =
+        map_member_rejection_message(&format!("variant `{discriminator_value}`"), rejection);
+    quote! { compile_error!(#message) }
+}
+
+/// Renders what one variant of an externally tagged enum writes under its key.
+///
+/// Returns `(typescript, zod, json_value)` for the content alone — the key is the caller's. A
+/// `Unit` variant has no content and never reaches here: serde writes it as the bare name.
+///
+/// Every content is the value the adjacent form puts under its content key, read through the same
+/// builders: a newtype variant's single slot, a tuple variant's fixed-arity array, and a struct
+/// variant's fields — which the adjacent form spreads beside the tag and this one gathers into an
+/// object.
+#[cfg(feature = "serde")]
+fn render_external_content(
+    kind: &VariantKind,
+    field_defs: &[FieldDef],
+    discriminator_value: &str,
+    self_type_name: &str,
+) -> (String, String, proc_macro2::TokenStream) {
+    #[cfg(not(feature = "jsonschema"))]
+    let _: &str = discriminator_value;
+
+    match kind {
+        VariantKind::Unit => (String::new(), String::new(), quote! {}),
+        VariantKind::TupleSingle => {
+            // `classify_variant` names this kind only for a variant of exactly one unnamed field.
+            let fld = &field_defs[0];
+
+            #[cfg(feature = "zod")]
+            let zod = fld.zod_slot_type();
+            #[cfg(not(feature = "zod"))]
+            let zod = String::new();
+
+            #[cfg(feature = "jsonschema")]
+            let json = build_tuple_element_json_schema(fld).unwrap_or_else(|rejection| {
+                external_content_rejection_value(discriminator_value, &rejection)
+            });
+            #[cfg(not(feature = "jsonschema"))]
+            let json = quote! {};
+
+            (fld.typescript_slot_typename(), zod, json)
+        }
+        VariantKind::TupleMultiple => {
+            let ts = format!(
+                "[{}]",
+                field_defs
+                    .iter()
+                    .map(super::field_type::FieldDef::typescript_slot_typename)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+
+            #[cfg(feature = "zod")]
+            let zod = format!(
+                "z.tuple([{}])",
+                field_defs
+                    .iter()
+                    .map(super::field_type::FieldDef::zod_slot_type)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            #[cfg(not(feature = "zod"))]
+            let zod = String::new();
+
+            #[cfg(feature = "jsonschema")]
+            let json = tuple_json_schema_value(field_defs).unwrap_or_else(|rejection| {
+                external_content_rejection_value(discriminator_value, &rejection)
+            });
+            #[cfg(not(feature = "jsonschema"))]
+            let json = quote! {};
+
+            (ts, zod, json)
+        }
+        VariantKind::Named => {
+            let mut parts = VariantParts {
+                json_fields: Vec::new(),
+                optional_fields: Vec::new(),
+                schema_code: String::new(),
+                type_code: String::new(),
+            };
+            write_named_variant_fields(field_defs, None, self_type_name, &mut parts);
+
+            #[cfg(feature = "zod")]
+            let zod = format!("z.strictObject({{\n{}}})", parts.schema_code);
+            #[cfg(not(feature = "zod"))]
+            let zod = String::new();
+
+            #[cfg(feature = "jsonschema")]
+            let json = named_content_json_value(&parts.json_fields);
+            #[cfg(not(feature = "jsonschema"))]
+            let json = quote! {};
+
+            (format!("{{\n{}}}", parts.type_code), zod, json)
+        }
+    }
+}
+
+/// Renders one variant of an externally tagged enum as a union member.
+///
+/// Returns `(typescript, zod, json_value)`. A data-carrying variant is a closed object whose sole
+/// key is the variant name; a unit variant is that name alone, which is the whole value serde
+/// writes for it.
+///
+/// The key is quoted on both text surfaces because it is a wire name rather than an identifier: a
+/// `#[serde(rename)]` can spell it as something no JavaScript identifier can hold.
+#[cfg(feature = "serde")]
+fn render_external_variant(
+    variant: &DiscriminatedVariant,
+    self_type_name: &str,
+) -> (String, String, proc_macro2::TokenStream) {
+    let key = &variant.discriminator_value;
+    let docs = &variant.docs;
+
+    if matches!(variant.kind, VariantKind::Unit) {
+        #[cfg(feature = "jsonschema")]
+        let json = quote! { serde_json::json!({ "type": "string", "const": #key }) };
+        #[cfg(not(feature = "jsonschema"))]
+        let json = quote! {};
+
+        return (
+            format!("/**\n{docs}\n**/\n  \"{key}\""),
+            format!("z.literal(\"{key}\")"),
+            json,
+        );
+    }
+
+    let (content_ts, content_zod, content_json) =
+        render_external_content(&variant.kind, &variant.field_defs, key, self_type_name);
+
+    #[cfg(feature = "zod")]
+    let zod = {
+        // A `Named` variant defers each recursive field inside the object it renders, so only the
+        // kinds with no inner object need the key itself to carry the deferral.
+        let defer_key = !matches!(variant.kind, VariantKind::Named)
+            && variant
+                .field_defs
+                .iter()
+                .any(|fld| fld.contains_type_reference(self_type_name));
+        if defer_key {
+            format!("z.strictObject({{\n  get \"{key}\"() {{ return {content_zod}; }},\n}})")
+        } else {
+            format!("z.strictObject({{\n  \"{key}\": {content_zod},\n}})")
+        }
+    };
+    #[cfg(not(feature = "zod"))]
+    let zod = {
+        let _: &str = &content_zod;
+        String::new()
+    };
+
+    // Built key by key rather than through `serde_json::json!`: a struct variant's content is a
+    // block of statements, which the macro's value position cannot parse.
+    #[cfg(feature = "jsonschema")]
+    let json = quote! {
+        {
+            let mut schema_obj = serde_json::Map::new();
+            schema_obj.insert(
+                "type".to_string(),
+                serde_json::Value::String("object".to_string()),
+            );
+            let mut properties = serde_json::Map::new();
+            properties.insert(#key.to_string(), #content_json);
+            schema_obj.insert(
+                "properties".to_string(),
+                serde_json::Value::Object(properties),
+            );
+            schema_obj.insert(
+                "required".to_string(),
+                serde_json::Value::Array(vec![serde_json::Value::String(#key.to_string())]),
+            );
+            schema_obj.insert(
+                "additionalProperties".to_string(),
+                serde_json::Value::Bool(false),
+            );
+            serde_json::Value::Object(schema_obj)
+        }
+    };
+    #[cfg(not(feature = "jsonschema"))]
+    let json = {
+        let _: &_ = &content_json;
+        quote! {}
+    };
+
+    (
+        format!("{{  /**\n{docs}\n**/\n  \"{key}\": {content_ts};\n}}"),
+        zod,
+        json,
+    )
+}
+
+/// Joins an externally tagged enum's rendered members into its three union surfaces: the
+/// JSON-schema body, the TypeScript union, and the Zod union.
+///
+/// Member order is the enum's declaration order on every surface, as it is for the other two enum
+/// forms.
+#[cfg(feature = "serde")]
+fn join_external_union(
+    members: &[(String, String, proc_macro2::TokenStream)],
+) -> (proc_macro2::TokenStream, String, String) {
+    #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+    let _: &_ = &members;
+
+    #[cfg(feature = "jsonschema")]
+    let main_schema_code = {
+        let json_members = members.iter().map(|(_, _, json)| json);
+        quote! {
+            let mut schema_obj = serde_json::Map::new();
+            schema_obj.insert("oneOf".to_string(), {
+                let result: Vec<serde_json::Value> = vec![
+                    #(#json_members), *
+                ];
+
+                serde_json::Value::Array(result)
+            });
+
+            serde_json::Value::Object(schema_obj)
+        }
+    };
+    #[cfg(not(feature = "jsonschema"))]
+    let main_schema_code = quote! {};
+
+    #[cfg(feature = "typescript")]
+    let type_code = members
+        .iter()
+        .map(|(ts, _, _)| ts.as_str())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    #[cfg(not(feature = "typescript"))]
+    let type_code = String::new();
+
+    #[cfg(feature = "zod")]
+    let schema_code = format!(
+        "z.union([{}])",
+        members
+            .iter()
+            .map(|(_, zod, _)| zod.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    #[cfg(not(feature = "zod"))]
+    let schema_code = String::new();
+
+    (main_schema_code, type_code, schema_code)
+}
+
+/// Processes an enum that carries no serde tagging attributes and generates its definitions.
+///
+/// Absent `tag` / `content` / `untagged`, serde writes the externally tagged form: a data-carrying
+/// variant becomes a single-key object under the variant's name, and a unit variant becomes that
+/// name as a bare string. The surfaces describe that union — a JSON-schema `oneOf`, a TypeScript
+/// union, and a Zod `z.union`. The key carries the discriminator, so there is no one field every
+/// member shares and `z.discriminatedUnion` has nothing to switch on.
+#[cfg(feature = "serde")]
+fn process_externally_tagged_enum(
+    mut item_enum: syn::ItemEnum,
+    name: &syn::Ident,
+    rename_all: Option<&str>,
+    item_name: &str,
+) -> TokenStream {
+    // Compute the schema module name and register the enum so other types can find it.
+    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+    let (module_name, module_ident) = enum_module_idents(name, item_name, AliasKind::NoEnumMembers);
+
+    #[cfg(any(feature = "typescript", feature = "zod"))]
+    let docs_vec = get_enum_docs(&item_enum);
+
+    #[cfg(feature = "zod")]
+    let example_code = docs_vec
+        .as_ref()
+        .and_then(|docs| extract_example_from_docs(docs));
+
+    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+    let enum_module_name_opt = Some(module_name.as_str());
+    #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+    let enum_module_name_opt = None;
+
+    let self_type_name = item_enum.ident.to_string();
+    let variants = collect_discriminated_variants(&mut item_enum, rename_all, enum_module_name_opt);
+    if let Some(output) = guard_failure_output(&item_enum, &variants.2) {
+        return output;
+    }
+
+    let members: Vec<(String, String, proc_macro2::TokenStream)> = variants
+        .0
+        .iter()
+        .map(|variant| render_external_variant(variant, &self_type_name))
+        .collect();
+
+    let (main_schema_code, type_code, schema_code) = join_external_union(&members);
+    #[cfg(not(feature = "jsonschema"))]
+    let _: &_ = &main_schema_code;
+    #[cfg(not(feature = "typescript"))]
+    let _: &_ = &type_code;
+    #[cfg(not(feature = "zod"))]
+    let _: &_ = &schema_code;
+    #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+    let _: &_ = &name;
+
+    #[cfg(feature = "typescript")]
+    let docs = build_item_jsdoc(docs_vec.as_deref(), name);
+
+    #[cfg(feature = "jsonschema")]
+    let json_schema_method =
+        generate_discriminated_enum_json_schema_method(&main_schema_code, item_name);
+
+    #[cfg(feature = "typescript")]
+    let ts_definition_method =
+        generate_discriminated_enum_ts_definition_method(&docs, item_name, &type_code);
+
+    #[cfg(feature = "zod")]
+    let zod_schema_method = generate_discriminated_enum_zod_schema_method(item_name, &schema_code);
+
+    #[cfg(not(any(feature = "typescript", feature = "zod")))]
+    let _: &_ = &item_name;
+
+    #[cfg(feature = "zod")]
+    let schema_example_method = build_struct_schema_example(example_code.as_ref(), name);
+    #[cfg(all(
+        not(feature = "zod"),
+        any(feature = "typescript", feature = "jsonschema")
+    ))]
+    let schema_example_method: Option<proc_macro2::TokenStream> = None;
+
+    #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
+    let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![
+        #[cfg(feature = "jsonschema")]
+        json_schema_method,
+        #[cfg(feature = "typescript")]
+        ts_definition_method,
+        #[cfg(feature = "zod")]
+        zod_schema_method,
+    ];
+
+    #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
+    let delegate_impl_items =
+        build_struct_delegate_items(&module_ident, schema_example_method.as_ref(), None);
+
+    #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
+    {
+        assemble_schema_output(
+            &item_enum,
+            &module_ident,
+            name,
+            &schema_impl_items,
+            &variants.1,
+            &delegate_impl_items,
+        )
+    }
+
+    #[cfg(not(any(feature = "zod", feature = "typescript", feature = "jsonschema")))]
+    {
+        let _: &_ = &variants.1;
+        let output = quote! {
+            #item_enum
+        };
+        log::trace!("{output}");
+        TokenStream::from(output)
+    }
+}
+
 /// Renders one variant of an untagged enum as a union member.
 ///
 /// Returns `(typescript, zod, json_value)` where:
@@ -3348,7 +3753,7 @@ fn generate_variant_code(
             // Zod: { type: z.literal("Variant") }
         }
         VariantKind::Named => {
-            write_named_variant_fields(field_defs, tag_name, self_type_name, &mut parts);
+            write_named_variant_fields(field_defs, Some(tag_name), self_type_name, &mut parts);
         }
         VariantKind::TupleSingle => {
             write_tuple_single_variant_fields(field_defs, content_name, self_type_name, &mut parts);
@@ -3418,10 +3823,14 @@ fn generate_variant_code(
     )
 }
 
-/// Writes the named-field portion of a discriminated enum variant (TypeScript, Zod, JSON Schema).
+/// Writes the named-field portion of an enum variant (TypeScript, Zod, JSON Schema).
+///
+/// `tag_name` is the key the discriminator occupies beside these fields, whose JSON-schema entry
+/// the caller has already written; `None` where the variant's fields sit in an object of their own
+/// and no key is taken.
 fn write_named_variant_fields(
     field_defs: &[FieldDef],
-    tag_name: &str,
+    tag_name: Option<&str>,
     self_type_name: &str,
     parts: &mut VariantParts,
 ) {
@@ -3464,7 +3873,7 @@ fn write_named_variant_fields(
         }
 
         #[cfg(feature = "jsonschema")]
-        if fld.name != tag_name {
+        if tag_name != Some(fld.name.as_str()) {
             json_schema_variant_fields.push(build_field_schema(fld));
         }
         #[cfg(not(feature = "jsonschema"))]
