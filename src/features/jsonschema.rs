@@ -5,6 +5,16 @@
 /// What every pointer the crate writes opens with; what follows it is the name being deferred.
 const DEFS_PREFIX: &str = "#/$defs/";
 
+/// How a merge that closes a cycle names itself in the diagnostic it raises.
+///
+/// `subject` is the frame that reads the merge, `edge` what the merged schema was reached through,
+/// and `remedy` the way out in the spelling that applies where that edge was written.
+pub struct MergeCycleDiagnostic<'msg> {
+    pub edge: &'msg str,
+    pub remedy: &'msg str,
+    pub subject: &'msg str,
+}
+
 /// Check if we should generate JSON schema methods.
 #[cfg(test)]
 pub const fn should_generate_json_schema() -> bool {
@@ -121,16 +131,27 @@ fn closed_object_body(json_schema_fields: &[proc_macro2::TokenStream]) -> proc_m
     }
 }
 
-/// The struct's own fields distributed into each branch of the flattened types' schemas.
+/// A base object's members with the members of every schema merged beside them.
 ///
-/// A flatten edge that closes a cycle is rejected where it is read rather than merged: `def_name`
-/// is the frame that reads it, and names one end of the closing edge in the diagnostic.
-fn flattened_object_body(
-    json_schema_fields: &[proc_macro2::TokenStream],
-    flatten_json_schemas: &[proc_macro2::TokenStream],
-    def_name: &str,
+/// serde writes a `#[serde(flatten)]` base and an internally tagged variant's newtype content the
+/// same way — what is merged contributes its members to the object the base is writing — so both
+/// describe through this one merge rather than each spelling its own. `base` is a
+/// `serde_json::Map` expression and every entry of `merged` a `serde_json::Value` one; the result
+/// is a `serde_json::Value`.
+///
+/// A merged schema that is itself a `oneOf` multiplies out rather than collapsing, so each branch
+/// stays a closed object naming exactly the members that branch writes.
+pub fn merged_object_value(
+    base: &proc_macro2::TokenStream,
+    merged: &[proc_macro2::TokenStream],
+    diagnostic: &MergeCycleDiagnostic<'_>,
 ) -> proc_macro2::TokenStream {
     let defs_prefix = DEFS_PREFIX;
+    let MergeCycleDiagnostic {
+        edge,
+        remedy,
+        subject,
+    } = *diagnostic;
     quote::quote! {
         {
             fn merge_object_schemas(
@@ -183,22 +204,11 @@ fn flattened_object_body(
                 }
             }
 
-            let mut schema_obj = serde_json::Map::new();
-            schema_obj.insert("type".to_string(), serde_json::Value::String("object".to_string()));
-            schema_obj.insert("additionalProperties".to_string(), serde_json::Value::Bool(false));
-            let mut properties = serde_json::Map::new();
-            let mut required = Vec::new();
+            let flattened: Vec<serde_json::Value> = vec![ #(#merged),* ];
 
-            #(#json_schema_fields)*
-
-            schema_obj.insert("properties".to_string(), serde_json::Value::Object(properties));
-            schema_obj.insert("required".to_string(), serde_json::Value::Array(required));
-
-            let flattened: Vec<serde_json::Value> = vec![ #(#flatten_json_schemas),* ];
-
-            let mut branches: Vec<serde_json::Map<String, serde_json::Value>> = vec![schema_obj];
+            let mut branches: Vec<serde_json::Map<String, serde_json::Value>> = vec![#base];
             for fs in &flattened {
-                // An entry still only reserved is this flatten coming back around to a name whose
+                // An entry still only reserved is this merge coming back around to a name whose
                 // body is still being written: there is nothing to merge, and the type it would
                 // describe has no finite value to inhabit it.
                 let fs_body = match deferred_name(fs) {
@@ -206,9 +216,11 @@ fn flattened_object_body(
                     Some(name) => match hoisted_defs.get(name) {
                         Some(body) if body.is_object() => body,
                         _ => panic!(
-                            "`{}`: `#[serde(flatten)]` of `{}` closes a flatten cycle — the flattened body does not exist to merge, and no finite value inhabits the type; write the field as a named member so the cycle defers through a reference",
-                            #def_name,
+                            "`{}`: {} `{}` closes a flatten cycle — the flattened body does not exist to merge, and no finite value inhabits the type; {}",
+                            #subject,
+                            #edge,
                             name,
+                            #remedy,
                         ),
                     },
                 };
@@ -240,6 +252,41 @@ fn flattened_object_body(
             }
         }
     }
+}
+
+/// The struct's own fields distributed into each branch of the flattened types' schemas.
+///
+/// A flatten edge that closes a cycle is rejected where it is read rather than merged: `def_name`
+/// is the frame that reads it, and names one end of the closing edge in the diagnostic.
+fn flattened_object_body(
+    json_schema_fields: &[proc_macro2::TokenStream],
+    flatten_json_schemas: &[proc_macro2::TokenStream],
+    def_name: &str,
+) -> proc_macro2::TokenStream {
+    let base = quote::quote! {
+        {
+            let mut schema_obj = serde_json::Map::new();
+            schema_obj.insert("type".to_string(), serde_json::Value::String("object".to_string()));
+            schema_obj.insert("additionalProperties".to_string(), serde_json::Value::Bool(false));
+            let mut properties = serde_json::Map::new();
+            let mut required = Vec::new();
+
+            #(#json_schema_fields)*
+
+            schema_obj.insert("properties".to_string(), serde_json::Value::Object(properties));
+            schema_obj.insert("required".to_string(), serde_json::Value::Array(required));
+            schema_obj
+        }
+    };
+    merged_object_value(
+        &base,
+        flatten_json_schemas,
+        &MergeCycleDiagnostic {
+            edge: "`#[serde(flatten)]` of",
+            remedy: "write the field as a named member so the cycle defers through a reference",
+            subject: def_name,
+        },
+    )
 }
 
 /// Generates the JSON schema method implementation for plain enums.

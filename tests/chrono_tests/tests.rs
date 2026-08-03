@@ -87,10 +87,11 @@ struct EventWithDate {
     name: String,
 }
 
-// Test enum with DateTime variant (the original use case!).
+// Test enum with DateTime variant (the original use case!). The content key is named because every
+// variant here wraps a scalar, and serde refuses to write one beside a bare tag.
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-#[serde(tag = "type")]
+#[serde(tag = "type", content = "value")]
 pub enum FixedValue {
     Alphanumeric(String),
     Boolean(bool),
@@ -157,10 +158,11 @@ struct Sample {
     start_time: NaiveTime,
 }
 
-// Test enum with a TupleSingle DateTime variant honoring the as_number opt-out.
+// Test enum with a TupleSingle DateTime variant honoring the as_number opt-out. A `DateTime` is
+// written as a string, so it needs a content key of its own to sit under.
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[serde(tag = "type")]
+#[serde(tag = "type", content = "value")]
 pub enum DynamicValue {
     Native(DateTime<Utc>),
     Number(#[model_schema_prop(as_number)] DateTime<Utc>),
