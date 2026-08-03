@@ -3583,16 +3583,13 @@ fn unnarrowed_key_map_json_schema_item() -> proc_macro2::TokenStream {
     quote! { { "type": "object", "additionalProperties": true } }
 }
 
-/// Fallback JSON schema for map fields whose key type is not specially handled.
+/// [`unnarrowed_key_map_json_schema_item`] as a standalone `serde_json::Value` expression, for the
+/// positions that hold a map as a value rather than writing it into a literal.
 #[cfg(feature = "jsonschema")]
-fn map_key_fallback_schema(field_name_str: &str, key: &FieldDef) -> proc_macro2::TokenStream {
+fn unnarrowed_key_map_json_schema_value(key: &FieldDef) -> proc_macro2::TokenStream {
     log::trace!("Map Key Type {:?}", key.field_type);
     let item = unnarrowed_key_map_json_schema_item();
-    quote! {
-        properties.insert(#field_name_str.to_string(), {
-            serde_json::json!(#item)
-        });
-    }
+    quote! { serde_json::json!(#item) }
 }
 
 /// The rendering a map whose value is itself a map carries, dispatched on the inner key exactly as
@@ -3789,27 +3786,22 @@ fn map_member_rejection_error(
     quote! { compile_error!(#message); }
 }
 
-/// Builds the JSON schema for a map whose key type is `String`, dispatching on the value type.
+/// The object a `String`-keyed map describes as, as a standalone `serde_json::Value` expression, or
+/// the rejection when the value type has no rendering here.
 ///
 /// A `String` key enumerates nothing, so one `additionalProperties` schema stands for every
 /// member — and it is the value type's own rendering, which the key never widens.
 #[cfg(feature = "jsonschema")]
-fn build_string_key_map_value_schema(
+fn string_key_map_json_schema_value(
     value: &FieldDef,
-    field_name_str: &str,
-) -> proc_macro2::TokenStream {
-    let value_schema = match build_map_member_schema(value) {
-        Ok(value_schema) => value_schema,
-        Err(rejection) => return map_member_rejection_error(field_name_str, &rejection),
-    };
-    quote! {
-        properties.insert(#field_name_str.to_string(), {
-            serde_json::json!({
-                "type": "object",
-                "additionalProperties": #value_schema
-            })
-        });
-    }
+) -> Result<proc_macro2::TokenStream, MapMemberRejection> {
+    let value_schema = build_map_member_schema(value)?;
+    Ok(quote! {
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": #value_schema
+        })
+    })
 }
 
 /// [`build_map_member_item`] for a member of an enum-keyed map, which differs for exactly one value
@@ -3871,25 +3863,38 @@ fn enum_key_map_json_schema_value(
     })
 }
 
+/// The `properties` insertion a map-typed field produces.
+///
+/// Every key path builds the map as a standalone value, which is then wrapped for the slot the
+/// field is: a sequence wrapper around a map is the *field's* array, not the map's, so the wrap
+/// every other field type applies is applied here too and a `Vec<HashMap<..>>` field describes as
+/// the array the map-member and tuple-element positions already describe it as. Nullability stays
+/// the `required` list's business, as it is for every other field type — only a slot that cannot be
+/// dropped spells a `None` as `null`.
 #[cfg(feature = "jsonschema")]
 fn build_map_field_schema(
+    fld: &FieldDef,
     key: &FieldDef,
     value: &FieldDef,
     field_name_str: &str,
 ) -> proc_macro2::TokenStream {
     log::trace!("Map => field_name: {field_name_str}, key: {key:?}, value: {value:?}");
 
-    match map_key_path(key) {
+    let rendered = match map_key_path(key) {
         MapKeyPath::Enumerated(key_type_name) => {
-            match enum_key_map_json_schema_value(key_type_name, value) {
-                Ok(map_schema) => quote! {
-                    properties.insert(#field_name_str.to_string(), #map_schema);
-                },
-                Err(rejection) => map_member_rejection_error(field_name_str, &rejection),
+            enum_key_map_json_schema_value(key_type_name, value)
+        }
+        MapKeyPath::Open => string_key_map_json_schema_value(value),
+        MapKeyPath::Unnarrowed => Ok(unnarrowed_key_map_json_schema_value(key)),
+    };
+    match rendered {
+        Ok(map_schema) => {
+            let field_schema = arrayed_json_schema_value(fld, map_schema);
+            quote! {
+                properties.insert(#field_name_str.to_string(), #field_schema);
             }
         }
-        MapKeyPath::Open => build_string_key_map_value_schema(value, field_name_str),
-        MapKeyPath::Unnarrowed => map_key_fallback_schema(field_name_str, key),
+        Err(rejection) => map_member_rejection_error(field_name_str, &rejection),
     }
 }
 
@@ -4248,7 +4253,7 @@ fn build_field_type_schema(fld: &FieldDef, field_name_str: &str) -> proc_macro2:
         FieldDefType::SiblingType(name, lst) => {
             build_sibling_type_field_schema(fld, field_name_str, name, lst)
         }
-        FieldDefType::Map(key, value) => build_map_field_schema(key, value, field_name_str),
+        FieldDefType::Map(key, value) => build_map_field_schema(fld, key, value, field_name_str),
         FieldDefType::Tuple(lst) => build_tuple_field_schema(fld, field_name_str, lst),
         // Named exhaustively rather than caught by a wildcard: a new variant must be given a
         // schema here, not silently routed to whatever the last arm happens to emit.

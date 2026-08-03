@@ -157,6 +157,25 @@ struct OptionalMapValues {
     string_keyed: HashMap<String, Option<String>>,
 }
 
+// A sequence wrapper around a map is the field's array, not the map's, so each wrapped field
+// describes as the array of the map its unwrapped twin describes as — the wrap every other field
+// type applies, and the one the slot positions already apply to the same type. An `Option` is not
+// such a wrapper: field position spells optionality by leaving the name out of `required`.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct WrappedMapFields {
+    bucket_counts: HashMap<MetricBucket, u64>,
+    labels: HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    optional_labels: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    optional_wrapped_labels: Option<Vec<HashMap<String, String>>>,
+    raw_keyed_counts: HashMap<u32, u64>,
+    wrapped_bucket_counts: Vec<HashMap<MetricBucket, u64>>,
+    wrapped_labels: Vec<HashMap<String, String>>,
+    wrapped_raw_keyed_counts: VecDeque<HashMap<u32, u64>>,
+}
+
 // Test struct with collections
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -1350,6 +1369,146 @@ fn test_optional_map_values_are_null_flavored_on_both_key_paths() {
         zod_schema.contains("string_keyed: z.record(z.string(), z.nullable(z.string()))"),
         "Got: {zod_schema}"
     );
+}
+
+#[cfg(feature = "jsonschema")]
+fn wrapped_map_fields_properties() -> serde_json::Map<String, serde_json::Value> {
+    WrappedMapFields::json_schema()["properties"]
+        .as_object()
+        .unwrap()
+        .clone()
+}
+
+fn wrapped_map_fields() -> WrappedMapFields {
+    WrappedMapFields {
+        bucket_counts: HashMap::from([(MetricBucket::High, 7_u64)]),
+        labels: HashMap::from([("a".to_owned(), "one".to_owned())]),
+        optional_labels: None,
+        optional_wrapped_labels: Some(vec![HashMap::from([("a".to_owned(), "one".to_owned())])]),
+        raw_keyed_counts: HashMap::from([(3_u32, 4_u64)]),
+        wrapped_bucket_counts: vec![HashMap::from([(MetricBucket::Low, 2_u64)])],
+        wrapped_labels: vec![HashMap::from([("b".to_owned(), "two".to_owned())])],
+        wrapped_raw_keyed_counts: once(HashMap::from([(6_u32, 8_u64)])).collect(),
+    }
+}
+
+#[test]
+fn test_wrapped_map_fields_constructible() {
+    let fields = wrapped_map_fields();
+    assert_eq!(fields.wrapped_labels[0]["b"], "two");
+    assert_eq!(fields.wrapped_bucket_counts[0][&MetricBucket::Low], 2);
+    assert_eq!(fields.wrapped_raw_keyed_counts[0][&6], 8);
+    assert_eq!(fields.optional_labels, None);
+}
+
+/// A field spelled with a sequence wrapper around a map writes a JSON array of the objects the map
+/// writes, on every key path — so a schema that describes the bare object rejects the payload the
+/// type serializes to.
+#[test]
+fn test_wrapped_map_fields_write_arrays_of_their_map() {
+    let payload = serde_json::to_value(wrapped_map_fields()).unwrap();
+    for field in [
+        "optional_wrapped_labels",
+        "wrapped_bucket_counts",
+        "wrapped_labels",
+        "wrapped_raw_keyed_counts",
+    ] {
+        let written = payload[field].as_array().unwrap();
+        assert_eq!(written.len(), 1, "in: {}", payload[field]);
+        assert!(written[0].is_object(), "in: {}", payload[field]);
+    }
+    for field in ["bucket_counts", "labels", "raw_keyed_counts"] {
+        assert!(payload[field].is_object(), "in: {}", payload[field]);
+    }
+}
+
+/// The array wrap is the field's, and what it wraps is the map's own rendering: each wrapped field
+/// describes as `array` of exactly what its unwrapped twin describes as. Every key path is held
+/// against its twin, so no path can lose the wrap or widen the map while applying it.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_wrapped_map_fields_describe_as_arrays_of_their_map() {
+    let properties = wrapped_map_fields_properties();
+    for (wrapped, unwrapped) in [
+        ("optional_wrapped_labels", "labels"),
+        ("wrapped_bucket_counts", "bucket_counts"),
+        ("wrapped_labels", "labels"),
+        ("wrapped_raw_keyed_counts", "raw_keyed_counts"),
+    ] {
+        assert_eq!(
+            properties[wrapped],
+            serde_json::json!({ "type": "array", "items": properties[unwrapped] }),
+            "for {wrapped}, got: {}",
+            properties[wrapped]
+        );
+    }
+}
+
+/// A map named without a sequence wrapper keeps the object it has always described as, on every key
+/// path — including behind an `Option`, which field position spells by leaving the name out of
+/// `required` rather than by admitting a `null`.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_unwrapped_map_fields_keep_the_object_they_describe_as() {
+    let properties = wrapped_map_fields_properties();
+    assert_eq!(
+        properties["labels"],
+        serde_json::json!({ "type": "object", "additionalProperties": { "type": "string" } })
+    );
+    assert_eq!(
+        properties["raw_keyed_counts"],
+        serde_json::json!({ "type": "object", "additionalProperties": true })
+    );
+    assert_eq!(properties["bucket_counts"], bucket_keyed_count_map());
+    assert_eq!(properties["optional_labels"], properties["labels"]);
+
+    let required = WrappedMapFields::json_schema()["required"]
+        .as_array()
+        .unwrap()
+        .clone();
+    for optional in ["optional_labels", "optional_wrapped_labels"] {
+        assert!(
+            !required.contains(&serde_json::Value::String(optional.to_owned())),
+            "for {optional}, got: {required:?}"
+        );
+    }
+}
+
+/// TypeScript and Zod have always rendered the array a wrapped map writes, so the JSON schema's wrap
+/// is pinned against theirs — the three surfaces describe the field one way or the divergence is
+/// back.
+#[test]
+#[cfg(all(feature = "typescript", feature = "zod"))]
+fn test_wrapped_map_fields_typescript_generation() {
+    let ts_definition = WrappedMapFields::ts_definition();
+    for expected in [
+        "bucket_counts: Partial<Record<MetricBucket, number>>;",
+        "labels: Partial<Record<string, string>>;",
+        "optional_labels: Partial<Record<string, string>> | undefined;",
+        "optional_wrapped_labels: Array<Partial<Record<string, string>>> | undefined;",
+        "raw_keyed_counts: Partial<Record<number, number>>;",
+        "wrapped_bucket_counts: Array<Partial<Record<MetricBucket, number>>>;",
+        "wrapped_labels: Array<Partial<Record<string, string>>>;",
+        "wrapped_raw_keyed_counts: Array<Partial<Record<number, number>>>;",
+    ] {
+        assert!(
+            ts_definition.contains(expected),
+            "missing {expected}, got: {ts_definition}"
+        );
+    }
+
+    let zod_schema = WrappedMapFields::zod_schema();
+    for expected in [
+        "bucket_counts: z.record(MetricBucket$Schema, z.number().int()),",
+        "labels: z.record(z.string(), z.string()),",
+        "wrapped_bucket_counts: z.array(z.record(MetricBucket$Schema, z.number().int())),",
+        "wrapped_labels: z.array(z.record(z.string(), z.string())),",
+    ] {
+        assert!(
+            zod_schema.contains(expected),
+            "missing {expected}, got: {zod_schema}"
+        );
+    }
 }
 
 #[test]
