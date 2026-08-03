@@ -5,9 +5,9 @@ use super::{
 
 #[cfg(feature = "serde")]
 use super::{
-    cfg_attr_guard_error, check_optional_field_serialization, collect_untagged_members,
-    enum_cfg_attr_guard_errors, field_label, get_field_def, parse_serde_field_attributes,
-    parse_serde_type_attributes,
+    build_field_validation, cfg_attr_guard_error, check_optional_field_serialization,
+    collect_untagged_members, constrained_shape, enum_cfg_attr_guard_errors, field_label,
+    get_field_def, parse_serde_field_attributes, parse_serde_type_attributes,
 };
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -2283,6 +2283,103 @@ fn discriminated_union_rendering_is_stable_across_runs() {
             rendered_discriminated_union(),
             first,
             "run {run} rendered a different union than run 0"
+        );
+    }
+}
+
+/// The `validate()` contribution for a field spelled `spelling`, as tokens.
+#[cfg(feature = "serde")]
+fn emitted_validation(spelling: &str) -> String {
+    let ty: syn::Type = syn::parse_str(spelling).unwrap();
+    let shape = constrained_shape(&ty).unwrap();
+    let field = proc_macro2::Ident::new("field", proc_macro2::Span::call_site());
+    let checker = proc_macro2::Ident::new("check", proc_macro2::Span::call_site());
+    build_field_validation(&shape.wraps, &field, &checker).to_string()
+}
+
+/// The one spelling whose emitted body predates the reach-through and must not move: anything else
+/// would change what every already-generated bare field validates.
+#[cfg(feature = "serde")]
+#[test]
+fn a_bare_field_is_checked_in_place() {
+    assert_eq!(
+        emitted_validation("String"),
+        "if let Err (e) = check (& self . field) { errors . push (e) ; }"
+    );
+    assert_eq!(emitted_validation("u32"), emitted_validation("String"));
+}
+
+/// A constraint describes the value on the wire, and a `None` puts none there.
+#[cfg(feature = "serde")]
+#[test]
+fn an_option_is_checked_inside_its_some() {
+    assert_eq!(
+        emitted_validation("Option<String>"),
+        "{ let value_0 = & self . field ; if let Some (value_1) = value_0 { if let Err (e) = check (value_1) { errors . push (e) ; } } }"
+    );
+}
+
+/// A transparent wrapper writes its inner value and nothing else, so reaching through it is a
+/// deref and no check of its own.
+#[cfg(feature = "serde")]
+#[test]
+fn a_transparent_wrapper_is_dereferenced_through() {
+    let expected = "{ let value_0 = & self . field ; let value_1 = & * * value_0 ; if let Err (e) = check (value_1) { errors . push (e) ; } }";
+    for spelling in ["Arc<str>", "Box<String>", "Cow<'a, str>", "Rc<str>"] {
+        assert_eq!(
+            emitted_validation(spelling),
+            expected,
+            "spelling {spelling}"
+        );
+    }
+}
+
+/// Every sequence spelling writes an array of its element, so each element answers for the
+/// constraint — one level per depth, the innermost being where it lands.
+#[cfg(feature = "serde")]
+#[test]
+fn a_sequence_is_checked_per_element() {
+    let expected = "{ let value_0 = & self . field ; for value_1 in value_0 { if let Err (e) = check (value_1) { errors . push (e) ; } } }";
+    for wrapper in SEQUENCE_WRAPPERS {
+        assert_eq!(
+            emitted_validation(&format!("{wrapper}<String>")),
+            expected,
+            "wrapper {wrapper}"
+        );
+    }
+    assert_eq!(emitted_validation("[String ; 2]"), expected);
+
+    assert_eq!(
+        emitted_validation("Vec<Vec<String>>"),
+        "{ let value_0 = & self . field ; for value_1 in value_0 { for value_2 in value_1 { if let Err (e) = check (value_2) { errors . push (e) ; } } } }"
+    );
+}
+
+/// The wrappers compose in the order they were written, each reaching exactly one level.
+#[cfg(feature = "serde")]
+#[test]
+fn mixed_wrappers_compose_in_written_order() {
+    assert_eq!(
+        emitted_validation("Option<Arc<[String]>>"),
+        "{ let value_0 = & self . field ; if let Some (value_1) = value_0 { let value_2 = & * * value_1 ; for value_3 in value_2 { if let Err (e) = check (value_3) { errors . push (e) ; } } } }"
+    );
+}
+
+/// A field with no value for a length or a range to describe emits nothing at all.
+#[cfg(feature = "serde")]
+#[test]
+fn a_field_without_a_constrainable_value_has_no_shape() {
+    for spelling in [
+        "Tag",
+        "Option<Tag>",
+        "HashMap<String, String>",
+        "(String, String)",
+        "PathBuf",
+    ] {
+        let ty: syn::Type = syn::parse_str(spelling).unwrap();
+        assert!(
+            constrained_shape(&ty).is_none(),
+            "spelling {spelling} should reach no constrainable value"
         );
     }
 }
