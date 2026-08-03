@@ -234,6 +234,64 @@ impl FieldDef {
         }
     }
 
+    /// Replaces every reference to one of the enclosing item's type parameters with the opaque
+    /// type.
+    ///
+    /// A parameter names no type at expansion — the instantiation names one, and the schema is
+    /// written once for every instantiation. So a parameter describes as an opaque value does,
+    /// which leaves the shape it sits in — a tuple's arity, an array, a map's keys — described.
+    ///
+    /// Recurses through `SiblingType` generics, `Map` keys/values, and `Tuple` elements.
+    #[cfg(feature = "jsonschema")]
+    pub fn erase_type_parameters(&mut self, parameters: &[String]) {
+        if let FieldDefType::SiblingType(name, _) = &self.field_type
+            && parameters.iter().any(|parameter| parameter == name)
+        {
+            self.field_type = FieldDefType::Unknown;
+            return;
+        }
+        match &mut self.field_type {
+            FieldDefType::SiblingType(_, generics) => {
+                for generic in generics.iter_mut() {
+                    generic.erase_type_parameters(parameters);
+                }
+            }
+            FieldDefType::Map(key, value) => {
+                key.erase_type_parameters(parameters);
+                value.erase_type_parameters(parameters);
+            }
+            FieldDefType::Tuple(elements) => {
+                for element in elements.iter_mut() {
+                    element.erase_type_parameters(parameters);
+                }
+            }
+            // Leaf types name no parameter.
+            FieldDefType::Unknown
+            | FieldDefType::StringLiteral(_)
+            | FieldDefType::Boolean
+            | FieldDefType::String
+            | FieldDefType::U8
+            | FieldDefType::U16
+            | FieldDefType::U32
+            | FieldDefType::U64
+            | FieldDefType::I8
+            | FieldDefType::I16
+            | FieldDefType::I32
+            | FieldDefType::I64
+            | FieldDefType::Usize
+            | FieldDefType::Isize
+            | FieldDefType::F32
+            | FieldDefType::F64 => {}
+            #[cfg(feature = "object_id")]
+            FieldDefType::ObjectId => {}
+            #[cfg(feature = "chrono")]
+            FieldDefType::NaiveDate
+            | FieldDefType::NaiveTime
+            | FieldDefType::NaiveDateTime
+            | FieldDefType::DateTime => {}
+        }
+    }
+
     #[cfg(feature = "chrono")]
     fn has_as_number(&self) -> bool {
         self.model_schema_prop_meta
