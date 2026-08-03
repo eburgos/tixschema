@@ -1688,7 +1688,9 @@ fn every_sequence_wrapper_describes_as_the_vec_of_its_element() {
 fn every_sequence_wrapper_describes_as_the_vec_of_its_element_in_a_slot() {
     let parsed = parsed_u32_vec_value();
     let expected_member = super::build_map_member_schema(&parsed).unwrap().to_string();
-    let expected_element = super::build_tuple_element_json_schema(&parsed).to_string();
+    let expected_element = super::build_tuple_element_json_schema(&parsed)
+        .unwrap()
+        .to_string();
     for wrapper in SEQUENCE_WRAPPERS {
         let value = wrapped_u32_value(wrapper);
         assert_eq!(
@@ -1697,7 +1699,9 @@ fn every_sequence_wrapper_describes_as_the_vec_of_its_element_in_a_slot() {
             "for: {wrapper}"
         );
         assert_eq!(
-            super::build_tuple_element_json_schema(&value).to_string(),
+            super::build_tuple_element_json_schema(&value)
+                .unwrap()
+                .to_string(),
             expected_element,
             "for: {wrapper}"
         );
@@ -1718,13 +1722,68 @@ fn a_sibling_slot_carries_the_schema_module_reference() {
     ];
     for value in &spellings {
         let parsed = super::get_field_def("tag", value, "");
-        let element = super::build_tuple_element_json_schema(&parsed).to_string();
+        let element = super::build_tuple_element_json_schema(&parsed)
+            .unwrap()
+            .to_string();
         assert!(element.contains("metric_tag_schema"), "Got: {element}");
         assert_eq!(
             element,
             super::build_map_member_schema(&parsed).unwrap().to_string()
         );
     }
+}
+
+/// The tuple-field insertion for a field type built by hand.
+#[cfg(feature = "jsonschema")]
+fn tuple_field_schema(field_type: &str) -> String {
+    let ty: syn::Type = syn::parse_str(field_type).unwrap();
+    super::build_field_type_schema(&super::get_field_def("t", &ty, ""), "t").to_string()
+}
+
+/// A tuple element reaching a map the dispatch cannot render fails the way the map field itself
+/// does: one diagnostic naming the field and the type, in place of the whole insertion. An open
+/// object left there would describe a field the expansion has already rejected.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_tuple_element_holding_an_unrenderable_map_emits_only_the_compile_error() {
+    for field_type in [
+        "(String, HashMap<String, (u32, u32)>)",
+        "(String, Vec<HashMap<String, (u32, u32)>>)",
+        "(String, (u32, HashMap<String, (u32, u32)>))",
+    ] {
+        let tokens = tuple_field_schema(field_type);
+        assert!(
+            tokens.starts_with("compile_error !"),
+            "for {field_type}, got: {tokens}"
+        );
+        assert!(
+            !tokens.contains("properties . insert"),
+            "for {field_type}, got: {tokens}"
+        );
+        assert!(
+            tokens.contains("field `t`"),
+            "for {field_type}, got: {tokens}"
+        );
+        assert!(
+            tokens.contains("a tuple is not supported as a map value"),
+            "for {field_type}, got: {tokens}"
+        );
+    }
+}
+
+/// The `ObjectId` divergence is frozen by position, so routing the tuple element through the map
+/// path's dispatch must not migrate it onto the `String`-keyed member's closed, unpatterned `$oid`
+/// object: the element keeps the patterned, open field-position form it has always carried.
+#[cfg(all(feature = "object_id", feature = "jsonschema"))]
+#[test]
+fn an_object_id_tuple_element_keeps_the_field_position_oid_object() {
+    let parsed = super::get_field_def("id", &syn::parse_quote!(ObjectId), "");
+    assert_eq!(
+        super::build_tuple_element_json_schema(&parsed)
+            .unwrap()
+            .to_string(),
+        r#"serde_json :: json ! ({ "type" : "object" , "properties" : { "$oid" : { "type" : "string" , "pattern" : "^[a-f\\d]{24}$" } } , "required" : ["$oid"] })"#
+    );
 }
 
 /// A slot cannot be dropped the way an object key can, so a `None` in one is written as `null` —
