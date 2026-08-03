@@ -964,12 +964,10 @@ fn collect_struct_fields(
         #[cfg(not(feature = "serde"))]
         let is_flatten = false;
 
-        let (f_def, validation_fn, validate_body, guard_error) =
+        let (f_def, validation_fn, validate_body, field_guard_errors) =
             process_field(rename_all, field, module_name_opt, None, type_name);
 
-        if let Some(err) = guard_error {
-            guard_errors.push(err);
-        }
+        guard_errors.extend(field_guard_errors);
 
         if is_flatten {
             let _: (&_, &_) = (&validation_fn, &validate_body);
@@ -2346,7 +2344,7 @@ fn collect_discriminated_variants(
 
         let mut field_defs: Vec<FieldDef> = Vec::new();
         for field in &mut item.fields {
-            let (f_def, validation_fn, _validate_body, guard_error) = process_field(
+            let (f_def, validation_fn, _validate_body, field_guard_errors) = process_field(
                 rename_all,
                 field,
                 enum_module_name_opt,
@@ -2356,9 +2354,7 @@ fn collect_discriminated_variants(
             if let Some(vfn) = validation_fn {
                 enum_validation_fns.push(vfn);
             }
-            if let Some(err) = guard_error {
-                guard_errors.push(err);
-            }
+            guard_errors.extend(field_guard_errors);
             field_defs.push(f_def);
         }
 
@@ -4794,9 +4790,40 @@ fn check_optional_field_serialization(
     ))
 }
 
+/// The `compile_error!` tokens for every guard the field violates.
+///
+/// A hidden serde attribute leaves every serde-read diagnostic unreliable — the `Option`-null guard
+/// included, since the wrapper is exactly what kept its evidence out of the meta. The
+/// positional-constraint guard reads no serde attribute, so it stands whatever the wrapper hid.
+#[cfg(feature = "serde")]
+fn field_guard_errors(
+    field: &Field,
+    raw_field_ident: &str,
+    is_optional: bool,
+    serde_field_meta: &SerdeFieldMeta,
+    positional_constraint_error: Option<proc_macro2::TokenStream>,
+) -> Vec<proc_macro2::TokenStream> {
+    positional_constraint_error
+        .into_iter()
+        .chain(serde_field_meta.cfg_attr_rejection.as_ref().map_or_else(
+            || {
+                check_optional_field_serialization(field, is_optional, serde_field_meta)
+                    .err()
+                    .map(|err| err.to_compile_error())
+            },
+            |rejection| {
+                Some(cfg_attr_guard_error(
+                    rejection,
+                    &field_label(raw_field_ident),
+                ))
+            },
+        ))
+        .collect()
+}
+
 /// Processes a field and returns its definition, optional module items (validators/deserializers),
 /// optional `validate_body` (contribution to the type-level `validate()` method), and the
-/// `compile_error!` tokens for any guard the field violates.
+/// `compile_error!` tokens for every guard the field violates.
 fn process_field(
     rename_all: Option<&str>,
     field: &mut Field,
@@ -4807,7 +4834,7 @@ fn process_field(
     FieldDef,
     Option<proc_macro2::TokenStream>,
     Option<proc_macro2::TokenStream>,
-    Option<proc_macro2::TokenStream>,
+    Vec<proc_macro2::TokenStream>,
 ) {
     let mut new_attrs = Vec::new();
 
@@ -4843,7 +4870,7 @@ fn process_field(
 
     // Generate validation code and inject serde attribute if serde feature is enabled
     #[cfg(feature = "serde")]
-    let (validation_fn, validate_body) = generate_field_validation(
+    let (validation_fn, validate_body, positional_constraint_error) = generate_field_validation(
         field,
         schema_module_name,
         &raw_field_ident,
@@ -4870,24 +4897,16 @@ fn process_field(
     // Create the field definition and apply any model_schema_prop overrides
     let mut field_def = get_field_def(&final_name, field_type, &field_docs);
 
-    // A hidden serde attribute leaves every other field diagnostic unreliable — the Option-null
-    // guard included, since the wrapper is exactly what kept its evidence out of the meta.
     #[cfg(feature = "serde")]
-    let guard_error = serde_field_meta.cfg_attr_rejection.as_ref().map_or_else(
-        || {
-            check_optional_field_serialization(field, field_def.is_optional(), &serde_field_meta)
-                .err()
-                .map(|err| err.to_compile_error())
-        },
-        |rejection| {
-            Some(cfg_attr_guard_error(
-                rejection,
-                &field_label(&raw_field_ident),
-            ))
-        },
+    let guard_errors = field_guard_errors(
+        field,
+        &raw_field_ident,
+        field_def.is_optional(),
+        &serde_field_meta,
+        positional_constraint_error,
     );
     #[cfg(not(feature = "serde"))]
-    let guard_error: Option<proc_macro2::TokenStream> = None;
+    let guard_errors: Vec<proc_macro2::TokenStream> = Vec::new();
 
     // Resolve `Self` references to the concrete type name so recursive fields
     // (e.g. `Vec<Self>`) are treated exactly like `Vec<EnclosingType>`.
@@ -4935,7 +4954,7 @@ fn process_field(
     // Update field docs to include length/range constraint information
     apply_constraint_docs(&mut field_def, &final_name);
 
-    (field_def, validation_fn, validate_body, guard_error)
+    (field_def, validation_fn, validate_body, guard_errors)
 }
 
 /// Whether the field needs a `#[serde(default)]` written for it alongside the `deserialize_with`.
@@ -4958,9 +4977,34 @@ fn needs_injected_default(wraps: &[ConstraintWrap], has_default: bool) -> bool {
     matches!(first_opaque, Some(ConstraintWrap::Optional)) && !has_default
 }
 
+/// The `compile_error!` tokens for a length or range constraint written on a positional field.
+///
+/// Both helpers such a constraint generates are named from the field ident, and `validate()` reaches
+/// the value through that same ident — a spelling a tuple slot has none of.
+#[cfg(feature = "serde")]
+fn positional_constraint_guard_error(
+    field: &Field,
+    raw_field_ident: &str,
+) -> proc_macro2::TokenStream {
+    syn::Error::new_spanned(
+        field,
+        format!(
+            "model_schema: {}: pattern, minLength, maxLength, minimum and maximum are unsupported \
+             on a positional field — the generated validator, the generated deserializer and the \
+             `validate()` accessor are all named from the field ident, which a tuple slot has \
+             none of. Move the element into a struct variant with a named field, or drop the \
+             constraint.",
+            field_label(raw_field_ident)
+        ),
+    )
+    .to_compile_error()
+}
+
 /// Generates per-field serde validation code (static validator + `deserialize_with`) and, when
 /// constraints apply, injects the corresponding `#[serde(deserialize_with = ...)]` attribute — plus
 /// the `#[serde(default)]` that keeps an optional key optional under one.
+///
+/// Returns (`module_items`, `validate_body`, `guard_error`).
 #[cfg(feature = "serde")]
 fn generate_field_validation(
     field: &Field,
@@ -4972,6 +5016,7 @@ fn generate_field_validation(
 ) -> (
     Option<proc_macro2::TokenStream>,
     Option<proc_macro2::TokenStream>,
+    Option<proc_macro2::TokenStream>,
 ) {
     let has_string_constraints = model_schema_prop_meta.min_length.is_some()
         || model_schema_prop_meta.max_length.is_some()
@@ -4979,9 +5024,17 @@ fn generate_field_validation(
     let has_numeric_constraints =
         model_schema_prop_meta.minimum.is_some() || model_schema_prop_meta.maximum.is_some();
 
+    if raw_field_ident.is_empty() && (has_string_constraints || has_numeric_constraints) {
+        return (
+            None,
+            None,
+            Some(positional_constraint_guard_error(field, raw_field_ident)),
+        );
+    }
+
     let (Some(module_name), Some(shape)) = (schema_module_name, constrained_shape(&field.ty))
     else {
-        return (None, None);
+        return (None, None, None);
     };
 
     let helper_stem = helper_name_stem(raw_field_ident, variant_ident);
@@ -5007,7 +5060,7 @@ fn generate_field_validation(
         }),
     };
     let Some(validation_code) = generated else {
-        return (None, None);
+        return (None, None, None);
     };
 
     let deserialize_with_path = format!("{module_name}::deserialize_{helper_stem}");
@@ -5024,6 +5077,7 @@ fn generate_field_validation(
     (
         Some(validation_code.module_items),
         Some(validation_code.validate_body),
+        None,
     )
 }
 

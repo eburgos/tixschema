@@ -7,9 +7,10 @@ use super::{
 use super::{
     ModelSchemaPropMeta, build_field_validation, cfg_attr_guard_error,
     check_optional_field_serialization, collect_untagged_members, constrained_shape,
-    enum_cfg_attr_guard_errors, field_label, generate_numeric_validation_code,
-    generate_string_validation_code, get_field_def, helper_name_stem, needs_injected_default,
-    parse_serde_field_attributes, parse_serde_type_attributes,
+    enum_cfg_attr_guard_errors, field_label, generate_field_validation,
+    generate_numeric_validation_code, generate_string_validation_code, get_field_def,
+    helper_name_stem, needs_injected_default, parse_serde_field_attributes,
+    parse_serde_type_attributes,
 };
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -2477,6 +2478,106 @@ fn a_variant_field_names_its_helpers_for_its_variant() {
         helper_name_stem("note", Some("DeleteForever")),
         "delete_forever_note"
     );
+}
+
+/// The sole field of `item`, run through the constraint generator under `constraint` as the field
+/// of variant `One`, returning (`module_items`, `validate_body`, `guard_error`, injected attribute
+/// count).
+#[cfg(feature = "serde")]
+fn generated_field_validation(
+    item: &syn::ItemStruct,
+    constraint: &ModelSchemaPropMeta,
+) -> (bool, bool, Option<String>, usize) {
+    let field = item.fields.iter().next().unwrap();
+    let raw_field_ident = field
+        .ident
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    let mut new_attrs = Vec::new();
+    let (module_items, validate_body, guard_error) = generate_field_validation(
+        field,
+        Some("probe_schema"),
+        &raw_field_ident,
+        Some("One"),
+        constraint,
+        &mut new_attrs,
+    );
+    (
+        module_items.is_some(),
+        validate_body.is_some(),
+        guard_error.map(|tokens| tokens.to_string()),
+        new_attrs.len(),
+    )
+}
+
+/// A length or range constraint spells three names from the field ident — the validator, the
+/// deserializer, and the `validate()` accessor — so a slot that has no ident is refused before the
+/// first of them is built, where the `Ident` made from the empty name used to abort the expansion.
+/// A named field is reached by none of this and generates what it always has.
+#[cfg(feature = "serde")]
+#[test]
+fn a_constraint_on_a_positional_field_is_refused_before_a_name_is_spelled() {
+    let positional: syn::ItemStruct = syn::parse_quote! { struct Probe(String); };
+    let named: syn::ItemStruct = syn::parse_quote! { struct Probe { note: String } };
+
+    for constraint in [
+        ModelSchemaPropMeta {
+            min_length: Some(3),
+            ..ModelSchemaPropMeta::default()
+        },
+        ModelSchemaPropMeta {
+            maximum: Some(5.0_f64),
+            ..ModelSchemaPropMeta::default()
+        },
+    ] {
+        let (module_items, validate_body, guard_error, injected_attrs) =
+            generated_field_validation(&positional, &constraint);
+        let error = guard_error.unwrap();
+        assert!(error.contains("compile_error"), "got: {error}");
+        assert!(error.contains("tuple field"), "got: {error}");
+        assert!(!module_items, "a refused slot generated helpers: {error}");
+        assert!(!validate_body, "a refused slot reached validate(): {error}");
+        assert_eq!(injected_attrs, 0, "a refused slot was given a serde hook");
+    }
+
+    let named_string = generated_field_validation(
+        &named,
+        &ModelSchemaPropMeta {
+            min_length: Some(3),
+            ..ModelSchemaPropMeta::default()
+        },
+    );
+    assert_eq!(named_string, (true, true, None, 1));
+
+    let unconstrained = generated_field_validation(&positional, &ModelSchemaPropMeta::default());
+    assert_eq!(unconstrained, (false, false, None, 0));
+}
+
+/// The whole expansion is what a panicking `Ident` cost, so the enum the bug was found on must
+/// come back as diagnostics — one per offending slot, and none for the slot that carries no
+/// constraint.
+#[cfg(feature = "serde")]
+#[test]
+fn a_constrained_tuple_variant_yields_diagnostics_rather_than_helpers() {
+    let mut item: syn::ItemEnum = syn::parse_quote! {
+        enum Probe {
+            One(#[model_schema_prop(minLength = 3)] String),
+            Two(#[model_schema_prop(minLength = 5)] String),
+            Three(String),
+        }
+    };
+    let variants = collect_discriminated_variants(&mut item, None, Some("probe_schema"));
+
+    let validation_fns: Vec<String> = variants.1.iter().map(ToString::to_string).collect();
+    assert!(validation_fns.is_empty(), "got: {validation_fns:?}");
+
+    let errors: Vec<String> = variants.2.iter().map(ToString::to_string).collect();
+    assert_eq!(errors.len(), 2, "got: {errors:?}");
+    for error in &errors {
+        assert!(error.contains("compile_error"), "got: {error}");
+        assert!(error.contains("tuple field"), "got: {error}");
+    }
 }
 
 /// A wrapped field is gated on the way in by the walk that gates it in `validate()`, run over the
