@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use tixschema::model_schema;
 
@@ -389,4 +391,188 @@ fn test_tuple_element_option_serde_roundtrip() {
 
     let back: Row = serde_json::from_value(json).unwrap();
     assert_eq!(back, row, "null must deserialize back to None");
+}
+
+/// A map in a tuple slot describes as the same map does in field position — the object whose
+/// members carry the value type's own rendering — and recurses to the depth the map path recurses
+/// to. A slot that fell back to the open object would admit members the field position rejects.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn test_map_element_tuple_field_json_schema() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub struct MapSlotRow {
+        pub counts: HashMap<String, u32>,
+        pub nested: HashMap<String, HashMap<String, u32>>,
+        pub nested_slot: (String, HashMap<String, HashMap<String, u32>>),
+        pub slot: (String, HashMap<String, u32>),
+    }
+
+    let schema = MapSlotRow::json_schema();
+    let properties = &schema["properties"];
+
+    assert_eq!(
+        properties["slot"]["prefixItems"][1], properties["counts"],
+        "A map slot must describe as the map field does. Got: {}",
+        properties["slot"]["prefixItems"][1]
+    );
+    assert_eq!(
+        properties["slot"]["prefixItems"][1],
+        serde_json::json!({ "type": "object", "additionalProperties": { "type": "integer" } })
+    );
+    assert_eq!(
+        properties["nested_slot"]["prefixItems"][1], properties["nested"],
+        "A nested map slot must recurse as the nested map field does. Got: {}",
+        properties["nested_slot"]["prefixItems"][1]
+    );
+    assert_eq!(
+        properties["slot"]["prefixItems"][0],
+        serde_json::json!({ "type": "string" })
+    );
+}
+
+/// The sibling reference survives the map wrap inside a slot: a map of siblings in a tuple element
+/// names the same schema module the sibling names in every other position.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn test_map_of_siblings_element_tuple_field_json_schema() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub struct SiblingMapSlotRow {
+        pub slot: (String, HashMap<String, DocumentId>),
+    }
+
+    assert_eq!(
+        SiblingMapSlotRow::json_schema()["properties"]["slot"]["prefixItems"][1]["additionalProperties"],
+        DocumentId::json_schema()
+    );
+}
+
+/// TypeScript and Zod already recurse into a map slot; pinned so the json-schema fix cannot be
+/// read as the only surface that owes the map its rendering.
+#[test]
+fn test_map_element_tuple_field_ts_and_zod() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub struct MapSlotShape {
+        pub slot: (String, HashMap<String, u32>),
+    }
+
+    let ts = MapSlotShape::ts_definition();
+    assert!(
+        ts.contains("slot: [string, Partial<Record<string, number>>]"),
+        "Expected the map's own TS rendering in the slot. Got: {ts}"
+    );
+
+    #[cfg(feature = "zod")]
+    {
+        let zod = MapSlotShape::zod_schema();
+        assert!(
+            zod.contains("slot: z.tuple([z.string(), z.record(z.string(), z.number().int())])"),
+            "Expected the map's own Zod rendering in the slot. Got: {zod}"
+        );
+    }
+}
+
+/// A tuple in a tuple slot is the fixed-arity array the same tuple is in field position: serde
+/// writes both as a JSON array of the same length, so the slot carries the arity bounds too.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn test_nested_tuple_element_tuple_field_json_schema() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub struct NestedTupleRow {
+        pub inner: (u32, u32),
+        pub slot: (String, (u32, u32)),
+    }
+
+    let properties = &NestedTupleRow::json_schema()["properties"];
+    assert_eq!(
+        properties["slot"]["prefixItems"][1], properties["inner"],
+        "A nested tuple slot must describe as the tuple field does. Got: {}",
+        properties["slot"]["prefixItems"][1]
+    );
+    assert_eq!(
+        properties["slot"]["prefixItems"][1],
+        serde_json::json!({
+            "type": "array",
+            "prefixItems": [{ "type": "integer" }, { "type": "integer" }],
+            "items": false,
+            "minItems": 2_u64,
+            "maxItems": 2_u64
+        })
+    );
+}
+
+/// TypeScript and Zod already recurse into a nested tuple slot; pinned.
+#[test]
+fn test_nested_tuple_element_tuple_field_ts_and_zod() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub struct NestedTupleShape {
+        pub slot: (String, (u32, u32)),
+    }
+
+    let ts = NestedTupleShape::ts_definition();
+    assert!(
+        ts.contains("slot: [string, [number, number]]"),
+        "Expected the nested tuple's own TS rendering in the slot. Got: {ts}"
+    );
+
+    #[cfg(feature = "zod")]
+    {
+        let zod = NestedTupleShape::zod_schema();
+        assert!(
+            zod.contains(
+                "slot: z.tuple([z.string(), z.tuple([z.number().int(), z.number().int()])])"
+            ),
+            "Expected the nested tuple's own Zod rendering in the slot. Got: {zod}"
+        );
+    }
+}
+
+/// An opaque value in a tuple slot admits any value, as it does in field position. This is the
+/// sharp one: the slot serde fills with a string or a number must not fail its own schema.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn test_unknown_element_tuple_field_json_schema() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub struct UnknownSlotRow {
+        pub opaque: serde_json::Value,
+        pub slot: (String, serde_json::Value),
+    }
+
+    let properties = &UnknownSlotRow::json_schema()["properties"];
+    assert_eq!(
+        properties["slot"]["prefixItems"][1], properties["opaque"],
+        "An unknown slot must describe as the unknown field does. Got: {}",
+        properties["slot"]["prefixItems"][1]
+    );
+    assert_eq!(properties["slot"]["prefixItems"][1], serde_json::json!({}));
+}
+
+/// TypeScript and Zod already render the opaque slot permissively; pinned.
+#[test]
+fn test_unknown_element_tuple_field_ts_and_zod() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub struct UnknownSlotShape {
+        pub slot: (String, serde_json::Value),
+    }
+
+    let ts = UnknownSlotShape::ts_definition();
+    assert!(
+        ts.contains("slot: [string, unknown]"),
+        "Expected the opaque slot's TS rendering. Got: {ts}"
+    );
+
+    #[cfg(feature = "zod")]
+    {
+        let zod = UnknownSlotShape::zod_schema();
+        assert!(
+            zod.contains("slot: z.tuple([z.string(), z.unknown()])"),
+            "Expected the opaque slot's Zod rendering. Got: {zod}"
+        );
+    }
 }

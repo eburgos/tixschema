@@ -185,11 +185,16 @@ impl MapMemberItem {
 
     /// The item wrapped for its slot as a standalone `serde_json::Value`.
     fn into_member_value(self, value: &FieldDef) -> proc_macro2::TokenStream {
-        let item_value = match self {
+        map_member_slot_value(value, self.into_value())
+    }
+
+    /// The item as a standalone `serde_json::Value`, with no slot wrap applied — a fragment lifted
+    /// into the `serde_json::json!` a value form already is.
+    fn into_value(self) -> proc_macro2::TokenStream {
+        match self {
             Self::Fragment(fragment) => quote! { serde_json::json!(#fragment) },
             Self::Value(item_value) => item_value,
-        };
-        map_member_slot_value(value, item_value)
+        }
     }
 }
 
@@ -3140,7 +3145,10 @@ fn push_single_tuple_json_field(
     fld: &FieldDef,
 ) {
     let content_name_str = content_name.to_owned();
-    let field_schema = build_tuple_element_json_schema(fld);
+    let Some(field_schema) = build_tuple_element_json_schema(fld) else {
+        json_schema_variant_fields.push(unsupported_map_value_error(content_name));
+        return;
+    };
     json_schema_variant_fields.push(quote! {
         properties.insert(#content_name_str.to_string(), #field_schema);
         required.push(serde_json::Value::String(#content_name_str.to_string()));
@@ -3272,20 +3280,23 @@ fn write_tuple_multiple_variant_fields(
     #[cfg(feature = "jsonschema")]
     {
         let content_name_str = content_name.to_owned();
-        let tuple_schemas: Vec<proc_macro2::TokenStream> = field_defs
+        match field_defs
             .iter()
             .map(build_tuple_element_json_schema)
-            .collect();
-        json_schema_variant_fields.push(quote! {
-            properties.insert(#content_name_str.to_string(), {
-                serde_json::json!({
-                    "type": "array",
-                    "prefixItems": [#(#tuple_schemas),*],
-                    "items": false
-                })
-            });
-            required.push(serde_json::Value::String(#content_name_str.to_string()));
-        });
+            .collect::<Option<Vec<_>>>()
+        {
+            Some(tuple_schemas) => json_schema_variant_fields.push(quote! {
+                properties.insert(#content_name_str.to_string(), {
+                    serde_json::json!({
+                        "type": "array",
+                        "prefixItems": [#(#tuple_schemas),*],
+                        "items": false
+                    })
+                });
+                required.push(serde_json::Value::String(#content_name_str.to_string()));
+            }),
+            None => json_schema_variant_fields.push(unsupported_map_value_error(content_name)),
+        }
     }
     #[cfg(not(feature = "jsonschema"))]
     let _: &_ = &&json_schema_variant_fields;
@@ -3362,37 +3373,46 @@ fn scalar_field_json_schema_item(fld: &FieldDef) -> Option<proc_macro2::TokenStr
     Some(item_schema)
 }
 
-/// The JSON schema value expression for a field whose type renders inline as a scalar — arrayed
-/// when the field is a `Vec` — or `None` for the composite types (sibling references, maps,
-/// tuples, unknowns) that have no inline rendering.
+/// [`build_map_member_item`] for a tuple element, which differs for exactly two value types.
 ///
-/// `is_optional` is not consulted: how an absent value is expressed depends on the position the
-/// value sits in, so each caller wraps this base itself.
+/// An `ObjectId` here carries the field-position `$oid` object — patterned, and open — where a
+/// `String`-keyed map member carries the closed, unpatterned one; which of the two a slot should
+/// carry is unsettled, so this position keeps the rendering it has. A tuple renders as the
+/// fixed-arity array its own field position renders, which is the one value the map path has no
+/// renderer for: an element is dispatched by the tuple builder itself, so the nesting costs
+/// nothing but the recursion.
+///
+/// Every other value is the member the map path renders, at every depth, so a type describes the
+/// same in either slot.
 #[cfg(feature = "jsonschema")]
-fn scalar_field_json_schema_value(fld: &FieldDef) -> Option<proc_macro2::TokenStream> {
-    let item_schema = scalar_field_json_schema_item(fld)?;
-    Some(arrayed_json_schema_value(
-        fld,
-        quote! { serde_json::json!(#item_schema) },
-    ))
+fn build_tuple_element_item(value: &FieldDef) -> Option<MapMemberItem> {
+    #[cfg(feature = "object_id")]
+    if matches!(value.field_type, FieldDefType::ObjectId) {
+        return Some(MapMemberItem::Fragment(scalar_field_json_schema_item(
+            value,
+        )?));
+    }
+    if let FieldDefType::Tuple(elements) = &value.field_type {
+        return Some(MapMemberItem::Value(tuple_json_schema_value(elements)?));
+    }
+    build_map_member_item(value)
 }
 
-/// Builds the base JSON schema for a tuple element, ignoring `is_optional`.
+/// Builds the base JSON schema for a tuple element, ignoring `is_optional`, or `None` when the
+/// element holds a value the dispatch cannot render.
 ///
 /// The element is dispatched in the form its slot normalizes it to, so a sequence wrapper here
-/// describes as the `Vec` of the same element does rather than falling through to the composite
-/// object every unrenderable type lands on. A sibling is carried by the same reference the field
-/// and map-member positions carry — arrayed when the normalization left the element arrayed — so
-/// the type an element holds is described by that type wherever it is named. The nullable wrap is
-/// applied by `build_tuple_element_json_schema`, off the element as it was written.
+/// describes as the `Vec` of the same element does. Everything else is the map path's member
+/// dispatch: a sibling is carried by the same reference the field and map-member positions carry,
+/// a map carries its own members' renderings, and an opaque value carries the permissive empty
+/// schema field position carries — so the type an element holds is described by that type wherever
+/// it is named. The nullable wrap is applied by `build_tuple_element_json_schema`, off the element
+/// as it was written.
 #[cfg(feature = "jsonschema")]
-fn build_tuple_element_base_json_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
+fn build_tuple_element_base_json_schema(fld: &FieldDef) -> Option<proc_macro2::TokenStream> {
     let value = normalized_slot_value(fld);
-    if let FieldDefType::SiblingType(type_name, _) = &value.field_type {
-        return arrayed_json_schema_value(&value, sibling_json_schema_value(type_name));
-    }
-    scalar_field_json_schema_value(&value)
-        .unwrap_or_else(|| quote! { serde_json::json!({ "type": "object" }) })
+    let item = build_tuple_element_item(&value)?;
+    Some(arrayed_json_schema_value(&value, item.into_value()))
 }
 
 /// The `anyOf [<base>, null]` form for a value in a slot that cannot be dropped — a tuple element
@@ -3449,10 +3469,38 @@ fn sibling_json_schema_value(name: &str) -> proc_macro2::TokenStream {
     quote! { #module_ident::Schema::json_schema() }
 }
 
-/// Builds JSON schema for a tuple element (used for single tuple and multi-tuple variants).
+/// Builds JSON schema for a tuple element (used for tuple fields and for tuple variants), or
+/// `None` when the element holds a value the dispatch cannot render — which the callers turn into
+/// the single diagnostic naming the field.
 #[cfg(feature = "jsonschema")]
-fn build_tuple_element_json_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
-    nullable_slot_json_schema_value(fld, build_tuple_element_base_json_schema(fld))
+fn build_tuple_element_json_schema(fld: &FieldDef) -> Option<proc_macro2::TokenStream> {
+    Some(nullable_slot_json_schema_value(
+        fld,
+        build_tuple_element_base_json_schema(fld)?,
+    ))
+}
+
+/// The fixed-arity array a tuple describes as — the form serde writes it in — or `None` when any
+/// element holds a value the dispatch cannot render.
+///
+/// A tuple field and a tuple nested in a slot are the same array, so both are built here rather
+/// than each spelling the bounds itself.
+#[cfg(feature = "jsonschema")]
+fn tuple_json_schema_value(elements: &[FieldDef]) -> Option<proc_macro2::TokenStream> {
+    let arity = elements.len();
+    let element_schemas = elements
+        .iter()
+        .map(build_tuple_element_json_schema)
+        .collect::<Option<Vec<_>>>()?;
+    Some(quote! {
+        serde_json::json!({
+            "type": "array",
+            "prefixItems": [#(#element_schemas),*],
+            "items": false,
+            "minItems": #arity,
+            "maxItems": #arity
+        })
+    })
 }
 
 /// Fallback JSON schema for map fields whose key type is not specially handled.
@@ -3548,14 +3596,17 @@ fn normalized_slot_value(value: &FieldDef) -> FieldDef {
     normalized
 }
 
-/// The rendering every member of a map carries, with the slot wraps left to the caller, or `None`
-/// when the value type has no rendering here.
+/// The rendering a value in a slot carries, with the slot wraps left to the caller, or `None` when
+/// the value type has no rendering here.
 ///
 /// A map value is dispatched through this same function, so the members of a nested map carry the
-/// inner value type's own rendering at every depth rather than an open object.
+/// inner value type's own rendering at every depth rather than an open object. A tuple element is
+/// dispatched through it too (via [`build_tuple_element_item`]), so the two slot positions cannot
+/// disagree about what a type describes as.
 ///
-/// A tuple is the only value the mapping cannot render, at any depth: the callers turn that `None`
-/// into the single diagnostic naming the field.
+/// A tuple is the only value the mapping cannot render, at any depth — a tuple element overrides
+/// that arm with the array its own field position renders, a map member has no such renderer — and
+/// the callers turn that `None` into the single diagnostic naming the field.
 #[cfg(feature = "jsonschema")]
 fn build_map_member_item(value: &FieldDef) -> Option<MapMemberItem> {
     Some(match &value.field_type {
@@ -3566,7 +3617,7 @@ fn build_map_member_item(value: &FieldDef) -> Option<MapMemberItem> {
         // literal, so it is already the value form.
         FieldDefType::SiblingType(value_type_name, value_args) => {
             log::trace!(
-                "Map Value SiblingType => value_type_name: {value_type_name}, value_args: {value_args:?}"
+                "Slot SiblingType => value_type_name: {value_type_name}, value_args: {value_args:?}"
             );
             MapMemberItem::Value(sibling_json_schema_value(value_type_name))
         }
@@ -3617,7 +3668,8 @@ fn build_map_member_schema(value: &FieldDef) -> Option<proc_macro2::TokenStream>
     Some(build_map_member_item(&normalized)?.into_member_schema(&normalized))
 }
 
-/// The one diagnostic a map value the mapping cannot render produces, on either key path.
+/// The one diagnostic a map value the mapping cannot render produces — on either key path, and in
+/// a tuple slot the map is reached through.
 ///
 /// It replaces the branch's whole output rather than joining it: an emission left in place hands
 /// the author a schema the expansion has already rejected, and on the enum-key path a second error
@@ -4015,29 +4067,23 @@ fn build_string_format_field_schema(
 
 /// Builds JSON schema for a tuple struct field.
 ///
-/// A Rust tuple field `(A, B, ...)` serializes (via serde) as a fixed-length
-/// JSON array, so it is rendered as `{ "type": "array", "prefixItems": [...],
-/// "items": false, "minItems": N, "maxItems": N }`. This mirrors the tuple
-/// **variant** path (`write_tuple_multiple_variant_fields`) and reuses the same
-/// per-element schema builder (`build_tuple_element_json_schema`).
+/// A Rust tuple field `(A, B, ...)` serializes (via serde) as a fixed-length JSON array, which is
+/// what [`tuple_json_schema_value`] renders — the same array a tuple nested in a slot renders, so
+/// the two positions cannot drift apart. The tuple **variant** path
+/// (`write_tuple_multiple_variant_fields`) shares the per-element builder but spells its own array,
+/// without the arity bounds.
+///
+/// An element the dispatch cannot render replaces the whole insertion with the lone diagnostic,
+/// as an unrenderable map value does: a schema left in place would describe a field the expansion
+/// has already rejected.
 #[cfg(feature = "jsonschema")]
 fn build_tuple_field_schema(
     fld: &FieldDef,
     field_name_str: &str,
     lst: &[FieldDef],
 ) -> proc_macro2::TokenStream {
-    let arity = lst.len();
-    let element_schemas: Vec<proc_macro2::TokenStream> =
-        lst.iter().map(build_tuple_element_json_schema).collect();
-
-    let tuple_schema = quote! {
-        serde_json::json!({
-            "type": "array",
-            "prefixItems": [#(#element_schemas),*],
-            "items": false,
-            "minItems": #arity,
-            "maxItems": #arity
-        })
+    let Some(tuple_schema) = tuple_json_schema_value(lst) else {
+        return unsupported_map_value_error(field_name_str);
     };
 
     if fld.is_array {
