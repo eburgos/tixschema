@@ -6,6 +6,9 @@ use syn::Attribute;
 use crate::features::model_schema_prop::ModelSchemaPropMeta;
 use crate::utils::{lookup_alias_info, safe_type_name};
 
+#[cfg(feature = "zod")]
+use crate::utils::escape_js_regex_literal;
+
 #[cfg(feature = "chrono")]
 use crate::features::chrono;
 #[cfg(feature = "object_id")]
@@ -799,7 +802,8 @@ impl FieldDef {
         if let Some(meta) = &self.model_schema_prop_meta
             && let Some(pattern) = &meta.pattern
         {
-            result = format!("{result}.check(z.regex(/{pattern}/))");
+            let literal_body = escape_js_regex_literal(pattern);
+            result = format!("{result}.check(z.regex(/{literal_body}/))");
         }
         result
     }
