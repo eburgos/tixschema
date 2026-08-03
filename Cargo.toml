@@ -25,6 +25,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = ">=0.4.40", features = ["serde"] }
 regex = ">=1.10"
+# Test-only: `span-locations` makes `Span::source_text()` work outside a real macro expansion,
+# which is how the unit tests assert that generated tokens are spanned on the user's source.
+proc-macro2 = { version = "1", features = ["span-locations"] }
 
 # Transitive dep floors — pinned to fix known vulnerabilities:
 # - bytes >=1.11.1: RUSTSEC-2026-0007 (integer overflow in BytesMut::reserve)

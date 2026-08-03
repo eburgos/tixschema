@@ -552,6 +552,32 @@ Notes:
 - Serde transparent serialization works normally -- the wrapper is invisible in JSON.
 - Use branded newtypes for opaque IDs and phantom types to prevent passing the wrong ID type across domain boundaries.
 
+#### The `Display` Requirement and `no_display`
+
+Every branded newtype gets a `Display` impl that delegates to its inner value, so **the inner type must implement `Display`**. An inner type that does not is reported at the inner field, naming the trait:
+
+```text
+error[E0277]: `Vec<String>` doesn't implement `std::fmt::Display`
+  --> src/lib.rs:7:21
+   |
+ 7 | pub struct Tags(pub Vec<String>);
+   |                     ^^^^^^^^^^^ the trait `std::fmt::Display` is not implemented for `Vec<String>`
+```
+
+Pass `no_display` for brands over container inner types. The brand then gets no `Display` impl and carries no such requirement; its schema and its serde transparency are unchanged. String constraints are a separate matter: `pattern`, `minLength`, and `maxLength` validate through `to_string()`, so a constrained brand needs a `Display` inner whether or not it passes `no_display`.
+
+```rust
+use tixschema::model_schema;
+use serde::{Deserialize, Serialize};
+
+#[model_schema(no_display)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Tags(pub Vec<String>);
+```
+
+A generic brand carries the requirement as a `Display` bound on each type parameter, so a non-`Display` type argument (e.g. `DocumentId<Vec<String>>`) is rejected where the brand is used rather than where it is declared.
+
 #### Branded Newtype Validation Constraints
 
 You can add `pattern`, `minLength`, and `maxLength` constraints directly on the `#[model_schema()]` attribute for branded newtypes. Constraints are enforced in three places: the generated Zod schema, serde deserialization, and a `validate()` method on the type.
