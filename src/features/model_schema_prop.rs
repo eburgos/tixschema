@@ -3,9 +3,27 @@
 //! This module handles parsing of model_schema_prop attributes for field-level customization
 //! of TypeScript type and Zod schema generation.
 
+use syn::meta::ParseNestedMeta;
 use syn::{Attribute, LitStr, Type};
 
 use crate::utils::regex_rejection;
+
+/// Every key the parser reads, in the order it tries them, as the unknown-key rejection names them.
+///
+/// A key added to [`parse_prop_key`] belongs here too: `no_key_the_parser_reads_is_rejected` walks
+/// this list back through the parser and fails on any name here it does not read.
+const KNOWN_KEYS: &[&str] = &[
+    "as",
+    "literal",
+    "minLength",
+    "maxLength",
+    "minimum",
+    "maximum",
+    "pattern",
+    "preprocess",
+    "ts_optional",
+    "as_number",
+];
 
 /// Metadata for `model_schema_prop` attributes applied to a field.
 ///
@@ -74,11 +92,14 @@ use crate::utils::regex_rejection;
 pub struct ModelSchemaPropMeta {
     pub as_number: bool, // DateTime<Tz>: epoch-number + codegen coercer instead of the native Date default
     pub as_type: Option<String>, // e.g., "String" from as = String
+    /// The parser's refusal of the attribute — a key it does not read, or a value it cannot read —
+    /// spanned on the tokens that earned it.
+    pub attr_rejection: Option<syn::Error>,
     pub literal: Option<String>, // e.g., "Tixena" from literal = "Tixena"
     pub max_length: Option<usize>, // e.g., 50 from maxLength = 50
-    pub maximum: Option<f64>, // e.g., 100.0 from maximum = 100
+    pub maximum: Option<f64>,    // e.g., 100.0 from maximum = 100
     pub min_length: Option<usize>, // e.g., 1 from minLength = 1
-    pub minimum: Option<f64>, // e.g., 0.0 from minimum = 0
+    pub minimum: Option<f64>,    // e.g., 0.0 from minimum = 0
     pub pattern: Option<String>, // e.g., "^[0-9a-fA-F]{24}$" from pattern = "^[0-9a-fA-F]{24}$"
     /// The `regex` crate's rejection of `pattern`, spanned on the literal it was written as.
     pub pattern_rejection: Option<syn::Error>,
@@ -87,114 +108,107 @@ pub struct ModelSchemaPropMeta {
 }
 
 /// Parses `model_schema_prop` attributes from a field.
+///
+/// What the parser cannot read is recorded as [`ModelSchemaPropMeta::attr_rejection`] rather than
+/// dropped: this attribute is read here and nowhere else, so a key or value that stops at this
+/// parser reaches no emitter, and the field it was written to constrain is emitted as though the
+/// attribute had been left off.
 pub fn parse_model_schema_prop_attributes(attrs: &[Attribute]) -> ModelSchemaPropMeta {
     let mut meta = ModelSchemaPropMeta::default();
 
     for attr in attrs {
-        if attr.path().is_ident("model_schema_prop") {
-            attr.parse_nested_meta(|nested| {
-                // Handle `as = Type`
-                if nested.path.is_ident("as") {
-                    let value = nested.value()?;
-                    if let Ok(ty) = value.parse::<Type>() {
-                        // Convert the type to a string representation
-                        meta.as_type = Some(quote::quote!(#ty).to_string());
-                    }
-                }
-                // Handle `literal = "value"`
-                else if nested.path.is_ident("literal") {
-                    let value = nested.value()?;
-                    let lit: LitStr = value.parse()?;
-                    meta.literal = Some(lit.value());
-                }
-                // Handle `minLength = N`
-                else if nested.path.is_ident("minLength") {
-                    let value = nested.value()?;
-                    let lit = value.parse::<syn::LitInt>()?;
-                    if let Ok(min_len) = lit.base10_parse::<usize>() {
-                        meta.min_length = Some(min_len);
-                    }
-                }
-                // Handle `maxLength = N`
-                else if nested.path.is_ident("maxLength") {
-                    let value = nested.value()?;
-                    let lit = value.parse::<syn::LitInt>()?;
-                    if let Ok(max_len) = lit.base10_parse::<usize>() {
-                        meta.max_length = Some(max_len);
-                    }
-                }
-                // Handle `minimum = N` (integer or float)
-                else if nested.path.is_ident("minimum") {
-                    let value = nested.value()?;
-                    let lit: syn::Lit = value.parse()?;
-                    if let syn::Lit::Int(li) = lit {
-                        if let Ok(n) = li.base10_parse::<f64>() {
-                            meta.minimum = Some(n);
-                        }
-                    } else if let syn::Lit::Float(lf) = lit
-                        && let Ok(n) = lf.base10_parse::<f64>()
-                    {
-                        meta.minimum = Some(n);
-                    } else {
-                        // Non-numeric literals are ignored.
-                    }
-                }
-                // Handle `maximum = N` (integer or float)
-                else if nested.path.is_ident("maximum") {
-                    let value = nested.value()?;
-                    let lit: syn::Lit = value.parse()?;
-                    if let syn::Lit::Int(li) = lit {
-                        if let Ok(n) = li.base10_parse::<f64>() {
-                            meta.maximum = Some(n);
-                        }
-                    } else if let syn::Lit::Float(lf) = lit
-                        && let Ok(n) = lf.base10_parse::<f64>()
-                    {
-                        meta.maximum = Some(n);
-                    } else {
-                        // Non-numeric literals are ignored.
-                    }
-                }
-                // Handle `pattern = "regex"`
-                else if nested.path.is_ident("pattern") {
-                    let value = nested.value()?;
-                    let lit: LitStr = value.parse()?;
-                    meta.pattern_rejection = regex_rejection(&lit);
-                    meta.pattern = Some(lit.value());
-                }
-                // Handle `preprocess = ["fn1", "fn2"]`
-                else if nested.path.is_ident("preprocess") {
-                    let value = nested.value()?;
-                    let arr: syn::ExprArray = value.parse()?;
-                    let fns: Vec<String> = arr
-                        .elems
-                        .iter()
-                        .filter_map(|elem| {
-                            if let syn::Expr::Lit(expr_lit) = elem
-                                && let syn::Lit::Str(s) = &expr_lit.lit
-                            {
-                                return Some(s.value());
-                            }
-                            None
-                        })
-                        .collect();
-                    meta.preprocess = fns;
-                } else if nested.path.is_ident("ts_optional") {
-                    meta.ts_optional = true;
-                } else if nested.path.is_ident("as_number") {
-                    meta.as_number = true;
-                } else {
-                    // Ignore unknown model_schema_prop keys.
-                }
-                Ok(())
-            })
-            .unwrap_or_else(|e| {
-                log::trace!("Failed to parse model_schema_prop attribute: {e}");
-            });
+        if attr.path().is_ident("model_schema_prop")
+            && let Err(rejection) =
+                attr.parse_nested_meta(|nested| parse_prop_key(&nested, &mut meta))
+        {
+            meta.attr_rejection.get_or_insert(rejection);
         }
     }
 
     meta
+}
+
+/// Reads one `key` or `key = value` of a `model_schema_prop` attribute into `meta`.
+fn parse_prop_key(nested: &ParseNestedMeta, meta: &mut ModelSchemaPropMeta) -> syn::Result<()> {
+    if nested.path.is_ident("as") {
+        let ty: Type = nested.value()?.parse()?;
+        meta.as_type = Some(quote::quote!(#ty).to_string());
+    } else if nested.path.is_ident("literal") {
+        let lit: LitStr = nested.value()?.parse()?;
+        meta.literal = Some(lit.value());
+    } else if nested.path.is_ident("minLength") {
+        meta.min_length = Some(nested.value()?.parse::<syn::LitInt>()?.base10_parse()?);
+    } else if nested.path.is_ident("maxLength") {
+        meta.max_length = Some(nested.value()?.parse::<syn::LitInt>()?.base10_parse()?);
+    } else if nested.path.is_ident("minimum") {
+        meta.minimum = Some(numeric_bound(nested, "minimum")?);
+    } else if nested.path.is_ident("maximum") {
+        meta.maximum = Some(numeric_bound(nested, "maximum")?);
+    } else if nested.path.is_ident("pattern") {
+        let lit: LitStr = nested.value()?.parse()?;
+        meta.pattern_rejection = regex_rejection(&lit);
+        meta.pattern = Some(lit.value());
+    } else if nested.path.is_ident("preprocess") {
+        let arr: syn::ExprArray = nested.value()?.parse()?;
+        meta.preprocess = arr
+            .elems
+            .iter()
+            .map(preprocess_fn_name)
+            .collect::<syn::Result<_>>()?;
+    } else if nested.path.is_ident("ts_optional") {
+        meta.ts_optional = true;
+    } else if nested.path.is_ident("as_number") {
+        meta.as_number = true;
+    } else {
+        return Err(unknown_key_rejection(nested));
+    }
+    Ok(())
+}
+
+/// The `f64` a numeric bound was written as.
+///
+/// Both bounds reach a numeric comparison in the Rust validator and a numeric literal in the Zod
+/// and JSON schemas, so a value that is not a number is one no surface can carry.
+fn numeric_bound(nested: &ParseNestedMeta, key: &str) -> syn::Result<f64> {
+    let lit: syn::Lit = nested.value()?.parse()?;
+    if let syn::Lit::Int(int) = &lit {
+        int.base10_parse()
+    } else if let syn::Lit::Float(float) = &lit {
+        float.base10_parse()
+    } else {
+        Err(syn::Error::new_spanned(
+            &lit,
+            format!("`model_schema_prop` key `{key}` takes an integer or float literal"),
+        ))
+    }
+}
+
+/// The name one `preprocess` element carries: the function is spliced into the emitted Zod schema
+/// by name, so a string literal is the only element that names one.
+fn preprocess_fn_name(elem: &syn::Expr) -> syn::Result<String> {
+    if let syn::Expr::Lit(expr_lit) = elem
+        && let syn::Lit::Str(name) = &expr_lit.lit
+    {
+        Ok(name.value())
+    } else {
+        Err(syn::Error::new_spanned(
+            elem,
+            "`model_schema_prop` key `preprocess` takes an array of string literals, each naming a \
+             function to wrap the Zod schema with",
+        ))
+    }
+}
+
+/// Rejects a key the parser does not read, spanned on the name as written.
+fn unknown_key_rejection(nested: &ParseNestedMeta) -> syn::Error {
+    let path = &nested.path;
+    nested.error(format!(
+        "unknown `model_schema_prop` key `{}`. This attribute is this crate's own, so a key it \
+         does not read reaches no emitter: the field would be written as though the key had been \
+         left off, unconstrained on every surface. Valid keys: {}",
+        quote::quote!(#path),
+        KNOWN_KEYS.join(", ")
+    ))
 }
 
 #[cfg(test)]

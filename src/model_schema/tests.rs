@@ -576,9 +576,9 @@ fn a_path_field_is_left_alone() {
 }
 
 /// Runs the field walk the way [`super::process_field`] does and renders the guard failures its
-/// `model_schema_prop` attributes earn, so an unparseable `pattern` is read off the same channel
-/// that carries it to the emitted item.
-fn field_pattern_errors(item: &syn::ItemStruct) -> Vec<String> {
+/// `model_schema_prop` attributes earn, so a refused key and an unparseable `pattern` are read off
+/// the same channel that carries them to the emitted item.
+fn field_prop_guard_errors(item: &syn::ItemStruct) -> Vec<String> {
     let field = item.fields.iter().next().unwrap();
     let name = field
         .ident
@@ -587,16 +587,10 @@ fn field_pattern_errors(item: &syn::ItemStruct) -> Vec<String> {
         .unwrap_or_default();
     let field_def = get_field_def(&name, &field.ty, "");
     let meta = super::parse_model_schema_prop_attributes(&field.attrs);
-    super::collect_field_guard_errors(
-        field,
-        &field_def,
-        &name,
-        meta.pattern_rejection.as_ref(),
-        Vec::new(),
-    )
-    .iter()
-    .map(ToString::to_string)
-    .collect()
+    super::collect_field_guard_errors(field, &field_def, &name, &meta, Vec::new())
+        .iter()
+        .map(ToString::to_string)
+        .collect()
 }
 
 /// The guard's verdict is the `regex` crate's verdict: the parse the generated validator's
@@ -606,7 +600,7 @@ fn field_pattern_errors(item: &syn::ItemStruct) -> Vec<String> {
 fn the_field_pattern_guard_follows_the_regex_crate() {
     for pattern in PROBE_PATTERNS {
         let rejected = regex::Regex::new(pattern).is_err();
-        let errors = field_pattern_errors(&syn::parse_quote! {
+        let errors = field_prop_guard_errors(&syn::parse_quote! {
             struct Report {
                 #[model_schema_prop(pattern = #pattern)]
                 name: String,
@@ -624,7 +618,7 @@ fn the_field_pattern_guard_follows_the_regex_crate() {
 /// Zod literal it would otherwise feed swallows its own closing delimiter.
 #[test]
 fn a_field_pattern_the_regex_crate_rejects_names_the_field_and_quotes_the_parse_error() {
-    let errors = field_pattern_errors(&syn::parse_quote! {
+    let errors = field_prop_guard_errors(&syn::parse_quote! {
         struct Report {
             #[model_schema_prop(pattern = r"^ab\")]
             name: String,
@@ -649,13 +643,67 @@ fn a_field_pattern_the_regex_crate_rejects_names_the_field_and_quotes_the_parse_
 /// A field carrying no `pattern` at all must not acquire one of these errors.
 #[test]
 fn an_unpatterned_field_is_left_alone() {
-    let errors = field_pattern_errors(&syn::parse_quote! {
+    let errors = field_prop_guard_errors(&syn::parse_quote! {
         struct Report {
             #[model_schema_prop(minLength = 3)]
             name: String,
         }
     });
     assert!(errors.is_empty(), "got: {errors:?}");
+}
+
+/// The reported repro: two misspelled keys, which emitted `z.string()` with nothing on it. The
+/// misspelling reaches the author on the same channel the `pattern` guard uses, naming the field
+/// and the key as written; parsing stops there, so the second misspelling is not reached.
+#[test]
+fn a_misspelled_field_prop_key_names_the_field_and_the_key_as_written() {
+    let errors = field_prop_guard_errors(&syn::parse_quote! {
+        struct Report {
+            #[model_schema_prop(patern = "^[a-z]+$", minLenght = 3)]
+            name: String,
+        }
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    for needle in ["compile_error", "field `name`", "patern", "pattern"] {
+        assert!(
+            errors[0].contains(needle),
+            "{needle} missing: {}",
+            errors[0]
+        );
+    }
+}
+
+/// A value the parser cannot read is the same class of loss as a key it cannot read — the
+/// constraint reaches no surface — and leaves by the same channel.
+#[test]
+fn a_field_prop_value_the_parser_cannot_read_names_the_field() {
+    let errors = field_prop_guard_errors(&syn::parse_quote! {
+        struct Report {
+            #[model_schema_prop(minLength = "3")]
+            name: String,
+        }
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(errors[0].contains("field `name`"), "got: {}", errors[0]);
+}
+
+/// The two `model_schema_prop` guards are independent: a refused key does not swallow the
+/// unparseable `pattern` the same attribute already carried.
+#[test]
+fn a_refused_key_and_an_unparseable_pattern_are_both_reported() {
+    let errors = field_prop_guard_errors(&syn::parse_quote! {
+        struct Report {
+            #[model_schema_prop(pattern = r"^ab\", patern = "^[a-z]+$")]
+            name: String,
+        }
+    });
+    assert_eq!(errors.len(), 2, "got: {errors:?}");
+    assert!(errors[0].contains("patern"), "got: {}", errors[0]);
+    assert!(
+        errors[1].contains("regex parse error"),
+        "got: {}",
+        errors[1]
+    );
 }
 
 #[cfg(feature = "serde")]
