@@ -509,11 +509,12 @@ impl FieldDef {
         })
     }
 
-    /// The TypeScript type for a value in a slot that cannot be dropped — a tuple element or a
-    /// map entry. An `Option` there is null-flavored (`{base} | null`) rather than
-    /// undefined-flavored: only an object key can be omitted, so serde emits `null` for a `None`
-    /// in either position.
-    fn typescript_slot_typename(&self) -> String {
+    /// The TypeScript type for a value in a slot that cannot be dropped — a tuple element, a map
+    /// entry, or the content key of a single-element tuple variant, which serde always writes. An
+    /// `Option` there is null-flavored (`{base} | null`) rather than undefined-flavored: none of
+    /// those positions can be omitted the way an object key can, so serde emits `null` for a
+    /// `None` in each of them.
+    pub fn typescript_slot_typename(&self) -> String {
         let base = self.typescript_base();
         if self.is_optional() {
             format!("{base} | null")
@@ -678,12 +679,13 @@ impl FieldDef {
         result
     }
 
-    /// The Zod schema for a value in a slot that cannot be dropped — a tuple element or a map
-    /// entry. An `Option` there is null-flavored (`z.nullable({base})`) rather than
-    /// undefined-flavored: only an object key can be omitted, so serde emits `null` for a `None`
-    /// in either position.
+    /// The Zod schema for a value in a slot that cannot be dropped — a tuple element, a map entry,
+    /// or the content key of a single-element tuple variant, which serde always writes. An
+    /// `Option` there is null-flavored (`z.nullable({base})`) rather than undefined-flavored: none
+    /// of those positions can be omitted the way an object key can, so serde emits `null` for a
+    /// `None` in each of them.
     #[cfg(feature = "zod")]
-    fn zod_slot_type(&self) -> String {
+    pub fn zod_slot_type(&self) -> String {
         let base = self.zod_base();
         if self.is_optional() {
             format!("z.nullable({base})")
