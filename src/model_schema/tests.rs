@@ -1205,6 +1205,120 @@ fn no_display_coexists_with_the_named_args() {
     assert!(args.no_display);
 }
 
+/// The parser's refusal of `args`, rendered, or `None` when it read them whole.
+fn args_rejection(args: proc_macro2::TokenStream) -> Option<String> {
+    super::parse_model_schema_args(args)
+        .arg_rejection
+        .as_ref()
+        .map(ToString::to_string)
+}
+
+/// The reported repro: a misspelled `name` compiled clean and emitted the unrenamed schema. The
+/// refusal names the argument as written and the one that was meant.
+#[test]
+fn a_misspelled_name_argument_is_refused_by_the_name_as_written() {
+    let rejection = args_rejection(quote::quote! { nme = "Renamed" }).unwrap();
+    assert!(rejection.contains("nme"), "got: {rejection}");
+    assert!(rejection.contains("name"), "got: {rejection}");
+}
+
+/// The refusal offers every argument the parser reads, and the probes below prove each offered
+/// name is one it actually reads — the list and the arms cannot drift apart while both hold.
+#[test]
+fn no_argument_the_parser_reads_is_rejected() {
+    let probes: [proc_macro2::TokenStream; 5] = [
+        quote::quote! { name = "Renamed" },
+        quote::quote! { pattern = "^[a-z]+$" },
+        quote::quote! { minLength = 1 },
+        quote::quote! { maxLength = 50 },
+        quote::quote! { no_display },
+    ];
+    assert_eq!(probes.len(), super::KNOWN_ARGS.len());
+
+    let offered = args_rejection(quote::quote! { bogus_flag }).unwrap();
+    for name in super::KNOWN_ARGS {
+        assert!(offered.contains(name), "{name} not offered: {offered}");
+    }
+    for probe in probes {
+        let rendered = probe.to_string();
+        assert_eq!(args_rejection(probe), None, "for {rendered}");
+    }
+}
+
+/// Every shape the old parser dropped on the floor: a wrong literal kind, a value that is no
+/// literal at all, a length the target type cannot hold, a known argument written as a list or as
+/// a bare flag, and a bare path the parser does not read.
+#[test]
+fn a_shape_the_parser_cannot_read_is_refused() {
+    let probes: [proc_macro2::TokenStream; 9] = [
+        quote::quote! { name = 3 },
+        quote::quote! { name("Nested") },
+        quote::quote! { name },
+        quote::quote! { pattern = 3 },
+        quote::quote! { minLength = "3" },
+        quote::quote! { minLength = -1 },
+        quote::quote! { maxLength = 99999999999999999999999999999999999999999 },
+        quote::quote! { no_display = 3 },
+        quote::quote! { bogus_flag },
+    ];
+    for probe in probes {
+        let rendered = probe.to_string();
+        assert!(args_rejection(probe).is_some(), "for {rendered}");
+    }
+}
+
+/// An argument list `syn` itself cannot parse took the whole list down with it, silently.
+#[test]
+fn an_unparseable_argument_list_is_refused() {
+    let rejection = args_rejection(quote::quote! { name = }).unwrap();
+    assert!(!rejection.is_empty());
+}
+
+/// An argument the parser reads before the refused one still lands: the refusal reports the
+/// attribute, it does not discard what was already read.
+#[test]
+fn a_refusal_keeps_what_the_parser_had_already_read() {
+    let args = super::parse_model_schema_args(quote::quote! { name = "Slug", nme = "Renamed" });
+    assert_eq!(args.name_override.as_deref(), Some("Slug"));
+    assert!(args.arg_rejection.is_some());
+}
+
+/// The refusal reaches the expansion as a `compile_error!` naming the type it was written on.
+#[test]
+fn a_refused_argument_reaches_the_expansion_as_a_named_compile_error() {
+    let rejection = super::parse_model_schema_args(quote::quote! { nme = "Renamed" })
+        .arg_rejection
+        .unwrap();
+    let item: syn::Item = syn::parse_quote! {
+        struct TypeLevelUnknown {
+            name: String,
+        }
+    };
+    let error = super::attr_guard_error(&rejection, &super::item_label(&item)).to_string();
+    for needle in ["compile_error", "type `TypeLevelUnknown`", "nme"] {
+        assert!(error.contains(needle), "{needle} missing: {error}");
+    }
+}
+
+/// The three shapes `model_schema` expands name themselves; anything else has no ident to name.
+#[test]
+fn every_expanded_shape_names_itself_in_a_guard_message() {
+    for (item, label) in [
+        (
+            syn::parse_quote! { struct Carrier { name: String } },
+            "type `Carrier`",
+        ),
+        (syn::parse_quote! { enum Carrier { One } }, "type `Carrier`"),
+        (
+            syn::parse_quote! { type Carrier = String; },
+            "type `Carrier`",
+        ),
+        (syn::parse_quote! { fn carrier() {} }, "item"),
+    ] {
+        assert_eq!(super::item_label(&item), label);
+    }
+}
+
 /// Builds the `Display` assertion for the sole field of `source`, parsed from text so its spans
 /// carry file locations and `source_text()` can report what they point at.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
