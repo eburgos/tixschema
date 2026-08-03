@@ -4234,9 +4234,10 @@ fn field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
 /// guard violations. The first three are always returned; the caller selects which to use based on
 /// the enabled features.
 ///
-/// This path builds its field defs directly rather than through [`process_field`], so it runs
-/// [`check_optional_field_serialization`] itself — a named `Option` in a struct variant renders in
-/// the absent form here exactly as it does in a struct, and must carry the same guarantee.
+/// This path builds its field defs directly rather than through [`process_field`], so it runs the
+/// field guards itself. A member renders exactly as a struct field of the same written type does —
+/// a named `Option` in the absent form, a map from its key's members — so each guard it escapes
+/// would be a rendering this position alone is allowed to write.
 #[cfg(feature = "serde")]
 fn collect_untagged_members(item_enum: &mut syn::ItemEnum) -> UntaggedMemberData {
     let enum_type_name = item_enum.ident.to_string();
@@ -4258,6 +4259,10 @@ fn collect_untagged_members(item_enum: &mut syn::ItemEnum) -> UntaggedMemberData
                 .unwrap_or_default();
             let mut field_def = get_field_def(&field_name, &field.ty, "");
             if let Err(err) = check_os_string_field(field, &field_def, &field_label(&field_name)) {
+                guard_errors.push(err.to_compile_error());
+            }
+            #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+            if let Err(err) = check_non_enum_map_key(field, &field_def, &field_label(&field_name)) {
                 guard_errors.push(err.to_compile_error());
             }
             let serde_field_meta = parse_serde_field_attributes(&field.attrs);
