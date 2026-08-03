@@ -1,15 +1,16 @@
 use super::{
-    FieldDefType, collect_discriminated_variants, render_discriminated_variants,
-    validate_as_number_flag, validate_ts_optional_flag,
+    FieldDefType, check_os_string_field, collect_discriminated_variants, field_label,
+    get_field_def, render_discriminated_variants, validate_as_number_flag,
+    validate_ts_optional_flag,
 };
 
 #[cfg(feature = "serde")]
 use super::{
     ModelSchemaPropMeta, build_field_validation, cfg_attr_guard_error,
     check_optional_field_serialization, collect_untagged_members, constrained_shape,
-    enum_cfg_attr_guard_errors, field_label, generate_numeric_validation_code,
-    generate_string_validation_code, get_field_def, helper_name_stem, needs_injected_default,
-    parse_serde_field_attributes, parse_serde_type_attributes,
+    enum_cfg_attr_guard_errors, generate_numeric_validation_code, generate_string_validation_code,
+    helper_name_stem, needs_injected_default, parse_serde_field_attributes,
+    parse_serde_type_attributes,
 };
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -378,6 +379,65 @@ fn cfg_attr_wrapped_serde_on_a_field_is_rejected() {
     assert!(error.contains("compile_error"), "got: {error}");
     assert!(error.contains("field `note`"), "got: {error}");
     assert!(error.contains("#[serde(...)]"), "got: {error}");
+}
+
+/// Runs the field walk the way [`process_field`] does and renders the `OsString` guard failure.
+fn field_os_string_error(item: &syn::ItemStruct) -> Option<String> {
+    let field = item.fields.iter().next()?;
+    let name = field
+        .ident
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    let field_def = get_field_def(&name, &field.ty, "");
+    check_os_string_field(field, &field_def, &field_label(&name))
+        .err()
+        .map(|err| err.to_compile_error().to_string())
+}
+
+#[test]
+fn an_os_string_field_is_rejected_by_name() {
+    let error = field_os_string_error(&syn::parse_quote! {
+        struct Report {
+            location: OsString,
+        }
+    })
+    .unwrap();
+    assert!(error.contains("compile_error"), "got: {error}");
+    assert!(error.contains("field `location`"), "got: {error}");
+    assert!(error.contains("`OsString`"), "got: {error}");
+    assert!(error.contains("externally tagged enum"), "got: {error}");
+}
+
+/// The guard reads through the wrappers the parser reads through, so a borrowed `OsStr` is named
+/// as itself rather than as the wrapper it was written behind.
+#[test]
+fn a_wrapped_os_str_field_is_rejected_by_its_own_name() {
+    let error = field_os_string_error(&syn::parse_quote! {
+        struct Report {
+            location: Box<OsStr>,
+        }
+    })
+    .unwrap();
+    assert!(error.contains("`OsStr`"), "got: {error}");
+}
+
+/// The path types the borrowed-form rule takes in are the ones this guard must not catch.
+#[test]
+fn a_path_field_is_left_alone() {
+    for ty in [
+        quote::quote! { PathBuf },
+        quote::quote! { Box<Path> },
+        quote::quote! { Cow<'static, Path> },
+        quote::quote! { String },
+    ] {
+        let error = field_os_string_error(&syn::parse_quote! {
+            struct Report {
+                location: #ty,
+            }
+        });
+        assert!(error.is_none(), "for {ty}, got: {error:?}");
+    }
 }
 
 #[cfg(feature = "serde")]

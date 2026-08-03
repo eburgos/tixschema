@@ -729,7 +729,6 @@ fn cfg_attr_guard_error(rejection: &syn::Error, item: &str) -> proc_macro2::Toke
 }
 
 /// Names a field in a guard message; tuple slots have no ident to name.
-#[cfg(feature = "serde")]
 fn field_label(raw_field_ident: &str) -> String {
     if raw_field_ident.is_empty() {
         "tuple field".to_owned()
@@ -964,12 +963,10 @@ fn collect_struct_fields(
         #[cfg(not(feature = "serde"))]
         let is_flatten = false;
 
-        let (f_def, validation_fn, validate_body, guard_error) =
+        let (f_def, validation_fn, validate_body, field_guard_errors) =
             process_field(rename_all, field, module_name_opt, None, type_name);
 
-        if let Some(err) = guard_error {
-            guard_errors.push(err);
-        }
+        guard_errors.extend(field_guard_errors);
 
         if is_flatten {
             let _: (&_, &_) = (&validation_fn, &validate_body);
@@ -2346,7 +2343,7 @@ fn collect_discriminated_variants(
 
         let mut field_defs: Vec<FieldDef> = Vec::new();
         for field in &mut item.fields {
-            let (f_def, validation_fn, _validate_body, guard_error) = process_field(
+            let (f_def, validation_fn, _validate_body, field_guard_errors) = process_field(
                 rename_all,
                 field,
                 enum_module_name_opt,
@@ -2356,9 +2353,7 @@ fn collect_discriminated_variants(
             if let Some(vfn) = validation_fn {
                 enum_validation_fns.push(vfn);
             }
-            if let Some(err) = guard_error {
-                guard_errors.push(err);
-            }
+            guard_errors.extend(field_guard_errors);
             field_defs.push(f_def);
         }
 
@@ -2865,6 +2860,9 @@ fn collect_untagged_members(item_enum: &mut syn::ItemEnum) -> UntaggedMemberData
                 .map(ToString::to_string)
                 .unwrap_or_default();
             let mut field_def = get_field_def(&field_name, &field.ty, "");
+            if let Err(err) = check_os_string_field(field, &field_def, &field_label(&field_name)) {
+                guard_errors.push(err.to_compile_error());
+            }
             let serde_field_meta = parse_serde_field_attributes(&field.attrs);
             if let Some(rejection) = serde_field_meta.cfg_attr_rejection.as_ref() {
                 guard_errors.push(cfg_attr_guard_error(rejection, &field_label(&field_name)));
@@ -4794,9 +4792,49 @@ fn check_optional_field_serialization(
     ))
 }
 
+/// Every guard error the field violates: the `OsString` guard first — it reads the written type,
+/// which no attribute can hide — then the serde-side guard when one fired.
+fn collect_field_guard_errors(
+    field: &Field,
+    field_def: &FieldDef,
+    raw_field_ident: &str,
+    serde_guard_error: Option<proc_macro2::TokenStream>,
+) -> Vec<proc_macro2::TokenStream> {
+    check_os_string_field(field, field_def, &field_label(raw_field_ident))
+        .err()
+        .map(|err| err.to_compile_error())
+        .into_iter()
+        .chain(serde_guard_error)
+        .collect()
+}
+
+/// Rejects a field that reaches an `OsString`/`OsStr`, at any depth.
+///
+/// serde writes both as an externally tagged enum naming the target platform — `{"Unix":[u8, …]}`
+/// or `{"Windows":[u16, …]}` — so one Rust field has two wire forms and no schema describes both.
+/// Their owned string counterparts are what a portable field is written as instead.
+fn check_os_string_field(
+    field: &Field,
+    field_def: &FieldDef,
+    label: &str,
+) -> Result<(), syn::Error> {
+    let Some(name) = field_def.os_string_name() else {
+        return Ok(());
+    };
+    Err(syn::Error::new_spanned(
+        field,
+        format!(
+            "model_schema: {label} reaches `{name}`, which serde writes as an externally tagged \
+             enum naming the target platform (`{{\"Unix\":[u8, ...]}}` or \
+             `{{\"Windows\":[u16, ...]}}`), not a string, so no schema can describe it portably. \
+             Use `String`, or `PathBuf` for a filesystem path."
+        ),
+    ))
+}
+
 /// Processes a field and returns its definition, optional module items (validators/deserializers),
 /// optional `validate_body` (contribution to the type-level `validate()` method), and the
-/// `compile_error!` tokens for any guard the field violates.
+/// `compile_error!` tokens for every guard the field violates.
 fn process_field(
     rename_all: Option<&str>,
     field: &mut Field,
@@ -4807,7 +4845,7 @@ fn process_field(
     FieldDef,
     Option<proc_macro2::TokenStream>,
     Option<proc_macro2::TokenStream>,
-    Option<proc_macro2::TokenStream>,
+    Vec<proc_macro2::TokenStream>,
 ) {
     let mut new_attrs = Vec::new();
 
@@ -4871,9 +4909,10 @@ fn process_field(
     let mut field_def = get_field_def(&final_name, field_type, &field_docs);
 
     // A hidden serde attribute leaves every other field diagnostic unreliable — the Option-null
-    // guard included, since the wrapper is exactly what kept its evidence out of the meta.
+    // guard included, since the wrapper is exactly what kept its evidence out of the meta. The
+    // `OsString` guard reads the written type, which no attribute can hide, so it stands apart.
     #[cfg(feature = "serde")]
-    let guard_error = serde_field_meta.cfg_attr_rejection.as_ref().map_or_else(
+    let serde_guard_error = serde_field_meta.cfg_attr_rejection.as_ref().map_or_else(
         || {
             check_optional_field_serialization(field, field_def.is_optional(), &serde_field_meta)
                 .err()
@@ -4887,7 +4926,10 @@ fn process_field(
         },
     );
     #[cfg(not(feature = "serde"))]
-    let guard_error: Option<proc_macro2::TokenStream> = None;
+    let serde_guard_error: Option<proc_macro2::TokenStream> = None;
+
+    let guard_errors =
+        collect_field_guard_errors(field, &field_def, &raw_field_ident, serde_guard_error);
 
     // Resolve `Self` references to the concrete type name so recursive fields
     // (e.g. `Vec<Self>`) are treated exactly like `Vec<EnclosingType>`.
@@ -4935,7 +4977,7 @@ fn process_field(
     // Update field docs to include length/range constraint information
     apply_constraint_docs(&mut field_def, &final_name);
 
-    (field_def, validation_fn, validate_body, guard_error)
+    (field_def, validation_fn, validate_body, guard_errors)
 }
 
 /// Whether the field needs a `#[serde(default)]` written for it alongside the `deserialize_with`.
