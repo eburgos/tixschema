@@ -3366,12 +3366,36 @@ fn nullable_slot_json_schema(
         .then(|| quote! { { "anyOf": [#base, { "type": "null" }] } })
 }
 
+/// [`nullable_slot_json_schema`] for a caller that needs a standalone `serde_json::Value`: the
+/// nullable form is a literal fragment, so it is wrapped, while `base` already is such a value.
+#[cfg(feature = "jsonschema")]
+fn nullable_slot_json_schema_value(
+    fld: &FieldDef,
+    base: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    nullable_slot_json_schema(fld, &base)
+        .map_or(base, |nullable| quote! { serde_json::json!(#nullable) })
+}
+
+/// The schema module a sibling type's `Schema::json_schema()` lives in.
+///
+/// An alias's module is named after its registered export name, which the raw ident does not
+/// reproduce, so the registry answers first. A name it does not hold is one this expansion has not
+/// seen — a type expanded later, or one from another crate — and takes the naming every
+/// `#[model_schema()]` type follows.
+#[cfg(feature = "jsonschema")]
+fn sibling_schema_module_ident(name: &str) -> Ident {
+    let module_name = match lookup_alias_info(name) {
+        Some(alias) => alias.module_name,
+        None => format!("{}_schema", to_snake_case(&safe_type_name(name))),
+    };
+    Ident::new(module_name.as_str(), proc_macro2::Span::call_site())
+}
+
 /// Builds JSON schema for a tuple element (used for single tuple and multi-tuple variants).
 #[cfg(feature = "jsonschema")]
 fn build_tuple_element_json_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
-    let base = build_tuple_element_base_json_schema(fld);
-    nullable_slot_json_schema(fld, &base)
-        .map_or(base, |nullable| quote! { serde_json::json!(#nullable) })
+    nullable_slot_json_schema_value(fld, build_tuple_element_base_json_schema(fld))
 }
 
 /// Fallback JSON schema for map fields whose key type is not specially handled.
@@ -3674,8 +3698,13 @@ fn build_map_vec_value_schema(
 }
 
 /// Builds the JSON schema for a map whose `String`-keyed value is a sibling/custom type.
+///
+/// The member is the sibling's own schema, as it is in field position and on the enum-key path.
+/// `is_array` and `is_optional` describe the slot rather than the type, so the array and nullable
+/// wraps are applied here over that one schema.
 #[cfg(feature = "jsonschema")]
 fn build_map_sibling_value_schema(
+    value: &FieldDef,
     value_type_name: &str,
     value_args: &[FieldDef],
     field_name_str: &str,
@@ -3686,17 +3715,21 @@ fn build_map_sibling_value_schema(
 
     // Handle Vec<T> as map value
     if value_type_name == "Vec" && value_args.len() == 1 {
-        build_map_vec_value_schema(&value_args[0], field_name_str)
-    } else {
-        // Other SiblingType cases - fallback to generic
-        quote! {
-            properties.insert(#field_name_str.to_string(), {
-                serde_json::json!({
-                    "type": "object",
-                    "additionalProperties": true
-                })
-            });
-        }
+        return build_map_vec_value_schema(&value_args[0], field_name_str);
+    }
+
+    let value_module_ident = sibling_schema_module_ident(value_type_name);
+    let value_schema = nullable_slot_json_schema_value(
+        value,
+        arrayed_json_schema_value(value, quote! { #value_module_ident::Schema::json_schema() }),
+    );
+    quote! {
+        properties.insert(#field_name_str.to_string(), {
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": #value_schema
+            })
+        });
     }
 }
 
@@ -3761,7 +3794,7 @@ fn build_string_key_map_value_schema(
             build_map_nested_map_value_schema(value, inner_key, inner_value, field_name_str)
         }
         FieldDefType::SiblingType(value_type_name, value_args) => {
-            build_map_sibling_value_schema(value_type_name, value_args, field_name_str)
+            build_map_sibling_value_schema(value, value_type_name, value_args, field_name_str)
         }
         // A map member's `$oid` object is closed and unpatterned, where the shared mapping's
         // field-position rendering carries the hex pattern and leaves the object open.
@@ -3815,21 +3848,13 @@ fn build_enum_key_map_value_binding(value: &FieldDef) -> Option<proc_macro2::Tok
     let base = if let FieldDefType::SiblingType(value_type_name, value_lst) = &value.field_type
         && value_lst.is_empty()
     {
-        // For json_schema(), use the module pattern. An alias's module is named after
-        // its registered export name, which the raw ident does not reproduce.
-        let value_module_name = match lookup_alias_info(value_type_name) {
-            Some(alias) => alias.module_name,
-            None => format!("{}_schema", to_snake_case(&safe_type_name(value_type_name))),
-        };
-        let value_module_ident =
-            proc_macro2::Ident::new(value_module_name.as_str(), proc_macro2::Span::call_site());
+        let value_module_ident = sibling_schema_module_ident(value_type_name);
         arrayed_json_schema_value(value, quote! { #value_module_ident::Schema::json_schema() })
     } else {
         scalar_field_json_schema_value(value)?
     };
 
-    let value_schema = nullable_slot_json_schema(value, &base)
-        .map_or(base, |nullable| quote! { serde_json::json!(#nullable) });
+    let value_schema = nullable_slot_json_schema_value(value, base);
     Some(quote! { let value_schema = #value_schema; })
 }
 
@@ -4100,22 +4125,11 @@ fn build_sibling_type_field_schema(
                 })
             });
         }
-    } else if let Some(alias) = lookup_alias_info(name) {
-        // Handles both non-generic sibling types (lst.is_empty()) and
-        // generic branded wrappers like DocumentTypeId<String>.
-        // For transparent newtypes the JSON schema is defined on the
-        // wrapper type's own schema module; type params don't affect it.
-        let module_ident =
-            proc_macro2::Ident::new(alias.module_name.as_str(), proc_macro2::Span::call_site());
-        let type_json_schema = quote! { #module_ident::Schema::json_schema() };
-        generate_type_schema(fld, field_name_str, &type_json_schema)
     } else {
-        // Fallback: Use module pattern for types that may be defined elsewhere.
-        // The type should have been registered - generate a module reference.
-        let safe_name = safe_type_name(name);
-        let module_name = format!("{}_schema", to_snake_case(&safe_name));
-        let module_ident =
-            proc_macro2::Ident::new(module_name.as_str(), proc_macro2::Span::call_site());
+        // Covers both non-generic sibling types (lst.is_empty()) and generic branded wrappers
+        // like DocumentTypeId<String>: for a transparent newtype the JSON schema is defined on
+        // the wrapper type's own schema module, and type params don't affect it.
+        let module_ident = sibling_schema_module_ident(name);
         let type_json_schema = quote! { #module_ident::Schema::json_schema() };
         generate_type_schema(fld, field_name_str, &type_json_schema)
     }
@@ -4915,11 +4929,7 @@ fn generate_json_schema_method(
 #[cfg(feature = "jsonschema")]
 fn flatten_field_json_schema_ref(fld: &FieldDef) -> proc_macro2::TokenStream {
     if let FieldDefType::SiblingType(name, _) = &fld.field_type {
-        let module_name = match lookup_alias_info(name) {
-            Some(alias) => alias.module_name,
-            None => format!("{}_schema", to_snake_case(&safe_type_name(name))),
-        };
-        let module_ident = Ident::new(&module_name, proc_macro2::Span::call_site());
+        let module_ident = sibling_schema_module_ident(name);
         quote! { #module_ident::Schema::json_schema() }
     } else {
         quote! { serde_json::json!({ "type": "object" }) }

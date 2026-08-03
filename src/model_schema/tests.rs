@@ -1196,3 +1196,93 @@ fn a_scalar_string_keyed_map_value_expands_exactly_as_before() {
         );
     }
 }
+
+/// The value half of a map type, parsed from the map type's source.
+#[cfg(feature = "jsonschema")]
+fn map_value_def(map_type: &str) -> super::FieldDef {
+    let ty: syn::Type = syn::parse_str(map_type).unwrap();
+    let field = super::get_field_def("m", &ty, "");
+    let value = if let FieldDefType::Map(_, value) = &field.field_type {
+        Some(value.as_ref().clone())
+    } else {
+        None
+    };
+    value.unwrap()
+}
+
+/// `Vec`-ness rides on the `FieldDef`, never in the type name: the parser collapses `Vec<T>` to
+/// `T` with `is_array` set. A map value's type name is therefore the sibling's own in both forms,
+/// so a member schema predicated on a `Vec` type name can never fire.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_vec_sibling_map_value_parses_as_the_sibling_with_is_array_set() {
+    for (map_type, is_array) in [
+        ("HashMap<String, Inner>", false),
+        ("HashMap<String, Vec<Inner>>", true),
+    ] {
+        let value = map_value_def(map_type);
+        assert_eq!(value.is_array, is_array, "for {map_type}");
+        assert!(
+            matches!(&value.field_type, FieldDefType::SiblingType(name, args) if name == "Inner" && args.is_empty()),
+            "for {map_type}, got: {:?}",
+            value.field_type
+        );
+    }
+}
+
+/// A `String` key enumerates nothing, so the member schema is the value type's own — for a sibling
+/// that is its schema module, arrayed when the value is a `Vec` and nullable when it is an
+/// `Option`, exactly as the enum-key path binds its member.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_sibling_string_keyed_map_value_emits_the_sibling_schema() {
+    for (map_type, expected) in [
+        (
+            "HashMap<String, Inner>",
+            "inner_schema :: Schema :: json_schema ()",
+        ),
+        (
+            "HashMap<String, Vec<Inner>>",
+            r#"serde_json :: json ! ({ "type" : "array" , "items" : inner_schema :: Schema :: json_schema () })"#,
+        ),
+        (
+            "HashMap<String, Option<Inner>>",
+            r#"serde_json :: json ! ({ "anyOf" : [inner_schema :: Schema :: json_schema () , { "type" : "null" }] })"#,
+        ),
+        (
+            "HashMap<String, Option<Vec<Inner>>>",
+            r#"serde_json :: json ! ({ "anyOf" : [serde_json :: json ! ({ "type" : "array" , "items" : inner_schema :: Schema :: json_schema () }) , { "type" : "null" }] })"#,
+        ),
+    ] {
+        let tokens = map_field_schema(map_type).to_string();
+        assert!(
+            tokens.contains(&format!(r#""additionalProperties" : {expected}"#)),
+            "for {map_type}, got: {tokens}"
+        );
+        assert!(
+            !tokens.contains(r#""additionalProperties" : true"#),
+            "for {map_type}, got: {tokens}"
+        );
+    }
+}
+
+/// An alias's schema module is named after its registered export name, which the raw ident does
+/// not reproduce — the reference has to come from the registry or it names a module that was never
+/// emitted.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_aliased_string_keyed_map_value_resolves_its_module_through_the_registry() {
+    register_alias_info(
+        "Inner",
+        "InnerType",
+        "inner_type_schema",
+        AliasKind::NoEnumMembers,
+    );
+    for map_type in ["HashMap<String, Inner>", "HashMap<String, Vec<Inner>>"] {
+        let tokens = map_field_schema(map_type).to_string();
+        assert!(
+            tokens.contains("inner_type_schema :: Schema :: json_schema ()"),
+            "for {map_type}, got: {tokens}"
+        );
+    }
+}
