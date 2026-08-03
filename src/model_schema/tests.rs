@@ -6,7 +6,7 @@ use super::{
 
 #[cfg(feature = "serde")]
 use super::{
-    ModelSchemaPropMeta, build_field_validation, cfg_attr_guard_error,
+    ConstraintLeaf, ModelSchemaPropMeta, build_field_validation, cfg_attr_guard_error,
     check_optional_field_serialization, collect_untagged_members, constrained_shape,
     enum_cfg_attr_guard_errors, generate_field_validation, generate_numeric_validation_code,
     generate_string_validation_code, helper_name_stem, needs_injected_default,
@@ -2780,7 +2780,6 @@ fn a_field_without_a_constrainable_value_has_no_shape() {
         "Option<Tag>",
         "HashMap<String, String>",
         "(String, String)",
-        "PathBuf",
     ] {
         let ty: syn::Type = syn::parse_str(spelling).unwrap();
         assert!(
@@ -2788,4 +2787,70 @@ fn a_field_without_a_constrainable_value_has_no_shape() {
             "spelling {spelling} should reach no constrainable value"
         );
     }
+}
+
+/// A path writes a string on the wire, which is the value the rendered constraint describes, so
+/// every spelling of one reaches a leaf the checks can land on — the borrowed form included.
+#[cfg(feature = "serde")]
+#[test]
+fn every_path_spelling_reaches_a_constrainable_value() {
+    for spelling in [
+        "PathBuf",
+        "std::path::PathBuf",
+        "Box<Path>",
+        "Cow<'a, Path>",
+        "Option<PathBuf>",
+        "Vec<PathBuf>",
+    ] {
+        let ty: syn::Type = syn::parse_str(spelling).unwrap();
+        let shape = constrained_shape(&ty).unwrap();
+        assert!(
+            matches!(shape.leaf, ConstraintLeaf::Path),
+            "spelling {spelling} should reach the path leaf"
+        );
+    }
+}
+
+/// The path leaf changes what the validator is handed and nothing else: it takes the borrowed path
+/// every wrap of the walk already ends at, and the checks read the string serde writes for it.
+#[cfg(feature = "serde")]
+#[test]
+fn a_path_is_checked_through_its_lossy_rendering() {
+    let module = emitted_string_module("PathBuf");
+    assert!(
+        module.starts_with(
+            "pub fn validate_field_value (path : & std :: path :: Path) -> Result < () , String > \
+             { let rendered = path . to_string_lossy () ; let value : & str = & rendered ;"
+        ),
+        "got: {module}"
+    );
+    assert!(
+        module.contains("if value . len () < 3usize"),
+        "the checks are the ones a string field is held to: {module}"
+    );
+}
+
+/// A bare path field is declared as the owned form — the borrowed one is unsized — so that is what
+/// its deserializer reads before the check runs.
+#[cfg(feature = "serde")]
+#[test]
+fn a_bare_path_field_deserializes_the_owned_path() {
+    assert_eq!(
+        emitted_string_deserializer("PathBuf"),
+        "pub fn deserialize_field < 'de , D > (deserializer : D) -> Result < std :: path :: PathBuf , D :: Error > \
+         where D : serde :: Deserializer < 'de > , { use serde :: Deserialize ; \
+         let s = std :: path :: PathBuf :: deserialize (deserializer) ? ; \
+         validate_field_value (& s) . map_err (serde :: de :: Error :: custom) ? ; Ok (s) }"
+    );
+}
+
+/// A wrapped path is read as its declared type and checked by the same walk a wrapped string is,
+/// the deref of each wrapper landing on the borrowed path the validator takes.
+#[cfg(feature = "serde")]
+#[test]
+fn a_wrapped_path_field_deserializes_its_declared_type() {
+    assert_eq!(
+        emitted_string_deserializer("Box<Path>"),
+        emitted_string_deserializer("Box<str>").replace("Box < str >", "Box < Path >")
+    );
 }
