@@ -3381,11 +3381,17 @@ fn scalar_field_json_schema_value(fld: &FieldDef) -> Option<proc_macro2::TokenSt
 ///
 /// The element is dispatched in the form its slot normalizes it to, so a sequence wrapper here
 /// describes as the `Vec` of the same element does rather than falling through to the composite
-/// object every unrenderable type lands on. The nullable wrap is applied by
-/// `build_tuple_element_json_schema`, off the element as it was written.
+/// object every unrenderable type lands on. A sibling is carried by the same reference the field
+/// and map-member positions carry — arrayed when the normalization left the element arrayed — so
+/// the type an element holds is described by that type wherever it is named. The nullable wrap is
+/// applied by `build_tuple_element_json_schema`, off the element as it was written.
 #[cfg(feature = "jsonschema")]
 fn build_tuple_element_base_json_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
-    scalar_field_json_schema_value(&normalized_slot_value(fld))
+    let value = normalized_slot_value(fld);
+    if let FieldDefType::SiblingType(type_name, _) = &value.field_type {
+        return arrayed_json_schema_value(&value, sibling_json_schema_value(type_name));
+    }
+    scalar_field_json_schema_value(&value)
         .unwrap_or_else(|| quote! { serde_json::json!({ "type": "object" }) })
 }
 
@@ -3429,6 +3435,18 @@ fn sibling_schema_module_ident(name: &str) -> Ident {
         None => format!("{}_schema", to_snake_case(&safe_type_name(name))),
     };
     Ident::new(module_name.as_str(), proc_macro2::Span::call_site())
+}
+
+/// A sibling's own schema as a standalone `serde_json::Value` expression: the module the reference
+/// resolves to, asked for the schema it publishes.
+///
+/// Every position that carries a sibling by reference — a field, a map member, a tuple element, a
+/// flattened base — emits this one call, so a type cannot describe as itself in one position and as
+/// an open object in another.
+#[cfg(feature = "jsonschema")]
+fn sibling_json_schema_value(name: &str) -> proc_macro2::TokenStream {
+    let module_ident = sibling_schema_module_ident(name);
+    quote! { #module_ident::Schema::json_schema() }
 }
 
 /// Builds JSON schema for a tuple element (used for single tuple and multi-tuple variants).
@@ -3550,8 +3568,7 @@ fn build_map_member_item(value: &FieldDef) -> Option<MapMemberItem> {
             log::trace!(
                 "Map Value SiblingType => value_type_name: {value_type_name}, value_args: {value_args:?}"
             );
-            let value_module_ident = sibling_schema_module_ident(value_type_name);
-            MapMemberItem::Value(quote! { #value_module_ident::Schema::json_schema() })
+            MapMemberItem::Value(sibling_json_schema_value(value_type_name))
         }
         // A map member's `$oid` object is closed and unpatterned, where the shared mapping's
         // field-position rendering carries the hex pattern and leaves the object open.
@@ -3929,9 +3946,7 @@ fn build_sibling_type_field_schema(
         // Covers both non-generic sibling types (lst.is_empty()) and generic branded wrappers
         // like DocumentTypeId<String>: for a transparent newtype the JSON schema is defined on
         // the wrapper type's own schema module, and type params don't affect it.
-        let module_ident = sibling_schema_module_ident(name);
-        let type_json_schema = quote! { #module_ident::Schema::json_schema() };
-        generate_type_schema(fld, field_name_str, &type_json_schema)
+        generate_type_schema(fld, field_name_str, &sibling_json_schema_value(name))
     }
 }
 
@@ -4737,8 +4752,7 @@ fn generate_json_schema_method(
 #[cfg(feature = "jsonschema")]
 fn flatten_field_json_schema_ref(fld: &FieldDef) -> proc_macro2::TokenStream {
     if let FieldDefType::SiblingType(name, _) = &fld.field_type {
-        let module_ident = sibling_schema_module_ident(name);
-        quote! { #module_ident::Schema::json_schema() }
+        sibling_json_schema_value(name)
     } else {
         quote! { serde_json::json!({ "type": "object" }) }
     }

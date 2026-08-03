@@ -1704,6 +1704,29 @@ fn every_sequence_wrapper_describes_as_the_vec_of_its_element_in_a_slot() {
     }
 }
 
+/// A sibling is carried by reference in every position that holds one, so the two slot positions
+/// name one schema module and wrap it the same way — a tuple element that fell back to the open
+/// object would admit values the same type in a map member rejects.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_sibling_slot_carries_the_schema_module_reference() {
+    let spellings: [syn::Type; 4] = [
+        syn::parse_quote!(MetricTag),
+        syn::parse_quote!(Vec<MetricTag>),
+        syn::parse_quote!(HashSet<MetricTag>),
+        syn::parse_quote!(Option<BTreeSet<MetricTag>>),
+    ];
+    for value in &spellings {
+        let parsed = super::get_field_def("tag", value, "");
+        let element = super::build_tuple_element_json_schema(&parsed).to_string();
+        assert!(element.contains("metric_tag_schema"), "Got: {element}");
+        assert_eq!(
+            element,
+            super::build_map_member_schema(&parsed).unwrap().to_string()
+        );
+    }
+}
+
 /// A slot cannot be dropped the way an object key can, so a `None` in one is written as `null` —
 /// and the wrapper the `None` stands around does not change that. The nullability belongs to the
 /// slot, and survives the wrapper being normalized away.

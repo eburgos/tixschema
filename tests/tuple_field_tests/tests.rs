@@ -1,6 +1,20 @@
 use serde::{Deserialize, Serialize};
 use tixschema::model_schema;
 
+/// A generated schema module reaches its siblings through the enclosing module, and a function body
+/// is not one, so a type another type references is declared here rather than inside a test.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DocumentId {
+    pub id: String,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct WithSibling {
+    pub pair: (DocumentId, String),
+}
+
 /// Test 1 + 2 + 3: A `(String, String)` struct field renders as a tuple in
 /// TypeScript, Zod, and JSON Schema.
 #[test]
@@ -109,25 +123,20 @@ fn test_mixed_element_tuple_field_zod() {
     );
 }
 
-/// Test 5: A sibling/custom element type renders by reference.
+/// Test 5: A sibling/custom element type renders by reference — the type's own rendering on every
+/// surface, not the open object any value satisfies.
 #[test]
 fn test_sibling_element_tuple_field() {
-    #[model_schema()]
-    #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub struct DocumentId {
-        pub id: String,
-    }
-
-    #[model_schema()]
-    #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub struct WithSibling {
-        pub pair: (DocumentId, String),
-    }
-
     let ts = WithSibling::ts_definition();
     assert!(
         ts.contains("pair: [DocumentId, string]"),
         "Expected sibling element in TS tuple. Got: {ts}"
+    );
+
+    #[cfg(feature = "jsonschema")]
+    assert_eq!(
+        WithSibling::json_schema()["properties"]["pair"]["prefixItems"][0],
+        DocumentId::json_schema()
     );
 
     #[cfg(feature = "zod")]
