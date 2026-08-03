@@ -436,6 +436,97 @@ fn internally_tagged_empty_tuple_variant_is_accepted() {
     assert!(errors.is_empty(), "got: {errors:?}");
 }
 
+/// A name is not the criterion — what serde writes for it is. A plain enum writes its own variant
+/// name, which joins no object, and the registry is where the expansion learns that.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn internally_tagged_newtype_over_a_registered_plain_enum_is_rejected() {
+    register_alias_info("Hue", "Hue", "hue_schema", AliasKind::EnumMembers);
+    let errors = internal_guard_errors(&syn::parse_quote! {
+        enum E { V(Hue) }
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(errors[0].contains("variant `V`"), "got: {}", errors[0]);
+    assert!(errors[0].contains("`Hue`"), "got: {}", errors[0]);
+    assert!(
+        errors[0].contains("does not write as an object"),
+        "got: {}",
+        errors[0]
+    );
+    assert!(
+        errors[0].contains("Name a `content` key"),
+        "got: {}",
+        errors[0]
+    );
+}
+
+/// The two answers that leave the declaration alone: a type the registry rules out, and one it has
+/// never seen. Neither is a plain enum as far as this expansion can tell, and an `Unknown` is not a
+/// negative — it reaches the merge, which reads the schema instead of the name.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn internally_tagged_newtype_over_a_non_enum_or_unknown_name_is_accepted() {
+    register_alias_info(
+        "Payload",
+        "Payload",
+        "payload_schema",
+        AliasKind::NoEnumMembers,
+    );
+    for source in ["enum E { V(Payload) }", "enum E { V(NeverRegistered) }"] {
+        let errors = internal_guard_errors(&syn::parse_str(source).unwrap());
+        assert!(errors.is_empty(), "got: {errors:?} for {source}");
+    }
+}
+
+/// The same criterion at the other flattened position: a `#[serde(flatten)]` field puts what its
+/// type writes into the object being written, so a plain enum has nothing to put there either.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn flattening_a_registered_plain_enum_is_rejected() {
+    register_alias_info("Hue", "Hue", "hue_schema", AliasKind::EnumMembers);
+    register_alias_info(
+        "Payload",
+        "Payload",
+        "payload_schema",
+        AliasKind::NoEnumMembers,
+    );
+
+    let rejected: syn::Field = syn::parse_quote! { pub tone: Hue };
+    let error = super::flattened_field_guard_error(&rejected, "Holder")
+        .map(|tokens| tokens.to_string())
+        .unwrap_or_default();
+    assert!(error.contains("field `tone`"), "got: {error}");
+    assert!(error.contains("`Holder`"), "got: {error}");
+    assert!(error.contains("`Hue`"), "got: {error}");
+    assert!(error.contains("#[serde(flatten)]"), "got: {error}");
+    assert!(
+        error.contains("does not write as an object"),
+        "got: {error}"
+    );
+
+    for accepted in [
+        syn::parse_quote! { pub body: Payload },
+        syn::parse_quote! { pub body: NeverRegistered },
+        syn::parse_quote! { pub tones: Vec<Hue> },
+    ] {
+        let field: syn::Field = accepted;
+        assert!(
+            super::flattened_field_guard_error(&field, "Holder").is_none(),
+            "got a rejection for {}",
+            quote::ToTokens::to_token_stream(&field)
+        );
+    }
+}
+
 /// Collects an enum's `cfg_attr` guard failures as rendered `compile_error!` token strings.
 #[cfg(feature = "serde")]
 fn enum_cfg_attr_errors(item: &syn::ItemEnum) -> Vec<String> {
@@ -672,9 +763,9 @@ fn an_alias_targeting_a_map_key_with_no_members_is_refused() {
 }
 
 /// Runs the field walk the way [`super::process_field`] does and renders the guard failures its
-/// `model_schema_prop` attributes earn, so an unparseable `pattern` is read off the same channel
-/// that carries it to the emitted item.
-fn field_pattern_errors(item: &syn::ItemStruct) -> Vec<String> {
+/// `model_schema_prop` attributes earn, so a refused key and an unparseable `pattern` are read off
+/// the same channel that carries them to the emitted item.
+fn field_prop_guard_errors(item: &syn::ItemStruct) -> Vec<String> {
     let field = item.fields.iter().next().unwrap();
     let name = field
         .ident
@@ -683,16 +774,10 @@ fn field_pattern_errors(item: &syn::ItemStruct) -> Vec<String> {
         .unwrap_or_default();
     let field_def = get_field_def(&name, &field.ty, "");
     let meta = super::parse_model_schema_prop_attributes(&field.attrs);
-    super::collect_field_guard_errors(
-        field,
-        &field_def,
-        &name,
-        meta.pattern_rejection.as_ref(),
-        Vec::new(),
-    )
-    .iter()
-    .map(ToString::to_string)
-    .collect()
+    super::collect_field_guard_errors(field, &field_def, &name, &meta, Vec::new())
+        .iter()
+        .map(ToString::to_string)
+        .collect()
 }
 
 /// The guard's verdict is the `regex` crate's verdict: the parse the generated validator's
@@ -702,7 +787,7 @@ fn field_pattern_errors(item: &syn::ItemStruct) -> Vec<String> {
 fn the_field_pattern_guard_follows_the_regex_crate() {
     for pattern in PROBE_PATTERNS {
         let rejected = regex::Regex::new(pattern).is_err();
-        let errors = field_pattern_errors(&syn::parse_quote! {
+        let errors = field_prop_guard_errors(&syn::parse_quote! {
             struct Report {
                 #[model_schema_prop(pattern = #pattern)]
                 name: String,
@@ -720,7 +805,7 @@ fn the_field_pattern_guard_follows_the_regex_crate() {
 /// Zod literal it would otherwise feed swallows its own closing delimiter.
 #[test]
 fn a_field_pattern_the_regex_crate_rejects_names_the_field_and_quotes_the_parse_error() {
-    let errors = field_pattern_errors(&syn::parse_quote! {
+    let errors = field_prop_guard_errors(&syn::parse_quote! {
         struct Report {
             #[model_schema_prop(pattern = r"^ab\")]
             name: String,
@@ -745,13 +830,67 @@ fn a_field_pattern_the_regex_crate_rejects_names_the_field_and_quotes_the_parse_
 /// A field carrying no `pattern` at all must not acquire one of these errors.
 #[test]
 fn an_unpatterned_field_is_left_alone() {
-    let errors = field_pattern_errors(&syn::parse_quote! {
+    let errors = field_prop_guard_errors(&syn::parse_quote! {
         struct Report {
             #[model_schema_prop(minLength = 3)]
             name: String,
         }
     });
     assert!(errors.is_empty(), "got: {errors:?}");
+}
+
+/// The reported repro: two misspelled keys, which emitted `z.string()` with nothing on it. The
+/// misspelling reaches the author on the same channel the `pattern` guard uses, naming the field
+/// and the key as written; parsing stops there, so the second misspelling is not reached.
+#[test]
+fn a_misspelled_field_prop_key_names_the_field_and_the_key_as_written() {
+    let errors = field_prop_guard_errors(&syn::parse_quote! {
+        struct Report {
+            #[model_schema_prop(patern = "^[a-z]+$", minLenght = 3)]
+            name: String,
+        }
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    for needle in ["compile_error", "field `name`", "patern", "pattern"] {
+        assert!(
+            errors[0].contains(needle),
+            "{needle} missing: {}",
+            errors[0]
+        );
+    }
+}
+
+/// A value the parser cannot read is the same class of loss as a key it cannot read — the
+/// constraint reaches no surface — and leaves by the same channel.
+#[test]
+fn a_field_prop_value_the_parser_cannot_read_names_the_field() {
+    let errors = field_prop_guard_errors(&syn::parse_quote! {
+        struct Report {
+            #[model_schema_prop(minLength = "3")]
+            name: String,
+        }
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(errors[0].contains("field `name`"), "got: {}", errors[0]);
+}
+
+/// The two `model_schema_prop` guards are independent: a refused key does not swallow the
+/// unparseable `pattern` the same attribute already carried.
+#[test]
+fn a_refused_key_and_an_unparseable_pattern_are_both_reported() {
+    let errors = field_prop_guard_errors(&syn::parse_quote! {
+        struct Report {
+            #[model_schema_prop(pattern = r"^ab\", patern = "^[a-z]+$")]
+            name: String,
+        }
+    });
+    assert_eq!(errors.len(), 2, "got: {errors:?}");
+    assert!(errors[0].contains("patern"), "got: {}", errors[0]);
+    assert!(
+        errors[1].contains("regex parse error"),
+        "got: {}",
+        errors[1]
+    );
 }
 
 #[cfg(feature = "serde")]

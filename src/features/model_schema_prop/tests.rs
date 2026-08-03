@@ -99,3 +99,88 @@ fn test_parse_all_attributes() {
     assert!(meta.min_length.is_some());
     assert_eq!(meta.min_length.unwrap(), 3);
 }
+
+/// The parser's refusal of `attr`, rendered, or `None` when it read the attribute whole.
+fn attr_rejection(attr: Attribute) -> Option<String> {
+    parse_model_schema_prop_attributes(&[attr])
+        .attr_rejection
+        .as_ref()
+        .map(ToString::to_string)
+}
+
+/// The reported repro: a misspelled `pattern` compiled clean and emitted an unconstrained string.
+/// The refusal names the key as written and the one that was meant.
+#[test]
+fn a_misspelled_string_constraint_key_is_refused_by_the_name_as_written() {
+    let rejection =
+        attr_rejection(parse_quote! { #[model_schema_prop(patern = "^[a-z]+$")] }).unwrap();
+    assert!(rejection.contains("patern"), "got: {rejection}");
+    assert!(rejection.contains("pattern"), "got: {rejection}");
+}
+
+#[test]
+fn a_misspelled_length_constraint_key_is_refused_by_the_name_as_written() {
+    let rejection = attr_rejection(parse_quote! { #[model_schema_prop(minLenght = 3)] }).unwrap();
+    assert!(rejection.contains("minLenght"), "got: {rejection}");
+    assert!(rejection.contains("minLength"), "got: {rejection}");
+}
+
+/// The refusal offers every key the parser reads, and the probes below prove each offered name is
+/// one it actually reads — the list and the arms cannot drift apart while both hold.
+#[test]
+fn no_key_the_parser_reads_is_rejected() {
+    let attrs: [Attribute; 10] = [
+        parse_quote! { #[model_schema_prop(as = String)] },
+        parse_quote! { #[model_schema_prop(literal = "Tixena")] },
+        parse_quote! { #[model_schema_prop(minLength = 1)] },
+        parse_quote! { #[model_schema_prop(maxLength = 50)] },
+        parse_quote! { #[model_schema_prop(minimum = 0)] },
+        parse_quote! { #[model_schema_prop(maximum = 1.5)] },
+        parse_quote! { #[model_schema_prop(pattern = "^[a-z]+$")] },
+        parse_quote! { #[model_schema_prop(preprocess = ["trim"])] },
+        parse_quote! { #[model_schema_prop(ts_optional)] },
+        parse_quote! { #[model_schema_prop(as_number)] },
+    ];
+    assert_eq!(attrs.len(), KNOWN_KEYS.len());
+
+    let offered = attr_rejection(parse_quote! { #[model_schema_prop(nonsense)] }).unwrap();
+    for key in KNOWN_KEYS {
+        assert!(offered.contains(key), "{key} not offered: {offered}");
+    }
+    for attr in attrs {
+        let rendered = quote::quote!(#attr).to_string();
+        assert_eq!(attr_rejection(attr), None, "for {rendered}");
+    }
+}
+
+/// Every value the old parser dropped on the floor: a wrong literal kind, a length the target type
+/// cannot hold, and a `preprocess` element that names no function.
+#[test]
+fn a_value_the_parser_cannot_read_is_refused() {
+    let attrs: [Attribute; 9] = [
+        parse_quote! { #[model_schema_prop(as = 3)] },
+        parse_quote! { #[model_schema_prop(literal = Tixena)] },
+        parse_quote! { #[model_schema_prop(minLength = "3")] },
+        parse_quote! { #[model_schema_prop(minLength = -1)] },
+        parse_quote! { #[model_schema_prop(maxLength = 99999999999999999999999999999999999999999)] },
+        parse_quote! { #[model_schema_prop(minimum = "0")] },
+        parse_quote! { #[model_schema_prop(maximum = "0")] },
+        parse_quote! { #[model_schema_prop(pattern = 3)] },
+        parse_quote! { #[model_schema_prop(preprocess = ["trim", 3])] },
+    ];
+    for attr in attrs {
+        let rendered = quote::quote!(#attr).to_string();
+        assert!(attr_rejection(attr).is_some(), "for {rendered}");
+    }
+}
+
+/// A key the parser reads before the refused one still lands: the refusal reports the attribute,
+/// it does not discard what was already read.
+#[test]
+fn a_refusal_keeps_what_the_parser_had_already_read() {
+    let meta = parse_model_schema_prop_attributes(&[parse_quote! {
+        #[model_schema_prop(minLength = 3, patern = "^[a-z]+$")]
+    }]);
+    assert_eq!(meta.min_length, Some(3));
+    assert!(meta.attr_rejection.is_some());
+}
