@@ -8,6 +8,61 @@ pub const fn should_generate_json_schema() -> bool {
     true // Always true when this module is compiled (feature is enabled)
 }
 
+/// Where a document holds the body of the type it describes, once that body names itself.
+///
+/// The crate writes draft 2020-12 (`prefixItems` with `"items": false` is that draft's fixed-arity
+/// array, and the draft before it spells the same array with `items`/`additionalItems`), whose
+/// recursive schema is a `$ref` into the document's own `$defs`.
+fn self_reference_pointer(def_name: &str) -> String {
+    format!("#/$defs/{def_name}")
+}
+
+/// Roots a document whose body names itself: the body moves under `$defs`, and the document
+/// becomes the `$ref` into it.
+///
+/// The body's own references are pointers from the document root, so this rooting is the only
+/// arrangement that resolves them — a body left at the root would point into a `$defs` that is not
+/// there.
+pub fn recursive_document(
+    def_name: &str,
+    body: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let pointer = self_reference_pointer(def_name);
+    quote::quote! {
+        {
+            let mut defs = serde_json::Map::new();
+            defs.insert(#def_name.to_string(), #body);
+            let mut document = serde_json::Map::new();
+            document.insert("$defs".to_string(), serde_json::Value::Object(defs));
+            document.insert(
+                "$ref".to_string(),
+                serde_json::Value::String(#pointer.to_string()),
+            );
+            serde_json::Value::Object(document)
+        }
+    }
+}
+
+/// The reference a self-naming type is described by wherever it appears inside its own document.
+pub fn self_reference_value(def_name: &str) -> proc_macro2::TokenStream {
+    let pointer = self_reference_pointer(def_name);
+    quote::quote! { serde_json::json!({ "$ref": #pointer }) }
+}
+
+/// Wraps a `json_schema()` body in the method, rooting it as a recursive document when the
+/// expansion emitted a reference back to the type being described.
+fn json_schema_method(
+    body: &proc_macro2::TokenStream,
+    self_reference: Option<&str>,
+) -> proc_macro2::TokenStream {
+    let value = self_reference.map_or_else(|| body.clone(), |name| recursive_document(name, body));
+    quote::quote! {
+        pub fn json_schema() -> serde_json::Value {
+            #value
+        }
+    }
+}
+
 /// Generates the JSON schema method implementation for structs.
 ///
 /// When the struct has `#[serde(flatten)]` fields, the base properties are
@@ -17,32 +72,47 @@ pub const fn should_generate_json_schema() -> bool {
 pub fn generate_struct_json_schema_method(
     json_schema_fields: &[proc_macro2::TokenStream],
     flatten_json_schemas: &[proc_macro2::TokenStream],
+    self_reference: Option<&str>,
 ) -> proc_macro2::TokenStream {
-    if flatten_json_schemas.is_empty() {
-        return quote::quote! {
-            pub fn json_schema() -> serde_json::Value {
-                let mut schema_obj = serde_json::Map::new();
-                schema_obj.insert("type".to_string(), serde_json::Value::String("object".to_string()));
-                schema_obj.insert("additionalProperties".to_string(), serde_json::Value::Bool(false));
-                let mut properties = serde_json::Map::new();
-                let mut required = Vec::new();
+    let body = if flatten_json_schemas.is_empty() {
+        closed_object_body(json_schema_fields)
+    } else {
+        flattened_object_body(json_schema_fields, flatten_json_schemas)
+    };
+    json_schema_method(&body, self_reference)
+}
 
-                #(#json_schema_fields)*
-
-                schema_obj.insert(
-                    "properties".to_string(),
-                    serde_json::Value::Object(properties),
-                );
-
-                schema_obj.insert("required".to_string(), serde_json::Value::Array(required));
-
-                serde_json::Value::Object(schema_obj)
-            }
-        };
-    }
-
+/// The struct's own fields as one closed object.
+fn closed_object_body(json_schema_fields: &[proc_macro2::TokenStream]) -> proc_macro2::TokenStream {
     quote::quote! {
-        pub fn json_schema() -> serde_json::Value {
+        {
+            let mut schema_obj = serde_json::Map::new();
+            schema_obj.insert("type".to_string(), serde_json::Value::String("object".to_string()));
+            schema_obj.insert("additionalProperties".to_string(), serde_json::Value::Bool(false));
+            let mut properties = serde_json::Map::new();
+            let mut required = Vec::new();
+
+            #(#json_schema_fields)*
+
+            schema_obj.insert(
+                "properties".to_string(),
+                serde_json::Value::Object(properties),
+            );
+
+            schema_obj.insert("required".to_string(), serde_json::Value::Array(required));
+
+            serde_json::Value::Object(schema_obj)
+        }
+    }
+}
+
+/// The struct's own fields distributed into each branch of the flattened types' schemas.
+fn flattened_object_body(
+    json_schema_fields: &[proc_macro2::TokenStream],
+    flatten_json_schemas: &[proc_macro2::TokenStream],
+) -> proc_macro2::TokenStream {
+    quote::quote! {
+        {
             fn merge_object_schemas(
                 a: &serde_json::Map<String, serde_json::Value>,
                 b: &serde_json::Map<String, serde_json::Value>,
