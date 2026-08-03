@@ -1,4 +1,7 @@
-use super::{FieldDefType, validate_as_number_flag, validate_ts_optional_flag};
+use super::{
+    FieldDefType, collect_discriminated_variants, render_discriminated_variants,
+    validate_as_number_flag, validate_ts_optional_flag,
+};
 
 #[cfg(feature = "serde")]
 use super::{
@@ -12,6 +15,9 @@ use super::{AliasKind, branded_guard_errors, register_alias_info};
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use syn::spanned::Spanned as _;
+
+/// The variants of [`rendered_discriminated_union`]'s enum, in the order they are declared.
+const DECLARED_VARIANTS: [&str; 6] = ["Upload", "Generate", "Delete", "Rename", "Move", "Archive"];
 
 /// The covered wrappers, under the names a dispatch reads them by.
 #[cfg(feature = "jsonschema")]
@@ -423,9 +429,88 @@ fn discriminated_enum_ts_definition_carries_no_cfg_attribute() {
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
-fn alias_json_schema_stub_carries_no_cfg_attribute() {
-    let tokens = super::generate_alias_json_schema_stub();
-    assert_no_cfg_attribute(&tokens, "generate_alias_json_schema_stub");
+fn alias_json_schema_method_carries_no_cfg_attribute() {
+    let alias: syn::ItemType = syn::parse_quote!(
+        pub type AliasIdent = String;
+    );
+    let field_def = super::get_field_def("AliasType", &alias.ty, "");
+    let tokens = super::generate_alias_json_schema_method(&alias, "AliasType", &field_def);
+    assert_no_cfg_attribute(&tokens, "generate_alias_json_schema_method");
+}
+
+/// An alias whose target the dispatch cannot render fails the way a field of that target does: one
+/// diagnostic, naming the alias and the reason, in place of the whole body. A schema left there
+/// would be carried by every slot the alias fills.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_alias_of_an_unrenderable_target_emits_only_the_compile_error() {
+    for alias_source in [
+        "pub type Rows = HashMap<String, (u32, u32)>;",
+        "pub type Rows = Vec<HashMap<String, (u32, u32)>>;",
+        "pub type Rows = (String, HashMap<String, (u32, u32)>);",
+    ] {
+        let alias: syn::ItemType = syn::parse_str(alias_source).unwrap();
+        let field_def = super::get_field_def("RowsType", &alias.ty, "");
+        let tokens =
+            super::generate_alias_json_schema_method(&alias, "RowsType", &field_def).to_string();
+        assert!(
+            tokens.contains("compile_error !"),
+            "for {alias_source}, got: {tokens}"
+        );
+        assert!(
+            tokens.contains("type alias `RowsType`"),
+            "for {alias_source}, got: {tokens}"
+        );
+        assert!(
+            tokens.contains("a tuple is not supported as a map value"),
+            "for {alias_source}, got: {tokens}"
+        );
+        assert!(
+            !tokens.contains("json !"),
+            "for {alias_source}, got: {tokens}"
+        );
+    }
+}
+
+/// A type parameter reaches the mapping as a named type, and a name is carried by a reference to
+/// the schema module it registered — a module no expansion emits for a parameter. So the parameter
+/// is erased wherever it can be written, or the alias names a module that does not exist.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_alias_type_parameter_is_erased_at_every_depth() {
+    for alias_source in [
+        "pub type Holder<V> = V;",
+        "pub type Holder<V> = Vec<V>;",
+        "pub type Holder<V> = Option<V>;",
+        "pub type Holder<V> = (String, V);",
+        "pub type Holder<V> = HashMap<String, V>;",
+        "pub type Holder<V> = HashMap<String, Vec<V>>;",
+    ] {
+        let alias: syn::ItemType = syn::parse_str(alias_source).unwrap();
+        let field_def = super::get_field_def("HolderType", &alias.ty, "");
+        let tokens =
+            super::generate_alias_json_schema_method(&alias, "HolderType", &field_def).to_string();
+        assert!(
+            !tokens.contains("Schema :: json_schema ()"),
+            "for {alias_source}, got: {tokens}"
+        );
+    }
+}
+
+/// The stub this replaced answered every alias with an object carrying a lone `warning` key, which
+/// under JSON Schema constrains nothing — every slot naming an alias accepted every payload. No
+/// emission may carry one again.
+#[test]
+fn no_json_schema_emission_carries_a_warning_key() {
+    for (file, source) in [
+        ("model_schema.rs", include_str!("../model_schema.rs")),
+        (
+            "features/jsonschema.rs",
+            include_str!("../features/jsonschema.rs"),
+        ),
+    ] {
+        assert!(!source.contains("\"warning\""), "in: {file}");
+    }
 }
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -980,14 +1065,14 @@ fn an_unsupported_enum_keyed_map_value_emits_only_the_compile_error() {
     }
 }
 
-/// The enum-key branch's binding for a map value built by hand, for the value types no source type
+/// The enum-key branch's rendering for a map value built by hand, for the value types no source type
 /// produces.
 #[cfg(feature = "jsonschema")]
 fn enum_key_map_value_binding(field_type: FieldDefType) -> String {
     let ty: syn::Type = syn::parse_str("String").unwrap();
     let mut value = super::get_field_def("m", &ty, "");
     value.field_type = field_type;
-    super::build_enum_key_map_value_binding(&value)
+    super::enum_key_map_json_schema_value("Slot", &value)
         .unwrap()
         .to_string()
 }
@@ -1054,7 +1139,10 @@ fn a_generic_sibling_enum_keyed_map_value_emits_the_sibling_schema() {
 #[test]
 fn an_opaque_enum_keyed_map_value_stays_permissive() {
     let tokens = enum_key_map_value_binding(FieldDefType::Unknown);
-    assert_eq!(tokens, "let value_schema = serde_json :: json ! ({ }) ;");
+    assert!(
+        tokens.contains("let value_schema = serde_json :: json ! ({ }) ;"),
+        "got: {tokens}"
+    );
 }
 
 /// A string literal keeps the `const` it carries on the `String`-key path.
@@ -1062,9 +1150,11 @@ fn an_opaque_enum_keyed_map_value_stays_permissive() {
 #[test]
 fn a_string_literal_enum_keyed_map_value_keeps_its_const() {
     let tokens = enum_key_map_value_binding(FieldDefType::StringLiteral("Tixena".to_owned()));
-    assert_eq!(
-        tokens,
-        r#"let value_schema = serde_json :: json ! ({ "type" : "string" , "const" : "Tixena" }) ;"#
+    assert!(
+        tokens.contains(
+            r#"let value_schema = serde_json :: json ! ({ "type" : "string" , "const" : "Tixena" }) ;"#
+        ),
+        "got: {tokens}"
     );
 }
 
@@ -1095,9 +1185,11 @@ fn a_chrono_enum_keyed_map_value_keeps_its_format() {
 #[test]
 fn an_object_id_enum_keyed_map_value_keeps_the_field_position_oid_object() {
     let tokens = enum_key_map_value_binding(FieldDefType::ObjectId);
-    assert_eq!(
-        tokens,
-        r#"let value_schema = serde_json :: json ! ({ "type" : "object" , "properties" : { "$oid" : { "type" : "string" , "pattern" : "^[a-f\\d]{24}$" } } , "required" : ["$oid"] }) ;"#
+    assert!(
+        tokens.contains(
+            r#"let value_schema = serde_json :: json ! ({ "type" : "object" , "properties" : { "$oid" : { "type" : "string" , "pattern" : "^[a-f\\d]{24}$" } } , "required" : ["$oid"] }) ;"#
+        ),
+        "got: {tokens}"
     );
 }
 
@@ -1511,18 +1603,198 @@ fn a_nested_object_id_map_value_keeps_its_oid_object() {
     );
 }
 
-/// An inner key type this branch does not enumerate leaves the inner members open — but the member
-/// is still known to be an object, which is more than an unconstrained value says.
+/// The rendering an enum-keyed map carries in every position, spelled out for a key of the given
+/// name and a member of the given tokens.
+#[cfg(feature = "jsonschema")]
+fn enum_key_map_rendering(key_type_name: &str, member: &str) -> String {
+    format!(
+        r#"serde_json :: json ! ({{ "type" : "object" , "properties" : ({{ let value_schema = {member} ; let mut map_properties = serde_json :: Map :: new () ; for enum_key in {key_type_name} :: enum_members () {{ map_properties . insert (enum_key . to_string () , value_schema . clone ()) ; }} map_properties }}) , "additionalProperties" : false }})"#
+    )
+}
+
+/// Which keys a map has is the key type's answer wherever the map is written, so an inner key that
+/// enumerates its members enumerates them under an outer `String` key too — the position the map
+/// sits in cannot decide whether its keys are known.
 #[cfg(feature = "jsonschema")]
 #[test]
-fn a_nested_map_under_an_unenumerated_key_still_renders_as_an_object() {
+fn a_nested_map_under_an_enumerating_key_expands_its_members() {
     let tokens = map_field_schema("HashMap<String, HashMap<Slot, String>>").to_string();
+    let inner = enum_key_map_rendering("Slot", r#"serde_json :: json ! ({ "type" : "string" })"#);
     assert!(
-        tokens.contains(
-            r#""additionalProperties" : { "type" : "object" , "additionalProperties" : true }"#
-        ),
+        tokens.contains(&format!(r#""additionalProperties" : {inner}"#)),
         "got: {tokens}"
     );
+    assert!(
+        !tokens.contains(r#""additionalProperties" : true"#),
+        "got: {tokens}"
+    );
+}
+
+/// And under an outer key that enumerates too: each level asks its own key type, so a two-level map
+/// spells both member sets out rather than stopping at the first.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_nested_map_under_two_enumerating_keys_expands_both_member_sets() {
+    let tokens = map_field_schema("HashMap<Slot, HashMap<Bucket, u64>>").to_string();
+    let inner =
+        enum_key_map_rendering("Bucket", r#"serde_json :: json ! ({ "type" : "integer" })"#);
+    assert!(
+        tokens.contains(&enum_key_map_rendering("Slot", &inner)),
+        "got: {tokens}"
+    );
+    assert!(
+        !tokens.contains(r#""additionalProperties" : true"#),
+        "got: {tokens}"
+    );
+}
+
+/// The slot wraps sit outside the map's own rendering, as they do for every other member: a `Vec` of
+/// enum-keyed maps is an array of the object each one describes as, and an `Option` admits `null`
+/// beside it.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_wrapped_nested_enum_keyed_map_keeps_its_members_inside_the_slot_wrap() {
+    let inner = enum_key_map_rendering("Slot", r#"serde_json :: json ! ({ "type" : "string" })"#);
+    for (map_type, expected) in [
+        (
+            "HashMap<String, Vec<HashMap<Slot, String>>>",
+            format!(r#"serde_json :: json ! ({{ "type" : "array" , "items" : {inner} }})"#),
+        ),
+        (
+            "HashMap<String, Option<HashMap<Slot, String>>>",
+            format!(r#"serde_json :: json ! ({{ "anyOf" : [{inner} , {{ "type" : "null" }}] }})"#),
+        ),
+    ] {
+        let tokens = map_field_schema(map_type).to_string();
+        assert!(
+            tokens.contains(&format!(r#""additionalProperties" : {expected}"#)),
+            "for {map_type}, got: {tokens}"
+        );
+    }
+}
+
+/// An enum-keyed map in a tuple slot is the same map, so it carries the same rendering: the slot
+/// dispatch reaches the one emission rather than falling back to the open object.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_enum_keyed_map_tuple_element_expands_its_members() {
+    let expected =
+        enum_key_map_rendering("Slot", r#"serde_json :: json ! ({ "type" : "integer" })"#);
+    for field_type in [
+        "(String, HashMap<Slot, u32>)",
+        "(String, HashMap<String, HashMap<Slot, u32>>)",
+    ] {
+        let tokens = tuple_field_schema(field_type);
+        assert!(
+            tokens.contains(&expected),
+            "for {field_type}, got: {tokens}"
+        );
+        assert!(
+            !tokens.contains(r#""additionalProperties" : true"#),
+            "for {field_type}, got: {tokens}"
+        );
+    }
+}
+
+/// An inner key the registry positively rules out is rejected where the outer one is: reaching the
+/// emitting path at depth resolves `enum_members()` through the alias onto a type that has no such
+/// method, and rustc blames the attribute for a method the author never wrote.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_nested_map_key_known_to_lack_enum_members_names_the_requirement() {
+    register_alias_info(
+        "KeyAlias",
+        "KeyAliasType",
+        "key_alias_type_schema",
+        AliasKind::NoEnumMembers,
+    );
+    for map_type in [
+        "HashMap<String, HashMap<KeyAlias, String>>",
+        "HashMap<Slot, HashMap<KeyAlias, String>>",
+        "HashMap<String, Vec<HashMap<KeyAlias, String>>>",
+    ] {
+        let tokens = map_field_schema(map_type).to_string();
+        assert!(
+            !tokens.contains("KeyAlias :: enum_members"),
+            "for {map_type}, got: {tokens}"
+        );
+        assert!(
+            tokens.starts_with("compile_error !"),
+            "for {map_type}, got: {tokens}"
+        );
+        assert!(
+            !tokens.contains("properties . insert"),
+            "for {map_type}, got: {tokens}"
+        );
+        assert!(
+            tokens.contains("a map key must be a plain"),
+            "for {map_type}, got: {tokens}"
+        );
+        assert!(tokens.contains("KeyAlias"), "for {map_type}, got: {tokens}");
+    }
+}
+
+/// The guard reaches a tuple slot too, that being another position the map is dispatched through.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_tuple_element_map_key_known_to_lack_enum_members_names_the_requirement() {
+    register_alias_info(
+        "KeyAlias",
+        "KeyAliasType",
+        "key_alias_type_schema",
+        AliasKind::NoEnumMembers,
+    );
+    let tokens = tuple_field_schema("(String, HashMap<KeyAlias, String>)");
+    assert!(tokens.starts_with("compile_error !"), "got: {tokens}");
+    assert!(
+        tokens.contains("a map key must be a plain"),
+        "got: {tokens}"
+    );
+    assert!(tokens.contains("field `t`"), "got: {tokens}");
+}
+
+/// The one emission answers for every position a map can sit in, so the object `HashMap<Slot, T>`
+/// describes as in field position is the object it describes as nested under either key flavor and
+/// in a tuple slot. Held against the field-position rendering, which is the one that has always
+/// enumerated — depth cannot widen what the key already settled.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_enum_keyed_map_renders_the_same_in_every_position() {
+    let expected =
+        enum_key_map_rendering("Slot", r#"serde_json :: json ! ({ "type" : "string" })"#);
+    assert!(
+        map_field_schema("HashMap<Slot, String>")
+            .to_string()
+            .contains(&expected),
+        "field position lost its enumeration"
+    );
+    for position in [
+        map_field_schema("HashMap<String, HashMap<Slot, String>>").to_string(),
+        map_field_schema("HashMap<Slot, HashMap<Slot, String>>").to_string(),
+        tuple_field_schema("(String, HashMap<Slot, String>)"),
+    ] {
+        assert!(position.contains(&expected), "got: {position}");
+    }
+}
+
+/// An inner key this expansion cannot narrow leaves the inner members open — the member is still
+/// known to be an object, which is what the map guarantees, and it is what the same key states in
+/// field position.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_nested_map_under_an_unenumerable_key_still_renders_as_an_object() {
+    for map_type in [
+        "HashMap<String, HashMap<u32, String>>",
+        "HashMap<String, HashMap<Wrapper<Slot>, String>>",
+    ] {
+        let tokens = map_field_schema(map_type).to_string();
+        assert!(
+            tokens.contains(
+                r#""additionalProperties" : { "type" : "object" , "additionalProperties" : true }"#
+            ),
+            "for {map_type}, got: {tokens}"
+        );
+    }
 }
 
 /// A value the mapping cannot render fails wherever it sits: nested behind a map, the tuple is
@@ -1804,4 +2076,79 @@ fn an_optional_sequence_wrapper_member_stays_nullable() {
             .unwrap()
             .to_string()
     );
+}
+
+/// Runs a fixed discriminated enum through the real collect/render pipeline, returning its
+/// TypeScript member fragments, Zod member fragments, and JSON-schema member fragments.
+///
+/// Rebuilt from scratch on every call so repeated calls exercise whatever ordering the collection
+/// stage imposes, not a single cached traversal.
+fn rendered_discriminated_union() -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut item: syn::ItemEnum = syn::parse_quote! {
+        enum Action {
+            Upload { path: String },
+            Generate,
+            Delete(String),
+            Rename { from: String, to: String },
+            Move(String, String),
+            Archive,
+        }
+    };
+    let variants = collect_discriminated_variants(&mut item, None, Some("action_schema"));
+    let rendered = render_discriminated_variants("type", "value", "Action", &variants.0);
+    (
+        rendered.0,
+        rendered
+            .1
+            .into_iter()
+            .map(|(schema_code, _optional)| schema_code)
+            .collect(),
+        rendered.2.iter().map(ToString::to_string).collect(),
+    )
+}
+
+/// Union member order is semantic, not cosmetic: serde tries untagged members in declaration
+/// order, so the emitted union must carry that same order on every surface.
+#[test]
+fn discriminated_union_members_follow_declaration_order() {
+    let (ts_members, zod_members, json_members) = rendered_discriminated_union();
+    assert_eq!(ts_members.len(), DECLARED_VARIANTS.len());
+    assert_eq!(zod_members.len(), DECLARED_VARIANTS.len());
+    assert_eq!(json_members.len(), DECLARED_VARIANTS.len());
+
+    for (position, declared) in DECLARED_VARIANTS.iter().enumerate() {
+        assert!(
+            ts_members[position].contains(&format!("type: \"{declared}\";")),
+            "TypeScript member {position} is not `{declared}`: {}",
+            ts_members[position]
+        );
+        assert!(
+            zod_members[position].contains(&format!("type: z.literal(\"{declared}\")")),
+            "Zod member {position} is not `{declared}`: {}",
+            zod_members[position]
+        );
+        #[cfg(feature = "jsonschema")]
+        assert!(
+            json_members[position].contains(&format!("\"const\" : \"{declared}\"")),
+            "JSON-schema member {position} is not `{declared}`: {}",
+            json_members[position]
+        );
+    }
+}
+
+/// Every per-variant collection feeding emission must be order-preserving. A hash-ordered one
+/// reseeds per instance, so the same source expands to a different union on each build — which
+/// this catches by rendering the same enum repeatedly inside one process.
+#[test]
+fn discriminated_union_rendering_is_stable_across_runs() {
+    const RUNS: usize = 32;
+
+    let first = rendered_discriminated_union();
+    for run in 1..RUNS {
+        assert_eq!(
+            rendered_discriminated_union(),
+            first,
+            "run {run} rendered a different union than run 0"
+        );
+    }
 }
