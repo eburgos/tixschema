@@ -144,6 +144,52 @@ pub enum InternalOverBrand {
     Branded(InternalSlug),
 }
 
+/// An untagged enum every member of which serde writes as an object, wrapped by a bare tag. The
+/// content joins the tag the same way a `#[serde(flatten)]` base does, so what lands beside the tag
+/// is the members of whichever union member matched.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct InternalFirst {
+    pub a: String,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct InternalSecond {
+    pub b: bool,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum InternalEither {
+    First(InternalFirst),
+    Second(InternalSecond),
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "type")]
+pub enum InternalOverUntagged {
+    Wrapped(InternalEither),
+}
+
+/// The same wrapping over a union with one member serde writes as a string.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum InternalScalarEither {
+    Obj(InternalFirst),
+    Text(String),
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "type")]
+pub enum InternalOverScalarUntagged {
+    Wrapped(InternalScalarEither),
+}
+
 /// A recursive enum with no tagging attributes: what sits under a key is the enum itself. Only the
 /// Zod surface spells the deferral, so the fixture is declared where it is read.
 #[cfg(feature = "zod")]
@@ -1762,4 +1808,70 @@ fn test_bare_tag_over_a_struct_documents_byte_identically() {
         serde_json::to_string(&Internal::json_schema()).unwrap(),
         r#"{"type":"object","oneOf":[{"additionalProperties":false,"properties":{"type":{"type":"string","const":"Bare"}},"required":["type"]},{"additionalProperties":false,"properties":{"type":{"type":"string","const":"Fields"},"a":{"type":"string"},"b":{"type":"boolean"}},"required":["type","a","b"]},{"type":"object","properties":{"type":{"type":"string","const":"Wrapped"},"a":{"type":"string"},"b":{"type":"boolean"}},"required":["type","a","b"],"additionalProperties":false}]}"#
     );
+}
+
+/// Test 22m: what serde writes for a bare tag over an untagged enum. The union names no type of its
+/// own, but every member of this one writes an object, so what lands beside the tag is that member's
+/// members — one key set per member.
+#[test]
+fn test_bare_tag_over_an_untagged_enum_writes_the_matched_members_keys() {
+    assert_eq!(
+        serde_json::to_value(InternalOverUntagged::Wrapped(InternalEither::First(
+            InternalFirst { a: "x".to_owned() }
+        )))
+        .unwrap(),
+        serde_json::json!({ "type": "Wrapped", "a": "x" })
+    );
+    assert_eq!(
+        serde_json::to_value(InternalOverUntagged::Wrapped(InternalEither::Second(
+            InternalSecond { b: true }
+        )))
+        .unwrap(),
+        serde_json::json!({ "type": "Wrapped", "b": true })
+    );
+}
+
+/// Test 22n: so the tag multiplies over the union the way it already multiplies over a discriminated
+/// one — a branch per member, each closed around the tag plus that member's members.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn test_bare_tag_over_an_untagged_enum_multiplies_over_its_members() {
+    assert_eq!(
+        serde_json::to_string(&InternalOverUntagged::json_schema()).unwrap(),
+        r#"{"type":"object","oneOf":[{"type":"object","oneOf":[{"type":"object","properties":{"type":{"type":"string","const":"Wrapped"},"a":{"type":"string"}},"required":["type","a"],"additionalProperties":false},{"type":"object","properties":{"type":{"type":"string","const":"Wrapped"},"b":{"type":"boolean"}},"required":["type","b"],"additionalProperties":false}]}]}"#
+    );
+}
+
+/// Test 22o: and the keys those branches require are exactly the keys the captures carry. Before the
+/// tag multiplied out, one branch required the tag alone and named nothing else, so neither capture
+/// was accepted.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn test_bare_tag_over_an_untagged_enum_requires_every_key_serde_writes() {
+    let schema = InternalOverUntagged::json_schema();
+    let required: Vec<&serde_json::Value> = schema["oneOf"][0]["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|branch| &branch["required"])
+        .collect();
+    assert_eq!(
+        required,
+        vec![
+            &serde_json::json!(["type", "a"]),
+            &serde_json::json!(["type", "b"])
+        ],
+        "Got: {schema}"
+    );
+}
+
+/// Test 22p: a union member serde writes as a string is a member serde cannot put beside the tag at
+/// all, so the merge refuses the whole union and names the branch that cannot join it.
+#[cfg(feature = "jsonschema")]
+#[test]
+#[should_panic(
+    expected = "`InternalOverScalarUntagged`: the content of variant `Wrapped`, `InternalScalarEither` writes a union member that is not an object — its branch 2 describes a `string`"
+)]
+fn test_a_string_member_of_a_tagged_untagged_enum_is_refused_by_the_merge() {
+    assert!(InternalOverScalarUntagged::json_schema().is_object());
 }
