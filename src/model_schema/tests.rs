@@ -9,8 +9,8 @@ use super::{
     ConstraintLeaf, ModelSchemaPropMeta, build_field_validation, cfg_attr_guard_error,
     check_optional_field_serialization, collect_untagged_members, constrained_shape,
     enum_cfg_attr_guard_errors, generate_field_validation, generate_numeric_validation_code,
-    generate_string_validation_code, helper_name_stem, needs_injected_default,
-    parse_serde_field_attributes, parse_serde_type_attributes,
+    generate_string_validation_code, helper_name_stem, internally_tagged_guard_errors,
+    needs_injected_default, parse_serde_field_attributes, parse_serde_type_attributes,
 };
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -303,6 +303,117 @@ fn untagged_tuple_variant_option_is_exempt() {
         enum Choice {
             Maybe(Option<i64>),
         }
+    });
+    assert!(errors.is_empty(), "got: {errors:?}");
+}
+
+/// Collects the internally tagged path's guard failures as rendered `compile_error!` token strings.
+#[cfg(feature = "serde")]
+fn internal_guard_errors(item: &syn::ItemEnum) -> Vec<String> {
+    internally_tagged_guard_errors(item, "type")
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// The arms serde writes beside a bare tag: a struct variant's fields, a named type's own members,
+/// and a unit variant's nothing at all.
+#[cfg(feature = "serde")]
+#[test]
+fn internally_tagged_serializable_variants_are_accepted() {
+    let errors = internal_guard_errors(&syn::parse_quote! {
+        enum TagOnly {
+            Bare,
+            Fields { a: String },
+            Wrapped(Payload),
+            Boxed(Box<Payload>),
+        }
+    });
+    assert!(errors.is_empty(), "got: {errors:?}");
+}
+
+/// Every scalar shape serde refuses to write beside the tag, named the way serde's own error names
+/// it.
+#[cfg(feature = "serde")]
+#[test]
+fn internally_tagged_newtype_over_a_scalar_is_rejected() {
+    for (source, shape) in [
+        ("enum E { V(String) }", "a string"),
+        ("enum E { V(bool) }", "a boolean"),
+        ("enum E { V(i64) }", "an integer"),
+        ("enum E { V(f64) }", "a float"),
+        ("enum E { V((u32, u32)) }", "a tuple"),
+        ("enum E { V(Vec<Payload>) }", "a sequence"),
+        ("enum E { V(Option<Payload>) }", "an optional"),
+    ] {
+        let errors = internal_guard_errors(&syn::parse_str(source).unwrap());
+        assert_eq!(errors.len(), 1, "got: {errors:?} for {source}");
+        assert!(errors[0].contains("compile_error"), "got: {}", errors[0]);
+        assert!(errors[0].contains("variant `V`"), "got: {}", errors[0]);
+        assert!(
+            errors[0].contains(&format!("containing {shape}")),
+            "expected serde's own wording for {source}. Got: {}",
+            errors[0]
+        );
+    }
+}
+
+/// An `Option` around a sequence is refused as an optional: serde's serializer meets the wrappers
+/// in that order, and reports the outermost one.
+#[cfg(feature = "serde")]
+#[test]
+fn internally_tagged_newtype_names_the_outermost_wrapper() {
+    let errors = internal_guard_errors(&syn::parse_quote! {
+        enum E { V(Option<Vec<Payload>>) }
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(
+        errors[0].contains("containing an optional"),
+        "got: {}",
+        errors[0]
+    );
+}
+
+/// A map's members are written beside the tag, but the expansion cannot name them, so no schema
+/// closed around the tag admits them. serde's restriction is not what is quoted here — serde writes
+/// this one.
+#[cfg(feature = "serde")]
+#[test]
+fn internally_tagged_newtype_over_a_map_is_rejected_as_unnameable() {
+    let errors = internal_guard_errors(&syn::parse_quote! {
+        enum E { V(std::collections::HashMap<String, u32>) }
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(errors[0].contains("wraps a map"), "got: {}", errors[0]);
+    assert!(
+        !errors[0].contains("serde refuses"),
+        "serde writes a map beside the tag. Got: {}",
+        errors[0]
+    );
+}
+
+/// A multi-element tuple variant is a declaration serde's own derive refuses; the guard names that
+/// rather than describing elements that have no key to sit under.
+#[cfg(feature = "serde")]
+#[test]
+fn internally_tagged_tuple_variant_is_rejected() {
+    let errors = internal_guard_errors(&syn::parse_quote! {
+        enum E { V(String, u32) }
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(
+        errors[0].contains("cannot be used with tuple variants"),
+        "got: {}",
+        errors[0]
+    );
+}
+
+/// An empty tuple variant carries nothing: serde writes the tag alone, which is the unit arm.
+#[cfg(feature = "serde")]
+#[test]
+fn internally_tagged_empty_tuple_variant_is_accepted() {
+    let errors = internal_guard_errors(&syn::parse_quote! {
+        enum E { V() }
     });
     assert!(errors.is_empty(), "got: {errors:?}");
 }

@@ -59,6 +59,9 @@ use crate::features::jsonschema::{
     json_schema_methods,
 };
 
+#[cfg(all(feature = "serde", feature = "jsonschema"))]
+use crate::features::jsonschema::{MergeCycleDiagnostic, merged_object_value};
+
 #[cfg(any(feature = "typescript", feature = "zod"))]
 use crate::utils::{get_enum_docs, get_struct_docs, strip_examples_from_docs};
 
@@ -256,6 +259,19 @@ enum MapKeyPath<'key> {
     Open,
     /// A key this expansion cannot narrow, leaving the members unconstrained.
     Unnarrowed,
+}
+
+/// What a newtype variant's inner value is when the tag is written beside it rather than around
+/// it.
+#[cfg(feature = "serde")]
+enum TaggedContent {
+    /// A named type: what it writes are members, and they are the ones that join the tag.
+    Flattened,
+    /// serde refuses to write it beside the tag, and names the shape the way this names it.
+    Refused(&'static str),
+    /// serde writes it, but its members are not a set the expansion can name, so no schema closed
+    /// around the tag can admit them.
+    Unnameable(&'static str),
 }
 
 #[derive(Default, Clone)]
@@ -2332,6 +2348,22 @@ fn process_enum(item_enum: syn::ItemEnum) -> TokenStream {
             );
         }
 
+        // A tag with no content is serde's internally tagged form: what a variant writes joins the
+        // tag in one object rather than sitting under a key of its own.
+        #[cfg(feature = "serde")]
+        if let (Some(tag), None) = (
+            serde_type_meta.tag.as_ref(),
+            serde_type_meta.content.as_ref(),
+        ) {
+            return process_internally_tagged_enum(
+                item_enum,
+                &name,
+                tag,
+                serde_type_meta.rename_all.as_deref(),
+                &item_name,
+            );
+        }
+
         #[cfg(feature = "serde")]
         let (tag_name, content_name, rename_all) = (
             serde_type_meta
@@ -3248,6 +3280,383 @@ fn process_externally_tagged_enum(
     }
 }
 
+/// How an internally tagged newtype variant's inner value fares beside the tag.
+///
+/// Internal tagging has no key for a content: the variant's data is written as members of the
+/// object the tag is written in, so only a value serde writes as an object has anything to put
+/// there. That is the whole of the split — a named type is one, and every shape that reaches the
+/// wire as a scalar, a sequence or an absence is not.
+///
+/// The wrappers are read before the type they wrap, in the order serde's serializer meets them: an
+/// `Option` is refused as an optional even around a sequence, and a sequence is refused as a
+/// sequence even around a named type.
+#[cfg(feature = "serde")]
+fn tagged_content(inner: &FieldDef) -> TaggedContent {
+    if inner.is_optional() {
+        return TaggedContent::Refused("an optional");
+    }
+    if inner.array_depth > 0 {
+        return TaggedContent::Refused("a sequence");
+    }
+    match inner.field_type {
+        FieldDefType::SiblingType(..) => TaggedContent::Flattened,
+        FieldDefType::Boolean => TaggedContent::Refused("a boolean"),
+        FieldDefType::F32 | FieldDefType::F64 => TaggedContent::Refused("a float"),
+        FieldDefType::I8
+        | FieldDefType::I16
+        | FieldDefType::I32
+        | FieldDefType::I64
+        | FieldDefType::Isize
+        | FieldDefType::U8
+        | FieldDefType::U16
+        | FieldDefType::U32
+        | FieldDefType::U64
+        | FieldDefType::Usize => TaggedContent::Refused("an integer"),
+        FieldDefType::String | FieldDefType::StringLiteral(_) => TaggedContent::Refused("a string"),
+        #[cfg(feature = "chrono")]
+        FieldDefType::DateTime
+        | FieldDefType::NaiveDate
+        | FieldDefType::NaiveDateTime
+        | FieldDefType::NaiveTime => TaggedContent::Refused("a string"),
+        FieldDefType::Tuple(_) => TaggedContent::Refused("a tuple"),
+        FieldDefType::Map(..) => TaggedContent::Unnameable("a map"),
+        #[cfg(feature = "object_id")]
+        FieldDefType::ObjectId => TaggedContent::Unnameable("an ObjectId"),
+        FieldDefType::Unknown => TaggedContent::Unnameable("a type the expansion cannot resolve"),
+    }
+}
+
+/// The `compile_error!` tokens for every variant an internally tagged enum cannot carry.
+///
+/// Collected from the declaration rather than from the collected variants so each diagnostic keeps
+/// the span of the thing it rejects: the inner type for a newtype variant, the variant itself for a
+/// tuple one.
+#[cfg(feature = "serde")]
+fn internally_tagged_guard_errors(
+    item_enum: &syn::ItemEnum,
+    tag_name: &str,
+) -> Vec<proc_macro2::TokenStream> {
+    let enum_name = &item_enum.ident;
+    item_enum
+        .variants
+        .iter()
+        .filter_map(|variant| {
+            let syn::Fields::Unnamed(unnamed) = &variant.fields else {
+                return None;
+            };
+            let variant_name = &variant.ident;
+            if unnamed.unnamed.len() > 1 {
+                return Some(
+                    syn::Error::new_spanned(
+                        variant,
+                        format!(
+                            "model_schema: variant `{variant_name}` of internally tagged enum \
+                             `{enum_name}` is a tuple variant, which `#[serde(tag = \
+                             \"{tag_name}\")]` cannot carry: the elements have no names to be \
+                             written under beside the tag, and serde's own derive refuses the \
+                             declaration outright — `#[serde(tag = \"...\")] cannot be used with \
+                             tuple variants`. Name a `content` key so the elements get an array \
+                             of their own, or write them as named fields."
+                        ),
+                    )
+                    .to_compile_error(),
+                );
+            }
+            // An empty tuple variant carries nothing: serde writes it as the tag alone, which is
+            // what the unit arm already describes.
+            let field = unnamed.unnamed.first()?;
+            let message = match tagged_content(&get_field_def("_inner", &field.ty, "")) {
+                TaggedContent::Flattened => return None,
+                TaggedContent::Refused(shape) => format!(
+                    "model_schema: variant `{variant_name}` of internally tagged enum \
+                     `{enum_name}` wraps {shape}, which cannot sit beside the tag: `#[serde(tag \
+                     = \"{tag_name}\")]` with no `content` writes the variant's data as members \
+                     of the object the tag is written in, and only a value serde writes as an \
+                     object has members to put there. serde refuses this one at run time — \
+                     `cannot serialize tagged newtype variant {enum_name}::{variant_name} \
+                     containing {shape}`. Name a `content` key so the value gets an object of its \
+                     own, or wrap it in a struct whose fields can sit beside the tag."
+                ),
+                TaggedContent::Unnameable(shape) => format!(
+                    "model_schema: variant `{variant_name}` of internally tagged enum \
+                     `{enum_name}` wraps {shape}, whose members the expansion cannot name: \
+                     `#[serde(tag = \"{tag_name}\")]` with no `content` writes them beside the \
+                     tag, and a schema closed around the tag alone rejects every one of them. \
+                     Name a `content` key so the value gets an object of its own, or wrap it in a \
+                     struct whose fields can sit beside the tag."
+                ),
+            };
+            Some(syn::Error::new_spanned(field, message).to_compile_error())
+        })
+        .collect()
+}
+
+/// Renders one variant of an internally tagged enum as a union member.
+///
+/// Returns `(typescript, zod, json_value, flattened)`, where the first three are the member on each
+/// surface and the last says whether it is an intersection rather than a plain object — which is
+/// what a `z.discriminatedUnion` option cannot be.
+///
+/// A unit variant is the tag alone and a struct variant is the tag beside its own fields, both of
+/// which the tagged member already spells. A newtype variant is the one the form differs on: what
+/// its inner type writes are members of the same object, so the inner's own description joins the
+/// tag's rather than sitting under a key.
+#[cfg(feature = "serde")]
+fn render_internal_variant(
+    variant: &DiscriminatedVariant,
+    tag_name: &str,
+    self_type_name: &str,
+) -> (String, String, proc_macro2::TokenStream, bool) {
+    let mut parts = tagged_variant_parts(tag_name, &variant.discriminator_value, &variant.docs);
+    match variant.kind {
+        VariantKind::Named => {
+            write_named_variant_fields(
+                &variant.field_defs,
+                Some(tag_name),
+                self_type_name,
+                &mut parts,
+            );
+        }
+        // A unit variant writes the tag alone; a tuple variant only reaches here as the flattened
+        // newtype the guard admits, whose content joins the finished member below.
+        VariantKind::Unit | VariantKind::TupleSingle | VariantKind::TupleMultiple => {}
+    }
+    parts.type_code.push('}');
+    parts.schema_code.push('}');
+
+    #[cfg(feature = "jsonschema")]
+    let tag_object =
+        tagged_variant_json_object(tag_name, &variant.discriminator_value, &parts.json_fields);
+
+    let flattened = matches!(variant.kind, VariantKind::TupleSingle)
+        .then(|| variant.field_defs.first())
+        .flatten();
+
+    let Some(inner) = flattened else {
+        #[cfg(feature = "jsonschema")]
+        let json = quote! { serde_json::Value::Object(#tag_object) };
+        #[cfg(not(feature = "jsonschema"))]
+        let json = quote! {};
+
+        return (
+            parts.type_code,
+            format!("z.strictObject({})", parts.schema_code),
+            json,
+            false,
+        );
+    };
+
+    #[cfg(feature = "jsonschema")]
+    let json = {
+        let variant_name = &variant.discriminator_value;
+        merged_object_value(
+            &tag_object,
+            // The same reference a `#[serde(flatten)]` base contributes: both name a type whose
+            // members join the object being written.
+            &[flatten_field_json_schema_ref(inner)],
+            &MergeCycleDiagnostic {
+                edge: &format!("the content of variant `{variant_name}`,"),
+                remedy: "name a `content` key so the content gets an object of its own",
+                subject: self_type_name,
+            },
+        )
+    };
+    #[cfg(not(feature = "jsonschema"))]
+    let json = quote! {};
+
+    #[cfg(feature = "zod")]
+    let zod = format!(
+        "z.strictObject({}).and({})",
+        parts.schema_code,
+        inner.zod_type()
+    );
+    #[cfg(not(feature = "zod"))]
+    let zod = String::new();
+
+    (
+        format!("{} & {}", parts.type_code, inner.typescript_typename()),
+        zod,
+        json,
+        true,
+    )
+}
+
+/// Joins an internally tagged enum's rendered members into its three union surfaces.
+///
+/// The Zod union is a `discriminatedUnion` only while every member is an object carrying the tag in
+/// its own shape. A flattened member is an intersection, which has no shape of its own to read the
+/// discriminator out of, so one of those turns the whole union into a plain `z.union`.
+#[cfg(feature = "serde")]
+fn join_internal_union(
+    members: &[(String, String, proc_macro2::TokenStream, bool)],
+    tag_name: &str,
+) -> (proc_macro2::TokenStream, String, String) {
+    // Only the Zod surface names the tag: the other two read the members alone.
+    #[cfg(not(feature = "zod"))]
+    let _: &str = tag_name;
+    #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+    let _: &_ = &members;
+
+    #[cfg(feature = "jsonschema")]
+    let main_schema_code = discriminated_main_schema_code(
+        &members
+            .iter()
+            .map(|(_, _, json, _)| json.clone())
+            .collect::<Vec<_>>(),
+    );
+    #[cfg(not(feature = "jsonschema"))]
+    let main_schema_code = quote! {};
+
+    #[cfg(feature = "typescript")]
+    let type_code = members
+        .iter()
+        .map(|(ts, _, _, _)| ts.as_str())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    #[cfg(not(feature = "typescript"))]
+    let type_code = String::new();
+
+    #[cfg(feature = "zod")]
+    let schema_code = {
+        let joined = members
+            .iter()
+            .map(|(_, zod, _, _)| zod.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if members.iter().any(|&(_, _, _, flattened)| flattened) {
+            format!("z.union([{joined}])")
+        } else {
+            format!("z.discriminatedUnion(\"{tag_name}\", [{joined}])")
+        }
+    };
+    #[cfg(not(feature = "zod"))]
+    let schema_code = String::new();
+
+    (main_schema_code, type_code, schema_code)
+}
+
+/// Processes an internally tagged enum (`#[serde(tag = "...")]` with no `content`) and generates
+/// its definitions.
+///
+/// With no content key there is nowhere for a variant's data to sit but the object the tag is
+/// written in: a struct variant's fields are written beside the tag, and so are the members of a
+/// newtype variant's inner type. Every other content has nothing to contribute there, and the
+/// guards refuse those declarations rather than describing a value serde cannot write.
+#[cfg(feature = "serde")]
+fn process_internally_tagged_enum(
+    mut item_enum: syn::ItemEnum,
+    name: &syn::Ident,
+    tag_name: &str,
+    rename_all: Option<&str>,
+    item_name: &str,
+) -> TokenStream {
+    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+    let (module_name, module_ident) = enum_module_idents(name, item_name, AliasKind::NoEnumMembers);
+
+    #[cfg(any(feature = "typescript", feature = "zod"))]
+    let docs_vec = get_enum_docs(&item_enum);
+
+    #[cfg(feature = "zod")]
+    let example_code = docs_vec
+        .as_ref()
+        .and_then(|docs| extract_example_from_docs(docs));
+
+    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+    let enum_module_name_opt = Some(module_name.as_str());
+    #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+    let enum_module_name_opt = None;
+
+    if let Some(output) = guard_failure_output(
+        &item_enum,
+        &internally_tagged_guard_errors(&item_enum, tag_name),
+    ) {
+        return output;
+    }
+
+    let self_type_name = item_enum.ident.to_string();
+    let variants = collect_discriminated_variants(&mut item_enum, rename_all, enum_module_name_opt);
+    if let Some(output) = guard_failure_output(&item_enum, &variants.2) {
+        return output;
+    }
+
+    let members: Vec<(String, String, proc_macro2::TokenStream, bool)> = variants
+        .0
+        .iter()
+        .map(|variant| render_internal_variant(variant, tag_name, &self_type_name))
+        .collect();
+
+    let (main_schema_code, type_code, schema_code) = join_internal_union(&members, tag_name);
+    #[cfg(not(feature = "jsonschema"))]
+    let _: &_ = &main_schema_code;
+    #[cfg(not(feature = "typescript"))]
+    let _: &_ = &type_code;
+    #[cfg(not(feature = "zod"))]
+    let _: &_ = &schema_code;
+    #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+    let _: &_ = &name;
+
+    #[cfg(feature = "typescript")]
+    let docs = build_item_jsdoc(docs_vec.as_deref(), name);
+
+    #[cfg(feature = "jsonschema")]
+    let json_schema_method =
+        generate_discriminated_enum_json_schema_method(&main_schema_code, item_name);
+
+    #[cfg(feature = "typescript")]
+    let ts_definition_method =
+        generate_discriminated_enum_ts_definition_method(&docs, item_name, &type_code);
+
+    #[cfg(feature = "zod")]
+    let zod_schema_method = generate_discriminated_enum_zod_schema_method(item_name, &schema_code);
+
+    #[cfg(not(any(feature = "typescript", feature = "zod")))]
+    let _: &_ = &item_name;
+
+    #[cfg(feature = "zod")]
+    let schema_example_method = build_struct_schema_example(example_code.as_ref(), name);
+    #[cfg(all(
+        not(feature = "zod"),
+        any(feature = "typescript", feature = "jsonschema")
+    ))]
+    let schema_example_method: Option<proc_macro2::TokenStream> = None;
+
+    #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
+    let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![
+        #[cfg(feature = "jsonschema")]
+        json_schema_method,
+        #[cfg(feature = "typescript")]
+        ts_definition_method,
+        #[cfg(feature = "zod")]
+        zod_schema_method,
+    ];
+
+    #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
+    let delegate_impl_items =
+        build_struct_delegate_items(&module_ident, schema_example_method.as_ref(), None);
+
+    #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
+    {
+        assemble_schema_output(
+            &item_enum,
+            &module_ident,
+            name,
+            &schema_impl_items,
+            &variants.1,
+            &delegate_impl_items,
+        )
+    }
+
+    #[cfg(not(any(feature = "zod", feature = "typescript", feature = "jsonschema")))]
+    {
+        let _: &_ = &variants.1;
+        let output = quote! {
+            #item_enum
+        };
+        log::trace!("{output}");
+        TokenStream::from(output)
+    }
+}
+
 /// Renders one variant of an untagged enum as a union member.
 ///
 /// Returns `(typescript, zod, json_value)` where:
@@ -3717,6 +4126,72 @@ fn generate_type_schema(
     }
 }
 
+/// The open TypeScript and Zod member every variant of a tagged enum starts from: the tag holding
+/// the variant's discriminator, with room for whatever the variant writes beside it.
+///
+/// Both tagged forms open the same way — the tag is a key of the variant's own object — so the
+/// spelling lives here once rather than in each form's renderer.
+fn tagged_variant_parts(
+    tag_name: &str,
+    discriminator_value: &str,
+    discriminator_docs: &str,
+) -> VariantParts {
+    VariantParts {
+        json_fields: Vec::new(),
+        optional_fields: Vec::new(),
+        schema_code: format!("{{\n  {tag_name}: z.literal(\"{discriminator_value}\"),\n"),
+        type_code: format!(
+            "{{  /**\n{discriminator_docs}\n**/\n  {tag_name}: \"{discriminator_value}\";\n"
+        ),
+    }
+}
+
+/// The closed object a tagged variant describes as, as a `serde_json::Map` expression: the tag
+/// pinned to the variant's discriminator, plus whatever the variant's own fields contributed.
+///
+/// A `Map` rather than a `Value` because the internally tagged form merges further members into it
+/// before it becomes one.
+#[cfg(feature = "jsonschema")]
+fn tagged_variant_json_object(
+    tag_name: &str,
+    discriminator_value: &str,
+    json_fields: &[proc_macro2::TokenStream],
+) -> proc_macro2::TokenStream {
+    let discriminator_value_str = discriminator_value.to_owned();
+    let tag_name_str = tag_name.to_owned();
+    quote! {
+        {
+            let mut schema_obj = serde_json::Map::new();
+            schema_obj.insert(
+                "additionalProperties".to_string(),
+                serde_json::Value::Bool(false),
+            );
+            let mut properties = serde_json::Map::new();
+            let mut required = Vec::new();
+
+            properties.insert(
+                #tag_name_str.to_string(),
+                serde_json::json!({
+                    "type": "string",
+                    "const": #discriminator_value_str,
+                }),
+            );
+            required.push(serde_json::Value::String(#tag_name_str.to_string()));
+
+            #(#json_fields)*
+
+            schema_obj.insert(
+                "properties".to_string(),
+                serde_json::Value::Object(properties),
+            );
+
+            schema_obj.insert("required".to_string(), serde_json::Value::Array(required));
+
+            schema_obj
+        }
+    }
+}
+
 /// Generates TypeScript and Zod schema code for a discriminated enum variant.
 ///
 /// Handles different variant kinds:
@@ -3735,15 +4210,7 @@ fn generate_variant_code(
     discriminator_docs: &str,
     self_type_name: &str,
 ) -> (String, String, Vec<String>, proc_macro2::TokenStream) {
-    // Start the TypeScript type and Zod schema with the discriminator.
-    let mut parts = VariantParts {
-        json_fields: Vec::new(),
-        optional_fields: Vec::new(),
-        schema_code: format!("{{\n  {tag_name}: z.literal(\"{discriminator_value}\"),\n"),
-        type_code: format!(
-            "{{  /**\n{discriminator_docs}\n**/\n  {tag_name}: \"{discriminator_value}\";\n"
-        ),
-    };
+    let mut parts = tagged_variant_parts(tag_name, discriminator_value, discriminator_docs);
 
     match variant_kind {
         VariantKind::Unit => {
@@ -3771,44 +4238,10 @@ fn generate_variant_code(
     parts.type_code.push('}');
     parts.schema_code.push('}');
 
-    // Create JSON schema for this variant
     #[cfg(feature = "jsonschema")]
     let json_schema_variant = {
-        let json_schema_variant_fields = &parts.json_fields;
-        let discriminator_value_str = discriminator_value.to_owned();
-        let tag_name_str = tag_name.to_owned();
-
-        quote! {
-            {
-                let mut schema_obj = serde_json::Map::new();
-                schema_obj.insert(
-                    "additionalProperties".to_string(),
-                    serde_json::Value::Bool(false),
-                );
-                let mut properties = serde_json::Map::new();
-                let mut required = Vec::new();
-
-                properties.insert(
-                    #tag_name_str.to_string(),
-                    serde_json::json!({
-                        "type": "string",
-                        "const": #discriminator_value_str,
-                    }),
-                );
-                required.push(serde_json::Value::String(#tag_name_str.to_string()));
-
-                #(#json_schema_variant_fields)*
-
-                schema_obj.insert(
-                    "properties".to_string(),
-                    serde_json::Value::Object(properties),
-                );
-
-                schema_obj.insert("required".to_string(), serde_json::Value::Array(required));
-
-                serde_json::Value::Object(schema_obj)
-            }
-        }
+        let object = tagged_variant_json_object(tag_name, discriminator_value, &parts.json_fields);
+        quote! { serde_json::Value::Object(#object) }
     };
 
     #[cfg(not(feature = "jsonschema"))]
