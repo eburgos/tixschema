@@ -4107,6 +4107,30 @@ fn build_tuple_field_schema(
     }
 }
 
+/// Builds the JSON schema for an opaque field — a `serde_json::Value`, a function pointer, or any
+/// other type the parser could not classify. No type name is carried, so there is no schema module
+/// to reference: the field admits any value, which is the permissive empty schema. Matches the
+/// `unknown` TypeScript type and the `z.unknown()` Zod schema emitted for the same field.
+#[cfg(feature = "jsonschema")]
+fn build_unknown_field_schema(fld: &FieldDef, field_name_str: &str) -> proc_macro2::TokenStream {
+    log::trace!("Unknown => field_name: {field_name_str}, fld: {fld:?}");
+
+    if fld.is_array {
+        quote! {
+            properties.insert(#field_name_str.to_string(), {
+                serde_json::json!({
+                    "type": "array",
+                    "items": {}
+                })
+            });
+        }
+    } else {
+        quote! {
+            properties.insert(#field_name_str.to_string(), serde_json::json!({}));
+        }
+    }
+}
+
 /// Builds JSON schema for a field.
 #[cfg(feature = "jsonschema")]
 fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
@@ -4152,20 +4176,9 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
         }
         FieldDefType::Map(key, value) => build_map_field_schema(key, value, &field_name_str),
         FieldDefType::Tuple(lst) => build_tuple_field_schema(fld, &field_name_str, lst),
-        fld_def => {
-            log::trace!("Other => field_name: {field_name_str}, fld_def: {fld_def:?}");
-            // Fallback: Use module pattern. This should not typically be reached
-            // for properly annotated types, but provides a reasonable fallback.
-            let name = &fld.name;
-            let safe_name = safe_type_name(name);
-            let module_name = format!("{}_schema", to_snake_case(&safe_name));
-            let module_ident =
-                proc_macro2::Ident::new(module_name.as_str(), proc_macro2::Span::call_site());
-            let type_json_schema = quote! { #module_ident::Schema::json_schema() };
-            quote! {
-                properties.insert(#field_name_str.to_string(), #type_json_schema);
-            }
-        }
+        // Named exhaustively rather than caught by a wildcard: a new variant must be given a
+        // schema here, not silently routed to whatever the last arm happens to emit.
+        FieldDefType::Unknown => build_unknown_field_schema(fld, &field_name_str),
     };
 
     let required_code = if fld.is_optional {
