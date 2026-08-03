@@ -14,7 +14,10 @@ use super::{
 };
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-use super::{AliasKind, branded_guard_errors, register_alias_info};
+use super::{
+    AliasKind, alias_map_key_guard_error, branded_guard_errors, check_non_enum_map_key,
+    register_alias_info,
+};
 
 #[cfg(feature = "typescript")]
 use super::tuple_struct_ts_body;
@@ -666,6 +669,99 @@ fn a_path_field_is_left_alone() {
     }
 }
 
+/// Runs the field walk the way [`super::process_field`] does and renders the map-key guard failure
+/// the field's written type earns, or the empty string when it earns none.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn field_map_key_error(field_type: &proc_macro2::TokenStream) -> String {
+    let item: syn::ItemStruct = syn::parse_quote! {
+        struct Report {
+            counts: #field_type,
+        }
+    };
+    let field = item.fields.iter().next().unwrap();
+    let field_def = get_field_def("counts", &field.ty, "");
+    check_non_enum_map_key(field, &field_def, &field_label("counts"))
+        .err()
+        .map_or_else(String::new, |err| err.to_compile_error().to_string())
+}
+
+/// The registry proves a struct-keyed map has no members to name, and it proves it whatever surface
+/// is being generated: the key is read off the field every one of them renders from, so the same
+/// source cannot be a schema under one feature set and a refusal under another.
+///
+/// Every depth the key can be written at is covered, those being the positions the surfaces reach
+/// it through: a field's own map, a map nested under either key flavor, a tuple slot, a sequence
+/// wrapper, and a sibling's generic argument.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_map_key_proved_to_lack_enum_members_is_refused_wherever_it_is_written() {
+    register_alias_info("Doc", "Doc", "doc_schema", AliasKind::NoEnumMembers);
+    register_alias_info("Slot", "Slot", "slot_schema", AliasKind::EnumMembers);
+    for field_type in [
+        quote::quote! { HashMap<Doc, u32> },
+        quote::quote! { HashMap<String, HashMap<Doc, u32>> },
+        quote::quote! { HashMap<Slot, HashMap<Doc, u32>> },
+        quote::quote! { Vec<HashMap<Doc, u32>> },
+        quote::quote! { Option<HashMap<Doc, u32>> },
+        quote::quote! { (String, HashMap<Doc, u32>) },
+        quote::quote! { Wrapper<HashMap<Doc, u32>> },
+        quote::quote! { HashMap<Doc, HashMap<Doc, u32>> },
+    ] {
+        let error = field_map_key_error(&field_type);
+        assert!(error.contains("compile_error"), "for {field_type}: {error}");
+        assert!(
+            error.contains("field `counts`"),
+            "for {field_type}: {error}"
+        );
+        assert!(
+            error.contains("a map key must be a plain"),
+            "for {field_type}: {error}"
+        );
+        assert!(error.contains("Doc"), "for {field_type}: {error}");
+    }
+}
+
+/// The guard is a filter, never a rewrite: a key the registry names as a plain enum, one it never
+/// saw registered, and one no position enumerates all keep the field they had.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_map_key_that_may_have_enum_members_is_left_alone() {
+    register_alias_info("Slot", "Slot", "slot_schema", AliasKind::EnumMembers);
+    for field_type in [
+        quote::quote! { HashMap<Slot, u32> },
+        quote::quote! { HashMap<String, u32> },
+        quote::quote! { HashMap<Ghost, u32> },
+        quote::quote! { HashMap<u32, u64> },
+        quote::quote! { HashMap<String, HashMap<Slot, u32>> },
+    ] {
+        let error = field_map_key_error(&field_type);
+        assert!(error.is_empty(), "for {field_type}, got: {error}");
+    }
+}
+
+/// An alias publishes the target type's own schema, so a target reaching a key with no members
+/// leaves every surface naming keys nothing can supply — the same refusal a field of that type
+/// earns, named for the alias the author wrote.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn an_alias_targeting_a_map_key_with_no_members_is_refused() {
+    register_alias_info("Doc", "Doc", "doc_schema", AliasKind::NoEnumMembers);
+    let alias: syn::ItemType = syn::parse_quote! {
+        pub type CountsByDoc = HashMap<Doc, u32>;
+    };
+    let field_def = get_field_def("CountsByDocType", &alias.ty, "");
+    let error = alias_map_key_guard_error(&alias, "CountsByDocType", &field_def)
+        .unwrap_or_default()
+        .to_string();
+    assert!(error.contains("compile_error"), "got: {error}");
+    assert!(
+        error.contains("type alias `CountsByDocType`"),
+        "got: {error}"
+    );
+    assert!(error.contains("a map key must be a plain"), "got: {error}");
+    assert!(error.contains("Doc"), "got: {error}");
+}
+
 /// Runs the field walk the way [`super::process_field`] does and renders the guard failures its
 /// `model_schema_prop` attributes earn, so a refused key and an unparseable `pattern` are read off
 /// the same channel that carries them to the emitted item.
@@ -1294,6 +1390,120 @@ fn no_display_coexists_with_the_named_args() {
     assert_eq!(args.min_length, Some(1));
     assert_eq!(args.max_length, Some(8));
     assert!(args.no_display);
+}
+
+/// The parser's refusal of `args`, rendered, or `None` when it read them whole.
+fn args_rejection(args: proc_macro2::TokenStream) -> Option<String> {
+    super::parse_model_schema_args(args)
+        .arg_rejection
+        .as_ref()
+        .map(ToString::to_string)
+}
+
+/// The reported repro: a misspelled `name` compiled clean and emitted the unrenamed schema. The
+/// refusal names the argument as written and the one that was meant.
+#[test]
+fn a_misspelled_name_argument_is_refused_by_the_name_as_written() {
+    let rejection = args_rejection(quote::quote! { nme = "Renamed" }).unwrap();
+    assert!(rejection.contains("nme"), "got: {rejection}");
+    assert!(rejection.contains("name"), "got: {rejection}");
+}
+
+/// The refusal offers every argument the parser reads, and the probes below prove each offered
+/// name is one it actually reads — the list and the arms cannot drift apart while both hold.
+#[test]
+fn no_argument_the_parser_reads_is_rejected() {
+    let probes: [proc_macro2::TokenStream; 5] = [
+        quote::quote! { name = "Renamed" },
+        quote::quote! { pattern = "^[a-z]+$" },
+        quote::quote! { minLength = 1 },
+        quote::quote! { maxLength = 50 },
+        quote::quote! { no_display },
+    ];
+    assert_eq!(probes.len(), super::KNOWN_ARGS.len());
+
+    let offered = args_rejection(quote::quote! { bogus_flag }).unwrap();
+    for name in super::KNOWN_ARGS {
+        assert!(offered.contains(name), "{name} not offered: {offered}");
+    }
+    for probe in probes {
+        let rendered = probe.to_string();
+        assert_eq!(args_rejection(probe), None, "for {rendered}");
+    }
+}
+
+/// Every shape the old parser dropped on the floor: a wrong literal kind, a value that is no
+/// literal at all, a length the target type cannot hold, a known argument written as a list or as
+/// a bare flag, and a bare path the parser does not read.
+#[test]
+fn a_shape_the_parser_cannot_read_is_refused() {
+    let probes: [proc_macro2::TokenStream; 9] = [
+        quote::quote! { name = 3 },
+        quote::quote! { name("Nested") },
+        quote::quote! { name },
+        quote::quote! { pattern = 3 },
+        quote::quote! { minLength = "3" },
+        quote::quote! { minLength = -1 },
+        quote::quote! { maxLength = 99999999999999999999999999999999999999999 },
+        quote::quote! { no_display = 3 },
+        quote::quote! { bogus_flag },
+    ];
+    for probe in probes {
+        let rendered = probe.to_string();
+        assert!(args_rejection(probe).is_some(), "for {rendered}");
+    }
+}
+
+/// An argument list `syn` itself cannot parse took the whole list down with it, silently.
+#[test]
+fn an_unparseable_argument_list_is_refused() {
+    let rejection = args_rejection(quote::quote! { name = }).unwrap();
+    assert!(!rejection.is_empty());
+}
+
+/// An argument the parser reads before the refused one still lands: the refusal reports the
+/// attribute, it does not discard what was already read.
+#[test]
+fn a_refusal_keeps_what_the_parser_had_already_read() {
+    let args = super::parse_model_schema_args(quote::quote! { name = "Slug", nme = "Renamed" });
+    assert_eq!(args.name_override.as_deref(), Some("Slug"));
+    assert!(args.arg_rejection.is_some());
+}
+
+/// The refusal reaches the expansion as a `compile_error!` naming the type it was written on.
+#[test]
+fn a_refused_argument_reaches_the_expansion_as_a_named_compile_error() {
+    let rejection = super::parse_model_schema_args(quote::quote! { nme = "Renamed" })
+        .arg_rejection
+        .unwrap();
+    let item: syn::Item = syn::parse_quote! {
+        struct TypeLevelUnknown {
+            name: String,
+        }
+    };
+    let error = super::attr_guard_error(&rejection, &super::item_label(&item)).to_string();
+    for needle in ["compile_error", "type `TypeLevelUnknown`", "nme"] {
+        assert!(error.contains(needle), "{needle} missing: {error}");
+    }
+}
+
+/// The three shapes `model_schema` expands name themselves; anything else has no ident to name.
+#[test]
+fn every_expanded_shape_names_itself_in_a_guard_message() {
+    for (item, label) in [
+        (
+            syn::parse_quote! { struct Carrier { name: String } },
+            "type `Carrier`",
+        ),
+        (syn::parse_quote! { enum Carrier { One } }, "type `Carrier`"),
+        (
+            syn::parse_quote! { type Carrier = String; },
+            "type `Carrier`",
+        ),
+        (syn::parse_quote! { fn carrier() {} }, "item"),
+    ] {
+        assert_eq!(super::item_label(&item), label);
+    }
 }
 
 /// Builds the `Display` assertion for the sole field of `source`, parsed from text so its spans
