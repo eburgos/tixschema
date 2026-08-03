@@ -72,13 +72,26 @@ pub fn safe_type_name(key: &str) -> String {
 
 /// The export name is what `register_alias_info` stores and what the alias schema module is
 /// named after, so every feature that references an alias needs it — not just `typescript`.
+///
+/// An override is taken verbatim: the parser has already refused a value no surface can carry, so
+/// what arrives here is the name the author wrote.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-pub fn compute_alias_export_name(rust_ident: &str, override_name: Option<String>) -> String {
-    match override_name {
-        Some(name) if name.trim().is_empty() => format!("{rust_ident}Type"),
-        Some(name) => name,
-        None => format!("{}Type", safe_type_name(rust_ident)),
-    }
+pub fn compute_alias_export_name(rust_ident: &str, override_name: Option<&str>) -> String {
+    override_name.map_or_else(
+        || format!("{}Type", safe_type_name(rust_ident)),
+        ToOwned::to_owned,
+    )
+}
+
+/// [`compute_alias_export_name`] for a declared item — a struct, an enum, a tuple struct, a branded
+/// newtype. Without an override the item keeps the name it is declared under, which is the one
+/// difference from an alias: an alias has no surface name of its own and is given the `Type` suffix.
+///
+/// This is the single seam every item path takes its exported name from, and the registry is keyed
+/// by the Rust ident and answers with it, so a sibling naming the type in Rust resolves to whatever
+/// it is exported as.
+pub fn compute_item_export_name(rust_ident: &str, override_name: Option<&str>) -> String {
+    override_name.map_or_else(|| safe_type_name(rust_ident), ToOwned::to_owned)
 }
 
 #[cfg(feature = "typescript")]

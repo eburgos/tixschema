@@ -1480,6 +1480,38 @@ fn a_misspelled_name_argument_is_refused_by_the_name_as_written() {
     assert!(rejection.contains("name"), "got: {rejection}");
 }
 
+/// A name the item paths splice into `Ident::new` — the schema module every reference to the item
+/// resolves through — so one no identifier can be spelled from panicked the macro, reporting no
+/// span and naming no argument.
+#[test]
+fn a_name_no_identifier_can_be_spelled_from_is_refused() {
+    for value in [
+        "",
+        " ",
+        "Not Valid",
+        "9Leading",
+        "Foo$Bar",
+        "Foo::Bar",
+        "\u{dc}n\u{ef}code",
+    ] {
+        let rejection = args_rejection(quote::quote! { name = #value });
+        assert!(rejection.is_some(), "accepted `name = {value:?}`");
+    }
+}
+
+#[test]
+fn a_name_an_identifier_can_be_spelled_from_is_read() {
+    for value in ["Slug", "_Slug", "Slug2", "slug_case", "S"] {
+        let args = super::parse_model_schema_args(quote::quote! { name = #value });
+        assert_eq!(
+            args.arg_rejection.map(|e| e.to_string()),
+            None,
+            "for {value}"
+        );
+        assert_eq!(args.name_override.as_deref(), Some(value));
+    }
+}
+
 /// The refusal offers every argument the parser reads, and the probes below prove each offered
 /// name is one it actually reads — the list and the arms cannot drift apart while both hold.
 #[test]
@@ -1962,7 +1994,7 @@ fn enum_key_map_value_binding(field_type: FieldDefType) -> String {
     let ty: syn::Type = syn::parse_str("String").unwrap();
     let mut value = super::get_field_def("m", &ty, "");
     value.field_type = field_type;
-    super::enum_key_map_json_schema_value("Slot", &value)
+    super::enum_key_map_json_schema_value("Slot", proc_macro2::Span::call_site(), &value)
         .unwrap()
         .to_string()
 }
@@ -2994,6 +3026,31 @@ fn a_sibling_reference_emits_the_tokens_it_always_has() {
         sole_field_json_schema("struct Outer { inner: Inner }").to_string(),
         "properties . insert (\"inner\" . to_string () , inner_schema :: Schema :: json_schema_within (in_flight , hoisted_defs)) ;"
     );
+}
+
+/// The registry is filled as items expand, so a key declared after the type that writes the map —
+/// like a key foreign to this crate — reads as unclassified and keeps the emitting path. Its
+/// `enum_members()` call is therefore spanned on the key the field names, so a key that carries no
+/// such method is blamed at the user's type instead of at `#[model_schema()]`. Every position a
+/// map is written in names the key the same way.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_enum_keyed_map_points_its_members_call_at_the_key_the_field_names() {
+    for source in [
+        "struct Outer { m: HashMap<Slot, String> }",
+        "struct Outer { m: Vec<HashMap<Slot, String>> }",
+        "struct Outer { m: HashMap<String, HashMap<Slot, String>> }",
+        "struct Outer { m: (HashMap<Slot, String>, u32) }",
+    ] {
+        let tokens = sole_field_json_schema(source);
+        for named in ["Slot", "enum_members"] {
+            assert_eq!(
+                ident_source_texts(&tokens, named),
+                vec![Some("Slot".to_owned())],
+                "for {source}, at `{named}`, got: {tokens}"
+            );
+        }
+    }
 }
 
 /// The tuple-field insertion for a field type built by hand.
