@@ -13,22 +13,22 @@ fn test_generate_struct_type_empty() {
 fn test_generate_struct_type_with_fields() {
     let fields = vec![
         FieldDef {
-            is_optional: false,
             name: "id".to_owned(),
             docs: "ID field".to_owned(),
             field_type: FieldDefType::String,
             array_depth: 0,
             array_num: None,
             model_schema_prop_meta: None,
+            nullable_levels: Vec::new(),
         },
         FieldDef {
-            is_optional: true,
             name: "name".to_owned(),
             docs: "Name field".to_owned(),
             field_type: FieldDefType::String,
             array_depth: 0,
             array_num: None,
             model_schema_prop_meta: None,
+            nullable_levels: vec![0],
         },
     ];
 

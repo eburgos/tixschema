@@ -16,8 +16,8 @@ fn field(field_type: FieldDefType) -> FieldDef {
         docs: String::new(),
         field_type,
         array_depth: 0,
-        is_optional: false,
         model_schema_prop_meta: None,
+        nullable_levels: Vec::new(),
         name: "items".to_owned(),
     }
 }
@@ -99,7 +99,7 @@ fn test_sequence_in_a_slot_renders_as_the_array_it_writes() {
         );
 
         let mut optional = sequence;
-        optional.is_optional = true;
+        optional.nullable_levels = vec![optional.array_depth];
         assert_eq!(
             optional.typescript_slot_typename(),
             "Array<string> | null",
@@ -140,7 +140,7 @@ fn test_sequence_within_an_array_field_nests_both_wraps() {
 #[test]
 fn test_optional_sequence_field_keeps_the_field_level_optionality() {
     let mut optional = sequence_of("HashSet", FieldDefType::String);
-    optional.is_optional = true;
+    optional.nullable_levels = vec![optional.array_depth];
     assert_eq!(optional.typescript_typename(), "Array<string> | undefined");
     #[cfg(feature = "zod")]
     assert_eq!(
@@ -219,7 +219,7 @@ fn test_a_transparent_wrapper_parses_as_the_field_it_wraps() {
         assert_eq!(parsed.name, "items", "for: {spelling}");
         assert_eq!(parsed.docs, " * items", "for: {spelling}");
         assert_eq!(parsed.array_depth, 0, "for: {spelling}");
-        assert!(!parsed.is_optional, "for: {spelling}");
+        assert!(!parsed.is_optional(), "for: {spelling}");
     }
 }
 
@@ -241,7 +241,7 @@ fn test_a_transparent_wrapper_carries_the_optionality_of_what_it_wraps() {
             matches!(parsed.field_type, FieldDefType::U32),
             "for: {spelling}"
         );
-        assert!(parsed.is_optional, "for: {spelling}");
+        assert!(parsed.is_optional(), "for: {spelling}");
         assert_eq!(parsed.array_depth, 0, "for: {spelling}");
     }
 }
@@ -280,5 +280,64 @@ fn test_a_borrowed_string_parses_as_a_string() {
             matches!(parsed.field_type, FieldDefType::String),
             "for: {spelling}"
         );
+    }
+}
+
+/// An `Option` written inside a sequence wrapper and one written around it are two different
+/// values on the wire — `[null]` against `null` — so the parse has to keep them apart. The level
+/// each is recorded at is the level it was written at: the element's below the array it sits in,
+/// the field's own at the top, where `is_optional` answers for it.
+#[test]
+fn test_the_parser_records_the_level_each_option_was_written_at() {
+    for (spelling, array_depth, nullable_levels) in [
+        ("u32", 0_u8, &[] as &[u8]),
+        ("Option<u32>", 0, &[0]),
+        ("Vec<u32>", 1, &[]),
+        ("Vec<Option<u32>>", 1, &[0]),
+        ("Option<Vec<u32>>", 1, &[1]),
+        ("[Option<u32>; 2]", 1, &[0]),
+        ("Vec<Vec<Option<u32>>>", 2, &[0]),
+        ("Vec<Option<Vec<u32>>>", 2, &[1]),
+        ("Option<Vec<Vec<u32>>>", 2, &[2]),
+        ("Option<Vec<Option<u32>>>", 1, &[0, 1]),
+        ("Vec<Option<Vec<Option<u32>>>>", 2, &[0, 1]),
+    ] {
+        let ty: syn::Type = syn::parse_str(spelling).unwrap();
+        let parsed = super::get_field_def("items", &ty, "");
+        assert_eq!(parsed.array_depth, array_depth, "for: {spelling}");
+        let mut recorded = parsed.nullable_levels.clone();
+        recorded.sort_unstable();
+        assert_eq!(recorded, nullable_levels, "for: {spelling}");
+    }
+}
+
+/// A covered wrapper writes the array its element decides, so the element's own `Option` is
+/// recorded at the level the wrapper puts it at — the same level the `Vec` spelling of the same
+/// field records it at, whichever wrapper name was written. Read off the surfaces, which is where
+/// the level shows.
+#[test]
+fn test_a_covered_wrapper_records_its_element_option_where_the_vec_spelling_does() {
+    let vec_spelling: syn::Type = syn::parse_str("Vec<Option<u32>>").unwrap();
+    let expected = super::get_field_def("items", &vec_spelling, "");
+    for wrapper in SEQUENCE_WRAPPERS {
+        let ty: syn::Type = syn::parse_str(&format!("{wrapper}<Option<u32>>")).unwrap();
+        let parsed = super::get_field_def("items", &ty, "");
+        assert_eq!(
+            parsed.typescript_typename(),
+            expected.typescript_typename(),
+            "for: {wrapper}"
+        );
+        assert_eq!(
+            parsed.typescript_slot_typename(),
+            expected.typescript_slot_typename(),
+            "for: {wrapper}"
+        );
+        assert_eq!(
+            parsed.is_optional(),
+            expected.is_optional(),
+            "for: {wrapper}"
+        );
+        #[cfg(feature = "zod")]
+        assert_eq!(parsed.zod_type(), expected.zod_type(), "for: {wrapper}");
     }
 }

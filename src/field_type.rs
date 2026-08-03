@@ -130,9 +130,14 @@ pub enum FieldDefType {
 /// `model_schema.rs` to build the full type definitions.
 ///
 /// Fields:
-/// - `is_optional`: In struct-field position, adds `| undefined` / `z.union([type, z.undefined()])`.
-///   In tuple-element and map-value position, adds `| null` / `z.nullable(type)` — neither slot can
-///   be dropped the way an object key can, so a `None` there serializes as `null`.
+/// - `nullable_levels`: which array levels the field was written with an `Option` at. Level 0 is
+///   what `field_type` names and level `array_depth` is the field as a whole, so `Vec<Option<T>>`
+///   records level 0 and `Option<Vec<T>>` records level 1 — two different values on the wire
+///   (`[null]` against `null`) that a single flag could not tell apart. `is_optional` asks it for
+///   the outermost level, the only one whose `None` is not written inside an array and so the only
+///   one whose flavor depends on where the field sits: `| undefined` /
+///   `z.union([type, z.undefined()])` in struct-field position, `| null` / `z.nullable(type)` in a
+///   tuple element or map value, neither of which can be dropped the way an object key can.
 /// - name: Safe field name (uses serde rename if feature enabled)
 /// - docs: Doc comments from Rust - included in generated TS as `JSDoc`
 /// - `field_type`: The core type classification (see `FieldDefType`)
@@ -145,7 +150,7 @@ pub enum FieldDefType {
 ///
 /// Usage notes:
 /// - Created recursively for nested types
-/// - Handles Option<T> by setting `is_optional=true` on inner type
+/// - Handles Option<T> by recording its array level in `nullable_levels`
 /// - For `HashMap`, only String keys allowed
 /// - Feature "serde" affects name (rename attributes)
 /// - Feature "zod" enables `zod_type()` method
@@ -155,9 +160,9 @@ pub struct FieldDef {
     pub array_num: Option<u16>,
     pub docs: String,
     pub field_type: FieldDefType,
-    pub is_optional: bool,
     pub model_schema_prop_meta: Option<ModelSchemaPropMeta>,
     pub name: String,
+    pub nullable_levels: Vec<u8>,
 }
 
 impl FieldDef {
@@ -170,14 +175,17 @@ impl FieldDef {
     ///
     /// Every array level survives the move: the element's own, the one this wrapper adds, and the
     /// ones the wrapper itself sits under. The result therefore stands for the whole field, and a
-    /// caller must not re-apply the field's own levels on top of it.
+    /// caller must not re-apply the field's own levels on top of it. Each level keeps the
+    /// nullability it was written with, renumbered where it moved: the element's levels are the
+    /// innermost and keep their numbers, while the wrapper's own sit above the array it adds.
     pub fn collection_element_field(&self, element: &Self) -> Self {
         let mut arrayed = element.clone();
         arrayed.name.clone_from(&self.name);
-        arrayed.array_depth = element
-            .array_depth
-            .saturating_add(1)
-            .saturating_add(self.array_depth);
+        arrayed.array_depth = element.array_depth.saturating_add(1);
+        for level in &self.nullable_levels {
+            arrayed.mark_nullable_at(level.saturating_add(arrayed.array_depth));
+        }
+        arrayed.array_depth = arrayed.array_depth.saturating_add(self.array_depth);
         arrayed
             .model_schema_prop_meta
             .clone_from(&self.model_schema_prop_meta);
@@ -308,7 +316,7 @@ impl FieldDef {
     }
 
     fn has_ts_optional(&self) -> bool {
-        self.is_optional
+        self.is_optional()
             && self
                 .model_schema_prop_meta
                 .as_ref()
@@ -320,6 +328,28 @@ impl FieldDef {
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     pub const fn is_array(&self) -> bool {
         self.array_depth > 0
+    }
+
+    /// Whether the value sitting at array level `level` was written as an `Option`.
+    ///
+    /// Levels count from the innermost value outward: level 0 is what `field_type` names, level
+    /// `array_depth` is the field as a whole. Below the outermost, a `None` reaches the wire as a
+    /// `null` among the items of the array one level up — the array itself is always written.
+    pub fn is_nullable_at(&self, level: u8) -> bool {
+        self.nullable_levels.contains(&level)
+    }
+
+    /// Whether the field as a whole is an `Option` — the outermost level, and the only one whose
+    /// `None` is not written inside an array. What it costs is the position's to say: an absent key
+    /// in struct-field position, a `null` in a slot that cannot be dropped.
+    pub fn is_optional(&self) -> bool {
+        self.is_nullable_at(self.array_depth)
+    }
+
+    fn mark_nullable_at(&mut self, level: u8) {
+        if !self.nullable_levels.contains(&level) {
+            self.nullable_levels.push(level);
+        }
     }
 
     /// Rewrites any `Self` type reference to the concrete enclosing type name.
@@ -382,8 +412,10 @@ impl FieldDef {
         if self.has_ts_optional() { "?" } else { "" }
     }
 
-    /// Builds the TypeScript type before the struct-field optional wrap: the type match plus one
-    /// `Array<…>` per array level. The `| undefined` wrap lives in `typescript_typename`.
+    /// Builds the TypeScript type before the outermost optional wrap: the type match plus one
+    /// `Array<…>` per array level, each carrying the `| null` of the level it wraps. The outermost
+    /// level's wrap lives in `typescript_typename` and `typescript_slot_typename`, which is where
+    /// the position it sits in decides between `| undefined` and `| null`.
     fn typescript_base(&self) -> String {
         let result = match &self.field_type {
             FieldDefType::Unknown => "unknown".to_owned(),
@@ -467,7 +499,14 @@ impl FieldDef {
                 }
             }
         };
-        (0..self.array_depth).fold(result, |wrapped, _| format!("Array<{wrapped}>"))
+        (0..self.array_depth).fold(result, |wrapped, level| {
+            let item = if self.is_nullable_at(level) {
+                format!("{wrapped} | null")
+            } else {
+                wrapped
+            };
+            format!("Array<{item}>")
+        })
     }
 
     /// The TypeScript type for a value in a slot that cannot be dropped — a tuple element or a
@@ -476,7 +515,7 @@ impl FieldDef {
     /// in either position.
     fn typescript_slot_typename(&self) -> String {
         let base = self.typescript_base();
-        if self.is_optional {
+        if self.is_optional() {
             format!("{base} | null")
         } else {
             base
@@ -486,14 +525,15 @@ impl FieldDef {
     /// Generates the TypeScript type name for this field.
     ///
     /// This method is the core of TypeScript type generation. It recursively builds
-    /// the TS type string based on `field_type`, `array_depth`, and `is_optional`.
+    /// the TS type string based on `field_type`, `array_depth`, and `nullable_levels`.
     ///
     /// Process:
     /// 1. Match on `field_type` to get base type
-    /// 2. Wrap in Array<...> once per `array_depth` level
-    /// 3. If `is_optional`: struct-field position adds `| undefined`; tuple-element and map-value
-    ///    positions add `| null` (neither can be omitted like an object key, so a `None` there
-    ///    serializes as `null`)
+    /// 2. Wrap in Array<...> once per `array_depth` level, adding `| null` inside the wrap at each
+    ///    level written as an `Option` — the array is always written, so the `None` is an item
+    /// 3. If `is_optional`, which is that question asked of the outermost level: struct-field
+    ///    position adds `| undefined`; tuple-element and map-value positions add `| null` (neither
+    ///    can be omitted like an object key, so a `None` there serializes as `null`)
     ///
     /// Feature notes:
     /// - "`object_id"`: Uses special `ObjectId` type
@@ -505,7 +545,7 @@ impl FieldDef {
     /// Examples in README.md show generated output.
     pub fn typescript_typename(&self) -> String {
         let pre_result = self.typescript_base();
-        if self.is_optional {
+        if self.is_optional() {
             // `ts_optional` renders the key as `field?: T`, so the `| undefined` is redundant.
             if self.has_ts_optional() {
                 pre_result
@@ -517,7 +557,8 @@ impl FieldDef {
         }
     }
 
-    /// The type match plus one `z.array(…)` per array level, before the preprocess wrap.
+    /// The type match plus one `z.array(…)` per array level, each carrying the `z.nullable(…)` of
+    /// the level it wraps, before the preprocess wrap.
     ///
     /// A set's element re-enters the rendering here rather than at `zod_base`: it carries a copy of
     /// the field's own metadata, and the preprocess wrap belongs once, outside the array — where
@@ -591,7 +632,14 @@ impl FieldDef {
                 }
             }
         };
-        (0..self.array_depth).fold(result, |wrapped, _| format!("z.array({wrapped})"))
+        (0..self.array_depth).fold(result, |wrapped, level| {
+            let item = if self.is_nullable_at(level) {
+                format!("z.nullable({wrapped})")
+            } else {
+                wrapped
+            };
+            format!("z.array({item})")
+        })
     }
 
     /// Builds the Zod schema before the struct-field optional wrap: the type match, the
@@ -637,7 +685,7 @@ impl FieldDef {
     #[cfg(feature = "zod")]
     fn zod_slot_type(&self) -> String {
         let base = self.zod_base();
-        if self.is_optional {
+        if self.is_optional() {
             format!("z.nullable({base})")
         } else {
             base
@@ -679,16 +727,18 @@ impl FieldDef {
     /// - For String: Adds .`min(min_len)` if `model_schema_prop_meta` has `min_length`
     /// - For literals: Uses z.literal(...)
     /// - For `ObjectId`: Uses regex validation for hex string
-    /// - Wraps with `z.array()` once per `array_depth` level
-    /// - If `is_optional`: struct-field position wraps `z.union([type, z.undefined()])`;
-    ///   tuple-element and map-value positions wrap `z.nullable(type)` (neither can be omitted like
-    ///   an object key, so a `None` there serializes as `null`)
+    /// - Wraps with `z.array()` once per `array_depth` level, wrapping `z.nullable(…)` inside it
+    ///   at each level written as an `Option`
+    /// - If `is_optional`, which is that question asked of the outermost level: struct-field
+    ///   position wraps `z.union([type, z.undefined()])`; tuple-element and map-value positions wrap
+    ///   `z.nullable(type)` (neither can be omitted like an object key, so a `None` there
+    ///   serializes as `null`)
     ///
     /// Requires Zod v4 in frontend - generates v4-compatible syntax.
     /// See `notes/20250706_features.md` for Zod feature details.
     pub fn zod_type(&self) -> String {
         let pre_result = self.zod_base();
-        if self.is_optional {
+        if self.is_optional() {
             format!("z.union([{pre_result}, z.undefined()]).prefault(undefined)")
         } else {
             pre_result
@@ -724,19 +774,6 @@ pub fn is_sequence_wrapper(name: &str) -> bool {
 /// list than this defect was measured over, not a claim that they write anything else.
 pub fn is_transparent_wrapper(name: &str) -> bool {
     matches!(name, "Arc" | "Box" | "Cow" | "Rc")
-}
-
-/// Whether a generic type is optional on its element's behalf: true exactly when it is a covered
-/// sequence wrapper whose element is an `Option`.
-///
-/// A wrapper writes the JSON array its element decides, so a `None` the element holds reaches the
-/// wire as a `null` inside that array — and every reader that decides nullability, the field-
-/// position guard and the slot renderers alike, reads the field's own flag rather than descending
-/// into the wrapper. `Vec` never arrives here, the parser having collapsed it onto its element
-/// with the flag already carried up; this hands the other spellings that same flag, so what a
-/// `None` costs cannot depend on which covered wrapper was written around it.
-fn sequence_element_optionality(name: &str, args: &[FieldDef]) -> bool {
-    matches!(args, [element] if element.is_optional && is_sequence_wrapper(name))
 }
 
 /// Classifies a `syn::Variant` into its `VariantKind`.
@@ -777,7 +814,7 @@ pub fn classify_variant(variant: &Variant) -> VariantKind {
 /// Key behaviors:
 /// - Strips references (&T -> T)
 /// - Counts an `array_depth` level for each Vec, slice, array
-/// - Sets `is_optional` for Option
+/// - Records a nullable level for each Option, at the array level it was written at
 /// - Only supports `HashMap`<String, T> (panics or errors otherwise per rules)
 /// - Uses `safe_type_name()` to strip Json suffix
 ///
@@ -795,37 +832,37 @@ fn get_field_def_from_type_path(
     let Some(segment) = type_path.path.segments.last() else {
         return FieldDef {
             name: safe_name,
-            is_optional: false,
             field_type: FieldDefType::Unknown,
             array_depth: 0,
             array_num: None,
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
+            nullable_levels: Vec::new(),
         };
     };
     let ident = segment.ident.to_string();
     match &segment.arguments {
         PathArguments::None => FieldDef {
-            is_optional: false,
             name: safe_name,
             field_type: get_field_def_type_or_sibling(&ident),
             array_depth: 0,
             array_num: None,
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
+            nullable_levels: Vec::new(),
         },
         PathArguments::AngleBracketed(args) => {
             get_field_def_from_generic_type(&ident, args, safe_name, field_docs)
         }
         // Function pointer types are unsupported; fall back to `unknown`.
         PathArguments::Parenthesized(_) => FieldDef {
-            is_optional: false,
             name: safe_name,
             field_type: FieldDefType::Unknown,
             array_depth: 0,
             array_num: None,
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
+            nullable_levels: Vec::new(),
         },
     }
 }
@@ -857,18 +894,18 @@ fn get_field_def_from_generic_type(
         .collect();
     if arg_types.is_empty() {
         FieldDef {
-            is_optional: false,
             name: safe_name,
             field_type: FieldDefType::SiblingType(ident.to_owned(), vec![]),
             array_depth: 0,
             array_num: None,
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
+            nullable_levels: Vec::new(),
         }
     } else if arg_types.len() == 1 && ident == "Option" {
         let mut result = arg_types[0].clone();
         result.name = safe_name;
-        result.is_optional = true;
+        result.mark_nullable_at(result.array_depth);
         result
     } else if arg_types.len() == 1 && ident == "Vec" {
         let mut result = arg_types[0].clone();
@@ -894,7 +931,6 @@ fn get_field_def_from_generic_type(
         );
         FieldDef {
             array_depth: 0,
-            is_optional: false,
             array_num: None,
             name: safe_name,
             field_type: FieldDefType::Map(
@@ -903,6 +939,7 @@ fn get_field_def_from_generic_type(
             ),
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
+            nullable_levels: Vec::new(),
         }
     } else if arg_types.len() == 1 && is_datetime_generic_type(ident) {
         // The timezone type parameter says nothing about what is written.
@@ -910,13 +947,13 @@ fn get_field_def_from_generic_type(
     } else {
         log::trace!("Creating SiblingType - name: {ident}, arg_types: {arg_types:?}");
         FieldDef {
-            is_optional: sequence_element_optionality(ident, &arg_types),
             name: safe_name,
             field_type: FieldDefType::SiblingType(ident.to_owned(), arg_types),
             array_depth: 0,
             array_num: None,
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
+            nullable_levels: Vec::new(),
         }
     }
 }
@@ -951,23 +988,23 @@ pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
             .collect();
         FieldDef {
             name: safe_name,
-            is_optional: false,
             field_type: FieldDefType::Tuple(elements),
             array_depth: 0,
             array_num: None,
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
+            nullable_levels: Vec::new(),
         }
     } else {
         // Fallback for BareFn, ImplTrait, etc.
         FieldDef {
             name: safe_name,
-            is_optional: false,
             field_type: FieldDefType::Unknown,
             array_depth: 0,
             array_num: None,
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
+            nullable_levels: Vec::new(),
         }
     }
 }
@@ -1092,13 +1129,13 @@ const fn is_datetime_generic_type(_type_name: &str) -> bool {
 #[cfg(feature = "chrono")]
 fn handle_datetime_generic_type(safe_name: String, field_docs: &str) -> FieldDef {
     FieldDef {
-        is_optional: false,
         name: safe_name,
         field_type: FieldDefType::DateTime,
         array_depth: 0,
         array_num: None,
         docs: field_docs.to_owned(),
         model_schema_prop_meta: None,
+        nullable_levels: Vec::new(),
     }
 }
 
@@ -1106,13 +1143,13 @@ fn handle_datetime_generic_type(safe_name: String, field_docs: &str) -> FieldDef
 fn handle_datetime_generic_type(safe_name: String, field_docs: &str) -> FieldDef {
     // Fallback - should never be called since is_datetime_generic_type returns false
     FieldDef {
-        is_optional: false,
         name: safe_name,
         field_type: FieldDefType::SiblingType("DateTime".to_owned(), vec![]),
         array_depth: 0,
         array_num: None,
         docs: field_docs.to_owned(),
         model_schema_prop_meta: None,
+        nullable_levels: Vec::new(),
     }
 }
 
