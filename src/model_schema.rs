@@ -36,7 +36,7 @@ use crate::utils::extract_example_from_docs;
 use crate::utils::{AliasKind, lookup_alias_info};
 
 #[cfg(feature = "serde")]
-use crate::features::serde::{SerdeFieldMeta, SerdeTypeMeta};
+use crate::features::serde::{SerdeFieldMeta, SerdeTypeMeta, has_serde_default};
 
 #[cfg(feature = "serde")]
 use crate::field_type::{parse_serde_field_attributes, parse_serde_type_attributes};
@@ -147,6 +147,9 @@ struct BrandedNewtypeOutput<'parts> {
 #[cfg(feature = "serde")]
 struct ConstrainedShape {
     leaf: ConstraintLeaf,
+    /// Every non-`'static` lifetime the field's type spells, deduplicated. A free function that
+    /// returns that type has to declare them itself — nothing of the struct's is in scope there.
+    lifetimes: Vec<syn::Lifetime>,
     wraps: Vec<ConstraintWrap>,
 }
 
@@ -156,6 +159,17 @@ enum ConstraintLeaf {
     /// The bare Rust numeric type, which is the validator's parameter type.
     Number(&'static str),
     Str,
+}
+
+/// What the end of a walk does with a violation it found.
+///
+/// `validate()` answers with every violation in the instance, so its walk collects; a
+/// `Deserializer` answers with one error, so the wire walk stops at the first.
+#[cfg(feature = "serde")]
+#[derive(Clone, Copy)]
+enum CheckSink {
+    Collect,
+    Fail,
 }
 
 /// A wrapper a constrained field can be written under, outermost first.
@@ -4288,7 +4302,7 @@ fn build_field_validation(
         };
     }
     let head = wrap_binding(0);
-    let walk = walk_wraps(wraps, &head, 1, validate_value_fn_ident);
+    let walk = walk_wraps(wraps, &head, 1, validate_value_fn_ident, CheckSink::Collect);
     quote! {
         {
             let #head = &self.#field_ident_tok;
@@ -4304,12 +4318,18 @@ fn walk_wraps(
     value: &proc_macro2::Ident,
     depth: usize,
     validate_value_fn_ident: &proc_macro2::Ident,
+    sink: CheckSink,
 ) -> proc_macro2::TokenStream {
     let Some((wrap, rest)) = wraps.split_first() else {
-        return quote! {
-            if let Err(e) = #validate_value_fn_ident(#value) {
-                errors.push(e);
-            }
+        return match sink {
+            CheckSink::Collect => quote! {
+                if let Err(e) = #validate_value_fn_ident(#value) {
+                    errors.push(e);
+                }
+            },
+            CheckSink::Fail => quote! {
+                #validate_value_fn_ident(#value)?;
+            },
         };
     };
     let next = wrap_binding(depth);
@@ -4318,6 +4338,7 @@ fn walk_wraps(
         &next,
         depth.saturating_add(1),
         validate_value_fn_ident,
+        sink,
     );
     match *wrap {
         // A `None` writes nothing, so there is nothing for the constraint to describe.
@@ -4338,17 +4359,65 @@ fn walk_wraps(
     }
 }
 
+/// Builds the serde hook for a field written under wrappers: it deserializes the field's own
+/// declared type and then runs the same walk `validate()` runs, so the wire is gated where the
+/// constraint lands rather than where the field happens to be spelled.
+///
+/// The declared type is the field's own tokens, both where it is returned and where it is checked,
+/// so a type naming a lifetime needs that lifetime declared here — nothing of the struct's generics
+/// reaches a free function. The check's parameter is typed rather than inferred: inference reaches
+/// the walk before it reaches the return type, and the walk's own leaf call would otherwise settle
+/// the helper's `T` as the validator's parameter type instead of the field's.
+#[cfg(feature = "serde")]
+fn build_wrapped_deserializer(
+    deserialize_fn_ident: &proc_macro2::Ident,
+    validate_value_fn_ident: &proc_macro2::Ident,
+    field_ty: &syn::Type,
+    lifetimes: &[syn::Lifetime],
+    wraps: &[ConstraintWrap],
+) -> proc_macro2::TokenStream {
+    let head = wrap_binding(0);
+    let walk = walk_wraps(wraps, &head, 1, validate_value_fn_ident, CheckSink::Fail);
+    quote! {
+        pub fn #deserialize_fn_ident<'de, #(#lifetimes,)* D>(deserializer: D) -> Result<#field_ty, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            // Nested so that each hook carries its own: a schema module holds one hook per
+            // constrained field and a shared name would have to be emitted exactly once.
+            fn deserialize_validated<'de, D, T, F>(deserializer: D, check: F) -> Result<T, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+                T: serde::Deserialize<'de>,
+                F: FnOnce(&T) -> Result<(), String>,
+            {
+                use serde::Deserialize;
+                let value = T::deserialize(deserializer)?;
+                check(&value).map_err(serde::de::Error::custom)?;
+                Ok(value)
+            }
+
+            deserialize_validated(deserializer, |#head: &#field_ty| {
+                #walk
+                Ok(())
+            })
+        }
+    }
+}
+
 /// Generates the static validator for a String field with constraints, plus the serde deserializer
-/// when the field is bare — a wrapped field's declared type is not the validator's, so only the
-/// bare spelling can carry `deserialize_with`.
+/// — written against the constrained value itself when the field is bare, and against the field's
+/// declared type when it is wrapped.
 ///
 /// Returns (`module_items`, `validate_body`) — both go into the schema module and `validate()` respectively.
 #[cfg(feature = "serde")]
 fn generate_string_validation_code(
     field_ident: &str,
     meta: &ModelSchemaPropMeta,
-    wraps: &[ConstraintWrap],
+    shape: &ConstrainedShape,
+    field_ty: &syn::Type,
 ) -> FieldValidationCode {
+    let wraps: &[ConstraintWrap] = &shape.wraps;
     let validate_value_fn_name = format!("validate_{field_ident}_value");
     let validate_value_fn_ident =
         proc_macro2::Ident::new(&validate_value_fn_name, proc_macro2::Span::call_site());
@@ -4401,7 +4470,7 @@ fn generate_string_validation_code(
         });
     }
 
-    let deserializer = wraps.is_empty().then(|| {
+    let deserializer = if wraps.is_empty() {
         quote! {
             pub fn #deserialize_fn_ident<'de, D>(deserializer: D) -> Result<String, D::Error>
             where
@@ -4413,7 +4482,15 @@ fn generate_string_validation_code(
                 Ok(s)
             }
         }
-    });
+    } else {
+        build_wrapped_deserializer(
+            &deserialize_fn_ident,
+            &validate_value_fn_ident,
+            field_ty,
+            &shape.lifetimes,
+            wraps,
+        )
+    };
 
     let module_items = quote! {
         pub fn #validate_value_fn_ident(value: &str) -> Result<(), String> {
@@ -4435,14 +4512,16 @@ fn generate_string_validation_code(
 }
 
 /// Generates the static validator for a numeric field with constraints, plus the serde deserializer
-/// when the field is bare — see `generate_string_validation_code` for why only that spelling gets one.
+/// — see `generate_string_validation_code` for how the two spellings differ.
 #[cfg(feature = "serde")]
 fn generate_numeric_validation_code(
     field_ident: &str,
     rust_type_str: &str,
     meta: &ModelSchemaPropMeta,
-    wraps: &[ConstraintWrap],
+    shape: &ConstrainedShape,
+    field_ty: &syn::Type,
 ) -> FieldValidationCode {
+    let wraps: &[ConstraintWrap] = &shape.wraps;
     let validate_value_fn_name = format!("validate_{field_ident}_value");
     let validate_value_fn_ident =
         proc_macro2::Ident::new(&validate_value_fn_name, proc_macro2::Span::call_site());
@@ -4482,7 +4561,7 @@ fn generate_numeric_validation_code(
         });
     }
 
-    let deserializer = wraps.is_empty().then(|| {
+    let deserializer = if wraps.is_empty() {
         quote! {
             pub fn #deserialize_fn_ident<'de, D>(deserializer: D) -> Result<#rust_type_ident, D::Error>
             where
@@ -4494,7 +4573,15 @@ fn generate_numeric_validation_code(
                 Ok(v)
             }
         }
-    });
+    } else {
+        build_wrapped_deserializer(
+            &deserialize_fn_ident,
+            &validate_value_fn_ident,
+            field_ty,
+            &shape.lifetimes,
+            wraps,
+        )
+    };
 
     let module_items = quote! {
         pub fn #validate_value_fn_ident(value: &#rust_type_ident) -> Result<(), String> {
@@ -4525,6 +4612,7 @@ fn generate_numeric_validation_code(
 #[cfg(feature = "serde")]
 fn constrained_shape(ty: &syn::Type) -> Option<ConstrainedShape> {
     let mut wraps = Vec::new();
+    let mut lifetimes: Vec<syn::Lifetime> = Vec::new();
     let mut current = ty;
     loop {
         if let syn::Type::Array(array) = current {
@@ -4537,15 +4625,37 @@ fn constrained_shape(ty: &syn::Type) -> Option<ConstrainedShape> {
             let segment = path.path.segments.last()?;
             if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
                 wraps.push(generic_wrap(&segment.ident.to_string())?);
+                collect_lifetimes(args, &mut lifetimes);
                 current = sole_type_argument(args)?;
             } else if matches!(segment.arguments, syn::PathArguments::None) {
                 let leaf = leaf_for_ident(&segment.ident.to_string())?;
-                return Some(ConstrainedShape { leaf, wraps });
+                return Some(ConstrainedShape {
+                    leaf,
+                    lifetimes,
+                    wraps,
+                });
             } else {
                 return None;
             }
         } else {
             return None;
+        }
+    }
+}
+
+/// Adds the lifetimes a wrapper spells to the ones already collected, skipping `'static` — which
+/// needs no declaration — and any already there, since a lifetime can only be declared once.
+#[cfg(feature = "serde")]
+fn collect_lifetimes(
+    args: &syn::AngleBracketedGenericArguments,
+    lifetimes: &mut Vec<syn::Lifetime>,
+) {
+    for arg in &args.args {
+        if let syn::GenericArgument::Lifetime(lifetime) = arg
+            && lifetime.ident != "static"
+            && !lifetimes.iter().any(|seen| seen.ident == lifetime.ident)
+        {
+            lifetimes.push(lifetime.clone());
         }
     }
 }
@@ -4800,8 +4910,29 @@ fn process_field(
     (field_def, validation_fn, validate_body, guard_error)
 }
 
+/// Whether the field needs a `#[serde(default)]` written for it alongside the `deserialize_with`.
+///
+/// serde reads a missing key as a `None` for any field that deserializes as an option — but only
+/// while the field deserializes itself. A `deserialize_with` makes that same missing key a hard
+/// error, and the generated schemas say the key may be left out, so such a field is given the
+/// default that restores what its absence already meant: `None`, wrapped as it was written. A
+/// field that already carries a default keeps the one it was written with.
+///
+/// A transparent wrapper hands its inner type the deserializer it was given, so a run of them
+/// changes nothing about which key is optional; a sequence does not, and neither does a `None`
+/// found beneath one. So the question is asked of the first wrapper that is not transparent, and
+/// anything else is a field whose key was never optional — its absence stays the error it was.
+#[cfg(feature = "serde")]
+fn needs_injected_default(wraps: &[ConstraintWrap], has_default: bool) -> bool {
+    let first_opaque = wraps
+        .iter()
+        .find(|wrap| !matches!(**wrap, ConstraintWrap::Transparent));
+    matches!(first_opaque, Some(ConstraintWrap::Optional)) && !has_default
+}
+
 /// Generates per-field serde validation code (static validator + `deserialize_with`) and, when
-/// constraints apply, injects the corresponding `#[serde(deserialize_with = ...)]` attribute.
+/// constraints apply, injects the corresponding `#[serde(deserialize_with = ...)]` attribute — plus
+/// the `#[serde(default)]` that keeps an optional key optional under one.
 #[cfg(feature = "serde")]
 fn generate_field_validation(
     field: &Field,
@@ -4826,14 +4957,20 @@ fn generate_field_validation(
 
     let generated = match shape.leaf {
         ConstraintLeaf::Str => has_string_constraints.then(|| {
-            generate_string_validation_code(raw_field_ident, model_schema_prop_meta, &shape.wraps)
+            generate_string_validation_code(
+                raw_field_ident,
+                model_schema_prop_meta,
+                &shape,
+                &field.ty,
+            )
         }),
         ConstraintLeaf::Number(rust_type) => has_numeric_constraints.then(|| {
             generate_numeric_validation_code(
                 raw_field_ident,
                 rust_type,
                 model_schema_prop_meta,
-                &shape.wraps,
+                &shape,
+                &field.ty,
             )
         }),
     };
@@ -4841,15 +4978,15 @@ fn generate_field_validation(
         return (None, None);
     };
 
-    // Only a bare field gets a `deserialize_with`: the generated deserializer answers for the
-    // constrained value itself, which is the field's own type only when nothing wraps it.
-    if shape.wraps.is_empty() {
-        let deserialize_with_path = format!("{module_name}::deserialize_{raw_field_ident}");
-        let path_lit = syn::LitStr::new(&deserialize_with_path, proc_macro2::Span::call_site());
-        let serde_attr: syn::Attribute = syn::parse_quote! {
-            #[serde(deserialize_with = #path_lit)]
-        };
-        new_attrs.push(serde_attr);
+    let deserialize_with_path = format!("{module_name}::deserialize_{raw_field_ident}");
+    let path_lit = syn::LitStr::new(&deserialize_with_path, proc_macro2::Span::call_site());
+    new_attrs.push(syn::parse_quote! {
+        #[serde(deserialize_with = #path_lit)]
+    });
+    if needs_injected_default(&shape.wraps, has_serde_default(&field.attrs)) {
+        new_attrs.push(syn::parse_quote! {
+            #[serde(default)]
+        });
     }
 
     (

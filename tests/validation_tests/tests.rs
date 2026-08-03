@@ -2,6 +2,11 @@
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
 ))]
+use alloc::borrow::Cow;
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
 use alloc::sync::Arc;
 #[cfg(all(
     feature = "serde",
@@ -1391,4 +1396,317 @@ fn test_validate_boxed_option_string() {
         .is_ok(),
         "A None under a Box still writes nothing to constrain"
     );
+}
+
+// ==================== Constraints on the wire, under Option / wrappers / sequences ====================
+
+/// The gate every consumer reaches first. A constraint describes the value the field puts on the
+/// wire, so a payload carrying a value the constraint rejects is rejected as it is read — at the
+/// same place, and with the same message, that `validate()` would answer with.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_deserialize_optional_string_rejects_a_short_some() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct WireOptional {
+        #[model_schema_prop(minLength = 3)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub nickname: Option<String>,
+    }
+
+    let error = serde_json::from_str::<WireOptional>(r#"{"nickname":"a"}"#).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("'nickname' is too short: minimum length is 3, got 1"),
+        "Unexpected error: {error}"
+    );
+
+    let accepted = serde_json::from_str::<WireOptional>(r#"{"nickname":"abc"}"#).unwrap();
+    assert_eq!(accepted.nickname.as_deref(), Some("abc"));
+}
+
+/// A `None` puts no string on the wire, so neither spelling of its absence has anything to reject.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_deserialize_optional_string_still_admits_an_absent_key() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct WireAbsent {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[model_schema_prop(minLength = 3)]
+        pub nickname: Option<String>,
+    }
+
+    assert!(
+        serde_json::from_str::<WireAbsent>("{}")
+            .unwrap()
+            .nickname
+            .is_none(),
+        "A missing key is what the generated schemas describe as the absent form"
+    );
+    assert!(
+        serde_json::from_str::<WireAbsent>(r#"{"nickname":null}"#)
+            .unwrap()
+            .nickname
+            .is_none(),
+        "A null reads as the same None it always did"
+    );
+}
+
+/// A field that writes its own default keeps it: the hook is given no second one.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_deserialize_optional_string_keeps_a_written_default() {
+    fn preset() -> Option<String> {
+        Some("preset".to_owned()).filter(|preset| preset.len() >= 3)
+    }
+
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct WirePreset {
+        #[serde(default = "preset", skip_serializing_if = "Option::is_none")]
+        #[model_schema_prop(minLength = 3)]
+        pub nickname: Option<String>,
+    }
+
+    assert_eq!(
+        serde_json::from_str::<WirePreset>("{}")
+            .unwrap()
+            .nickname
+            .as_deref(),
+        Some("preset"),
+        "The field's own default is what answers for its missing key"
+    );
+}
+
+/// A transparent wrapper writes its inner value and nothing else, so the wire the constraint
+/// describes is the same one a bare field writes.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_deserialize_boxed_string_rejects_a_short_value() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct WireBoxed {
+        #[model_schema_prop(minLength = 3)]
+        pub label: Box<str>,
+    }
+
+    let error = serde_json::from_str::<WireBoxed>(r#"{"label":"a"}"#).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("'label' is too short: minimum length is 3, got 1"),
+        "Unexpected error: {error}"
+    );
+    assert_eq!(
+        &*serde_json::from_str::<WireBoxed>(r#"{"label":"abc"}"#)
+            .unwrap()
+            .label,
+        "abc"
+    );
+}
+
+/// A `Cow` arrives as the `Box` does, its lifetime being no part of what it writes.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_deserialize_cow_string_rejects_a_short_value() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct WireCow {
+        #[model_schema_prop(minLength = 3)]
+        pub label: Cow<'static, str>,
+    }
+
+    let error = serde_json::from_str::<WireCow>(r#"{"label":"a"}"#).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("'label' is too short: minimum length is 3, got 1"),
+        "Unexpected error: {error}"
+    );
+    assert_eq!(
+        serde_json::from_str::<WireCow>(r#"{"label":"abc"}"#)
+            .unwrap()
+            .label,
+        "abc"
+    );
+}
+
+/// A sequence writes an array of the constrained value, so one failing element fails the read.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_deserialize_vec_string_rejects_a_short_element() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct WireVec {
+        #[model_schema_prop(minLength = 3)]
+        pub tags: Vec<String>,
+    }
+
+    let error = serde_json::from_str::<WireVec>(r#"{"tags":["ok!","a"]}"#).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("'tags' is too short: minimum length is 3, got 1"),
+        "Unexpected error: {error}"
+    );
+    assert_eq!(
+        serde_json::from_str::<WireVec>(r#"{"tags":["ok!","two"]}"#)
+            .unwrap()
+            .tags,
+        vec!["ok!".to_owned(), "two".to_owned()]
+    );
+    assert!(
+        serde_json::from_str::<WireVec>(r#"{"tags":[]}"#)
+            .unwrap()
+            .tags
+            .is_empty(),
+        "An empty array writes no element to constrain"
+    );
+}
+
+/// The wrappers compose on the wire in the order they were written.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_deserialize_optional_vec_string_rejects_a_short_element() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct WireOptionalVec {
+        #[model_schema_prop(minLength = 3)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub tags: Option<Vec<String>>,
+    }
+
+    let error = serde_json::from_str::<WireOptionalVec>(r#"{"tags":["ok!","a"]}"#).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("'tags' is too short: minimum length is 3, got 1"),
+        "Unexpected error: {error}"
+    );
+    assert!(
+        serde_json::from_str::<WireOptionalVec>("{}")
+            .unwrap()
+            .tags
+            .is_none(),
+        "A missing key is still the absent form the schemas describe"
+    );
+}
+
+/// A range describes the number on the wire wherever the field wrote it, exactly as a length
+/// describes the string.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_deserialize_optional_numeric_rejects_an_out_of_range_some() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct WireNumeric {
+        #[model_schema_prop(minimum = 18, maximum = 120)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub age: Option<u32>,
+        #[model_schema_prop(minimum = 1)]
+        pub counts: Vec<u32>,
+    }
+
+    let out_of_range =
+        serde_json::from_str::<WireNumeric>(r#"{"age":5,"counts":[1]}"#).unwrap_err();
+    assert!(
+        out_of_range
+            .to_string()
+            .contains("'age' is too small: minimum is 18, got 5"),
+        "Unexpected error: {out_of_range}"
+    );
+
+    let under_element =
+        serde_json::from_str::<WireNumeric>(r#"{"age":21,"counts":[1,0]}"#).unwrap_err();
+    assert!(
+        under_element
+            .to_string()
+            .contains("'counts' is too small: minimum is 1, got 0"),
+        "Unexpected error: {under_element}"
+    );
+
+    let accepted = serde_json::from_str::<WireNumeric>(r#"{"age":21,"counts":[1]}"#).unwrap();
+    assert_eq!(accepted.age, Some(21));
+}
+
+/// What the wire admits and what `validate()` admits are the same set — a value one accepts and the
+/// other rejects is the disagreement this covers.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_deserialize_and_validate_agree_on_every_wrapped_shape() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct WireAgreement {
+        #[model_schema_prop(minLength = 3)]
+        pub boxed: Box<str>,
+        #[model_schema_prop(minLength = 3)]
+        pub cow: Cow<'static, str>,
+        #[model_schema_prop(minLength = 3)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub nested: Option<Vec<String>>,
+        #[model_schema_prop(minLength = 3)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub opt: Option<String>,
+        #[model_schema_prop(minLength = 3)]
+        pub plain: String,
+        #[model_schema_prop(minLength = 3)]
+        pub tags: Vec<String>,
+    }
+
+    const GOOD: &str =
+        r#"{"opt":"aaa","boxed":"bbb","tags":["ccc"],"cow":"ddd","nested":["eee"],"plain":"fff"}"#;
+
+    let accepted = serde_json::from_str::<WireAgreement>(GOOD).unwrap();
+    assert!(
+        accepted.validate().is_ok(),
+        "A payload the wire admits must be one validate() admits"
+    );
+
+    for (field, short) in [
+        ("opt", r#""a""#),
+        ("boxed", r#""b""#),
+        ("tags", r#"["c"]"#),
+        ("cow", r#""d""#),
+        ("nested", r#"["e"]"#),
+        ("plain", r#""f""#),
+    ] {
+        let mut payload: serde_json::Value = serde_json::from_str(GOOD).unwrap();
+        payload[field] = serde_json::from_str(short).unwrap();
+        let error = serde_json::from_str::<WireAgreement>(&payload.to_string()).unwrap_err();
+        assert!(
+            error.to_string().contains(&format!(
+                "'{field}' is too short: minimum length is 3, got 1"
+            )),
+            "field {field} was admitted by the wire but is rejected by validate(): {error}"
+        );
+    }
 }
