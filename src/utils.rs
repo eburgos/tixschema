@@ -32,8 +32,27 @@ pub struct AliasInfo {
     pub module_name: String,
 }
 
+/// The type the running expansion describes, and the `$defs` name a reference back to it was
+/// emitted under.
+///
+/// A JSON schema names a type by inlining it, which a type naming itself cannot be described by —
+/// the inlining has nothing to stop it. Recognizing that case belongs where references are
+/// emitted, which is far from the item being expanded, so the name travels here.
+#[cfg(feature = "jsonschema")]
+#[derive(Default)]
+struct ExpansionSelfReference {
+    def_name: Option<String>,
+    rust_ident: String,
+}
+
 thread_local! {
     static ALIAS_INFO: RefCell<HashMap<String, AliasInfo>> = RefCell::new(HashMap::new());
+}
+
+#[cfg(feature = "jsonschema")]
+thread_local! {
+    static SELF_REFERENCE: RefCell<ExpansionSelfReference> =
+        RefCell::new(ExpansionSelfReference::default());
 }
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -60,6 +79,42 @@ pub fn register_alias_info(
 
 pub fn lookup_alias_info(rust_ident: &str) -> Option<AliasInfo> {
     ALIAS_INFO.with(|map| map.borrow().get(rust_ident).cloned())
+}
+
+/// Names the type the expansion starting now describes.
+///
+/// Every expansion sets it. A name left behind by the previous one would make an unrelated type's
+/// reference read as a self reference and describe as a `$ref` into a `$defs` nobody wrote.
+#[cfg(feature = "jsonschema")]
+pub fn begin_expansion(rust_ident: &str) {
+    SELF_REFERENCE.with(|cell| {
+        *cell.borrow_mut() = ExpansionSelfReference {
+            rust_ident: rust_ident.to_owned(),
+            def_name: None,
+        };
+    });
+}
+
+/// The `$defs` name to describe `rust_ident` under when it is the type being expanded, recording
+/// that this document now needs the entry the reference points into.
+///
+/// `None` for every other name, which is described by inlining as before.
+#[cfg(feature = "jsonschema")]
+pub fn self_reference_def_name(rust_ident: &str) -> Option<String> {
+    if !SELF_REFERENCE.with(|cell| cell.borrow().rust_ident == rust_ident) {
+        return None;
+    }
+    let def_name = lookup_alias_info(rust_ident)
+        .map_or_else(|| safe_type_name(rust_ident), |info| info.export_name);
+    SELF_REFERENCE.with(|cell| cell.borrow_mut().def_name = Some(def_name.clone()));
+    Some(def_name)
+}
+
+/// The `$defs` name the expansion emitted a self reference under, or `None` when it named itself
+/// nowhere and describes fully inlined.
+#[cfg(feature = "jsonschema")]
+pub fn emitted_self_reference() -> Option<String> {
+    SELF_REFERENCE.with(|cell| cell.borrow().def_name.clone())
 }
 
 pub fn safe_type_name(key: &str) -> String {

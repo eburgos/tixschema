@@ -53,7 +53,11 @@ use crate::features::model_schema_prop::ModelSchemaPropMeta;
 use crate::features::jsonschema::{
     generate_plain_enum_json_schema_method as generate_plain_enum_json_schema_method_impl,
     generate_struct_json_schema_method as generate_struct_json_schema_method_impl,
+    recursive_document, self_reference_value,
 };
+
+#[cfg(feature = "jsonschema")]
+use crate::utils::{begin_expansion, emitted_self_reference, self_reference_def_name};
 
 #[cfg(any(feature = "typescript", feature = "zod"))]
 use crate::utils::{get_enum_docs, get_struct_docs, strip_examples_from_docs};
@@ -301,10 +305,16 @@ pub fn exec_model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
     let parsed_args = parse_model_schema_args(args.into());
     let item = parse_macro_input!(input as Item);
     if let Item::Struct(item_struct) = item {
+        #[cfg(feature = "jsonschema")]
+        begin_expansion(&item_struct.ident.to_string());
         process_struct(item_struct, &parsed_args)
     } else if let Item::Enum(item_enum) = item {
+        #[cfg(feature = "jsonschema")]
+        begin_expansion(&item_enum.ident.to_string());
         process_enum(item_enum)
     } else if let Item::Type(item_type) = item {
+        #[cfg(feature = "jsonschema")]
+        begin_expansion(&item_type.ident.to_string());
         process_type_alias(item_type, &parsed_args)
     } else {
         syn::Error::new_spanned(item, "Unsupported target for model_schema")
@@ -2726,14 +2736,7 @@ fn string_field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
 #[cfg(all(feature = "serde", feature = "jsonschema"))]
 fn field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
     let inner = match &fld.field_type {
-        FieldDefType::SiblingType(name, _) => {
-            let module_name = match lookup_alias_info(name) {
-                Some(alias) => alias.module_name,
-                None => format!("{}_schema", to_snake_case(&safe_type_name(name))),
-            };
-            let module_ident = Ident::new(&module_name, proc_macro2::Span::call_site());
-            quote! { #module_ident::Schema::json_schema() }
-        }
+        FieldDefType::SiblingType(name, _) => sibling_json_schema_value(name),
         FieldDefType::String => string_field_json_schema_value(fld),
         FieldDefType::StringLiteral(literal) => {
             quote! { serde_json::json!({ "type": "string", "const": #literal }) }
@@ -3485,8 +3488,15 @@ fn sibling_schema_module_ident(name: &str) -> Ident {
 /// Every position that carries a sibling by reference — a field, a map member, a tuple element, a
 /// flattened base — emits this one call, so a type cannot describe as itself in one position and as
 /// an open object in another.
+///
+/// The type being expanded is the one name that cannot be asked: its schema is what is being
+/// written, so inlining it would have nothing to stop it. It is described by reference instead,
+/// which is what makes a self-naming type describable at all.
 #[cfg(feature = "jsonschema")]
 fn sibling_json_schema_value(name: &str) -> proc_macro2::TokenStream {
+    if let Some(def_name) = self_reference_def_name(name) {
+        return self_reference_value(&def_name);
+    }
     let module_ident = sibling_schema_module_ident(name);
     quote! { #module_ident::Schema::json_schema() }
 }
@@ -4760,7 +4770,11 @@ fn generate_json_schema_method(
     json_schema_fields: &[proc_macro2::TokenStream],
     flatten_json_schemas: &[proc_macro2::TokenStream],
 ) -> proc_macro2::TokenStream {
-    generate_struct_json_schema_method_impl(json_schema_fields, flatten_json_schemas)
+    generate_struct_json_schema_method_impl(
+        json_schema_fields,
+        flatten_json_schemas,
+        emitted_self_reference().as_deref(),
+    )
 }
 
 #[cfg(feature = "jsonschema")]
@@ -5015,9 +5029,12 @@ fn generate_plain_enum_zod_schema_method(
 fn generate_discriminated_enum_json_schema_method(
     main_schema_code: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
+    let body = quote::quote! { { #main_schema_code } };
+    let value = emitted_self_reference()
+        .map_or_else(|| body.clone(), |name| recursive_document(&name, &body));
     quote::quote! {
         pub fn json_schema() -> serde_json::Value {
-            #main_schema_code
+            #value
         }
     }
 }
