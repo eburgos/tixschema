@@ -40,6 +40,25 @@ struct ExtraPart {
     priority: i64,
 }
 
+/// A base that names itself, written only where something asks what it describes as: what a
+/// flattened branch that is a reference rather than an object contributes to its container.
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatHolder {
+    #[serde(flatten)]
+    base: FlatNode,
+    extra: String,
+}
+
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatNode {
+    children: Vec<Self>,
+    val: String,
+}
+
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct FlattenOnly {
@@ -243,6 +262,65 @@ fn test_no_flatten_json_schema_closes_additional_properties() {
     assert!(schema.get("oneOf").is_none());
 }
 
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_flatten_recursive_base_contributes_its_fields() {
+    let schema = FlatHolder::json_schema();
+    assert!(schema.get("oneOf").is_none());
+    assert_eq!(
+        schema["additionalProperties"],
+        serde_json::Value::Bool(false)
+    );
+    let props = schema["properties"].as_object().unwrap();
+    assert!(props.contains_key("children"));
+    assert!(props.contains_key("val"));
+    assert!(props.contains_key("extra"));
+    let req = schema["required"].as_array().unwrap();
+    for name in ["children", "val", "extra"] {
+        assert!(
+            req.iter().any(|v| v.as_str() == Some(name)),
+            "{name} missing from {req:?}"
+        );
+    }
+}
+
+/// The base's own self-reference is written from the container's root, so it has to resolve there.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_flatten_recursive_base_self_reference_resolves_from_the_container() {
+    let schema = FlatHolder::json_schema();
+    let reference = schema["properties"]["children"]["items"]["$ref"]
+        .as_str()
+        .unwrap();
+    let pointer = reference.strip_prefix('#').unwrap();
+    let resolved = schema.pointer(pointer).unwrap();
+    let resolved_props = resolved["properties"].as_object().unwrap();
+    assert!(resolved_props.contains_key("children"));
+    assert!(resolved_props.contains_key("val"));
+}
+
+/// Flattening a base that does not name itself writes the document it wrote before, byte for byte.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_non_recursive_flatten_documents_are_byte_identical() {
+    assert_eq!(
+        serde_json::to_string(&DataElementSampleValueEntry::json_schema()).unwrap(),
+        r#"{"type":"object","oneOf":[{"type":"object","properties":{"dataElementId":{"type":"string"},"dataType":{"type":"string","const":"Alphanumeric"},"sampleValues":{"type":"array","items":{"type":"string"}}},"required":["dataElementId","dataType","sampleValues"],"additionalProperties":false},{"type":"object","properties":{"dataElementId":{"type":"string"},"dataType":{"type":"string","const":"Logical"},"sampleValues":{"type":"array","items":{"type":"boolean"}}},"required":["dataElementId","dataType","sampleValues"],"additionalProperties":false},{"type":"object","properties":{"dataElementId":{"type":"string"},"dataType":{"type":"string","const":"Numeric"},"sampleValues":{"type":"array","items":{"type":"integer"}}},"required":["dataElementId","dataType","sampleValues"],"additionalProperties":false}]}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&MultiFlatten::json_schema()).unwrap(),
+        r#"{"type":"object","properties":{"id":{"type":"string"},"owner":{"type":"string"},"priority":{"type":"integer"}},"required":["id","owner","priority"],"additionalProperties":false}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&FlattenOnly::json_schema()).unwrap(),
+        r#"{"type":"object","oneOf":[{"type":"object","properties":{"dataType":{"type":"string","const":"Alphanumeric"},"sampleValues":{"type":"array","items":{"type":"string"}}},"required":["dataType","sampleValues"],"additionalProperties":false},{"type":"object","properties":{"dataType":{"type":"string","const":"Logical"},"sampleValues":{"type":"array","items":{"type":"boolean"}}},"required":["dataType","sampleValues"],"additionalProperties":false},{"type":"object","properties":{"dataType":{"type":"string","const":"Numeric"},"sampleValues":{"type":"array","items":{"type":"integer"}}},"required":["dataType","sampleValues"],"additionalProperties":false}]}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&NoFlatten::json_schema()).unwrap(),
+        r#"{"type":"object","additionalProperties":false,"properties":{"id":{"type":"string"},"name":{"type":"string"}},"required":["id","name"]}"#
+    );
+}
+
 // ========================================================================
 // Serialization round-trip
 // ========================================================================
@@ -266,4 +344,27 @@ fn test_flatten_serialization_is_flat() {
 
     let back: DataElementSampleValueEntry = serde_json::from_value(json).unwrap();
     assert_eq!(back, entry);
+}
+
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_flatten_recursive_base_serializes_flat() {
+    let holder = FlatHolder {
+        base: FlatNode {
+            children: vec![FlatNode {
+                children: Vec::new(),
+                val: "leaf".to_owned(),
+            }],
+            val: "root".to_owned(),
+        },
+        extra: "x".to_owned(),
+    };
+    let json = serde_json::to_value(&holder).unwrap();
+    assert_eq!(json["val"], "root");
+    assert_eq!(json["extra"], "x");
+    assert_eq!(json["children"][0]["val"], "leaf");
+    assert!(json.get("base").is_none());
+
+    let back: FlatHolder = serde_json::from_value(json).unwrap();
+    assert_eq!(back, holder);
 }
