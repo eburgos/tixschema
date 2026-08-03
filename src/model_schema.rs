@@ -329,7 +329,6 @@ fn build_struct_schema_example(
     let code = example_code?;
     let code_tokens: proc_macro2::TokenStream = code.parse().unwrap();
     Some(quote! {
-        #[cfg(feature = "zod")]
         pub fn schema_example() -> serde_json::Value {
             let value: #name = {
                 #code_tokens
@@ -965,7 +964,6 @@ fn build_branded_json_schema_method(
     }
 
     quote! {
-        #[cfg(feature = "jsonschema")]
         pub fn json_schema() -> serde_json::Value {
             let mut schema_obj = serde_json::Map::new();
             schema_obj.insert("type".to_string(), serde_json::Value::String(#json_inner_type.to_string()));
@@ -1250,7 +1248,6 @@ fn build_branded_schema_example(
         // For generic newtypes, the example constructs a concrete type (e.g., DocumentId<String>).
         // We use String as the concrete type since the Zod schema always uses z.string().
         quote! {
-            #[cfg(feature = "zod")]
             pub fn schema_example() -> serde_json::Value {
                 let value: #name<String> = {
                     #code_tokens
@@ -1260,7 +1257,6 @@ fn build_branded_schema_example(
         }
     } else {
         quote! {
-            #[cfg(feature = "zod")]
             pub fn schema_example() -> serde_json::Value {
                 let value: #name = {
                     #code_tokens
@@ -4660,6 +4656,30 @@ fn generate_json_docs_part() -> proc_macro2::TokenStream {
     }
 }
 
+/// Binds the `docs` local that an enum's `ts_definition()` renders, enriched with the JSON
+/// schema when this build of tixschema can produce one.
+///
+/// The enrichment reads `Self::json_schema()`, so it may only be emitted when tixschema's own
+/// features put that method in the schema module — deciding here rather than emitting a `cfg`
+/// keeps the reader and the method in agreement regardless of the consumer's feature table.
+#[cfg(feature = "typescript")]
+fn generate_enum_json_docs_part(docs: &str) -> proc_macro2::TokenStream {
+    #[cfg(all(feature = "jsonschema", feature = "zod"))]
+    {
+        quote::quote! {
+            let prettified = serde_json::to_string_pretty(&Self::json_schema()).unwrap().lines().map(|l| format!(" * {l}")).collect::<Vec<_>>().join("\n");
+            let docs = format!("/**\n{}\n * JSON Schema:\n{}\n **/\n", #docs, prettified);
+        }
+    }
+
+    #[cfg(not(all(feature = "jsonschema", feature = "zod")))]
+    {
+        quote::quote! {
+            let docs = format!("/**\n{}\n**/\n", #docs);
+        }
+    }
+}
+
 #[cfg(feature = "jsonschema")]
 /// Generates the JSON schema method for plain enums conditionally.
 fn generate_plain_enum_json_schema_method(
@@ -4690,17 +4710,7 @@ fn generate_plain_enum_ts_definition_method(
 ) -> proc_macro2::TokenStream {
     #[cfg(feature = "typescript")]
     {
-        // Conditional JSON schema docs
-        let json_docs_gen = quote::quote! {
-            #[cfg(all(feature = "jsonschema", feature = "zod"))]
-            let prettified = serde_json::to_string_pretty(&Self::json_schema()).unwrap().lines().map(|l| format!(" * {l}")).collect::<Vec<_>>().join("\n");
-
-            #[cfg(all(feature = "jsonschema", feature = "zod"))]
-            let docs = format!("/**\n{}\n * JSON Schema:\n{}\n **/\n", #docs, prettified);
-
-            #[cfg(not(all(feature = "jsonschema", feature = "zod")))]
-            let docs = format!("/**\n{}\n**/\n", #docs);
-        };
+        let json_docs_gen = generate_enum_json_docs_part(docs);
 
         // TypeScript type generation (only available when typescript feature is enabled)
         let typescript_type_gen = quote::quote! {
@@ -4788,17 +4798,7 @@ fn generate_discriminated_enum_ts_definition_method(
 ) -> proc_macro2::TokenStream {
     #[cfg(feature = "typescript")]
     {
-        // Conditional JSON schema docs
-        let json_docs_gen = quote::quote! {
-            #[cfg(all(feature = "jsonschema", feature = "zod"))]
-            let prettified = serde_json::to_string_pretty(&Self::json_schema()).unwrap().lines().map(|l| format!(" * {l}")).collect::<Vec<_>>().join("\n");
-
-            #[cfg(all(feature = "jsonschema", feature = "zod"))]
-            let docs = format!("/**\n{}\n * JSON Schema:\n{}\n **/\n", #docs, prettified);
-
-            #[cfg(not(all(feature = "jsonschema", feature = "zod")))]
-            let docs = format!("/**\n{}\n**/\n", #docs);
-        };
+        let json_docs_gen = generate_enum_json_docs_part(docs);
 
         quote::quote! {
             pub fn ts_definition() -> String {
@@ -4892,13 +4892,21 @@ fn generate_ts_alias_method(
 
 #[cfg(feature = "typescript")]
 fn generate_alias_json_schema_stub() -> proc_macro2::TokenStream {
-    quote! {
-        #[cfg(feature = "jsonschema")]
-        pub fn json_schema() -> serde_json::Value {
-            serde_json::json!({
-                "warning": "JSON schema generation for aliases is not yet supported"
-            })
+    #[cfg(feature = "jsonschema")]
+    {
+        quote! {
+            pub fn json_schema() -> serde_json::Value {
+                serde_json::json!({
+                    "warning": "JSON schema generation for aliases is not yet supported"
+                })
+            }
         }
+    }
+    #[cfg(not(feature = "jsonschema"))]
+    {
+        // Nothing in this build references an alias module's `json_schema()`; the sibling
+        // reference that would (`flatten_field_json_schema_ref`) is itself jsonschema-gated.
+        quote! {}
     }
 }
 
@@ -4912,7 +4920,6 @@ fn generate_alias_zod_method(export_name: &str, field_def: &FieldDef) -> proc_ma
         // `$Schema`, mirroring how struct/enum schemas expose their const.
         let schema_code = field_def.zod_type();
         quote! {
-            #[cfg(feature = "zod")]
             pub fn zod_schema() -> String {
                 format!(
                     "const {}$RawSchema = {};\n\nexport const {}$Schema: ZodType<{}> = {}$RawSchema;",

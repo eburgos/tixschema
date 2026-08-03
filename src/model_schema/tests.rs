@@ -300,3 +300,122 @@ fn cfg_attr_without_serde_leaves_a_field_alone() {
     });
     assert!(error.is_none(), "got: {error:?}");
 }
+
+/// Reports whether `tokens` contains a `#[cfg(...)]` / `#![cfg(...)]` attribute at any nesting
+/// depth.
+fn contains_cfg_attribute(tokens: proc_macro2::TokenStream) -> bool {
+    let mut in_attr_prefix = false;
+    for tree in tokens {
+        match tree {
+            proc_macro2::TokenTree::Punct(punct) => {
+                let ch = punct.as_char();
+                in_attr_prefix = ch == '#' || (in_attr_prefix && ch == '!');
+            }
+            proc_macro2::TokenTree::Group(group) => {
+                let is_cfg_attr = in_attr_prefix
+                    && group.delimiter() == proc_macro2::Delimiter::Bracket
+                    && matches!(
+                        group.stream().into_iter().next(),
+                        Some(proc_macro2::TokenTree::Ident(ident)) if ident == "cfg"
+                    );
+                if is_cfg_attr || contains_cfg_attribute(group.stream()) {
+                    return true;
+                }
+                in_attr_prefix = false;
+            }
+            proc_macro2::TokenTree::Ident(_) | proc_macro2::TokenTree::Literal(_) => {
+                in_attr_prefix = false;
+            }
+        }
+    }
+    false
+}
+
+/// A `cfg` attribute in the macro's output is resolved against the *consumer's* feature table,
+/// not tixschema's, so an item emitted per tixschema's features can call a method the consumer
+/// cfg'd away. Every feature decision must be made while building the tokens, never emitted.
+fn assert_no_cfg_attribute(tokens: &proc_macro2::TokenStream, what: &str) {
+    assert!(
+        !contains_cfg_attribute(tokens.clone()),
+        "{what} emitted a cfg attribute into generated code: {tokens}"
+    );
+}
+
+#[test]
+fn the_cfg_probe_sees_an_emitted_cfg_attribute() {
+    assert!(contains_cfg_attribute(quote::quote! {
+        #[cfg(feature = "zod")]
+        pub fn zod_schema() -> String { String::new() }
+    }));
+    assert!(contains_cfg_attribute(quote::quote! {
+        pub fn wrapper() {
+            #[cfg(feature = "zod")]
+            let _ = 1;
+        }
+    }));
+    assert_no_cfg_attribute(
+        &quote::quote! {
+            pub fn zod_schema() -> String { String::new() }
+        },
+        "a cfg-free token stream",
+    );
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn struct_schema_example_carries_no_cfg_attribute() {
+    let name: syn::Ident = syn::parse_quote!(Report);
+    let tokens =
+        super::build_struct_schema_example(Some(&"Report { id: 1 }".to_owned()), &name).unwrap();
+    assert_no_cfg_attribute(&tokens, "build_struct_schema_example");
+}
+
+#[cfg(feature = "jsonschema")]
+#[test]
+fn branded_json_schema_method_carries_no_cfg_attribute() {
+    let args = super::ModelSchemaArgs::default();
+    let tokens = super::build_branded_json_schema_method(&args, "string");
+    assert_no_cfg_attribute(&tokens, "build_branded_json_schema_method");
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn branded_schema_example_carries_no_cfg_attribute() {
+    let name: syn::Ident = syn::parse_quote!(DocumentId);
+    let example = "DocumentId(\"abc\".to_string())".to_owned();
+    for is_generic in [false, true] {
+        let tokens = super::build_branded_schema_example(Some(&example), &name, is_generic);
+        assert_no_cfg_attribute(&tokens, "build_branded_schema_example");
+    }
+}
+
+#[cfg(feature = "typescript")]
+#[test]
+fn plain_enum_ts_definition_carries_no_cfg_attribute() {
+    let tokens = super::generate_plain_enum_ts_definition_method(" * Status", "Status", "  'a'");
+    assert_no_cfg_attribute(&tokens, "generate_plain_enum_ts_definition_method");
+}
+
+#[cfg(feature = "typescript")]
+#[test]
+fn discriminated_enum_ts_definition_carries_no_cfg_attribute() {
+    let tokens =
+        super::generate_discriminated_enum_ts_definition_method(" * Shape", "Shape", "  'a'");
+    assert_no_cfg_attribute(&tokens, "generate_discriminated_enum_ts_definition_method");
+}
+
+#[cfg(feature = "typescript")]
+#[test]
+fn alias_json_schema_stub_carries_no_cfg_attribute() {
+    let tokens = super::generate_alias_json_schema_stub();
+    assert_no_cfg_attribute(&tokens, "generate_alias_json_schema_stub");
+}
+
+#[cfg(feature = "typescript")]
+#[test]
+fn alias_zod_method_carries_no_cfg_attribute() {
+    let ty: syn::Type = syn::parse_quote!(String);
+    let field_def = super::get_field_def("AliasType", &ty, "");
+    let tokens = super::generate_alias_zod_method("AliasType", &field_def);
+    assert_no_cfg_attribute(&tokens, "generate_alias_zod_method");
+}
