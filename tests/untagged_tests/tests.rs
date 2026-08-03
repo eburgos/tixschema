@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tixschema::model_schema;
 
 // ISO-8601 date string. Branded newtype carries the regex pattern.
@@ -67,6 +68,23 @@ enum CompliantUnion {
 enum SlotUnion {
     Maybe(Option<i64>),
     Plain(String),
+}
+
+// A plain enum's members are what a map keyed by it writes its object's keys from.
+#[model_schema()]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+enum Bucket {
+    Large,
+    Small,
+}
+
+// The map keys a variant's member may carry: one the registry enumerates, one open by nature.
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum KeyedUnion {
+    Counts { counts: HashMap<Bucket, u32> },
+    Labels { labels: HashMap<String, String> },
 }
 
 #[test]
@@ -351,4 +369,52 @@ fn test_untagged_newtype_option_content_json_schema_null_flavor() {
         })
     );
     assert_eq!(any_of[1], serde_json::json!({ "type": "string" }));
+}
+
+// ========================================================================
+// Untagged member holding a map — the key the guard reads off the written type
+// ========================================================================
+
+/// A key that enumerates its members, and an open one, both render the map their written type
+/// earns: the guard is a filter over keys the registry rules out, never a rewrite of the ones it
+/// admits.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_untagged_map_member_keys_typescript() {
+    let ts = KeyedUnion::ts_definition();
+    assert!(
+        ts.contains(
+            "export type KeyedUnion = { counts: Partial<Record<Bucket, number>> } \
+             | { labels: Partial<Record<string, string>> };"
+        ),
+        "Got:\n{ts}"
+    );
+}
+
+#[test]
+#[cfg(feature = "zod")]
+fn test_untagged_map_member_keys_zod() {
+    let zod = KeyedUnion::zod_schema();
+    assert!(
+        zod.contains("z.strictObject({ counts: z.record(Bucket$Schema, z.number().int()), })"),
+        "Got:\n{zod}"
+    );
+    assert!(
+        zod.contains("z.strictObject({ labels: z.record(z.string(), z.string()), })"),
+        "Got:\n{zod}"
+    );
+}
+
+/// A map is one of the inner shapes an untagged member leaves open for v1, so each branch keeps
+/// the member as a required key carrying the permissive empty schema.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_untagged_map_member_keys_json_schema() {
+    let schema = KeyedUnion::json_schema();
+    let any_of = schema["anyOf"].as_array().unwrap();
+    assert_eq!(any_of.len(), 2, "Got:\n{schema}");
+    for (branch, member) in any_of.iter().zip(["counts", "labels"]) {
+        assert_eq!(branch["properties"][member], serde_json::json!({}));
+        assert_eq!(branch["required"], serde_json::json!([member]));
+    }
 }
