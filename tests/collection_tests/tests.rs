@@ -63,6 +63,15 @@ struct EnumKeyedSiblingValueMaps {
     sample_value: HashMap<MetricSlot, MetricSample>,
 }
 
+// A map entry cannot be dropped the way an object key can, so an `Option` value is spelled `null`
+// on the wire rather than omitted — the same twin type on both key paths pins that both agree.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct OptionalMapValues {
+    enum_keyed: HashMap<MetricSlot, Option<String>>,
+    string_keyed: HashMap<String, Option<String>>,
+}
+
 // Test struct with collections
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -171,6 +180,11 @@ fn test_collection_structs_constructible() {
         tags: Vec::new(),
     };
     assert!(with_collections.id.is_empty());
+    let optional_values = OptionalMapValues {
+        enum_keyed: HashMap::from([(MetricSlot::Daily, None)]),
+        string_keyed: HashMap::from([("k".to_owned(), None)]),
+    };
+    assert_eq!(optional_values.enum_keyed[&MetricSlot::Daily], None);
 }
 
 #[test]
@@ -232,6 +246,22 @@ fn test_comprehensive_hashmap_json_schema() {
     assert_hashmap_array_type(properties, "i64_array", "integer");
     assert_hashmap_array_type(properties, "f64_array", "number");
     assert_hashmap_array_type(properties, "bool_array", "boolean");
+
+    // An `Option` value is nullable rather than absent — the array wrap sits inside the union,
+    // because the `Option` is the outer one in `Option<Vec<T>>`.
+    assert_eq!(
+        properties["optional_u64"]["additionalProperties"],
+        serde_json::json!({ "anyOf": [{ "type": "integer" }, { "type": "null" }] })
+    );
+    assert_eq!(
+        properties["optional_u64_array"]["additionalProperties"],
+        serde_json::json!({
+            "anyOf": [
+                { "type": "array", "items": { "type": "integer" } },
+                { "type": "null" }
+            ]
+        })
+    );
 }
 
 #[test]
@@ -267,6 +297,28 @@ fn test_comprehensive_hashmap_typescript_generation() {
     assert!(zod_schema.contains("i64_array: z.record(z.string(), z.array(z.number().int()))"));
     assert!(zod_schema.contains("f64_array: z.record(z.string(), z.array(z.number()))"));
     assert!(zod_schema.contains("bool_array: z.record(z.string(), z.array(z.boolean()))"));
+
+    // An `Option` map value is null-flavored, not undefined-flavored: the entry it sits in cannot
+    // be dropped, so serde writes the `None` as `null`.
+    assert!(
+        ts_definition.contains("optional_u64: Partial<Record<string, number | null>>;"),
+        "Got: {ts_definition}"
+    );
+    assert!(
+        ts_definition
+            .contains("optional_u64_array: Partial<Record<string, Array<number> | null>>;"),
+        "Got: {ts_definition}"
+    );
+    assert!(
+        zod_schema.contains("optional_u64: z.record(z.string(), z.nullable(z.number().int()))"),
+        "Got: {zod_schema}"
+    );
+    assert!(
+        zod_schema.contains(
+            "optional_u64_array: z.record(z.string(), z.nullable(z.array(z.number().int())))"
+        ),
+        "Got: {zod_schema}"
+    );
 }
 
 #[test]
@@ -451,6 +503,62 @@ fn test_enum_keyed_sibling_value_maps_typescript_generation() {
     assert!(
         zod_schema
             .contains("sample_array: z.record(MetricSlot$Schema, z.array(MetricSample$Schema))"),
+        "Got: {zod_schema}"
+    );
+}
+
+/// A map entry carries its `None` as JSON `null`: unlike an object key, an entry cannot be dropped,
+/// so the schema has to admit the null serde writes. Both key paths render the same nullable form,
+/// the one a tuple slot already uses for the same reason.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_optional_map_values_admit_the_null_serde_writes() {
+    let values = OptionalMapValues {
+        enum_keyed: HashMap::from([(MetricSlot::Daily, None)]),
+        string_keyed: HashMap::from([("k".to_owned(), None)]),
+    };
+    let payload = serde_json::to_value(&values).unwrap();
+    assert_eq!(json_type_name(&payload["enum_keyed"]["Daily"]), "null");
+    assert_eq!(json_type_name(&payload["string_keyed"]["k"]), "null");
+
+    let nullable_string = serde_json::json!({
+        "anyOf": [{ "type": "string" }, { "type": "null" }]
+    });
+    let schema = OptionalMapValues::json_schema();
+    let properties = schema["properties"].as_object().unwrap();
+
+    assert_enum_keyed_map_value(properties, "enum_keyed", &nullable_string);
+    assert_eq!(properties["string_keyed"]["type"], "object");
+    assert_eq!(
+        properties["string_keyed"]["additionalProperties"], nullable_string,
+        "in: {}",
+        properties["string_keyed"]
+    );
+}
+
+/// A map value is null-flavored rather than undefined-flavored, on both key paths: `Partial<Record>`
+/// already lets a key be missing, but a key that *is* present carries the `null` serde writes for a
+/// `None`, so the value type has to admit it.
+#[test]
+#[cfg(all(feature = "typescript", feature = "zod"))]
+fn test_optional_map_values_are_null_flavored_on_both_key_paths() {
+    let ts_definition = OptionalMapValues::ts_definition();
+    assert!(
+        ts_definition.contains("enum_keyed: Partial<Record<MetricSlot, string | null>>;"),
+        "Got: {ts_definition}"
+    );
+    assert!(
+        ts_definition.contains("string_keyed: Partial<Record<string, string | null>>;"),
+        "Got: {ts_definition}"
+    );
+
+    let zod_schema = OptionalMapValues::zod_schema();
+    assert!(
+        zod_schema.contains("enum_keyed: z.record(MetricSlot$Schema, z.nullable(z.string()))"),
+        "Got: {zod_schema}"
+    );
+    assert!(
+        zod_schema.contains("string_keyed: z.record(z.string(), z.nullable(z.string()))"),
         "Got: {zod_schema}"
     );
 }
