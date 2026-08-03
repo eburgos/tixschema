@@ -564,7 +564,7 @@ error[E0277]: `Vec<String>` doesn't implement `std::fmt::Display`
    |                     ^^^^^^^^^^^ the trait `std::fmt::Display` is not implemented for `Vec<String>`
 ```
 
-Pass `no_display` for brands over container inner types. The brand then gets no `Display` impl and carries no such requirement; its schema and its serde transparency are unchanged. String constraints are a separate matter: `pattern`, `minLength`, and `maxLength` validate through `to_string()`, so a constrained brand needs a `Display` inner whether or not it passes `no_display`.
+Pass `no_display` for brands over container inner types. The brand then gets no `Display` impl and carries no such requirement; its schema and its serde transparency are unchanged. String constraints are a separate matter: `pattern`, `minLength`, and `maxLength` validate through `to_string()`, so a constrained brand needs a `Display` inner whether or not it passes `no_display` — and a container inner cannot carry them at all (see [Branded Newtype Validation Constraints](#branded-newtype-validation-constraints)).
 
 ```rust
 use tixschema::model_schema;
@@ -582,7 +582,9 @@ A generic brand carries the requirement as a `Display` bound on each type parame
 
 You can add `pattern`, `minLength`, and `maxLength` constraints directly on the `#[model_schema()]` attribute for branded newtypes. Constraints are enforced in three places: the generated Zod schema, serde deserialization, and a `validate()` method on the type.
 
-**This only works for `String` inner types.** Applying constraints to a non-String branded newtype (e.g., `u64`) produces a compile-time error.
+**The inner type has to be one whose schema is a string** — `String`, `PathBuf`, `ObjectId`, a chrono date/time type, another brand, or a generic parameter. A numeric, boolean, container (`Vec`, array, `HashMap`, tuple), or opaque (`serde_json::Value`) inner is rejected at expansion time, because the three constraints are string checks and each surface would read them differently: Zod's `.min`/`.max` become bounds on the value itself, JSON Schema ignores `minLength`/`maxLength`/`pattern` outside `"type": "string"`, and `validate()` measures the inner's `Display` rendering.
+
+**The inner type also has to implement `Display`,** since validation runs against `to_string()`. That holds whether or not the brand passes `no_display`: the flag drops the `Display` impl, not the requirement.
 
 ```rust
 #[model_schema(pattern = "^[a-z0-9_]+$", minLength = 3, maxLength = 50)]
@@ -650,7 +652,7 @@ pub struct ObjectIdStr(pub String);
 pub struct NonEmptyString(pub String);
 ```
 
-Compile-time error for non-String types:
+An inner type whose schema is not a string is rejected at the field:
 
 ```rust
 // This will NOT compile:
@@ -658,8 +660,40 @@ Compile-time error for non-String types:
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct BadNum(pub u64);
-// Error: model_schema constraints (pattern, minLength, maxLength) are only
-//        supported on String branded newtypes, but `BadNum` has inner type `u64`
+```
+
+```text
+error: model_schema: branded newtype `BadNum` applies string constraints (pattern, minLength,
+       maxLength) to a numeric inner type, which cannot carry them: ...
+ --> src/lib.rs:4:19
+  |
+4 | pub struct BadNum(pub u64);
+  |                   ^^^
+```
+
+An inner type the macro cannot resolve — another brand, a user type, a generic parameter — is
+admitted here and checked for `Display` instead, so a non-`Display` one is still reported at the
+field:
+
+```rust
+#[model_schema(no_display)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Tags(pub Vec<String>);
+
+// This will NOT compile either: `Tags` has no `Display` for `validate()` to render.
+#[model_schema(pattern = "^[a-z]+$")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TagsBrand(pub Tags);
+```
+
+```text
+error[E0277]: `Tags` doesn't implement `std::fmt::Display`
+  --> src/lib.rs:12:26
+   |
+12 | pub struct TagsBrand(pub Tags);
+   |                          ^^^^ unsatisfied trait bound
 ```
 
 #### Doc Comments and Examples on Branded Newtypes
