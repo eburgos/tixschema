@@ -76,6 +76,46 @@ pub enum RenamedExternal {
     UnitThing,
 }
 
+/// The type an internally tagged newtype variant wraps. Its fields are what serde writes beside
+/// the tag, so they are the ones the surfaces owe.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct TagPayload {
+    pub a: String,
+    pub b: bool,
+}
+
+/// An enum carrying `#[serde(tag = ...)]` and no `content` is internally tagged: there is no key
+/// for a variant's data, so what it writes are members of the object the tag is written in. The
+/// three variants are the three things that can be written there — nothing at all, a struct
+/// variant's own fields, and the members of a newtype variant's inner type.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "type")]
+pub enum Internal {
+    Bare,
+    Fields { a: String, b: bool },
+    Wrapped(TagPayload),
+}
+
+/// The same form with no newtype variant, which is every member a `z.discriminatedUnion` can hold.
+/// Only the Zod surface names that union, so the fixture is declared where it is read.
+#[cfg(feature = "zod")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "type")]
+pub enum InternalNamedOnly {
+    Fields { a: String },
+}
+
+/// The shape the crate refuses to describe, declared without `#[model_schema()]` so serde's own
+/// answer for it can be read off the wire.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "type")]
+pub enum InternalScalar {
+    Single(String),
+}
+
 /// A recursive enum with no tagging attributes: what sits under a key is the enum itself. Only the
 /// Zod surface spells the deferral, so the fixture is declared where it is read.
 #[cfg(feature = "zod")]
@@ -1434,4 +1474,206 @@ fn test_explicitly_tagged_twin_keeps_the_adjacent_json_schema_form() {
             "maxItems": 2_u64
         })
     );
+}
+
+/// Test 22: what serde writes for a bare tag. There is no content key: a struct variant's fields
+/// and a newtype variant's inner members are both written beside the tag, in the same object.
+#[test]
+fn test_bare_tag_writes_the_variant_data_beside_the_tag() {
+    assert_eq!(
+        serde_json::to_value(Internal::Fields {
+            a: "a".to_owned(),
+            b: true
+        })
+        .unwrap(),
+        serde_json::json!({ "type": "Fields", "a": "a", "b": true }),
+        "A struct variant's fields sit beside the tag"
+    );
+    assert_eq!(
+        serde_json::to_value(Internal::Wrapped(TagPayload {
+            a: "a".to_owned(),
+            b: true
+        }))
+        .unwrap(),
+        serde_json::json!({ "type": "Wrapped", "a": "a", "b": true }),
+        "A newtype variant's inner members sit beside the tag too: no key holds them"
+    );
+    assert_eq!(
+        serde_json::to_value(Internal::Bare).unwrap(),
+        serde_json::json!({ "type": "Bare" }),
+        "A unit variant is the tag alone"
+    );
+}
+
+/// Test 22a: and the shape that has no members to write there. serde refuses it at run time, which
+/// is why the crate refuses the declaration: there is no schema to write for a value that cannot
+/// exist on the wire.
+#[test]
+fn test_bare_tag_newtype_over_a_scalar_is_unserializable() {
+    let refusal = serde_json::to_value(InternalScalar::Single("a".to_owned()))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refusal.contains("cannot serialize tagged newtype variant"),
+        "Got: {refusal}"
+    );
+    assert!(refusal.contains("containing a string"), "Got: {refusal}");
+}
+
+/// Test 22b: TypeScript spreads the inner type beside the tag rather than putting it under a key.
+/// `&` binds tighter than `|`, so the intersection is one member of the union.
+#[test]
+fn test_bare_tag_typescript_spreads_the_inner_type_beside_the_tag() {
+    let ts = Internal::ts_definition();
+
+    assert!(
+        ts.contains("type: \"Wrapped\";\n} & TagPayload"),
+        "The inner type joins the tag's object. Got: {ts}"
+    );
+    assert!(
+        !ts.contains("value:"),
+        "Nothing writes a content key under a bare tag. Got: {ts}"
+    );
+    assert!(ts.contains("type: \"Fields\";"), "Got: {ts}");
+    assert!(ts.contains("  a: string;"), "Got: {ts}");
+    assert!(ts.contains("type: \"Bare\";"), "Got: {ts}");
+}
+
+/// Test 22c: the Zod member for a newtype variant is the tag's object intersected with the inner
+/// schema. An intersection has no shape of its own to read a discriminator out of, so the union
+/// that holds it is a plain `z.union`.
+#[cfg(feature = "zod")]
+#[test]
+fn test_bare_tag_zod_intersects_the_inner_schema() {
+    let zod = Internal::zod_schema();
+
+    assert!(
+        zod.contains(
+            "z.strictObject({\n  type: z.literal(\"Wrapped\"),\n}).and(TagPayload$Schema)"
+        ),
+        "Got: {zod}"
+    );
+    assert!(zod.contains("z.union(["), "Got: {zod}");
+    assert!(
+        !zod.contains("z.discriminatedUnion"),
+        "An intersection member cannot be discriminated on. Got: {zod}"
+    );
+    assert!(!zod.contains("value:"), "Got: {zod}");
+}
+
+/// Test 22d: with no newtype variant every member is an object carrying the tag, so the union still
+/// switches on it.
+#[cfg(feature = "zod")]
+#[test]
+fn test_bare_tag_without_a_newtype_variant_still_discriminates() {
+    let zod = InternalNamedOnly::zod_schema();
+
+    assert!(
+        zod.contains("z.discriminatedUnion(\"type\", [z.strictObject({\n  type: z.literal(\"Fields\"),\n  a: z.string(),\n})])"),
+        "Got: {zod}"
+    );
+}
+
+/// Test 22e: the JSON schema holds the inner type's fields beside the tag, required where the inner
+/// requires them, and closed around exactly the members serde writes.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn test_bare_tag_json_schema_holds_the_inner_fields_beside_the_tag() {
+    let schema = Internal::json_schema();
+    let wrapped = schema["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["properties"]["type"]["const"] == "Wrapped")
+        .unwrap();
+
+    assert_eq!(
+        wrapped["properties"],
+        serde_json::json!({
+            "type": { "type": "string", "const": "Wrapped" },
+            "a": { "type": "string" },
+            "b": { "type": "boolean" }
+        })
+    );
+    assert_eq!(
+        wrapped["required"],
+        serde_json::json!(["type", "a", "b"]),
+        "The tag and everything the inner type requires"
+    );
+    assert_eq!(wrapped["additionalProperties"], false);
+    assert!(
+        wrapped["properties"]["value"].is_null(),
+        "There is no content key. Got: {wrapped}"
+    );
+}
+
+/// Test 22f: the round trip the schema owes. Every payload serde writes is admitted by the member
+/// the schema names for it, and reads back into the value it describes.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn test_bare_tag_round_trips_against_its_schema() {
+    let schema = Internal::json_schema();
+
+    for value in [
+        Internal::Bare,
+        Internal::Fields {
+            a: "a".to_owned(),
+            b: true,
+        },
+        Internal::Wrapped(TagPayload {
+            a: "a".to_owned(),
+            b: true,
+        }),
+    ] {
+        let written = serde_json::to_value(&value).unwrap();
+        let member = schema["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|member| member["properties"]["type"]["const"] == written["type"])
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        assert!(!member.is_null(), "No member for {written}");
+
+        let declared = member["properties"].as_object().unwrap();
+        for key in written.as_object().unwrap().keys() {
+            assert!(
+                declared.contains_key(key),
+                "The member admits every key serde writes. Missing `{key}` in {member}"
+            );
+        }
+        for required in member["required"].as_array().unwrap() {
+            assert!(
+                written[required.as_str().unwrap()] != serde_json::Value::Null,
+                "The member requires only keys serde writes. Got: {written}"
+            );
+        }
+
+        assert_eq!(
+            serde_json::from_value::<Internal>(written.clone()).unwrap(),
+            value,
+            "What serde writes must read back. Got: {written}"
+        );
+    }
+
+    // And the adjacent form the schema no longer describes is one the type cannot read either.
+    assert!(
+        serde_json::from_value::<Internal>(
+            serde_json::json!({ "type": "Wrapped", "value": { "a": "a", "b": true } })
+        )
+        .is_err(),
+        "A content key is not what this enum reads"
+    );
+}
+
+/// Test 22g: naming a content key beside the tag keeps the adjacent form, content key and all.
+#[test]
+fn test_adjacent_twin_keeps_its_content_key() {
+    assert_eq!(
+        serde_json::to_value(Adjacent::Single("a".to_owned())).unwrap(),
+        serde_json::json!({ "type": "Single", "value": "a" })
+    );
+
+    let ts = Adjacent::ts_definition();
+    assert!(ts.contains("value: string"), "Got: {ts}");
 }

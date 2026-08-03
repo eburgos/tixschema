@@ -9,8 +9,8 @@ use super::{
     ConstraintLeaf, ModelSchemaPropMeta, build_field_validation, cfg_attr_guard_error,
     check_optional_field_serialization, collect_untagged_members, constrained_shape,
     enum_cfg_attr_guard_errors, generate_field_validation, generate_numeric_validation_code,
-    generate_string_validation_code, helper_name_stem, needs_injected_default,
-    parse_serde_field_attributes, parse_serde_type_attributes,
+    generate_string_validation_code, helper_name_stem, internally_tagged_guard_errors,
+    needs_injected_default, parse_serde_field_attributes, parse_serde_type_attributes,
 };
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -318,6 +318,117 @@ fn untagged_tuple_variant_option_is_exempt() {
         enum Choice {
             Maybe(Option<i64>),
         }
+    });
+    assert!(errors.is_empty(), "got: {errors:?}");
+}
+
+/// Collects the internally tagged path's guard failures as rendered `compile_error!` token strings.
+#[cfg(feature = "serde")]
+fn internal_guard_errors(item: &syn::ItemEnum) -> Vec<String> {
+    internally_tagged_guard_errors(item, "type")
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// The arms serde writes beside a bare tag: a struct variant's fields, a named type's own members,
+/// and a unit variant's nothing at all.
+#[cfg(feature = "serde")]
+#[test]
+fn internally_tagged_serializable_variants_are_accepted() {
+    let errors = internal_guard_errors(&syn::parse_quote! {
+        enum TagOnly {
+            Bare,
+            Fields { a: String },
+            Wrapped(Payload),
+            Boxed(Box<Payload>),
+        }
+    });
+    assert!(errors.is_empty(), "got: {errors:?}");
+}
+
+/// Every scalar shape serde refuses to write beside the tag, named the way serde's own error names
+/// it.
+#[cfg(feature = "serde")]
+#[test]
+fn internally_tagged_newtype_over_a_scalar_is_rejected() {
+    for (source, shape) in [
+        ("enum E { V(String) }", "a string"),
+        ("enum E { V(bool) }", "a boolean"),
+        ("enum E { V(i64) }", "an integer"),
+        ("enum E { V(f64) }", "a float"),
+        ("enum E { V((u32, u32)) }", "a tuple"),
+        ("enum E { V(Vec<Payload>) }", "a sequence"),
+        ("enum E { V(Option<Payload>) }", "an optional"),
+    ] {
+        let errors = internal_guard_errors(&syn::parse_str(source).unwrap());
+        assert_eq!(errors.len(), 1, "got: {errors:?} for {source}");
+        assert!(errors[0].contains("compile_error"), "got: {}", errors[0]);
+        assert!(errors[0].contains("variant `V`"), "got: {}", errors[0]);
+        assert!(
+            errors[0].contains(&format!("containing {shape}")),
+            "expected serde's own wording for {source}. Got: {}",
+            errors[0]
+        );
+    }
+}
+
+/// An `Option` around a sequence is refused as an optional: serde's serializer meets the wrappers
+/// in that order, and reports the outermost one.
+#[cfg(feature = "serde")]
+#[test]
+fn internally_tagged_newtype_names_the_outermost_wrapper() {
+    let errors = internal_guard_errors(&syn::parse_quote! {
+        enum E { V(Option<Vec<Payload>>) }
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(
+        errors[0].contains("containing an optional"),
+        "got: {}",
+        errors[0]
+    );
+}
+
+/// A map's members are written beside the tag, but the expansion cannot name them, so no schema
+/// closed around the tag admits them. serde's restriction is not what is quoted here — serde writes
+/// this one.
+#[cfg(feature = "serde")]
+#[test]
+fn internally_tagged_newtype_over_a_map_is_rejected_as_unnameable() {
+    let errors = internal_guard_errors(&syn::parse_quote! {
+        enum E { V(std::collections::HashMap<String, u32>) }
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(errors[0].contains("wraps a map"), "got: {}", errors[0]);
+    assert!(
+        !errors[0].contains("serde refuses"),
+        "serde writes a map beside the tag. Got: {}",
+        errors[0]
+    );
+}
+
+/// A multi-element tuple variant is a declaration serde's own derive refuses; the guard names that
+/// rather than describing elements that have no key to sit under.
+#[cfg(feature = "serde")]
+#[test]
+fn internally_tagged_tuple_variant_is_rejected() {
+    let errors = internal_guard_errors(&syn::parse_quote! {
+        enum E { V(String, u32) }
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(
+        errors[0].contains("cannot be used with tuple variants"),
+        "got: {}",
+        errors[0]
+    );
+}
+
+/// An empty tuple variant carries nothing: serde writes the tag alone, which is the unit arm.
+#[cfg(feature = "serde")]
+#[test]
+fn internally_tagged_empty_tuple_variant_is_accepted() {
+    let errors = internal_guard_errors(&syn::parse_quote! {
+        enum E { V() }
     });
     assert!(errors.is_empty(), "got: {errors:?}");
 }
@@ -2292,6 +2403,7 @@ fn wrapped_u32_value(wrapper: &str) -> super::FieldDef {
         model_schema_prop_meta: None,
         nullable_levels: Vec::new(),
         name: "items".to_owned(),
+        type_span: proc_macro2::Span::call_site(),
     }
 }
 
@@ -2369,6 +2481,75 @@ fn a_sibling_slot_carries_the_schema_module_reference() {
             super::build_map_member_schema(&parsed).unwrap().to_string()
         );
     }
+}
+
+/// The JSON-schema insertion for the sole field of `source`, parsed from text so its spans carry
+/// file locations and `source_text()` can report what they point at.
+#[cfg(feature = "jsonschema")]
+fn sole_field_json_schema(source: &str) -> proc_macro2::TokenStream {
+    let item: syn::ItemStruct = syn::parse_str(source).unwrap();
+    let field = item.fields.iter().next().unwrap();
+    let field_name = field.ident.as_ref().unwrap().to_string();
+    let def = get_field_def(&field_name, &field.ty, "");
+    super::build_field_type_schema(&def, &field_name)
+}
+
+/// The source text each occurrence of the ident `name` points at, `None` for an occurrence carrying
+/// no location.
+#[cfg(feature = "jsonschema")]
+fn ident_source_texts(tokens: &proc_macro2::TokenStream, name: &str) -> Vec<Option<String>> {
+    let mut found = Vec::new();
+    for tree in tokens.clone() {
+        match &tree {
+            proc_macro2::TokenTree::Group(group) => {
+                found.extend(ident_source_texts(&group.stream(), name));
+            }
+            proc_macro2::TokenTree::Ident(ident) if ident == name => {
+                found.push(tree.span().source_text());
+            }
+            proc_macro2::TokenTree::Ident(_)
+            | proc_macro2::TokenTree::Punct(_)
+            | proc_macro2::TokenTree::Literal(_) => {}
+        }
+    }
+    found
+}
+
+/// A generated module reaches its siblings through `use super::*`, which a type declared inside a
+/// function body never joins, and nothing the macro can read says whether it will resolve. So the
+/// whole reference is spanned on the name the module was built from — the module ident included,
+/// that being the one the `E0433` blames — and the failure is reported at the user's type instead
+/// of at `#[model_schema()]`. Every position that carries a sibling names it the same way.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_sibling_reference_points_at_the_type_the_field_names() {
+    for source in [
+        "struct Outer { inner: Inner }",
+        "struct Outer { inner: Vec<Inner> }",
+        "struct Outer { inner: Box<Inner> }",
+        "struct Outer { inner: HashMap<String, Inner> }",
+        "struct Outer { inner: (Inner, u32) }",
+    ] {
+        let tokens = sole_field_json_schema(source);
+        for named in ["inner_schema", "Schema", "json_schema_within"] {
+            assert_eq!(
+                ident_source_texts(&tokens, named),
+                vec![Some("Inner".to_owned())],
+                "for {source}, at `{named}`, got: {tokens}"
+            );
+        }
+    }
+}
+
+/// The reference an item-scope sibling emits is the one it has always emitted — only the spans its
+/// tokens carry are new.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_sibling_reference_emits_the_tokens_it_always_has() {
+    assert_eq!(
+        sole_field_json_schema("struct Outer { inner: Inner }").to_string(),
+        "properties . insert (\"inner\" . to_string () , inner_schema :: Schema :: json_schema_within (in_flight , hoisted_defs)) ;"
+    );
 }
 
 /// The tuple-field insertion for a field type built by hand.
