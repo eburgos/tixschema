@@ -2219,6 +2219,30 @@ fn a_sibling_string_keyed_map_value_emits_the_sibling_schema() {
     }
 }
 
+/// A map is a `Map` wherever it is written, never a sibling named after the container: the parser
+/// claims both 2-argument map idents ahead of the sibling fallback, and the wrappers a map can be
+/// written under either collapse onto it or hold it as a value. The sibling dispatch therefore
+/// renders no map of its own — a rendering there answers for nothing, and is free to drift from the
+/// one the map arm states.
+#[test]
+fn a_map_never_parses_as_a_sibling_named_after_its_container() {
+    for spelling in [
+        "HashMap<String, u32>",
+        "BTreeMap<String, u32>",
+        "std::collections::BTreeMap<String, u32>",
+        "Option<HashMap<String, u32>>",
+        "Box<HashMap<String, u32>>",
+        "Vec<BTreeMap<String, u32>>",
+    ] {
+        let ty: syn::Type = syn::parse_str(spelling).unwrap();
+        let field_type = get_field_def("m", &ty, "").field_type;
+        assert!(
+            matches!(field_type, FieldDefType::Map(..)),
+            "for {spelling}, got: {field_type:?}"
+        );
+    }
+}
+
 /// An alias's schema module is named after its registered export name, which the raw ident does
 /// not reproduce — the reference has to come from the registry or it names a module that was never
 /// emitted.
