@@ -710,6 +710,19 @@ pub fn is_sequence_wrapper(name: &str) -> bool {
     )
 }
 
+/// Whether a generic type is optional on its element's behalf: true exactly when it is a covered
+/// sequence wrapper whose element is an `Option`.
+///
+/// A wrapper writes the JSON array its element decides, so a `None` the element holds reaches the
+/// wire as a `null` inside that array — and every reader that decides nullability, the field-
+/// position guard and the slot renderers alike, reads the field's own flag rather than descending
+/// into the wrapper. `Vec` never arrives here, the parser having collapsed it onto its element
+/// with the flag already carried up; this hands the other spellings that same flag, so what a
+/// `None` costs cannot depend on which covered wrapper was written around it.
+fn sequence_element_optionality(name: &str, args: &[FieldDef]) -> bool {
+    matches!(args, [element] if element.is_optional && is_sequence_wrapper(name))
+}
+
 /// Classifies a `syn::Variant` into its `VariantKind`.
 ///
 /// This determines how the variant should be rendered in TypeScript/Zod:
@@ -846,7 +859,7 @@ fn get_field_def_from_type_path(
                 // Debug print to see what's happening with SiblingType
                 log::trace!("Creating SiblingType - name: {ident}, arg_types: {arg_types:?}");
                 FieldDef {
-                    is_optional: false,
+                    is_optional: sequence_element_optionality(&ident, &arg_types),
                     name: safe_name,
                     field_type: FieldDefType::SiblingType(ident, arg_types),
                     array_depth: 0,
