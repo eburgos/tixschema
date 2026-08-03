@@ -3205,6 +3205,10 @@ fn push_single_tuple_json_field(
 }
 
 /// Writes the single-element tuple portion of a discriminated enum variant.
+///
+/// The content key is a slot: serde writes it for every variant that has one, so a `None` there
+/// reaches the wire as a `null` under the key rather than dropping it. All three surfaces read the
+/// element through the slot spellings for that reason.
 fn write_tuple_single_variant_fields(
     field_defs: &[FieldDef],
     content_name: &str,
@@ -3213,7 +3217,6 @@ fn write_tuple_single_variant_fields(
 ) {
     let variant_type_code = &mut parts.type_code;
     let variant_schema_code = &mut parts.schema_code;
-    let optional_fields = &mut parts.optional_fields;
     let json_schema_variant_fields = &mut parts.json_fields;
     let Some(fld) = field_defs.first() else {
         let _: (&_, &_, &_) = (
@@ -3228,13 +3231,13 @@ fn write_tuple_single_variant_fields(
         variant_type_code,
         "  /** Tuple value */\n  {}: {};",
         content_name,
-        fld.typescript_typename()
+        fld.typescript_slot_typename()
     );
 
     // Add Zod schema definition
     #[cfg(feature = "zod")]
     {
-        let zod_field_type = fld.zod_type();
+        let zod_field_type = fld.zod_slot_type();
         let is_recursive = fld.contains_type_reference(self_type_name);
 
         if is_recursive {
@@ -3258,10 +3261,6 @@ fn write_tuple_single_variant_fields(
     push_single_tuple_json_field(json_schema_variant_fields, content_name, fld);
     #[cfg(not(feature = "jsonschema"))]
     let _: &_ = &json_schema_variant_fields;
-
-    if fld.is_optional() {
-        optional_fields.push(content_name.to_owned());
-    }
 }
 
 /// Writes the multi-element tuple portion of a discriminated enum variant.

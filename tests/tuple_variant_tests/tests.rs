@@ -16,6 +16,19 @@ pub enum Outer {
     Wrapped(Inner),
 }
 
+/// The content key of a single-element tuple variant is a slot: serde always writes the key, so a
+/// `None` at the outermost level reaches the wire as a `null` under it rather than dropping the
+/// key. The three variants below are the three answers the surfaces owe — the `Option` around the
+/// array, the `Option` among its items, and no `Option` at all.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "type", content = "value")]
+pub enum SlotContent {
+    Covered(Option<Vec<u32>>),
+    Element(Vec<Option<u32>>),
+    Plain(String),
+}
+
 /// Test 1: Single-element tuple variants.
 /// Each variant has exactly one tuple element.
 #[test]
@@ -470,10 +483,10 @@ fn test_optional_in_tuple() {
 
     let ts = OptionalTuple::ts_definition();
 
-    // Single optional tuple
+    // Single optional tuple: the content key is a slot, so the `None` is a `null` under it.
     assert!(
-        ts.contains("value: string | undefined"),
-        "Maybe should have optional string"
+        ts.contains("value: string | null"),
+        "Maybe should have nullable string"
     );
 
     // Multi tuple with optional element
@@ -732,5 +745,107 @@ fn test_jsdoc_comments() {
     assert!(
         ts.contains("Tuple:") || ts.contains("Tuple value"),
         "Multi-tuple should have tuple documentation"
+    );
+}
+
+/// Test 17: what serde writes for a single-element tuple variant whose content is an `Option` —
+/// the capture the three surfaces below are read against.
+#[test]
+fn test_single_tuple_variant_option_content_writes_null_under_the_key() {
+    assert_eq!(
+        serde_json::to_value(SlotContent::Covered(None)).unwrap(),
+        serde_json::json!({ "type": "Covered", "value": null }),
+        "A `None` content keeps the key and writes `null` under it"
+    );
+    assert_eq!(
+        serde_json::to_value(SlotContent::Element(vec![None])).unwrap(),
+        serde_json::json!({ "type": "Element", "value": [null] }),
+        "A `None` among the items is a `null` among them"
+    );
+}
+
+/// Test 17a: TypeScript describes that content key as the slot it is.
+#[test]
+fn test_single_tuple_variant_option_content_typescript_null_flavor() {
+    let ts = SlotContent::ts_definition();
+
+    assert!(
+        ts.contains("value: Array<number> | null"),
+        "Covered's content is the slot the `None` fills with `null`. Got: {ts}"
+    );
+    assert!(
+        ts.contains("value: Array<number | null>"),
+        "Element's `None` stays among the items. Got: {ts}"
+    );
+    assert!(
+        ts.contains("value: string;"),
+        "Plain's content carries no null. Got: {ts}"
+    );
+}
+
+/// Test 17b: the Zod schema of that content key admits the `null` serde writes.
+#[cfg(feature = "zod")]
+#[test]
+fn test_single_tuple_variant_option_content_zod_null_flavor() {
+    let zod = SlotContent::zod_schema();
+
+    assert!(
+        zod.contains("value: z.nullable(z.array(z.number().int()))"),
+        "Covered's content admits the `null`. Got: {zod}"
+    );
+    assert!(
+        zod.contains("value: z.array(z.nullable(z.number().int()))"),
+        "Element's `null` stays among the items. Got: {zod}"
+    );
+    assert!(
+        zod.contains("value: z.string()"),
+        "Plain's content carries no null. Got: {zod}"
+    );
+}
+
+/// Test 17c: the JSON schema already said so, and keeps saying it unchanged.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn test_single_tuple_variant_option_content_json_schema_null_flavor() {
+    let schema = SlotContent::json_schema();
+    let variant_of = |discriminator: &str| {
+        schema["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|member| member["properties"]["type"]["const"] == discriminator)
+            .unwrap()
+            .clone()
+    };
+
+    let covered = variant_of("Covered");
+    assert_eq!(
+        covered["properties"]["value"],
+        serde_json::json!({
+            "anyOf": [
+                { "type": "array", "items": { "type": "integer" } },
+                { "type": "null" }
+            ]
+        })
+    );
+    assert!(
+        covered["required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::Value::String("value".to_owned())),
+        "The key a `None` cannot drop stays required. Got: {}",
+        covered["required"]
+    );
+
+    assert_eq!(
+        variant_of("Element")["properties"]["value"],
+        serde_json::json!({
+            "type": "array",
+            "items": { "anyOf": [{ "type": "integer" }, { "type": "null" }] }
+        })
+    );
+    assert_eq!(
+        variant_of("Plain")["properties"]["value"],
+        serde_json::json!({ "type": "string" })
     );
 }
