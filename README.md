@@ -821,7 +821,26 @@ match reg.validate() {
 
 The macro also generates into the type's schema module:
 - `validate_{field}_value(&FieldType) -> Result<(), String>` -- pure static validator per field
-- `deserialize_{field}(D) -> Result<FieldType, E>` -- serde hook that calls the static validator
+- `deserialize_{field}(D) -> Result<FieldType, E>` -- serde hook that calls the static validator, emitted for a bare field only
+
+#### Constraints under `Option`, wrappers, and sequences
+
+A constraint describes the value the field puts on the wire, wherever it was written. `validate()` therefore reaches through everything the parser reads through -- an `Option`, a transparent wrapper (`Box`, `Rc`, `Arc`, `Cow`), and every sequence level (`Vec`, `VecDeque`, `HashSet`, `BTreeSet`, `LinkedList`, `BinaryHeap`, arrays and slices) -- and checks the innermost value, which is the same place the Zod, TypeScript and JSON Schema surfaces put it.
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+pub struct Article {
+    #[model_schema_prop(minLength = 3)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle: Option<String>,   // checked inside the Some; a None is nothing to check
+
+    #[model_schema_prop(minLength = 3)]
+    pub tags: Vec<String>,          // checked per element, once per failing tag
+}
+```
+
+Serde-side enforcement is narrower: the generated `deserialize_{field}` hook answers for the constrained value itself, so it is attached only when the field is written bare. A wrapped field is checked by `validate()`.
 
 ### Literal Values
 
