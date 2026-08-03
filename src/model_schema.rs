@@ -51,13 +51,14 @@ use crate::features::model_schema_prop::{ModelSchemaPropMeta, parse_model_schema
 
 #[cfg(feature = "jsonschema")]
 use crate::features::jsonschema::{
+    MergedSource,
     generate_plain_enum_json_schema_method as generate_plain_enum_json_schema_method_impl,
     generate_struct_json_schema_method as generate_struct_json_schema_method_impl,
     json_schema_methods,
 };
 
 #[cfg(all(feature = "serde", feature = "jsonschema"))]
-use crate::features::jsonschema::{MergeCycleDiagnostic, merged_object_value};
+use crate::features::jsonschema::{MergeDiagnostic, merged_object_value};
 
 #[cfg(any(feature = "typescript", feature = "zod"))]
 use crate::utils::{get_enum_docs, get_struct_docs, strip_examples_from_docs};
@@ -80,6 +81,15 @@ use crate::utils::register_alias_info;
 use crate::utils::to_snake_case;
 
 use crate::rename_rule::resolve_rename_rule;
+
+/// What every plain-enum flatten diagnostic says about its own reach, so an author who fixes the
+/// one declaration named there knows what was and was not checked around it.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+const FLATTENED_PLAIN_ENUM_SCOPE: &str = "Only a type the registry has already classified reaches this guard; one it has not keeps its \
+     TypeScript and Zod intersection, and is refused by the JSON surface when the merge runs.";
 
 /// One variant of a discriminated enum, carrying everything its union member is rendered from.
 struct DiscriminatedVariant {
@@ -430,6 +440,28 @@ fn alias_target_kind(alias_field_def: &FieldDef) -> AliasKind {
     lookup_alias_info(target_name).map_or(AliasKind::Unknown, |target| target.kind)
 }
 
+/// The name of a flattened value's type when the registry proves that type is a plain enum.
+///
+/// Both flattened positions — an internally tagged newtype variant's content and a
+/// `#[serde(flatten)]` field — put what the value writes into the object being written, so only a
+/// value serde writes as an object belongs there. A plain enum writes its own variant name instead,
+/// which joins nothing and which every closed schema built here rejects.
+///
+/// The registry is the only thing the expansion holds that can rule this out, and it answers for a
+/// name it has already seen: `Unknown` is not a negative, and a struct and a branded newtype
+/// register alike. So this is a partial answer by construction, and the merge is where the rest is
+/// caught.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+fn flattened_plain_enum(inner: &FieldDef) -> Option<&str> {
+    let FieldDefType::SiblingType(name, _) = &inner.field_type else {
+        return None;
+    };
+    (alias_target_kind(inner) == AliasKind::EnumMembers).then_some(name.as_str())
+}
+
 /// The alias schema module is referenced by all three schema features — `typescript` and `zod`
 /// through the alias's registered export name, `jsonschema` through a Rust path to
 /// `#module_ident::Schema::json_schema()`. So the module and its `register_alias_info` call are
@@ -683,12 +715,10 @@ fn build_struct_validate_method(
     })
 }
 
-/// Computes the TypeScript types, Zod schemas, and JSON-schema references contributed by a
-/// struct's `#[serde(flatten)]` fields (empty vectors for any disabled output feature).
-#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-fn compute_flatten_outputs(
-    flattened_fields: &[FieldDef],
-) -> (Vec<String>, Vec<String>, Vec<proc_macro2::TokenStream>) {
+/// Computes the TypeScript types and Zod schemas contributed by a struct's `#[serde(flatten)]`
+/// fields (an empty vector for either disabled output feature).
+#[cfg(any(feature = "typescript", feature = "zod"))]
+fn compute_flatten_outputs(flattened_fields: &[FieldDef]) -> (Vec<String>, Vec<String>) {
     #[cfg(feature = "typescript")]
     let ts_types = flattened_fields
         .iter()
@@ -702,15 +732,43 @@ fn compute_flatten_outputs(
     #[cfg(not(feature = "zod"))]
     let zod_schemas = Vec::new();
 
-    #[cfg(feature = "jsonschema")]
-    let json_schemas = flattened_fields
-        .iter()
-        .map(flatten_field_json_schema_ref)
-        .collect();
-    #[cfg(not(feature = "jsonschema"))]
-    let json_schemas = Vec::new();
+    (ts_types, zod_schemas)
+}
 
-    (ts_types, zod_schemas, json_schemas)
+/// The schema methods a struct's module publishes — the JSON-schema document, the TypeScript
+/// definition, the Zod schema — each built only where its feature is on.
+///
+/// The module emits `zod_schema` without examples; example injection happens in the delegating
+/// method on the type, to avoid `super::` issues.
+///
+/// `flattened_fields` are the ones whose own members join the object the struct writes; every
+/// other field is written under a key of its own.
+#[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
+fn struct_schema_impl_items(
+    field_defs: Vec<FieldDef>,
+    flattened_fields: &[FieldDef],
+    item_name: &str,
+    docs: &str,
+) -> Vec<proc_macro2::TokenStream> {
+    #[cfg(not(feature = "typescript"))]
+    let _: &str = docs;
+    // bodies: (type_code, schema_code, json_schema_fields, fields_empty)
+    let bodies = render_struct_field_bodies(field_defs, Some(item_name));
+    // flatten: (ts_types, zod_schemas)
+    #[cfg(any(feature = "typescript", feature = "zod"))]
+    let flatten = compute_flatten_outputs(flattened_fields);
+    vec![
+        #[cfg(feature = "jsonschema")]
+        generate_json_schema_method(
+            &bodies.2,
+            &flatten_merged_sources(flattened_fields),
+            item_name,
+        ),
+        #[cfg(feature = "typescript")]
+        generate_ts_definition_method(docs, item_name, &bodies.0, bodies.3, &flatten.0),
+        #[cfg(feature = "zod")]
+        generate_zod_schema_method(item_name, &bodies.1, "", &flatten.1),
+    ]
 }
 
 /// Renders the per-field TypeScript type code, Zod schema code, and JSON-schema fragments for a
@@ -1037,6 +1095,44 @@ fn branded_guard_errors(
         .collect()
 }
 
+/// The `compile_error!` tokens for a `#[serde(flatten)]` field the registry proves is a plain enum,
+/// or `None` for every other field.
+///
+/// Read from the declaration rather than from the collected field so the diagnostic keeps the span
+/// of the type it rejects.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+fn flattened_field_guard_error(
+    field: &syn::Field,
+    type_name: &str,
+) -> Option<proc_macro2::TokenStream> {
+    let inner = get_field_def("_flattened", &field.ty, "");
+    let inner_name = flattened_plain_enum(&inner)?;
+    let field_name = field_label(
+        &field
+            .ident
+            .as_ref()
+            .map_or_else(String::new, ToString::to_string),
+    );
+    Some(
+        syn::Error::new_spanned(
+            &field.ty,
+            format!(
+                "model_schema: {field_name} of `{type_name}` carries `#[serde(flatten)]` over \
+                 `{inner_name}`, which serde does not write as an object: a plain enum writes its \
+                 own variant name, so it contributes no members to the object being written — \
+                 serde writes that name as a key holding null, which a schema closed around the \
+                 remaining fields rejects. Write the field as a named member so the value gets a \
+                 key of its own, or flatten a type serde writes as an object. \
+                 {FLATTENED_PLAIN_ENUM_SCOPE}"
+            ),
+        )
+        .to_compile_error(),
+    )
+}
+
 /// Processes every field of a struct, returning the regular field defs, the `#[serde(flatten)]`
 /// field defs, the per-field serde validation functions and `validate()` body fragments, and the
 /// `compile_error!` tokens for any field-level guard violations.
@@ -1057,6 +1153,15 @@ fn collect_struct_fields(
         let is_flatten = parse_serde_field_attributes(&field.attrs).flatten;
         #[cfg(not(feature = "serde"))]
         let is_flatten = false;
+
+        // Read before the field is processed, which strips the attributes the declaration carried.
+        #[cfg(all(
+            feature = "serde",
+            any(feature = "typescript", feature = "zod", feature = "jsonschema")
+        ))]
+        if is_flatten {
+            guard_errors.extend(flattened_field_guard_error(field, type_name));
+        }
 
         let (f_def, validation_fn, validate_body, field_guard_errors) =
             process_field(rename_all, field, module_name_opt, None, type_name);
@@ -1203,7 +1308,7 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
     // `Some(..)` selects schema-module-aware field processing; `None` (no schema output feature)
     // skips it so generated code never references a module that won't be emitted.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    let (module_name_opt, item_name_opt) = (Some(module_name.as_str()), Some(item_name.as_str()));
+    let module_name_opt = Some(module_name.as_str());
     #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
     let module_name_opt: Option<&str> = None;
 
@@ -1228,24 +1333,14 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
 
     #[cfg(feature = "typescript")]
     let docs = build_item_jsdoc(docs_and_example.0.as_deref(), &name);
+    #[cfg(all(
+        not(feature = "typescript"),
+        any(feature = "zod", feature = "jsonschema")
+    ))]
+    let docs = String::new();
 
-    // Generate the schema module methods. The schema module emits zod_schema without examples;
-    // example injection happens in the delegating method on the type to avoid `super::` issues.
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
-    let schema_impl_items: Vec<proc_macro2::TokenStream> = {
-        // bodies: (type_code, schema_code, json_schema_fields, fields_empty)
-        let bodies = render_struct_field_bodies(collected.0, item_name_opt);
-        // flatten: (ts_types, zod_schemas, json_schemas)
-        let flatten = compute_flatten_outputs(&collected.1);
-        vec![
-            #[cfg(feature = "jsonschema")]
-            generate_json_schema_method(&bodies.2, &flatten.2, &item_name),
-            #[cfg(feature = "typescript")]
-            generate_ts_definition_method(&docs, &item_name, &bodies.0, bodies.3, &flatten.0),
-            #[cfg(feature = "zod")]
-            generate_zod_schema_method(&item_name, &bodies.1, "", &flatten.1),
-        ]
-    };
+    let schema_impl_items = struct_schema_impl_items(collected.0, &collected.1, &item_name, &docs);
 
     // schema_example must be directly on the type (not in the module) because the example code
     // uses type names that may not be accessible from the nested module.
@@ -3425,7 +3520,22 @@ fn internally_tagged_guard_errors(
             // An empty tuple variant carries nothing: serde writes it as the tag alone, which is
             // what the unit arm already describes.
             let field = unnamed.unnamed.first()?;
-            let message = match tagged_content(&get_field_def("_inner", &field.ty, "")) {
+            let inner = get_field_def("_inner", &field.ty, "");
+            let message = match tagged_content(&inner) {
+                #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+                TaggedContent::Flattened => {
+                    let inner_name = flattened_plain_enum(&inner)?;
+                    format!(
+                        "model_schema: variant `{variant_name}` of internally tagged enum \
+                         `{enum_name}` wraps `{inner_name}`, which serde does not write as an \
+                         object: a plain enum writes its own variant name, so nothing of it joins \
+                         the tag — serde writes that name as a key holding null, which a schema \
+                         closed around the tag rejects. Name a `content` key so the value gets an \
+                         object of its own, or wrap it in a struct whose fields can sit beside the \
+                         tag. {FLATTENED_PLAIN_ENUM_SCOPE}"
+                    )
+                }
+                #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
                 TaggedContent::Flattened => return None,
                 TaggedContent::Refused(shape) => format!(
                     "model_schema: variant `{variant_name}` of internally tagged enum \
@@ -3513,10 +3623,11 @@ fn render_internal_variant(
             &tag_object,
             // The same reference a `#[serde(flatten)]` base contributes: both name a type whose
             // members join the object being written.
-            &[flatten_field_json_schema_ref(inner)],
-            &MergeCycleDiagnostic {
+            &[flatten_merged_source(inner)],
+            &MergeDiagnostic {
+                cycle_remedy: "name a `content` key so the content gets an object of its own",
                 edge: &format!("the content of variant `{variant_name}`,"),
-                remedy: "name a `content` key so the content gets an object of its own",
+                non_object_remedy: "name a `content` key so the content gets an object of its own",
                 subject: self_type_name,
             },
         )
@@ -6477,18 +6588,33 @@ fn get_final_variant_name(
 /// Generates the JSON schema method conditionally based on the jsonschema feature.
 fn generate_json_schema_method(
     json_schema_fields: &[proc_macro2::TokenStream],
-    flatten_json_schemas: &[proc_macro2::TokenStream],
+    flatten_json_schemas: &[MergedSource],
     def_name: &str,
 ) -> proc_macro2::TokenStream {
     generate_struct_json_schema_method_impl(json_schema_fields, flatten_json_schemas, def_name)
 }
 
+/// What a struct's `#[serde(flatten)]` fields contribute to the object it writes.
 #[cfg(feature = "jsonschema")]
-fn flatten_field_json_schema_ref(fld: &FieldDef) -> proc_macro2::TokenStream {
+fn flatten_merged_sources(flattened_fields: &[FieldDef]) -> Vec<MergedSource> {
+    flattened_fields.iter().map(flatten_merged_source).collect()
+}
+
+/// What a value whose members join the object being written contributes to it, labelled with the
+/// name the author gave it: the type for a named one, the field otherwise — a shape with no name of
+/// its own is only ever pointed at through where it was written.
+#[cfg(feature = "jsonschema")]
+fn flatten_merged_source(fld: &FieldDef) -> MergedSource {
     if let FieldDefType::SiblingType(name, _) = &fld.field_type {
-        sibling_json_schema_value(name, fld.type_span)
+        MergedSource {
+            label: name.clone(),
+            value: sibling_json_schema_value(name, fld.type_span),
+        }
     } else {
-        quote! { serde_json::json!({ "type": "object" }) }
+        MergedSource {
+            label: fld.name.clone(),
+            value: quote! { serde_json::json!({ "type": "object" }) },
+        }
     }
 }
 
