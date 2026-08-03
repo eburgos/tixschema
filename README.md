@@ -190,6 +190,7 @@ Discriminated unions also support tuple variants. Single-element tuples are flat
 ```rust
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "type", content = "value")]
 pub enum FixedValue {
     // Unit variant (no data)
     Empty,
@@ -256,6 +257,64 @@ pub enum Event {
 ```
 
 This generates `kind` as the discriminator and `data` as the value field instead of the defaults (`type` and `value`).
+
+#### Externally Tagged Enums (No Tagging Attributes)
+
+An enum with data-carrying variants that names neither `tag` nor `content` is externally tagged, which is Serde's default: the variant name is the sole key of an object holding the content, and a unit variant is that name as a bare string. The generated surfaces describe that form -- a JSON Schema `oneOf`, a TypeScript union, and a Zod `z.union([...])`. There is no field every member shares, so the Zod schema is a plain union rather than a `z.discriminatedUnion`.
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum External {
+    Bare,
+    Fields { a: String, b: bool },
+    Pair(u32, u32),
+    Single(String),
+}
+```
+
+Serialized by Serde:
+
+```json
+"Bare"
+{ "Fields": { "a": "a", "b": true } }
+{ "Pair": [1, 2] }
+{ "Single": "a" }
+```
+
+Generated TypeScript:
+
+```typescript
+export type External = "Bare" | {
+  "Fields": {
+    a: string;
+    b: boolean;
+  };
+} | {
+  "Pair": [number, number];
+} | {
+  "Single": string;
+};
+```
+
+Generated Zod:
+
+```typescript
+export const External$Schema: ZodType<External> = z.union([
+  z.literal("Bare"),
+  z.strictObject({
+    "Fields": z.strictObject({ a: z.string(), b: z.boolean() }),
+  }),
+  z.strictObject({
+    "Pair": z.tuple([z.number().int(), z.number().int()]),
+  }),
+  z.strictObject({
+    "Single": z.string(),
+  }),
+]);
+```
+
+Add `#[serde(tag = "...", content = "...")]` to get the adjacently tagged `{ type, value }` form documented above instead.
 
 ### Intersection Types (`#[serde(flatten)]`)
 
