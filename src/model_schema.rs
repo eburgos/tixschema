@@ -51,13 +51,14 @@ use crate::features::model_schema_prop::{ModelSchemaPropMeta, parse_model_schema
 
 #[cfg(feature = "jsonschema")]
 use crate::features::jsonschema::{
+    MergedSource,
     generate_plain_enum_json_schema_method as generate_plain_enum_json_schema_method_impl,
     generate_struct_json_schema_method as generate_struct_json_schema_method_impl,
     json_schema_methods,
 };
 
 #[cfg(all(feature = "serde", feature = "jsonschema"))]
-use crate::features::jsonschema::{MergeCycleDiagnostic, merged_object_value};
+use crate::features::jsonschema::{MergeDiagnostic, merged_object_value};
 
 #[cfg(any(feature = "typescript", feature = "zod"))]
 use crate::utils::{get_enum_docs, get_struct_docs, strip_examples_from_docs};
@@ -87,6 +88,15 @@ use crate::rename_rule::resolve_rename_rule;
 /// An argument added to [`apply_arg`] belongs here too: `no_argument_the_parser_reads_is_rejected`
 /// walks this list back through the parser and fails on any name here it does not read.
 const KNOWN_ARGS: &[&str] = &["name", "pattern", "minLength", "maxLength", "no_display"];
+
+/// What every plain-enum flatten diagnostic says about its own reach, so an author who fixes the
+/// one declaration named there knows what was and was not checked around it.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+const FLATTENED_PLAIN_ENUM_SCOPE: &str = "Only a type the registry has already classified reaches this guard; one it has not keeps its \
+     TypeScript and Zod intersection, and is refused by the JSON surface when the merge runs.";
 
 /// One variant of a discriminated enum, carrying everything its union member is rendered from.
 struct DiscriminatedVariant {
@@ -255,7 +265,7 @@ enum MapMemberRejection {
 ///
 /// Every position a map is written in reads its key through this one classification, so a key
 /// cannot enumerate its members in field position and stay open in a slot.
-#[cfg(feature = "jsonschema")]
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 enum MapKeyPath<'key> {
     /// A key named by a type path, whose `enum_members()` become the object's keys.
     Enumerated(&'key str),
@@ -522,6 +532,42 @@ fn alias_target_kind(alias_field_def: &FieldDef) -> AliasKind {
     lookup_alias_info(target_name).map_or(AliasKind::Unknown, |target| target.kind)
 }
 
+/// The `compile_error!` tokens an alias whose target reaches a map key with no `enum_members()`
+/// earns, or `None` when it reaches none. Spanned on the target, which is where the key was
+/// written.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn alias_map_key_guard_error(
+    alias: &ItemType,
+    export_name: &str,
+    alias_field_def: &FieldDef,
+) -> Option<proc_macro2::TokenStream> {
+    let key_type_name = non_enum_map_key(alias_field_def)?;
+    let message = non_enum_map_key_message(&format!("type alias `{export_name}`"), key_type_name);
+    Some(syn::Error::new_spanned(&alias.ty, message).to_compile_error())
+}
+
+/// The name of a flattened value's type when the registry proves that type is a plain enum.
+///
+/// Both flattened positions — an internally tagged newtype variant's content and a
+/// `#[serde(flatten)]` field — put what the value writes into the object being written, so only a
+/// value serde writes as an object belongs there. A plain enum writes its own variant name instead,
+/// which joins nothing and which every closed schema built here rejects.
+///
+/// The registry is the only thing the expansion holds that can rule this out, and it answers for a
+/// name it has already seen: `Unknown` is not a negative, and a struct and a branded newtype
+/// register alike. So this is a partial answer by construction, and the merge is where the rest is
+/// caught.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+fn flattened_plain_enum(inner: &FieldDef) -> Option<&str> {
+    let FieldDefType::SiblingType(name, _) = &inner.field_type else {
+        return None;
+    };
+    (alias_target_kind(inner) == AliasKind::EnumMembers).then_some(name.as_str())
+}
+
 /// The alias schema module is referenced by all three schema features — `typescript` and `zod`
 /// through the alias's registered export name, `jsonschema` through a Rust path to
 /// `#module_ident::Schema::json_schema()`. So the module and its `register_alias_info` call are
@@ -545,6 +591,14 @@ fn process_type_alias(item_type: ItemType, args: &ModelSchemaArgs) -> TokenStrea
     let alias_field_def = get_field_def(export_name.as_str(), &alias.ty, "");
     let kind = alias_target_kind(&alias_field_def);
     register_alias_info(&rust_ident_str, &export_name, &module_name, kind);
+
+    // Registered above whatever the outcome, so a type naming a refused alias still resolves to the
+    // export name the author wrote and the alias's own diagnostic stays the one they act on.
+    if let Some(error) = alias_map_key_guard_error(&alias, &export_name, &alias_field_def)
+        && let Some(output) = guard_failure_output(&alias, &[error])
+    {
+        return output;
+    }
 
     let ts_method = generate_alias_ts_definition_method(&alias, &export_name, &alias_field_def);
     let json_schema_method =
@@ -775,12 +829,10 @@ fn build_struct_validate_method(
     })
 }
 
-/// Computes the TypeScript types, Zod schemas, and JSON-schema references contributed by a
-/// struct's `#[serde(flatten)]` fields (empty vectors for any disabled output feature).
-#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-fn compute_flatten_outputs(
-    flattened_fields: &[FieldDef],
-) -> (Vec<String>, Vec<String>, Vec<proc_macro2::TokenStream>) {
+/// Computes the TypeScript types and Zod schemas contributed by a struct's `#[serde(flatten)]`
+/// fields (an empty vector for either disabled output feature).
+#[cfg(any(feature = "typescript", feature = "zod"))]
+fn compute_flatten_outputs(flattened_fields: &[FieldDef]) -> (Vec<String>, Vec<String>) {
     #[cfg(feature = "typescript")]
     let ts_types = flattened_fields
         .iter()
@@ -794,15 +846,43 @@ fn compute_flatten_outputs(
     #[cfg(not(feature = "zod"))]
     let zod_schemas = Vec::new();
 
-    #[cfg(feature = "jsonschema")]
-    let json_schemas = flattened_fields
-        .iter()
-        .map(flatten_field_json_schema_ref)
-        .collect();
-    #[cfg(not(feature = "jsonschema"))]
-    let json_schemas = Vec::new();
+    (ts_types, zod_schemas)
+}
 
-    (ts_types, zod_schemas, json_schemas)
+/// The schema methods a struct's module publishes — the JSON-schema document, the TypeScript
+/// definition, the Zod schema — each built only where its feature is on.
+///
+/// The module emits `zod_schema` without examples; example injection happens in the delegating
+/// method on the type, to avoid `super::` issues.
+///
+/// `flattened_fields` are the ones whose own members join the object the struct writes; every
+/// other field is written under a key of its own.
+#[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
+fn struct_schema_impl_items(
+    field_defs: Vec<FieldDef>,
+    flattened_fields: &[FieldDef],
+    item_name: &str,
+    docs: &str,
+) -> Vec<proc_macro2::TokenStream> {
+    #[cfg(not(feature = "typescript"))]
+    let _: &str = docs;
+    // bodies: (type_code, schema_code, json_schema_fields, fields_empty)
+    let bodies = render_struct_field_bodies(field_defs, Some(item_name));
+    // flatten: (ts_types, zod_schemas)
+    #[cfg(any(feature = "typescript", feature = "zod"))]
+    let flatten = compute_flatten_outputs(flattened_fields);
+    vec![
+        #[cfg(feature = "jsonschema")]
+        generate_json_schema_method(
+            &bodies.2,
+            &flatten_merged_sources(flattened_fields),
+            item_name,
+        ),
+        #[cfg(feature = "typescript")]
+        generate_ts_definition_method(docs, item_name, &bodies.0, bodies.3, &flatten.0),
+        #[cfg(feature = "zod")]
+        generate_zod_schema_method(item_name, &bodies.1, "", &flatten.1),
+    ]
 }
 
 /// Renders the per-field TypeScript type code, Zod schema code, and JSON-schema fragments for a
@@ -1144,6 +1224,44 @@ fn branded_guard_errors(
         .collect()
 }
 
+/// The `compile_error!` tokens for a `#[serde(flatten)]` field the registry proves is a plain enum,
+/// or `None` for every other field.
+///
+/// Read from the declaration rather than from the collected field so the diagnostic keeps the span
+/// of the type it rejects.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+fn flattened_field_guard_error(
+    field: &syn::Field,
+    type_name: &str,
+) -> Option<proc_macro2::TokenStream> {
+    let inner = get_field_def("_flattened", &field.ty, "");
+    let inner_name = flattened_plain_enum(&inner)?;
+    let field_name = field_label(
+        &field
+            .ident
+            .as_ref()
+            .map_or_else(String::new, ToString::to_string),
+    );
+    Some(
+        syn::Error::new_spanned(
+            &field.ty,
+            format!(
+                "model_schema: {field_name} of `{type_name}` carries `#[serde(flatten)]` over \
+                 `{inner_name}`, which serde does not write as an object: a plain enum writes its \
+                 own variant name, so it contributes no members to the object being written — \
+                 serde writes that name as a key holding null, which a schema closed around the \
+                 remaining fields rejects. Write the field as a named member so the value gets a \
+                 key of its own, or flatten a type serde writes as an object. \
+                 {FLATTENED_PLAIN_ENUM_SCOPE}"
+            ),
+        )
+        .to_compile_error(),
+    )
+}
+
 /// Processes every field of a struct, returning the regular field defs, the `#[serde(flatten)]`
 /// field defs, the per-field serde validation functions and `validate()` body fragments, and the
 /// `compile_error!` tokens for any field-level guard violations.
@@ -1164,6 +1282,15 @@ fn collect_struct_fields(
         let is_flatten = parse_serde_field_attributes(&field.attrs).flatten;
         #[cfg(not(feature = "serde"))]
         let is_flatten = false;
+
+        // Read before the field is processed, which strips the attributes the declaration carried.
+        #[cfg(all(
+            feature = "serde",
+            any(feature = "typescript", feature = "zod", feature = "jsonschema")
+        ))]
+        if is_flatten {
+            guard_errors.extend(flattened_field_guard_error(field, type_name));
+        }
 
         let (f_def, validation_fn, validate_body, field_guard_errors) =
             process_field(rename_all, field, module_name_opt, None, type_name);
@@ -1310,7 +1437,7 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
     // `Some(..)` selects schema-module-aware field processing; `None` (no schema output feature)
     // skips it so generated code never references a module that won't be emitted.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    let (module_name_opt, item_name_opt) = (Some(module_name.as_str()), Some(item_name.as_str()));
+    let module_name_opt = Some(module_name.as_str());
     #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
     let module_name_opt: Option<&str> = None;
 
@@ -1335,24 +1462,14 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
 
     #[cfg(feature = "typescript")]
     let docs = build_item_jsdoc(docs_and_example.0.as_deref(), &name);
+    #[cfg(all(
+        not(feature = "typescript"),
+        any(feature = "zod", feature = "jsonschema")
+    ))]
+    let docs = String::new();
 
-    // Generate the schema module methods. The schema module emits zod_schema without examples;
-    // example injection happens in the delegating method on the type to avoid `super::` issues.
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
-    let schema_impl_items: Vec<proc_macro2::TokenStream> = {
-        // bodies: (type_code, schema_code, json_schema_fields, fields_empty)
-        let bodies = render_struct_field_bodies(collected.0, item_name_opt);
-        // flatten: (ts_types, zod_schemas, json_schemas)
-        let flatten = compute_flatten_outputs(&collected.1);
-        vec![
-            #[cfg(feature = "jsonschema")]
-            generate_json_schema_method(&bodies.2, &flatten.2, &item_name),
-            #[cfg(feature = "typescript")]
-            generate_ts_definition_method(&docs, &item_name, &bodies.0, bodies.3, &flatten.0),
-            #[cfg(feature = "zod")]
-            generate_zod_schema_method(&item_name, &bodies.1, "", &flatten.1),
-        ]
-    };
+    let schema_impl_items = struct_schema_impl_items(collected.0, &collected.1, &item_name, &docs);
 
     // schema_example must be directly on the type (not in the module) because the example code
     // uses type names that may not be accessible from the nested module.
@@ -3532,7 +3649,22 @@ fn internally_tagged_guard_errors(
             // An empty tuple variant carries nothing: serde writes it as the tag alone, which is
             // what the unit arm already describes.
             let field = unnamed.unnamed.first()?;
-            let message = match tagged_content(&get_field_def("_inner", &field.ty, "")) {
+            let inner = get_field_def("_inner", &field.ty, "");
+            let message = match tagged_content(&inner) {
+                #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+                TaggedContent::Flattened => {
+                    let inner_name = flattened_plain_enum(&inner)?;
+                    format!(
+                        "model_schema: variant `{variant_name}` of internally tagged enum \
+                         `{enum_name}` wraps `{inner_name}`, which serde does not write as an \
+                         object: a plain enum writes its own variant name, so nothing of it joins \
+                         the tag — serde writes that name as a key holding null, which a schema \
+                         closed around the tag rejects. Name a `content` key so the value gets an \
+                         object of its own, or wrap it in a struct whose fields can sit beside the \
+                         tag. {FLATTENED_PLAIN_ENUM_SCOPE}"
+                    )
+                }
+                #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
                 TaggedContent::Flattened => return None,
                 TaggedContent::Refused(shape) => format!(
                     "model_schema: variant `{variant_name}` of internally tagged enum \
@@ -3620,10 +3752,11 @@ fn render_internal_variant(
             &tag_object,
             // The same reference a `#[serde(flatten)]` base contributes: both name a type whose
             // members join the object being written.
-            &[flatten_field_json_schema_ref(inner)],
-            &MergeCycleDiagnostic {
+            &[flatten_merged_source(inner)],
+            &MergeDiagnostic {
+                cycle_remedy: "name a `content` key so the content gets an object of its own",
                 edge: &format!("the content of variant `{variant_name}`,"),
-                remedy: "name a `content` key so the content gets an object of its own",
+                non_object_remedy: "name a `content` key so the content gets an object of its own",
                 subject: self_type_name,
             },
         )
@@ -4929,7 +5062,7 @@ fn tuple_json_schema_value(
 ///
 /// Only a bare type path can name an enum: a generic spelling is a type this expansion has no
 /// `enum_members()` for, and every other type names keys the schema cannot enumerate.
-#[cfg(feature = "jsonschema")]
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 const fn map_key_path(key: &FieldDef) -> MapKeyPath<'_> {
     match &key.field_type {
         FieldDefType::String => MapKeyPath::Open,
@@ -4962,6 +5095,104 @@ const fn map_key_path(key: &FieldDef) -> MapKeyPath<'_> {
         | FieldDefType::NaiveDateTime
         | FieldDefType::NaiveTime => MapKeyPath::Unnarrowed,
     }
+}
+
+/// The name a map key carries when the registry proves it has no `enum_members()`, and `None` for
+/// every key that may still have them.
+///
+/// Only a target the registry positively rules out is named: an unregistered name — a foreign
+/// type, or one expanded after the type that writes the map — cannot be ruled out at this
+/// expansion, and is left alone.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn key_without_enum_members(key: &FieldDef) -> Option<&str> {
+    let MapKeyPath::Enumerated(key_type_name) = map_key_path(key) else {
+        return None;
+    };
+    proves_no_enum_members(key_type_name).then_some(key_type_name)
+}
+
+/// Whether the registry rules the named type out as a source of `enum_members()`. `false` covers
+/// both the plain enums that have them and the names this expansion never saw registered.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn proves_no_enum_members(key_type_name: &str) -> bool {
+    lookup_alias_info(key_type_name)
+        .is_some_and(|key_alias| key_alias.kind == AliasKind::NoEnumMembers)
+}
+
+/// The name of the first map key this field reaches, at any depth, that the registry proves has no
+/// `enum_members()`.
+///
+/// Every surface names such a key: TypeScript writes it as a `Record`'s key type, Zod as a
+/// `z.record` key schema, and the JSON schema calls `enum_members()` on it to spell the object's
+/// properties. So the key is answered for once, off the field all three render from, rather than
+/// by whichever of them a build happens to enable.
+///
+/// Recurses through `SiblingType` generics, `Map` keys/values, and `Tuple` elements — the walk
+/// [`FieldDef::os_string_name`] makes. What position the map sits in is not what decides whether
+/// its key can enumerate.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn non_enum_map_key(fld: &FieldDef) -> Option<&str> {
+    match &fld.field_type {
+        FieldDefType::Map(key, value) => key_without_enum_members(key)
+            .or_else(|| non_enum_map_key(key))
+            .or_else(|| non_enum_map_key(value)),
+        FieldDefType::SiblingType(_, generics) => generics.iter().find_map(non_enum_map_key),
+        FieldDefType::Tuple(elements) => elements.iter().find_map(non_enum_map_key),
+        FieldDefType::Unknown
+        | FieldDefType::StringLiteral(_)
+        | FieldDefType::Boolean
+        | FieldDefType::String
+        | FieldDefType::U8
+        | FieldDefType::U16
+        | FieldDefType::U32
+        | FieldDefType::U64
+        | FieldDefType::I8
+        | FieldDefType::I16
+        | FieldDefType::I32
+        | FieldDefType::I64
+        | FieldDefType::Usize
+        | FieldDefType::Isize
+        | FieldDefType::F32
+        | FieldDefType::F64 => None,
+        #[cfg(feature = "object_id")]
+        FieldDefType::ObjectId => None,
+        #[cfg(feature = "chrono")]
+        FieldDefType::NaiveDate
+        | FieldDefType::NaiveTime
+        | FieldDefType::NaiveDateTime
+        | FieldDefType::DateTime => None,
+    }
+}
+
+/// What a key with no members is reported as. The `subject` names where the map was written — a
+/// field, an alias — which is what the author can act on and all that differs between them.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn non_enum_map_key_message(subject: &str, key_type_name: &str) -> String {
+    format!(
+        "{subject}: a map key must be a plain `#[model_schema()]` enum, whose members become the object's keys — `{key_type_name}` resolves to a type with no `enum_members()`"
+    )
+}
+
+/// Rejects a field reaching a map key the registry proves carries no `enum_members()`.
+///
+/// Those members are what every surface writes the map's keys from, so a key that has none leaves
+/// each of them describing an object whose keys nothing can supply — and leaves the JSON schema
+/// calling a method the author never wrote, which rustc blames `#[model_schema()]` for. The key is
+/// written as a *type path*, which resolves through any alias, so an alias of a non-enum is named
+/// here as the alias the author wrote.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn check_non_enum_map_key(
+    field: &Field,
+    field_def: &FieldDef,
+    label: &str,
+) -> Result<(), syn::Error> {
+    let Some(key_type_name) = non_enum_map_key(field_def) else {
+        return Ok(());
+    };
+    Err(syn::Error::new_spanned(
+        field,
+        non_enum_map_key_message(label, key_type_name),
+    ))
 }
 
 /// The `json!` literal a map whose keys cannot be narrowed describes as: an object, with nothing
@@ -5139,9 +5370,9 @@ fn build_map_member_schema(
 #[cfg(feature = "jsonschema")]
 fn map_member_rejection_message(subject: &str, rejection: &MapMemberRejection) -> String {
     match rejection {
-        MapMemberRejection::NonEnumKey(key_type_name) => format!(
-            "{subject}: a map key must be a plain `#[model_schema()]` enum, whose members become the object's keys — `{key_type_name}` resolves to a type with no `enum_members()`"
-        ),
+        MapMemberRejection::NonEnumKey(key_type_name) => {
+            non_enum_map_key_message(subject, key_type_name)
+        }
         MapMemberRejection::Tuple => format!(
             "{subject}: a tuple is not supported as a map value — give the value a `#[model_schema()]` struct instead"
         ),
@@ -5206,19 +5437,18 @@ fn build_enum_key_map_member_item(value: &FieldDef) -> Result<MapMemberItem, Map
 /// in: a field's insertion, a member of an enclosing map, a tuple's `prefixItems` slot. A key that
 /// enumerates its members therefore enumerates them at any depth.
 ///
-/// The key is written as a *type path*, which resolves through any alias, so an alias of a non-enum
-/// lands on a type with no `enum_members()` and rustc blames `#[model_schema()]` for a method the
-/// author never wrote. Only a target the registry positively rules out is turned away here: an
-/// unregistered name — a foreign type, or one expanded after this struct — stays on the emitting
-/// path, where it behaves as it always has.
+/// [`check_non_enum_map_key`] walks every field an item renders from and drops the whole schema
+/// surface when one reaches a key with no members, so no such key should arrive here. The question
+/// is asked again because the `enum_members()` call is *this* function's to emit, and it is only
+/// sound for a key that has them: whatever reaches this dispatch, a key the registry rules out
+/// leaves with a diagnostic naming it rather than with rustc blaming `#[model_schema()]` for a
+/// method the author never wrote.
 #[cfg(feature = "jsonschema")]
 fn enum_key_map_json_schema_value(
     key_type_name: &str,
     value: &FieldDef,
 ) -> Result<proc_macro2::TokenStream, MapMemberRejection> {
-    if lookup_alias_info(key_type_name)
-        .is_some_and(|key_alias| key_alias.kind == AliasKind::NoEnumMembers)
-    {
+    if proves_no_enum_members(key_type_name) {
         return Err(MapMemberRejection::NonEnumKey(key_type_name.to_owned()));
     }
 
@@ -6179,13 +6409,14 @@ fn field_guard_errors(
         .collect()
 }
 
-/// Every guard error the field violates: the `OsString` guard first — it reads the written type,
-/// which no attribute can hide — then what the `model_schema_prop` parser refused, then the
-/// unparseable `pattern`, then the serde-side guards when any fired.
+/// Every guard error the field violates: the two the written type earns — the `OsString` guard and
+/// the map-key guard, neither of which any attribute can hide — then what the `model_schema_prop`
+/// parser refused, then the unparseable `pattern`, then the serde-side guards when any fired.
 ///
 /// Both `model_schema_prop` guards stand under every feature subset: an unread key and an
 /// unparseable `pattern` alike reach the Rust validator, the Zod literal and the JSON schema, and
-/// no toggle makes either one mean anything.
+/// no toggle makes either one mean anything. The map-key guard stands under every subset that
+/// emits a schema at all, which is the same set the registry it reads is populated under.
 fn collect_field_guard_errors(
     field: &Field,
     field_def: &FieldDef,
@@ -6194,10 +6425,19 @@ fn collect_field_guard_errors(
     serde_guard_errors: Vec<proc_macro2::TokenStream>,
 ) -> Vec<proc_macro2::TokenStream> {
     let label = field_label(raw_field_ident);
+
+    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+    let map_key_error = check_non_enum_map_key(field, field_def, &label)
+        .err()
+        .map(|err| err.to_compile_error());
+    #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+    let map_key_error: Option<proc_macro2::TokenStream> = None;
+
     check_os_string_field(field, field_def, &label)
         .err()
         .map(|err| err.to_compile_error())
         .into_iter()
+        .chain(map_key_error)
         .chain(
             prop_meta
                 .attr_rejection
@@ -6314,6 +6554,11 @@ fn process_field(
     // Create the field definition and apply any model_schema_prop overrides
     let mut field_def = get_field_def(&final_name, field_type, &field_docs);
 
+    // Resolve `Self` references to the concrete type name so recursive fields
+    // (e.g. `Vec<Self>`) are treated exactly like `Vec<EnclosingType>`. Resolved before the guards
+    // read the field so each one asks its question of the type the surfaces will render.
+    field_def.resolve_self_references(type_name);
+
     #[cfg(feature = "serde")]
     let serde_guard_errors = field_guard_errors(
         field,
@@ -6333,9 +6578,6 @@ fn process_field(
         serde_guard_errors,
     );
 
-    // Resolve `Self` references to the concrete type name so recursive fields
-    // (e.g. `Vec<Self>`) are treated exactly like `Vec<EnclosingType>`.
-    field_def.resolve_self_references(type_name);
     field_def.model_schema_prop_meta = (model_schema_prop_meta.as_type.is_some()
         || model_schema_prop_meta.literal.is_some()
         || model_schema_prop_meta.min_length.is_some()
@@ -6584,18 +6826,33 @@ fn get_final_variant_name(
 /// Generates the JSON schema method conditionally based on the jsonschema feature.
 fn generate_json_schema_method(
     json_schema_fields: &[proc_macro2::TokenStream],
-    flatten_json_schemas: &[proc_macro2::TokenStream],
+    flatten_json_schemas: &[MergedSource],
     def_name: &str,
 ) -> proc_macro2::TokenStream {
     generate_struct_json_schema_method_impl(json_schema_fields, flatten_json_schemas, def_name)
 }
 
+/// What a struct's `#[serde(flatten)]` fields contribute to the object it writes.
 #[cfg(feature = "jsonschema")]
-fn flatten_field_json_schema_ref(fld: &FieldDef) -> proc_macro2::TokenStream {
+fn flatten_merged_sources(flattened_fields: &[FieldDef]) -> Vec<MergedSource> {
+    flattened_fields.iter().map(flatten_merged_source).collect()
+}
+
+/// What a value whose members join the object being written contributes to it, labelled with the
+/// name the author gave it: the type for a named one, the field otherwise — a shape with no name of
+/// its own is only ever pointed at through where it was written.
+#[cfg(feature = "jsonschema")]
+fn flatten_merged_source(fld: &FieldDef) -> MergedSource {
     if let FieldDefType::SiblingType(name, _) = &fld.field_type {
-        sibling_json_schema_value(name, fld.type_span)
+        MergedSource {
+            label: name.clone(),
+            value: sibling_json_schema_value(name, fld.type_span),
+        }
     } else {
-        quote! { serde_json::json!({ "type": "object" }) }
+        MergedSource {
+            label: fld.name.clone(),
+            value: quote! { serde_json::json!({ "type": "object" }) },
+        }
     }
 }
 

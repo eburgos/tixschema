@@ -23,7 +23,10 @@ fn test_json_schema_method_flatten_emits_merge() {
     let no_flatten = generate_struct_json_schema_method(&fields, &[], "Node").to_string();
     let with_flatten = generate_struct_json_schema_method(
         &fields,
-        &[quote::quote! { serde_json::json!({ "type": "object" }) }],
+        &[MergedSource {
+            label: "Base".to_owned(),
+            value: quote::quote! { serde_json::json!({ "type": "object" }) },
+        }],
         "Node",
     )
     .to_string();

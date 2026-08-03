@@ -5,14 +5,28 @@
 /// What every pointer the crate writes opens with; what follows it is the name being deferred.
 const DEFS_PREFIX: &str = "#/$defs/";
 
-/// How a merge that closes a cycle names itself in the diagnostic it raises.
+/// How a merge that cannot proceed names itself in the diagnostic it raises.
 ///
 /// `subject` is the frame that reads the merge, `edge` what the merged schema was reached through,
-/// and `remedy` the way out in the spelling that applies where that edge was written.
-pub struct MergeCycleDiagnostic<'msg> {
+/// and each remedy the way out in the spelling that applies where that edge was written.
+pub struct MergeDiagnostic<'msg> {
+    /// The way out of a cycle: what makes the edge defer rather than merge.
+    pub cycle_remedy: &'msg str,
     pub edge: &'msg str,
-    pub remedy: &'msg str,
+    /// The way out of a merged value that is not an object: what gives that value a place of its
+    /// own.
+    pub non_object_remedy: &'msg str,
     pub subject: &'msg str,
+}
+
+/// One schema merged into a base, together with how the author named it.
+///
+/// A merged schema is a `serde_json` expression by the time it reaches the merge and no longer
+/// carries the name it came from, so the label travels beside it — it is what a diagnostic points
+/// the author at.
+pub struct MergedSource {
+    pub label: String,
+    pub value: proc_macro2::TokenStream,
 }
 
 /// Check if we should generate JSON schema methods.
@@ -96,7 +110,7 @@ pub fn json_schema_methods(
 /// fields and the flattened union together.
 pub fn generate_struct_json_schema_method(
     json_schema_fields: &[proc_macro2::TokenStream],
-    flatten_json_schemas: &[proc_macro2::TokenStream],
+    flatten_json_schemas: &[MergedSource],
     def_name: &str,
 ) -> proc_macro2::TokenStream {
     let body = if flatten_json_schemas.is_empty() {
@@ -141,73 +155,99 @@ fn closed_object_body(json_schema_fields: &[proc_macro2::TokenStream]) -> proc_m
 ///
 /// A merged schema that is itself a `oneOf` multiplies out rather than collapsing, so each branch
 /// stays a closed object naming exactly the members that branch writes.
+///
+/// Only a value serde writes as an object has members to contribute, and the expansion cannot
+/// always tell which types those are — a name reaches the merge without saying what it writes. The
+/// schema it produces does say, so the merge reads it there: a description naming any type but
+/// `object` is refused rather than merged, which is the last point at which the wrong schema can
+/// still be stopped.
+/// The four things the merge asks of a schema it is handed, as the tokens the merging block opens
+/// with: how two objects join, whether a schema is a deferred name, what type it commits its value
+/// to, and which branches it offers.
+fn merge_readers() -> proc_macro2::TokenStream {
+    let defs_prefix = DEFS_PREFIX;
+    quote::quote! {
+        fn merge_object_schemas(
+            a: &serde_json::Map<String, serde_json::Value>,
+            b: &serde_json::Map<String, serde_json::Value>,
+        ) -> serde_json::Map<String, serde_json::Value> {
+            let mut out = serde_json::Map::new();
+            out.insert("type".to_string(), serde_json::Value::String("object".to_string()));
+            let mut properties = serde_json::Map::new();
+            for src in [a, b] {
+                if let Some(p) = src.get("properties").and_then(serde_json::Value::as_object) {
+                    for (k, v) in p {
+                        properties.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            out.insert("properties".to_string(), serde_json::Value::Object(properties));
+            let mut required: Vec<serde_json::Value> = Vec::new();
+            for src in [a, b] {
+                if let Some(r) = src.get("required").and_then(serde_json::Value::as_array) {
+                    for item in r {
+                        if !required.contains(item) {
+                            required.push(item.clone());
+                        }
+                    }
+                }
+            }
+            out.insert("required".to_string(), serde_json::Value::Array(required));
+            out.insert("additionalProperties".to_string(), serde_json::Value::Bool(false));
+            out
+        }
+
+        // A flattened base that names itself describes as a reference into the definitions being
+        // hoisted, and a reference is the one thing with no properties to merge. The body it
+        // points at is written by then — the frame that deferred the name fills the entry in
+        // before it returns — so the merge reads it back.
+        fn deferred_name(schema: &serde_json::Value) -> Option<&str> {
+            schema.get("$ref")?.as_str()?.strip_prefix(#defs_prefix)
+        }
+
+        // What a description commits its value to on the wire, when it commits to anything. A
+        // union of branches and a bare reference name no type of their own, and neither is
+        // provably not an object, so both are left to the merge.
+        fn described_type(schema: &serde_json::Value) -> Option<&str> {
+            schema.get("type")?.as_str()
+        }
+
+        fn branches_of(
+            schema: &serde_json::Value,
+        ) -> Vec<serde_json::Map<String, serde_json::Value>> {
+            if let Some(one_of) = schema.get("oneOf").and_then(serde_json::Value::as_array) {
+                one_of.iter().filter_map(|b| b.as_object().cloned()).collect()
+            } else if let Some(obj) = schema.as_object() {
+                vec![obj.clone()]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+}
+
 pub fn merged_object_value(
     base: &proc_macro2::TokenStream,
-    merged: &[proc_macro2::TokenStream],
-    diagnostic: &MergeCycleDiagnostic<'_>,
+    merged: &[MergedSource],
+    diagnostic: &MergeDiagnostic<'_>,
 ) -> proc_macro2::TokenStream {
-    let defs_prefix = DEFS_PREFIX;
-    let MergeCycleDiagnostic {
+    let MergeDiagnostic {
+        cycle_remedy,
         edge,
-        remedy,
+        non_object_remedy,
         subject,
     } = *diagnostic;
+    let labels = merged.iter().map(|source| source.label.as_str());
+    let values = merged.iter().map(|source| &source.value);
+    let readers = merge_readers();
     quote::quote! {
         {
-            fn merge_object_schemas(
-                a: &serde_json::Map<String, serde_json::Value>,
-                b: &serde_json::Map<String, serde_json::Value>,
-            ) -> serde_json::Map<String, serde_json::Value> {
-                let mut out = serde_json::Map::new();
-                out.insert("type".to_string(), serde_json::Value::String("object".to_string()));
-                let mut properties = serde_json::Map::new();
-                for src in [a, b] {
-                    if let Some(p) = src.get("properties").and_then(serde_json::Value::as_object) {
-                        for (k, v) in p {
-                            properties.insert(k.clone(), v.clone());
-                        }
-                    }
-                }
-                out.insert("properties".to_string(), serde_json::Value::Object(properties));
-                let mut required: Vec<serde_json::Value> = Vec::new();
-                for src in [a, b] {
-                    if let Some(r) = src.get("required").and_then(serde_json::Value::as_array) {
-                        for item in r {
-                            if !required.contains(item) {
-                                required.push(item.clone());
-                            }
-                        }
-                    }
-                }
-                out.insert("required".to_string(), serde_json::Value::Array(required));
-                out.insert("additionalProperties".to_string(), serde_json::Value::Bool(false));
-                out
-            }
+            #readers
 
-            // A flattened base that names itself describes as a reference into the definitions
-            // being hoisted, and a reference is the one thing with no properties to merge. The
-            // body it points at is written by then — the frame that deferred the name fills the
-            // entry in before it returns — so the merge reads it back.
-            fn deferred_name(schema: &serde_json::Value) -> Option<&str> {
-                schema.get("$ref")?.as_str()?.strip_prefix(#defs_prefix)
-            }
-
-            fn branches_of(
-                schema: &serde_json::Value,
-            ) -> Vec<serde_json::Map<String, serde_json::Value>> {
-                if let Some(one_of) = schema.get("oneOf").and_then(serde_json::Value::as_array) {
-                    one_of.iter().filter_map(|b| b.as_object().cloned()).collect()
-                } else if let Some(obj) = schema.as_object() {
-                    vec![obj.clone()]
-                } else {
-                    Vec::new()
-                }
-            }
-
-            let flattened: Vec<serde_json::Value> = vec![ #(#merged),* ];
+            let flattened: Vec<(&'static str, serde_json::Value)> = vec![ #((#labels, #values)),* ];
 
             let mut branches: Vec<serde_json::Map<String, serde_json::Value>> = vec![#base];
-            for fs in &flattened {
+            for (label, fs) in &flattened {
                 // An entry still only reserved is this merge coming back around to a name whose
                 // body is still being written: there is nothing to merge, and the type it would
                 // describe has no finite value to inhabit it.
@@ -220,10 +260,22 @@ pub fn merged_object_value(
                             #subject,
                             #edge,
                             name,
-                            #remedy,
+                            #cycle_remedy,
                         ),
                     },
                 };
+                if let Some(named) = described_type(fs_body) {
+                    if named != "object" {
+                        panic!(
+                            "`{}`: {} `{}` is not written as an object — its schema describes a `{}`, which has no members to merge, and what serde writes for it does not join the object being written; {}",
+                            #subject,
+                            #edge,
+                            label,
+                            named,
+                            #non_object_remedy,
+                        );
+                    }
+                }
                 let fs_branches = branches_of(fs_body);
                 if fs_branches.is_empty() {
                     continue;
@@ -260,7 +312,7 @@ pub fn merged_object_value(
 /// is the frame that reads it, and names one end of the closing edge in the diagnostic.
 fn flattened_object_body(
     json_schema_fields: &[proc_macro2::TokenStream],
-    flatten_json_schemas: &[proc_macro2::TokenStream],
+    flatten_json_schemas: &[MergedSource],
     def_name: &str,
 ) -> proc_macro2::TokenStream {
     let base = quote::quote! {
@@ -281,9 +333,10 @@ fn flattened_object_body(
     merged_object_value(
         &base,
         flatten_json_schemas,
-        &MergeCycleDiagnostic {
+        &MergeDiagnostic {
+            cycle_remedy: "write the field as a named member so the cycle defers through a reference",
             edge: "`#[serde(flatten)]` of",
-            remedy: "write the field as a named member so the cycle defers through a reference",
+            non_object_remedy: "write the field as a named member so the value gets a key of its own",
             subject: def_name,
         },
     )
