@@ -35,6 +35,24 @@ struct DateMap {
     name: String,
 }
 
+// An enum-keyed map enumerates its keys, so every member carries the value schema outright
+// instead of the open `additionalProperties` the String-keyed `DateMap` above uses.
+#[model_schema()]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ScheduleSlot {
+    Closing,
+    Opening,
+}
+
+#[model_schema()]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq)]
+struct SlotSchedule {
+    dates: HashMap<ScheduleSlot, NaiveDate>,
+    timestamps: HashMap<ScheduleSlot, DateTime<Utc>>,
+}
+
 // Test struct with NaiveDate field.
 #[model_schema()]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -149,6 +167,12 @@ fn test_chrono_types_constructible() {
         name: String::new(),
     };
     assert!(date_map.events.is_empty());
+    let slot_schedule = SlotSchedule {
+        dates: HashMap::from([(ScheduleSlot::Opening, date), (ScheduleSlot::Closing, date)]),
+        timestamps: HashMap::new(),
+    };
+    assert_eq!(slot_schedule.dates.len(), 2);
+    assert!(slot_schedule.timestamps.is_empty());
     let values = [
         FixedValue::Alphanumeric(String::new()),
         FixedValue::Boolean(false),
@@ -421,6 +445,32 @@ fn test_vec_date_json_schema() {
     assert_eq!(dates_prop["type"], "array");
     assert_eq!(dates_prop["items"]["type"], "string");
     assert_eq!(dates_prop["items"]["format"], "date");
+}
+
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_enum_keyed_chrono_map_json_schema() {
+    let schema = SlotSchedule::json_schema();
+    let properties = schema["properties"].as_object().unwrap();
+
+    for (field_name, expected_format) in [("dates", "date"), ("timestamps", "date-time")] {
+        let field = &properties[field_name];
+        assert_eq!(field["type"], "object", "in: {field}");
+        assert_eq!(field["additionalProperties"], false, "in: {field}");
+        let members = ScheduleSlot::enum_members();
+        assert_eq!(
+            field["properties"].as_object().unwrap().len(),
+            members.len(),
+            "in: {field}"
+        );
+        for member in members {
+            assert_eq!(
+                field["properties"][&member],
+                serde_json::json!({ "type": "string", "format": expected_format }),
+                "member {member} in: {field}"
+            );
+        }
+    }
 }
 
 // ========== Enum Tests (Original Use Case) ==========
