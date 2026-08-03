@@ -123,15 +123,21 @@ just ci
 **FieldDef** (central type representation):
 ```rust
 pub struct FieldDef {
-    pub is_optional: bool,           // Option<T> → T | undefined
     pub name: String,                // Field name (respects Serde rename)
     pub docs: String,                // Rust doc comments → JSDoc
     pub field_type: FieldDefType,    // The actual type category
     pub array_depth: u8,             // Vec<T> → Array<T>, one level per Vec/slice/set written
+    pub nullable_levels: Vec<u8>,    // Which array levels were written as Option
     pub array_num: Option<u16>,      // Future: fixed-size arrays
     pub model_schema_prop_meta: ..., // Field-level overrides
 }
 ```
+
+Levels count from the innermost value outward, so `Vec<Option<T>>` records level 0 — a `null`
+among the array's items, rendered `Array<T | null>` — while `Option<Vec<T>>` records level 1, a
+`null` in place of the whole array, rendered `Array<T> | undefined` in a field and
+`Array<T> | null` in a slot. `is_optional()` asks the question of the outermost level, the only
+one whose rendering depends on where the field sits.
 
 **FieldDefType** (type categories):
 - Primitives: `Boolean`, `String`, `U8-U64`, `I8-I64`, `F32`, `F64`, `Usize`, `Isize`

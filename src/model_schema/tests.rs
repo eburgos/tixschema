@@ -78,7 +78,7 @@ fn guard_result(item: &syn::ItemStruct) -> Result<(), syn::Error> {
         .unwrap_or_default();
     let field_def = get_field_def(&field_name, &field.ty, "");
     let meta = parse_serde_field_attributes(&field.attrs);
-    check_optional_field_serialization(field, field_def.is_optional, &meta)
+    check_optional_field_serialization(field, field_def.is_optional(), &meta)
 }
 
 #[cfg(feature = "serde")]
@@ -100,40 +100,54 @@ fn report_with(spelling: &str) -> syn::ItemStruct {
     syn::parse_str(&format!("struct Report {{ notes: {spelling} }}")).unwrap()
 }
 
-/// A covered wrapper writes the JSON array its element decides, so a `None` the element holds
-/// reaches the wire as a `null` inside that array — which the absent-key form the field renders in
-/// cannot stand for. The guard therefore refuses it wherever it refuses the `Vec` spelling, `Vec`
-/// being the one wrapper the parser had always collapsed onto its element.
+/// The guard's subject is the `None` that reaches the wire as a bare `null` under the key, which is
+/// the one an `Option` around the whole field writes. A covered wrapper is such a field, so the
+/// wrapper spellings are refused exactly where the `Vec` spelling is.
 #[cfg(feature = "serde")]
 #[test]
-fn a_covered_wrapper_of_option_is_rejected_as_the_vec_spelling_is() {
-    for wrapper in SEQUENCE_WRAPPERS {
-        let message = guard_result(&report_with(&format!("{wrapper}<Option<String>>")))
+fn an_option_around_a_covered_wrapper_is_rejected_as_the_vec_spelling_is() {
+    for spelling in SEQUENCE_WRAPPERS
+        .iter()
+        .map(|wrapper| format!("Option<{wrapper}<String>>"))
+        .chain(["Option<Vec<String>>".to_owned()])
+    {
+        let message = guard_result(&report_with(&spelling))
             .unwrap_err()
             .to_string();
-        assert!(message.contains("notes"), "{wrapper}: {message}");
+        assert!(message.contains("notes"), "{spelling}: {message}");
         assert!(
             message.contains("skip_serializing_if"),
-            "{wrapper}: {message}"
+            "{spelling}: {message}"
         );
     }
 }
 
-/// Every level a wrapper is written at hands its element's optionality up, so a `None` is refused
-/// however deep the wrappers are stacked and whichever spelling each level takes.
+/// An `Option` the wrapper holds is a different `None`: the array around it is always written, so
+/// the key is always present and the `null` lands among the items, which is a value the field's
+/// schema describes rather than one it has no way to admit. The guard has no subject there and
+/// says nothing — at every depth, and whichever spelling each level takes.
 #[cfg(feature = "serde")]
 #[test]
-fn a_covered_wrapper_carries_its_element_optionality_at_every_depth() {
-    for spelling in [
-        "Vec<Vec<Option<String>>>",
-        "HashSet<Vec<Option<String>>>",
-        "Vec<HashSet<Option<String>>>",
-        "BTreeSet<VecDeque<Option<String>>>",
-    ] {
-        let message = guard_result(&report_with(spelling))
-            .unwrap_err()
-            .to_string();
-        assert!(message.contains("notes"), "{spelling}: {message}");
+fn an_option_inside_a_covered_wrapper_leaves_the_guard_nothing_to_refuse() {
+    for spelling in SEQUENCE_WRAPPERS
+        .iter()
+        .map(|wrapper| format!("{wrapper}<Option<String>>"))
+        .chain(
+            [
+                "Vec<Option<String>>",
+                "Vec<Vec<Option<String>>>",
+                "HashSet<Vec<Option<String>>>",
+                "Vec<HashSet<Option<String>>>",
+                "BTreeSet<VecDeque<Option<String>>>",
+                "Vec<Option<Vec<String>>>",
+            ]
+            .map(ToOwned::to_owned),
+        )
+    {
+        let refusal = guard_result(&report_with(&spelling))
+            .err()
+            .map(|err| err.to_string());
+        assert_eq!(refusal, None, "for: {spelling}");
     }
 }
 
@@ -1997,8 +2011,8 @@ fn wrapped_u32_value(wrapper: &str) -> super::FieldDef {
         docs: String::new(),
         field_type: FieldDefType::SiblingType(wrapper.to_owned(), vec![element]),
         array_depth: 0,
-        is_optional: false,
         model_schema_prop_meta: None,
+        nullable_levels: Vec::new(),
         name: "items".to_owned(),
     }
 }
@@ -2128,7 +2142,6 @@ fn a_sequence_wrapped_map_field_describes_as_the_array_of_the_map_it_holds() {
         ("HashMap<String, u64>", "Vec<HashMap<String, u64>>"),
         ("HashMap<String, u64>", "VecDeque<HashMap<String, u64>>"),
         ("HashMap<String, u64>", "Option<Vec<HashMap<String, u64>>>"),
-        ("HashMap<String, u64>", "Vec<Option<HashMap<String, u64>>>"),
         ("HashMap<Slot, u64>", "Vec<HashMap<Slot, u64>>"),
         (
             "HashMap<Slot, Vec<u64>>",
@@ -2147,6 +2160,21 @@ fn a_sequence_wrapped_map_field_describes_as_the_array_of_the_map_it_holds() {
             "for {wrapped_type}"
         );
     }
+}
+
+/// An `Option` the sequence holds is not the field's: the array is written either way, and the
+/// `None` lands among its items — so the map's own rendering is what admits the `null`, one level
+/// inside the array wrap rather than around it.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_sequence_of_optional_maps_admits_the_null_among_its_items() {
+    let item = inserted_field_value("HashMap<String, u64>");
+    assert_eq!(
+        inserted_field_value("Vec<Option<HashMap<String, u64>>>"),
+        format!(
+            r#"serde_json :: json ! ({{ "type" : "array" , "items" : serde_json :: json ! ({{ "anyOf" : [{item} , {{ "type" : "null" }}] }}) }})"#
+        )
+    );
 }
 
 /// A map named without a sequence wrapper describes exactly as it always has, on every key path.
@@ -2199,9 +2227,9 @@ fn an_object_id_tuple_element_keeps_the_field_position_oid_object() {
 #[test]
 fn an_optional_sequence_wrapper_member_stays_nullable() {
     let mut optional_set = wrapped_u32_value("HashSet");
-    optional_set.is_optional = true;
+    optional_set.nullable_levels = vec![optional_set.array_depth];
     let mut optional_vec = parsed_u32_vec_value();
-    optional_vec.is_optional = true;
+    optional_vec.nullable_levels = vec![optional_vec.array_depth];
     assert_eq!(
         super::build_map_member_schema(&optional_set)
             .unwrap()

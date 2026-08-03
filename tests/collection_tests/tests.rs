@@ -1977,16 +1977,20 @@ fn test_set_slots_describe_as_arrays_of_their_element() {
         properties["optional_ids"]["additionalProperties"],
         serde_json::json!({ "anyOf": [integer_array, { "type": "null" }] })
     );
-    // A `None` the wrapper itself holds is that same `null` to every reader of the slot: the
-    // element carries the wrapper's array-ness, so the optionality it carries is the slot's too —
-    // the one form the `Vec` spelling arrives in, and so the one a set has to describe as.
+    // A `None` the wrapper itself holds is a different `null`: the array is written either way, so
+    // it lands among the items rather than in place of the slot. The `Vec` spelling writes exactly
+    // that, and so describes as exactly this.
+    let nullable_integer_array = serde_json::json!({
+        "type": "array",
+        "items": { "anyOf": [{ "type": "integer" }, { "type": "null" }] }
+    });
     assert_eq!(
         properties["optional_element_ids"]["additionalProperties"],
-        serde_json::json!({ "anyOf": [integer_array, { "type": "null" }] })
+        nullable_integer_array
     );
     assert_eq!(
         properties["tuple_optional_ids"]["prefixItems"][1],
-        serde_json::json!({ "anyOf": [integer_array, { "type": "null" }] })
+        nullable_integer_array
     );
 }
 
@@ -2059,12 +2063,12 @@ fn test_set_slots_type_as_the_vec_slot_twin() {
     for spelling in [
         "aliased_tags: Partial<Record<string, Array<MetricTagRefType>>>;",
         "enum_keyed_ids: Partial<Record<MetricSlot, Array<number>>>;",
-        "optional_element_ids: Partial<Record<string, Array<number> | null>>;",
+        "optional_element_ids: Partial<Record<string, Array<number | null>>>;",
         "optional_ids: Partial<Record<string, Array<number> | null>>;",
         "sibling_tags: Partial<Record<string, Array<MetricTag>>>;",
         "tuple_ids: [string, Array<number>];",
         "tuple_labels: [number, Array<string>];",
-        "tuple_optional_ids: [string, Array<number> | null];",
+        "tuple_optional_ids: [string, Array<number | null>];",
     ] {
         assert!(ts_definition.contains(spelling), "Got: {ts_definition}");
     }
@@ -2082,11 +2086,11 @@ fn test_set_slots_validate_as_the_vec_slot_twin() {
     for spelling in [
         "aliased_tags: z.record(z.string(), z.array(MetricTagRefType$Schema)),",
         "enum_keyed_tags: z.record(MetricSlot$Schema, z.array(MetricTag$Schema)),",
-        "optional_element_ids: z.record(z.string(), z.nullable(z.array(z.number().int()))),",
+        "optional_element_ids: z.record(z.string(), z.array(z.nullable(z.number().int()))),",
         "optional_ids: z.record(z.string(), z.nullable(z.array(z.number().int()))),",
         "tuple_ids: z.tuple([z.string(), z.array(z.number().int())]),",
         "tuple_labels: z.tuple([z.number().int(), z.array(z.string())]),",
-        "tuple_optional_ids: z.tuple([z.string(), z.nullable(z.array(z.number().int()))]),",
+        "tuple_optional_ids: z.tuple([z.string(), z.array(z.nullable(z.number().int()))]),",
     ] {
         assert!(zod_schema.contains(spelling), "Got: {zod_schema}");
     }
