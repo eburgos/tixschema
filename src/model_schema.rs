@@ -148,6 +148,18 @@ struct BrandedNewtypeOutput<'parts> {
     validation_tokens: &'parts proc_macro2::TokenStream,
 }
 
+/// A constrained brand's generated validation: the two schema-module functions, and the expression
+/// through which `validate()` reaches the inner value it hands to the first of them.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+struct BrandedValidation {
+    checked_inner: proc_macro2::TokenStream,
+    deserialize_fn: proc_macro2::TokenStream,
+    validate_fn: proc_macro2::TokenStream,
+}
+
 /// What a field bottoms out in, under the wrappers it was written beneath.
 #[cfg(feature = "serde")]
 struct ConstrainedShape {
@@ -1413,8 +1425,10 @@ fn process_tuple_struct(mut item_struct: syn::ItemStruct, rename_all: Option<&st
 /// cannot be resolved at macro-expansion time.
 /// Builds the `validate_value`/`deserialize_value` functions for a constrained branded newtype.
 ///
-/// Returns `None` when the newtype has no string constraints. Uses `ToString` so it works for
-/// `String`, `ObjectId`, and any generic `ID_TYPE` that implements `Display`.
+/// Returns `None` when the newtype has no string constraints. A path inner is measured by the
+/// string serde writes for it, exactly as a path field is; every other inner is reached through
+/// `ToString`, so it works for `String`, `ObjectId`, and any generic `ID_TYPE` implementing
+/// `Display`.
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
@@ -1423,8 +1437,11 @@ fn build_branded_validation(
     args: &ModelSchemaArgs,
     is_generic: bool,
     inner_ty: &syn::Type,
-) -> Option<(proc_macro2::TokenStream, proc_macro2::TokenStream)> {
+) -> Option<BrandedValidation> {
     args.has_string_constraints().then(|| {
+        let measures_path = branded_inner_measures_path(inner_ty);
+        let (checked_param, rendering) = checked_value_parts(measures_path);
+        let checked_v = branded_checked_value(measures_path, &quote! { v });
         let mut checks: Vec<proc_macro2::TokenStream> = Vec::new();
 
         if let Some(min_len) = args.min_length {
@@ -1466,7 +1483,8 @@ fn build_branded_validation(
         }
 
         let validate_fn = quote! {
-            pub fn validate_value(value: &str) -> Result<(), String> {
+            pub fn validate_value(#checked_param) -> Result<(), String> {
+                #rendering
                 #(#checks)*
                 Ok(())
             }
@@ -1481,7 +1499,7 @@ fn build_branded_validation(
                 {
                     use serde::Deserialize;
                     let v = T::deserialize(deserializer)?;
-                    validate_value(&v.to_string()).map_err(serde::de::Error::custom)?;
+                    validate_value(#checked_v).map_err(serde::de::Error::custom)?;
                     Ok(v)
                 }
             }
@@ -1497,14 +1515,50 @@ fn build_branded_validation(
                 {
                     use serde::Deserialize;
                     let v = <#inner_ty>::deserialize(deserializer)?;
-                    validate_value(&v.to_string()).map_err(serde::de::Error::custom)?;
+                    validate_value(#checked_v).map_err(serde::de::Error::custom)?;
                     Ok(v)
                 }
             }
         };
 
-        (validate_fn, deserialize_fn)
+        BrandedValidation {
+            checked_inner: branded_checked_value(measures_path, &quote! { self.0 }),
+            deserialize_fn,
+            validate_fn,
+        }
     })
+}
+
+/// Whether a brand's constrained checks reach its inner value as a path rather than through
+/// `Display`.
+///
+/// A brand's constrained value is the inner field itself, with no walk to reach it, so only an
+/// inner that *is* a path answers here — one merely holding paths writes no string of its own for
+/// the checks to measure, and is refused by [`branded_constraint_inner_error`] before this.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+fn branded_inner_measures_path(inner_ty: &syn::Type) -> bool {
+    constrained_shape(inner_ty)
+        .is_some_and(|shape| shape.wraps.is_empty() && matches!(shape.leaf, ConstraintLeaf::Path))
+}
+
+/// How a constrained brand hands `receiver` to `validate_value`: a path goes borrowed, since the
+/// validator renders it itself; every other inner is rendered through `Display` first.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+fn branded_checked_value(
+    measures_path: bool,
+    receiver: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    if measures_path {
+        quote! { &#receiver }
+    } else {
+        quote! { &#receiver.to_string() }
+    }
 }
 
 /// Builds the `json_schema()` method for a branded newtype's schema module.
@@ -1817,7 +1871,9 @@ fn build_branded_display_impl(
 ///
 /// A constrained brand validates through `value.to_string()`, so the requirement outlives the impl
 /// the brand opted out of. Keeping the assertion is what turns that into an `E0277` at the inner
-/// field instead of the `E0599` the `to_string()` call raises against the attribute.
+/// field instead of the `E0599` the `to_string()` call raises against the attribute. A path inner
+/// is the exception: its checks read the path's own rendering and call no `to_string()`, so there
+/// is nothing left for the assertion to blame.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn build_branded_display_tokens(
     generics: &syn::Generics,
@@ -1827,7 +1883,8 @@ fn build_branded_display_tokens(
 ) -> proc_macro2::TokenStream {
     // Only the serde build emits the validation functions that call `to_string()`.
     #[cfg(feature = "serde")]
-    let validation_needs_display = args.has_string_constraints();
+    let validation_needs_display =
+        args.has_string_constraints() && !branded_inner_measures_path(&inner_field.ty);
     #[cfg(not(feature = "serde"))]
     let validation_needs_display = false;
 
@@ -1945,7 +2002,7 @@ fn build_branded_schema_example(
 ))]
 fn inject_branded_serde_attrs(
     mut owned_struct: syn::ItemStruct,
-    branded_validation: Option<&(proc_macro2::TokenStream, proc_macro2::TokenStream)>,
+    branded_validation: Option<&BrandedValidation>,
     is_generic: bool,
     generic_params: &[String],
     module_name: &str,
@@ -1955,7 +2012,7 @@ fn inject_branded_serde_attrs(
     proc_macro2::TokenStream,
     proc_macro2::TokenStream,
 ) {
-    let Some((validate_fn, deserialize_fn)) = branded_validation else {
+    let Some(validation) = branded_validation else {
         return (owned_struct, quote! {}, quote! {});
     };
 
@@ -1987,6 +2044,9 @@ fn inject_branded_serde_attrs(
         fields.unnamed.first_mut().unwrap().attrs.push(serde_attr);
     }
 
+    let validate_fn = &validation.validate_fn;
+    let deserialize_fn = &validation.deserialize_fn;
+    let checked_inner = &validation.checked_inner;
     let validation_tokens = quote! {
         #validate_fn
         #deserialize_fn
@@ -1994,7 +2054,7 @@ fn inject_branded_serde_attrs(
     let validate_method = quote! {
         pub fn validate(&self) -> Result<(), Vec<String>> {
             let mut errors = Vec::new();
-            if let Err(e) = #module_ident::validate_value(&self.0.to_string()) {
+            if let Err(e) = #module_ident::validate_value(#checked_inner) {
                 errors.push(e);
             }
             if errors.is_empty() { Ok(()) } else { Err(errors) }
@@ -4639,6 +4699,28 @@ fn helper_name_stem(field_ident: &str, variant_ident: Option<&str>) -> String {
     )
 }
 
+/// The parameter a string validator takes and the rendering its checks read `value` from.
+///
+/// A path is the one leaf the checks cannot be handed as-is: it arrives borrowed — the form every
+/// reach into one already ends at — and is rendered once through `to_string_lossy`, the string
+/// serde writes for it. Every other leaf already is that string, and renders nothing.
+#[cfg(feature = "serde")]
+fn checked_value_parts(
+    measures_path: bool,
+) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
+    if measures_path {
+        (
+            quote! { path: &std::path::Path },
+            quote! {
+                let rendered = path.to_string_lossy();
+                let value: &str = &rendered;
+            },
+        )
+    } else {
+        (quote! { value: &str }, quote! {})
+    }
+}
+
 /// Generates the static validator for a string-shaped field with constraints, plus the serde
 /// deserializer — written against the constrained value itself when the field is bare, and against
 /// the field's declared type when it is wrapped.
@@ -4665,17 +4747,7 @@ fn generate_string_validation_code(
         proc_macro2::Ident::new(&deserialize_fn_name, proc_macro2::Span::call_site());
 
     let measures_path = matches!(shape.leaf, ConstraintLeaf::Path);
-    let (checked_param, rendering) = if measures_path {
-        (
-            quote! { path: &std::path::Path },
-            quote! {
-                let rendered = path.to_string_lossy();
-                let value: &str = &rendered;
-            },
-        )
-    } else {
-        (quote! { value: &str }, quote! {})
-    };
+    let (checked_param, rendering) = checked_value_parts(measures_path);
 
     let field_name_lit = field_ident.to_owned();
 
