@@ -105,6 +105,8 @@ pub struct UserWithOptionals {
 
 `Vec<T>` becomes `Array<T>`, and so does every other std wrapper serde writes as a JSON array of its element: `VecDeque<T>`, `LinkedList<T>`, `BinaryHeap<T>`, `HashSet<T>`, and `BTreeSet<T>`. Each is that array on the wire, so each is typed and validated as that array — the element decides what the array holds. Nesting is kept at whatever depth it is written: a `Vec<Vec<T>>` (or `HashSet<Vec<T>>`, or any other mix of those wrappers) writes an array of arrays, so it becomes `Array<Array<T>>`, `z.array(z.array(...))`, and a JSON schema whose `items` is itself an array. Only `HashMap<String, T>` is supported (non-string keys will cause compilation errors).
 
+A fixed-size array `[T; N]` is that array too, with its length described. serde writes exactly `N` items and reads one back only at that length, so the two validating surfaces say so: the JSON schema pins the level with `"minItems": N` and `"maxItems": N`, and Zod appends `.length(N)`. The bound belongs to the level it was written at, so `Vec<[T; 3]>` is an unbounded array of 3-element arrays and `[Vec<T>; 3]` is a 3-element array of unbounded ones. TypeScript stays `Array<T>`: the fixed-length form its type system has is the N-element tuple, which has to be written out element by element and stops being readable long before `N` stops being legal. A length the macro cannot read — a const generic parameter, a `const` item, any computed expression — describes as an unbounded array, the macro running before there is a value to ask for; a slice `[T]` has no length to describe at all.
+
 ```rust
 use std::collections::HashMap;
 
@@ -188,6 +190,7 @@ Discriminated unions also support tuple variants. Single-element tuples are flat
 ```rust
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "type", content = "value")]
 pub enum FixedValue {
     // Unit variant (no data)
     Empty,
@@ -254,6 +257,64 @@ pub enum Event {
 ```
 
 This generates `kind` as the discriminator and `data` as the value field instead of the defaults (`type` and `value`).
+
+#### Externally Tagged Enums (No Tagging Attributes)
+
+An enum with data-carrying variants that names neither `tag` nor `content` is externally tagged, which is Serde's default: the variant name is the sole key of an object holding the content, and a unit variant is that name as a bare string. The generated surfaces describe that form -- a JSON Schema `oneOf`, a TypeScript union, and a Zod `z.union([...])`. There is no field every member shares, so the Zod schema is a plain union rather than a `z.discriminatedUnion`.
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum External {
+    Bare,
+    Fields { a: String, b: bool },
+    Pair(u32, u32),
+    Single(String),
+}
+```
+
+Serialized by Serde:
+
+```json
+"Bare"
+{ "Fields": { "a": "a", "b": true } }
+{ "Pair": [1, 2] }
+{ "Single": "a" }
+```
+
+Generated TypeScript:
+
+```typescript
+export type External = "Bare" | {
+  "Fields": {
+    a: string;
+    b: boolean;
+  };
+} | {
+  "Pair": [number, number];
+} | {
+  "Single": string;
+};
+```
+
+Generated Zod:
+
+```typescript
+export const External$Schema: ZodType<External> = z.union([
+  z.literal("Bare"),
+  z.strictObject({
+    "Fields": z.strictObject({ a: z.string(), b: z.boolean() }),
+  }),
+  z.strictObject({
+    "Pair": z.tuple([z.number().int(), z.number().int()]),
+  }),
+  z.strictObject({
+    "Single": z.string(),
+  }),
+]);
+```
+
+Add `#[serde(tag = "...", content = "...")]` to get the adjacently tagged `{ type, value }` form documented above instead.
 
 ### Intersection Types (`#[serde(flatten)]`)
 
