@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tixschema::model_schema;
 
 // Test comprehensive HashMap scenarios with various value types
@@ -123,6 +123,44 @@ struct UserWithCollections {
     metadata: HashMap<String, String>,
     scores: Vec<u32>,
     tags: Vec<String>,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+struct MetricTag {
+    label: String,
+}
+
+/// An alias of a set element: the element's schema module is named after the registered export
+/// name, so the reference has to be resolved through the registry rather than from the ident.
+#[model_schema()]
+type MetricTagRef = MetricTag;
+
+// A `HashSet<T>` and a `Vec<T>` both serialize as a JSON array of `T`, so the element decides what
+// the array holds on either one. The twin structs below carry the same element types under both
+// spellings; the tests hold every field of one against its twin.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct SetElementFields {
+    aliased_tags: HashSet<MetricTagRef>,
+    big_ids: HashSet<u64>,
+    #[model_schema_prop(minLength = 3)]
+    constrained_labels: HashSet<String>,
+    labels: HashSet<String>,
+    sibling_tags: HashSet<MetricTag>,
+    small_ids: HashSet<u32>,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct VecElementFields {
+    aliased_tags: Vec<MetricTagRef>,
+    big_ids: Vec<u64>,
+    #[model_schema_prop(minLength = 3)]
+    constrained_labels: Vec<String>,
+    labels: Vec<String>,
+    sibling_tags: Vec<MetricTag>,
+    small_ids: Vec<u32>,
 }
 
 #[cfg(feature = "jsonschema")]
@@ -955,4 +993,126 @@ fn test_hashmap_with_64bit_ts_definition() {
     assert!(zod_schema.contains("u64_map: z.record(z.string(), z.number().int())"));
     assert!(zod_schema.contains("i64_map: z.record(z.string(), z.number().int())"));
     assert!(zod_schema.contains("mixed_map: z.record(z.string(), z.array(z.number().int()))"));
+}
+
+#[test]
+fn test_element_fields_constructible_under_both_spellings() {
+    let tag = MetricTag {
+        label: "a".to_owned(),
+    };
+    let sets = SetElementFields {
+        aliased_tags: HashSet::from([tag.clone()]),
+        big_ids: HashSet::from([9_u64]),
+        constrained_labels: HashSet::from(["abc".to_owned()]),
+        labels: HashSet::from(["t".to_owned()]),
+        sibling_tags: HashSet::from([tag.clone()]),
+        small_ids: HashSet::from([7_u32]),
+    };
+    assert!(sets.small_ids.contains(&7));
+    assert!(sets.big_ids.contains(&9));
+
+    let vecs = VecElementFields {
+        aliased_tags: vec![tag.clone()],
+        big_ids: vec![9],
+        constrained_labels: vec!["abc".to_owned()],
+        labels: vec!["t".to_owned()],
+        sibling_tags: vec![tag],
+        small_ids: vec![7],
+    };
+    assert_eq!(vecs.small_ids, [7]);
+    assert_eq!(vecs.big_ids, [9]);
+}
+
+/// A set writes a JSON array of its element, so the element decides what the array holds — the
+/// hardcoded `string` items every set once carried described only the sets of strings.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_set_element_json_schema() {
+    let sets = SetElementFields {
+        aliased_tags: HashSet::new(),
+        big_ids: HashSet::from([9_u64]),
+        constrained_labels: HashSet::new(),
+        labels: HashSet::new(),
+        sibling_tags: HashSet::new(),
+        small_ids: HashSet::from([7_u32]),
+    };
+    let payload = serde_json::to_value(&sets).unwrap();
+    let schema = SetElementFields::json_schema();
+    let properties = schema["properties"].as_object().unwrap();
+
+    for numeric in ["big_ids", "small_ids"] {
+        let field = &properties[numeric];
+        assert_eq!(
+            field["type"],
+            json_type_name(&payload[numeric]),
+            "in: {field}"
+        );
+        assert_eq!(
+            field["items"],
+            serde_json::json!({ "type": "integer" }),
+            "in: {field}"
+        );
+    }
+
+    assert_eq!(
+        properties["labels"],
+        serde_json::json!({ "type": "array", "items": { "type": "string" } })
+    );
+
+    // A constraint written on the field constrains what the array holds, there being nothing else
+    // for it to reach — the element is where it lands, as it does on the `Vec` spelling.
+    assert_eq!(
+        properties["constrained_labels"],
+        serde_json::json!({
+            "type": "array",
+            "items": { "type": "string", "minLength": 3_u32 }
+        })
+    );
+
+    assert_eq!(
+        properties["sibling_tags"]["items"],
+        MetricTag::json_schema(),
+        "in: {}",
+        properties["sibling_tags"]
+    );
+}
+
+/// A `HashSet<T>` and a `Vec<T>` serialize alike, so they describe alike — element by element, at
+/// every element type. An alias element is the case the naming cannot be guessed for: its schema
+/// module is the registered one, which is why the twin below compiles at all.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_set_elements_render_as_vec_elements() {
+    let set_schema = SetElementFields::json_schema();
+    let vec_schema = VecElementFields::json_schema();
+
+    assert_eq!(set_schema["properties"], vec_schema["properties"]);
+    assert_eq!(set_schema["required"], vec_schema["required"]);
+}
+
+/// The TypeScript and Zod surfaces write the Rust container name through verbatim — `HashSet<T>` is
+/// neither a TypeScript type nor a Zod schema expression. Pinned as it stands so that the JSON
+/// schema agreeing with `Vec` is not read as those two having been settled with it.
+#[test]
+#[cfg(all(feature = "typescript", feature = "zod"))]
+fn test_set_element_typescript_generation() {
+    let ts_definition = SetElementFields::ts_definition();
+    for spelling in [
+        "aliased_tags: HashSet<MetricTagRefType>;",
+        "sibling_tags: HashSet<MetricTag>;",
+        "labels: HashSet<string>;",
+        "small_ids: HashSet<number>;",
+    ] {
+        assert!(ts_definition.contains(spelling), "Got: {ts_definition}");
+    }
+
+    let zod_schema = SetElementFields::zod_schema();
+    for spelling in [
+        "aliased_tags: HashSet<MetricTagRefType>,",
+        "sibling_tags: HashSet<MetricTag>,",
+        "labels: HashSet<string>,",
+        "small_ids: HashSet<number>,",
+    ] {
+        assert!(zod_schema.contains(spelling), "Got: {zod_schema}");
+    }
 }
