@@ -7,6 +7,9 @@ use super::{
     parse_serde_type_attributes,
 };
 
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+use super::branded_guard_errors;
+
 #[test]
 fn ts_optional_ok_on_option_field() {
     validate_ts_optional_flag(true, true).unwrap();
@@ -418,4 +421,83 @@ fn alias_zod_method_carries_no_cfg_attribute() {
     let field_def = super::get_field_def("AliasType", &ty, "");
     let tokens = super::generate_alias_zod_method("AliasType", &field_def);
     assert_no_cfg_attribute(&tokens, "generate_alias_zod_method");
+}
+
+/// Collects a branded newtype's guard failures as rendered `compile_error!` token strings.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn branded_errors(item: &syn::ItemStruct) -> Vec<String> {
+    branded_guard_errors(item)
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn cfg_attr_wrapped_serde_on_a_branded_type_is_rejected() {
+    let errors = branded_errors(&syn::parse_quote! {
+        #[serde(transparent)]
+        #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+        struct UserId(pub String);
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(errors[0].contains("compile_error"), "got: {}", errors[0]);
+    assert!(errors[0].contains("type `UserId`"), "got: {}", errors[0]);
+    assert!(errors[0].contains("cfg_attr"), "got: {}", errors[0]);
+}
+
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn cfg_attr_wrapped_serde_on_a_branded_inner_slot_is_rejected() {
+    let errors = branded_errors(&syn::parse_quote! {
+        #[serde(transparent)]
+        struct UserId(#[cfg_attr(feature = "serde", serde(rename = "inner"))] pub String);
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(errors[0].contains("compile_error"), "got: {}", errors[0]);
+    assert!(errors[0].contains("tuple field"), "got: {}", errors[0]);
+    assert!(errors[0].contains("#[serde(...)]"), "got: {}", errors[0]);
+}
+
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn branded_newtype_over_option_is_rejected() {
+    let errors = branded_errors(&syn::parse_quote! {
+        #[serde(transparent)]
+        struct MaybeUserId(pub Option<String>);
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(errors[0].contains("compile_error"), "got: {}", errors[0]);
+    assert!(errors[0].contains("Option"), "got: {}", errors[0]);
+    assert!(errors[0].contains("null"), "got: {}", errors[0]);
+}
+
+/// The generic arm renders the type parameter and drops the `Option` wrapper outright, so the
+/// shape is no more representable there than in the concrete case.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn generic_branded_newtype_over_option_is_rejected() {
+    let errors = branded_errors(&syn::parse_quote! {
+        #[serde(transparent)]
+        struct MaybeId<T>(pub Option<T>);
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(errors[0].contains("Option"), "got: {}", errors[0]);
+}
+
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn compliant_branded_newtype_passes_every_guard() {
+    let errors = branded_errors(&syn::parse_quote! {
+        #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+        #[serde(transparent)]
+        struct UserId(#[cfg_attr(feature = "serde", doc = "documented in serde builds")] pub String);
+    });
+    assert!(errors.is_empty(), "got: {errors:?}");
 }
