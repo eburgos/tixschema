@@ -123,13 +123,13 @@ just ci
 **FieldDef** (central type representation):
 ```rust
 pub struct FieldDef {
-    pub name: String,                // Field name (respects Serde rename)
-    pub docs: String,                // Rust doc comments → JSDoc
-    pub field_type: FieldDefType,    // The actual type category
-    pub array_depth: u8,             // Vec<T> → Array<T>, one level per Vec/slice/set written
-    pub nullable_levels: Vec<u8>,    // Which array levels were written as Option
-    pub array_num: Option<u16>,      // Future: fixed-size arrays
-    pub model_schema_prop_meta: ..., // Field-level overrides
+    pub name: String,                    // Field name (respects Serde rename)
+    pub docs: String,                    // Rust doc comments → JSDoc
+    pub field_type: FieldDefType,        // The actual type category
+    pub array_depth: u8,                 // Vec<T> → Array<T>, one level per Vec/slice/set written
+    pub nullable_levels: Vec<u8>,        // Which array levels were written as Option
+    pub array_lengths: Vec<(u8, usize)>, // Length of each level written as [T; N]
+    pub model_schema_prop_meta: ...,     // Field-level overrides
 }
 ```
 
@@ -138,6 +138,11 @@ among the array's items, rendered `Array<T | null>` — while `Option<Vec<T>>` r
 `null` in place of the whole array, rendered `Array<T> | undefined` in a field and
 `Array<T> | null` in a slot. `is_optional()` asks the question of the outermost level, the only
 one whose rendering depends on where the field sits.
+
+`array_lengths` numbers levels the same way: `[[T; 2]; 3]` records `(0, 2)` and `(1, 3)`. Only the
+validating surfaces spend it — `minItems`/`maxItems` in the JSON schema, `.length(N)` in Zod —
+while TypeScript stays `Array<T>`. A length the expansion cannot read (const generic, `const`
+item, computed expression) records nothing and describes as an unbounded array.
 
 **FieldDefType** (type categories):
 - Primitives: `Boolean`, `String`, `U8-U64`, `I8-I64`, `F32`, `F64`, `Usize`, `Isize`

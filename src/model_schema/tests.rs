@@ -2078,7 +2078,7 @@ fn an_aliased_string_keyed_map_value_resolves_its_module_through_the_registry() 
 fn wrapped_u32_value(wrapper: &str) -> super::FieldDef {
     let element = super::get_field_def("", &syn::parse_quote!(u32), "");
     super::FieldDef {
-        array_num: None,
+        array_lengths: Vec::new(),
         docs: String::new(),
         field_type: FieldDefType::SiblingType(wrapper.to_owned(), vec![element]),
         array_depth: 0,

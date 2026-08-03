@@ -3585,6 +3585,9 @@ fn write_tuple_multiple_variant_fields(
 /// which is always written — rather than around the array, which is what the outermost level does
 /// and is the caller's to apply.
 ///
+/// A level written as a fixed-size `[T; N]` carries its bounds, so the wrong-length payload serde
+/// refuses to deserialize is refused here too.
+///
 /// `item_schema` is a `serde_json::Value` expression, as is the result. Callers holding a literal
 /// fragment want [`arrayed_json_schema_fragment`].
 #[cfg(feature = "jsonschema")]
@@ -3598,7 +3601,8 @@ fn arrayed_json_schema_value(
         } else {
             level_schema
         };
-        quote! { serde_json::json!({ "type": "array", "items": #items }) }
+        let bounds = fixed_length_json_schema_bounds(fld, level);
+        quote! { serde_json::json!({ "type": "array", "items": #items #bounds }) }
     })
 }
 
@@ -3615,8 +3619,22 @@ fn arrayed_json_schema_fragment(
         } else {
             level_schema
         };
-        quote! { { "type": "array", "items": #items } }
+        let bounds = fixed_length_json_schema_bounds(fld, level);
+        quote! { { "type": "array", "items": #items #bounds } }
     })
+}
+
+/// The arity a fixed-size `[T; N]` level pins, as the `minItems`/`maxItems` pair a tuple pins its
+/// own arity with — the same constraint, the two spellings serde writes a fixed-length array from.
+///
+/// Empty for every other level, which is what leaves an unbounded array unbounded. The pair carries
+/// its own leading comma so that emptiness costs the caller nothing.
+#[cfg(feature = "jsonschema")]
+fn fixed_length_json_schema_bounds(fld: &FieldDef, level: u8) -> proc_macro2::TokenStream {
+    fld.fixed_length_at(level).map_or_else(
+        proc_macro2::TokenStream::new,
+        |length| quote! { , "minItems": #length, "maxItems": #length },
+    )
 }
 
 /// The JSON schema literal for a type that renders inline as a scalar — the object body itself,
