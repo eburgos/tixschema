@@ -980,14 +980,14 @@ fn an_unsupported_enum_keyed_map_value_emits_only_the_compile_error() {
     }
 }
 
-/// The enum-key branch's binding for a map value built by hand, for the value types no source type
+/// The enum-key branch's rendering for a map value built by hand, for the value types no source type
 /// produces.
 #[cfg(feature = "jsonschema")]
 fn enum_key_map_value_binding(field_type: FieldDefType) -> String {
     let ty: syn::Type = syn::parse_str("String").unwrap();
     let mut value = super::get_field_def("m", &ty, "");
     value.field_type = field_type;
-    super::build_enum_key_map_value_binding(&value)
+    super::enum_key_map_json_schema_value("Slot", &value)
         .unwrap()
         .to_string()
 }
@@ -1054,7 +1054,10 @@ fn a_generic_sibling_enum_keyed_map_value_emits_the_sibling_schema() {
 #[test]
 fn an_opaque_enum_keyed_map_value_stays_permissive() {
     let tokens = enum_key_map_value_binding(FieldDefType::Unknown);
-    assert_eq!(tokens, "let value_schema = serde_json :: json ! ({ }) ;");
+    assert!(
+        tokens.contains("let value_schema = serde_json :: json ! ({ }) ;"),
+        "got: {tokens}"
+    );
 }
 
 /// A string literal keeps the `const` it carries on the `String`-key path.
@@ -1062,9 +1065,11 @@ fn an_opaque_enum_keyed_map_value_stays_permissive() {
 #[test]
 fn a_string_literal_enum_keyed_map_value_keeps_its_const() {
     let tokens = enum_key_map_value_binding(FieldDefType::StringLiteral("Tixena".to_owned()));
-    assert_eq!(
-        tokens,
-        r#"let value_schema = serde_json :: json ! ({ "type" : "string" , "const" : "Tixena" }) ;"#
+    assert!(
+        tokens.contains(
+            r#"let value_schema = serde_json :: json ! ({ "type" : "string" , "const" : "Tixena" }) ;"#
+        ),
+        "got: {tokens}"
     );
 }
 
@@ -1095,9 +1100,11 @@ fn a_chrono_enum_keyed_map_value_keeps_its_format() {
 #[test]
 fn an_object_id_enum_keyed_map_value_keeps_the_field_position_oid_object() {
     let tokens = enum_key_map_value_binding(FieldDefType::ObjectId);
-    assert_eq!(
-        tokens,
-        r#"let value_schema = serde_json :: json ! ({ "type" : "object" , "properties" : { "$oid" : { "type" : "string" , "pattern" : "^[a-f\\d]{24}$" } } , "required" : ["$oid"] }) ;"#
+    assert!(
+        tokens.contains(
+            r#"let value_schema = serde_json :: json ! ({ "type" : "object" , "properties" : { "$oid" : { "type" : "string" , "pattern" : "^[a-f\\d]{24}$" } } , "required" : ["$oid"] }) ;"#
+        ),
+        "got: {tokens}"
     );
 }
 
@@ -1511,18 +1518,198 @@ fn a_nested_object_id_map_value_keeps_its_oid_object() {
     );
 }
 
-/// An inner key type this branch does not enumerate leaves the inner members open — but the member
-/// is still known to be an object, which is more than an unconstrained value says.
+/// The rendering an enum-keyed map carries in every position, spelled out for a key of the given
+/// name and a member of the given tokens.
+#[cfg(feature = "jsonschema")]
+fn enum_key_map_rendering(key_type_name: &str, member: &str) -> String {
+    format!(
+        r#"serde_json :: json ! ({{ "type" : "object" , "properties" : ({{ let value_schema = {member} ; let mut map_properties = serde_json :: Map :: new () ; for enum_key in {key_type_name} :: enum_members () {{ map_properties . insert (enum_key . to_string () , value_schema . clone ()) ; }} map_properties }}) , "additionalProperties" : false }})"#
+    )
+}
+
+/// Which keys a map has is the key type's answer wherever the map is written, so an inner key that
+/// enumerates its members enumerates them under an outer `String` key too — the position the map
+/// sits in cannot decide whether its keys are known.
 #[cfg(feature = "jsonschema")]
 #[test]
-fn a_nested_map_under_an_unenumerated_key_still_renders_as_an_object() {
+fn a_nested_map_under_an_enumerating_key_expands_its_members() {
     let tokens = map_field_schema("HashMap<String, HashMap<Slot, String>>").to_string();
+    let inner = enum_key_map_rendering("Slot", r#"serde_json :: json ! ({ "type" : "string" })"#);
     assert!(
-        tokens.contains(
-            r#""additionalProperties" : { "type" : "object" , "additionalProperties" : true }"#
-        ),
+        tokens.contains(&format!(r#""additionalProperties" : {inner}"#)),
         "got: {tokens}"
     );
+    assert!(
+        !tokens.contains(r#""additionalProperties" : true"#),
+        "got: {tokens}"
+    );
+}
+
+/// And under an outer key that enumerates too: each level asks its own key type, so a two-level map
+/// spells both member sets out rather than stopping at the first.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_nested_map_under_two_enumerating_keys_expands_both_member_sets() {
+    let tokens = map_field_schema("HashMap<Slot, HashMap<Bucket, u64>>").to_string();
+    let inner =
+        enum_key_map_rendering("Bucket", r#"serde_json :: json ! ({ "type" : "integer" })"#);
+    assert!(
+        tokens.contains(&enum_key_map_rendering("Slot", &inner)),
+        "got: {tokens}"
+    );
+    assert!(
+        !tokens.contains(r#""additionalProperties" : true"#),
+        "got: {tokens}"
+    );
+}
+
+/// The slot wraps sit outside the map's own rendering, as they do for every other member: a `Vec` of
+/// enum-keyed maps is an array of the object each one describes as, and an `Option` admits `null`
+/// beside it.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_wrapped_nested_enum_keyed_map_keeps_its_members_inside_the_slot_wrap() {
+    let inner = enum_key_map_rendering("Slot", r#"serde_json :: json ! ({ "type" : "string" })"#);
+    for (map_type, expected) in [
+        (
+            "HashMap<String, Vec<HashMap<Slot, String>>>",
+            format!(r#"serde_json :: json ! ({{ "type" : "array" , "items" : {inner} }})"#),
+        ),
+        (
+            "HashMap<String, Option<HashMap<Slot, String>>>",
+            format!(r#"serde_json :: json ! ({{ "anyOf" : [{inner} , {{ "type" : "null" }}] }})"#),
+        ),
+    ] {
+        let tokens = map_field_schema(map_type).to_string();
+        assert!(
+            tokens.contains(&format!(r#""additionalProperties" : {expected}"#)),
+            "for {map_type}, got: {tokens}"
+        );
+    }
+}
+
+/// An enum-keyed map in a tuple slot is the same map, so it carries the same rendering: the slot
+/// dispatch reaches the one emission rather than falling back to the open object.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_enum_keyed_map_tuple_element_expands_its_members() {
+    let expected =
+        enum_key_map_rendering("Slot", r#"serde_json :: json ! ({ "type" : "integer" })"#);
+    for field_type in [
+        "(String, HashMap<Slot, u32>)",
+        "(String, HashMap<String, HashMap<Slot, u32>>)",
+    ] {
+        let tokens = tuple_field_schema(field_type);
+        assert!(
+            tokens.contains(&expected),
+            "for {field_type}, got: {tokens}"
+        );
+        assert!(
+            !tokens.contains(r#""additionalProperties" : true"#),
+            "for {field_type}, got: {tokens}"
+        );
+    }
+}
+
+/// An inner key the registry positively rules out is rejected where the outer one is: reaching the
+/// emitting path at depth resolves `enum_members()` through the alias onto a type that has no such
+/// method, and rustc blames the attribute for a method the author never wrote.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_nested_map_key_known_to_lack_enum_members_names_the_requirement() {
+    register_alias_info(
+        "KeyAlias",
+        "KeyAliasType",
+        "key_alias_type_schema",
+        AliasKind::NoEnumMembers,
+    );
+    for map_type in [
+        "HashMap<String, HashMap<KeyAlias, String>>",
+        "HashMap<Slot, HashMap<KeyAlias, String>>",
+        "HashMap<String, Vec<HashMap<KeyAlias, String>>>",
+    ] {
+        let tokens = map_field_schema(map_type).to_string();
+        assert!(
+            !tokens.contains("KeyAlias :: enum_members"),
+            "for {map_type}, got: {tokens}"
+        );
+        assert!(
+            tokens.starts_with("compile_error !"),
+            "for {map_type}, got: {tokens}"
+        );
+        assert!(
+            !tokens.contains("properties . insert"),
+            "for {map_type}, got: {tokens}"
+        );
+        assert!(
+            tokens.contains("a map key must be a plain"),
+            "for {map_type}, got: {tokens}"
+        );
+        assert!(tokens.contains("KeyAlias"), "for {map_type}, got: {tokens}");
+    }
+}
+
+/// The guard reaches a tuple slot too, that being another position the map is dispatched through.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_tuple_element_map_key_known_to_lack_enum_members_names_the_requirement() {
+    register_alias_info(
+        "KeyAlias",
+        "KeyAliasType",
+        "key_alias_type_schema",
+        AliasKind::NoEnumMembers,
+    );
+    let tokens = tuple_field_schema("(String, HashMap<KeyAlias, String>)");
+    assert!(tokens.starts_with("compile_error !"), "got: {tokens}");
+    assert!(
+        tokens.contains("a map key must be a plain"),
+        "got: {tokens}"
+    );
+    assert!(tokens.contains("field `t`"), "got: {tokens}");
+}
+
+/// The one emission answers for every position a map can sit in, so the object `HashMap<Slot, T>`
+/// describes as in field position is the object it describes as nested under either key flavor and
+/// in a tuple slot. Held against the field-position rendering, which is the one that has always
+/// enumerated — depth cannot widen what the key already settled.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_enum_keyed_map_renders_the_same_in_every_position() {
+    let expected =
+        enum_key_map_rendering("Slot", r#"serde_json :: json ! ({ "type" : "string" })"#);
+    assert!(
+        map_field_schema("HashMap<Slot, String>")
+            .to_string()
+            .contains(&expected),
+        "field position lost its enumeration"
+    );
+    for position in [
+        map_field_schema("HashMap<String, HashMap<Slot, String>>").to_string(),
+        map_field_schema("HashMap<Slot, HashMap<Slot, String>>").to_string(),
+        tuple_field_schema("(String, HashMap<Slot, String>)"),
+    ] {
+        assert!(position.contains(&expected), "got: {position}");
+    }
+}
+
+/// An inner key this expansion cannot narrow leaves the inner members open — the member is still
+/// known to be an object, which is what the map guarantees, and it is what the same key states in
+/// field position.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_nested_map_under_an_unenumerable_key_still_renders_as_an_object() {
+    for map_type in [
+        "HashMap<String, HashMap<u32, String>>",
+        "HashMap<String, HashMap<Wrapper<Slot>, String>>",
+    ] {
+        let tokens = map_field_schema(map_type).to_string();
+        assert!(
+            tokens.contains(
+                r#""additionalProperties" : { "type" : "object" , "additionalProperties" : true }"#
+            ),
+            "for {map_type}, got: {tokens}"
+        );
+    }
 }
 
 /// A value the mapping cannot render fails wherever it sits: nested behind a map, the tuple is
