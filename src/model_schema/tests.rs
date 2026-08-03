@@ -16,6 +16,15 @@ use super::{
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use super::{AliasKind, branded_guard_errors, register_alias_info};
 
+#[cfg(feature = "typescript")]
+use super::tuple_struct_ts_body;
+
+#[cfg(feature = "zod")]
+use super::tuple_struct_zod_body;
+
+#[cfg(feature = "jsonschema")]
+use super::tuple_struct_json_body;
+
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use syn::spanned::Spanned as _;
 
@@ -1083,7 +1092,7 @@ fn constrained_brand_inner_spanned_tokens(source: &str, inner: &str) -> (usize, 
             .filter(|text| text.as_str() == inner)
             .count()
     };
-    (count(&validation.1), count(&validate_method))
+    (count(&validation.deserialize_fn), count(&validate_method))
 }
 
 /// Neither `to_string()` the constrained path emits may carry the inner field's span. Spanned
@@ -1109,43 +1118,103 @@ fn neither_constrained_to_string_call_carries_the_inner_fields_span() {
     );
 }
 
-/// The constrained path's generated text is what it has always been.
+/// A constrained brand's emitted text for an inner spelled `inner`, as the three streams it is made
+/// of: the validator, the deserializer, and the `validate()` method that calls into the first.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+fn constrained_brand_emission(inner: &str, module: &str) -> (String, String, String) {
+    let ty: syn::Type = syn::parse_str(inner).unwrap();
+    let item: syn::ItemStruct = syn::parse_quote!(
+        pub struct Branded(pub #ty);
+    );
+    let args = super::parse_model_schema_args(quote::quote! { pattern = "^[a-z]+$" });
+    let validation =
+        super::build_branded_validation(&args, false, &item.fields.iter().next().unwrap().ty)
+            .unwrap();
+    let module_ident = syn::Ident::new(module, proc_macro2::Span::call_site());
+    let (_, _, validate_method) = super::inject_branded_serde_attrs(
+        item,
+        Some(&validation),
+        false,
+        &[],
+        module,
+        &module_ident,
+    );
+    (
+        validation.validate_fn.to_string(),
+        validation.deserialize_fn.to_string(),
+        validate_method.to_string(),
+    )
+}
+
+/// The constrained path's generated text is what it has always been. A wrapper that is not
+/// transparent stays here too: only a deref reaches a path from outside it, and an `Option` or a
+/// sequence has none to offer.
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
 ))]
 #[test]
 fn the_constrained_path_renders_the_same_to_string_calls_it_always_has() {
-    let item: syn::ItemStruct = syn::parse_quote!(
-        pub struct SlugId(pub String);
-    );
-    let args = super::parse_model_schema_args(quote::quote! { pattern = "^[a-z]+$" });
-    let validation =
-        super::build_branded_validation(&args, false, &item.fields.iter().next().unwrap().ty)
-            .unwrap();
-    let module_ident = syn::Ident::new("slug_id_schema", proc_macro2::Span::call_site());
-    let (_, _, validate_method) = super::inject_branded_serde_attrs(
-        item,
-        Some(&validation),
-        false,
-        &[],
-        "slug_id_schema",
-        &module_ident,
-    );
-    assert!(
-        validation
-            .1
-            .to_string()
-            .contains("validate_value (& v . to_string ())"),
-        "got: {}",
-        validation.1
-    );
-    assert!(
-        validate_method
-            .to_string()
-            .contains("slug_id_schema :: validate_value (& self . 0 . to_string ())"),
-        "got: {validate_method}"
-    );
+    for spelling in ["String", "Option<PathBuf>", "Vec<PathBuf>"] {
+        let (validate_fn, deserialize_fn, validate_method) =
+            constrained_brand_emission(spelling, "slug_id_schema");
+        assert!(
+            validate_fn
+                .starts_with("pub fn validate_value (value : & str) -> Result < () , String > {"),
+            "for {spelling}, got: {validate_fn}"
+        );
+        assert!(
+            deserialize_fn.contains("validate_value (& v . to_string ())"),
+            "for {spelling}, got: {deserialize_fn}"
+        );
+        assert!(
+            validate_method
+                .contains("slug_id_schema :: validate_value (& self . 0 . to_string ())"),
+            "for {spelling}, got: {validate_method}"
+        );
+    }
+}
+
+/// A brand's constrained value is its inner field, so a path inner is reached the way a path field
+/// is: the validator takes the borrowed path and renders it once, and neither call site names a
+/// `to_string()` a path has none of. A transparent wrapper adds no call of its own — the borrow the
+/// bare spelling already writes is what deref coercion carries through it.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn a_path_brand_is_checked_through_its_lossy_rendering() {
+    for spelling in [
+        "PathBuf",
+        "std::path::PathBuf",
+        "Arc<Path>",
+        "Box<Path>",
+        "Cow<'static, Path>",
+        "Rc<std::path::Path>",
+        "Box<Arc<Path>>",
+    ] {
+        let (validate_fn, deserialize_fn, validate_method) =
+            constrained_brand_emission(spelling, "asset_path_schema");
+        assert!(
+            validate_fn.starts_with(
+                "pub fn validate_value (path : & std :: path :: Path) -> Result < () , String > { \
+                 let rendered = path . to_string_lossy () ; let value : & str = & rendered ;"
+            ),
+            "for {spelling}, got: {validate_fn}"
+        );
+        assert!(
+            deserialize_fn.contains("validate_value (& v)"),
+            "for {spelling}, got: {deserialize_fn}"
+        );
+        assert!(
+            validate_method.contains("asset_path_schema :: validate_value (& self . 0)"),
+            "for {spelling}, got: {validate_method}"
+        );
+    }
 }
 
 /// The JSON schema statements a map-typed field expands to, parsed from the map type's source and
@@ -2069,7 +2138,7 @@ fn an_aliased_string_keyed_map_value_resolves_its_module_through_the_registry() 
 fn wrapped_u32_value(wrapper: &str) -> super::FieldDef {
     let element = super::get_field_def("", &syn::parse_quote!(u32), "");
     super::FieldDef {
-        array_num: None,
+        array_lengths: Vec::new(),
         docs: String::new(),
         field_type: FieldDefType::SiblingType(wrapper.to_owned(), vec![element]),
         array_depth: 0,
@@ -2787,6 +2856,63 @@ fn a_field_without_a_constrainable_value_has_no_shape() {
             "spelling {spelling} should reach no constrainable value"
         );
     }
+}
+
+/// The slots a tuple struct is read from, at the three arities the dispatch answers for. The empty
+/// one has no declaration in this crate — `struct Nothing();` is refused by the lint table — so it
+/// is read here, where the slots are built rather than parsed off an item.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn tuple_slots(spellings: &[&str]) -> Vec<super::FieldDef> {
+    spellings
+        .iter()
+        .map(|spelling| get_field_def("", &syn::parse_str(spelling).unwrap(), ""))
+        .collect()
+}
+
+/// One slot is the slot's own type — serde writes a newtype struct as that value alone — and every
+/// other arity is the fixed tuple serde writes as an array.
+#[cfg(feature = "typescript")]
+#[test]
+fn a_tuple_struct_describes_as_its_arity_in_typescript() {
+    assert_eq!(tuple_struct_ts_body(&tuple_slots(&[])), "[]");
+    assert_eq!(tuple_struct_ts_body(&tuple_slots(&["String"])), "string");
+    assert_eq!(
+        tuple_struct_ts_body(&tuple_slots(&["String", "u32"])),
+        "[string, number]"
+    );
+}
+
+/// [`a_tuple_struct_describes_as_its_arity_in_typescript`] for the Zod surface.
+#[cfg(feature = "zod")]
+#[test]
+fn a_tuple_struct_describes_as_its_arity_in_zod() {
+    assert_eq!(tuple_struct_zod_body(&tuple_slots(&[])), "z.tuple([])");
+    assert_eq!(
+        tuple_struct_zod_body(&tuple_slots(&["String"])),
+        "z.string()"
+    );
+    assert_eq!(
+        tuple_struct_zod_body(&tuple_slots(&["String", "u32"])),
+        "z.tuple([z.string(), z.number().int()])"
+    );
+}
+
+/// [`a_tuple_struct_describes_as_its_arity_in_typescript`] for the JSON-schema surface, whose
+/// fixed array carries the arity as its own bounds.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_tuple_struct_describes_as_its_arity_in_json_schema() {
+    let empty = tuple_struct_json_body("Nothing", &tuple_slots(&[])).to_string();
+    assert!(empty.contains("prefixItems"), "Got: {empty}");
+    assert!(empty.contains("minItems"), "Got: {empty}");
+
+    let single = tuple_struct_json_body("Plain", &tuple_slots(&["String"])).to_string();
+    assert!(single.contains("string"), "Got: {single}");
+    assert!(!single.contains("prefixItems"), "Got: {single}");
+
+    let pair = tuple_struct_json_body("Pair", &tuple_slots(&["String", "u32"])).to_string();
+    assert!(pair.contains("prefixItems"), "Got: {pair}");
+    assert!(pair.contains("maxItems"), "Got: {pair}");
 }
 
 /// A path writes a string on the wire, which is the value the rendered constraint describes, so

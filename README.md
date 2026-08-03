@@ -105,6 +105,8 @@ pub struct UserWithOptionals {
 
 `Vec<T>` becomes `Array<T>`, and so does every other std wrapper serde writes as a JSON array of its element: `VecDeque<T>`, `LinkedList<T>`, `BinaryHeap<T>`, `HashSet<T>`, and `BTreeSet<T>`. Each is that array on the wire, so each is typed and validated as that array — the element decides what the array holds. Nesting is kept at whatever depth it is written: a `Vec<Vec<T>>` (or `HashSet<Vec<T>>`, or any other mix of those wrappers) writes an array of arrays, so it becomes `Array<Array<T>>`, `z.array(z.array(...))`, and a JSON schema whose `items` is itself an array. Only `HashMap<String, T>` is supported (non-string keys will cause compilation errors).
 
+A fixed-size array `[T; N]` is that array too, with its length described. serde writes exactly `N` items and reads one back only at that length, so the two validating surfaces say so: the JSON schema pins the level with `"minItems": N` and `"maxItems": N`, and Zod appends `.length(N)`. The bound belongs to the level it was written at, so `Vec<[T; 3]>` is an unbounded array of 3-element arrays and `[Vec<T>; 3]` is a 3-element array of unbounded ones. TypeScript stays `Array<T>`: the fixed-length form its type system has is the N-element tuple, which has to be written out element by element and stops being readable long before `N` stops being legal. A length the macro cannot read — a const generic parameter, a `const` item, any computed expression — describes as an unbounded array, the macro running before there is a value to ask for; a slice `[T]` has no length to describe at all.
+
 ```rust
 use std::collections::HashMap;
 
@@ -643,7 +645,7 @@ error[E0277]: `Vec<String>` doesn't implement `std::fmt::Display`
    |                     ^^^^^^^^^^^ the trait `std::fmt::Display` is not implemented for `Vec<String>`
 ```
 
-Pass `no_display` for brands over container inner types. The brand then gets no `Display` impl and carries no such requirement; its schema and its serde transparency are unchanged. String constraints are a separate matter: `pattern`, `minLength`, and `maxLength` validate through `to_string()`, so a constrained brand needs a `Display` inner whether or not it passes `no_display` — and a container inner cannot carry them at all (see [Branded Newtype Validation Constraints](#branded-newtype-validation-constraints)).
+Pass `no_display` for brands over an inner type that has none — a container, or a `PathBuf`. The brand then gets no `Display` impl and carries no such requirement; its schema and its serde transparency are unchanged. String constraints are a separate matter: `pattern`, `minLength`, and `maxLength` validate through `to_string()` for every inner but a path, so a constrained brand over one of the others needs a `Display` inner whether or not it passes `no_display` — and a container inner cannot carry them at all (see [Branded Newtype Validation Constraints](#branded-newtype-validation-constraints)).
 
 ```rust
 use tixschema::model_schema;
@@ -664,6 +666,17 @@ You can add `pattern`, `minLength`, and `maxLength` constraints directly on the 
 **The inner type has to be one whose schema is a string** — `String`, `PathBuf`, `ObjectId`, a chrono date/time type, another brand, or a generic parameter. A numeric, boolean, container (`Vec`, array, `HashMap`, tuple), or opaque (`serde_json::Value`) inner is rejected at expansion time, because the three constraints are string checks and each surface would read them differently: Zod's `.min`/`.max` become bounds on the value itself, JSON Schema ignores `minLength`/`maxLength`/`pattern` outside `"type": "string"`, and `validate()` measures the inner's `Display` rendering.
 
 **The inner type also has to implement `Display`,** since validation runs against `to_string()`. That holds whether or not the brand passes `no_display`: the flag drops the `Display` impl, not the requirement.
+
+A path inner is the one exception, and needs no `Display`: its checks read the path's `to_string_lossy` rendering — the string serde writes for it — exactly as a constrained path field's do. Such a brand still passes `no_display`, since the impl a brand gets by default has no inner `Display` to delegate to:
+
+```rust
+#[model_schema(no_display, minLength = 3, pattern = "^/[a-z]+$")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AssetPath(pub std::path::PathBuf);
+```
+
+That holds for every spelling of a path: a transparent wrapper writes nothing of its own on the wire and derefs to what it holds, so `Arc<Path>`, `Box<Path>`, `Cow<'static, Path>`, and `Rc<Path>` are branded and bounded exactly as `PathBuf` is.
 
 ```rust
 #[model_schema(pattern = "^[a-z0-9_]+$", minLength = 3, maxLength = 50)]

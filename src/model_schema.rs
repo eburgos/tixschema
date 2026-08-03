@@ -148,6 +148,18 @@ struct BrandedNewtypeOutput<'parts> {
     validation_tokens: &'parts proc_macro2::TokenStream,
 }
 
+/// A constrained brand's generated validation: the two schema-module functions, and the expression
+/// through which `validate()` reaches the inner value it hands to the first of them.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+struct BrandedValidation {
+    checked_inner: proc_macro2::TokenStream,
+    deserialize_fn: proc_macro2::TokenStream,
+    validate_fn: proc_macro2::TokenStream,
+}
+
 /// What a field bottoms out in, under the wrappers it was written beneath.
 #[cfg(feature = "serde")]
 struct ConstrainedShape {
@@ -1054,6 +1066,23 @@ fn struct_docs_and_example(item_struct: &syn::ItemStruct) -> (Option<Vec<String>
     (docs_vec, example_code)
 }
 
+/// The output a struct carrying a `cfg_attr`-wrapped serde attribute on the type is refused with,
+/// or `None` when it carries none.
+///
+/// A hidden `rename_all` reshapes every field name, so the item is refused before a single field
+/// is processed.
+#[cfg(feature = "serde")]
+fn struct_cfg_attr_guard_output(
+    item_struct: &syn::ItemStruct,
+    rejection: Option<&syn::Error>,
+) -> Option<TokenStream> {
+    let ident = &item_struct.ident;
+    guard_failure_output(
+        item_struct,
+        &[cfg_attr_guard_error(rejection?, &format!("type `{ident}`"))],
+    )
+}
+
 fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> TokenStream {
     // Check if this is a branded newtype (transparent single-field tuple struct)
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -1064,19 +1093,14 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
     // String constraints (pattern, minLength, maxLength) are only valid on branded newtypes
     assert_no_struct_string_constraints(args);
 
-    let name = &item_struct.ident;
+    let name = item_struct.ident.clone();
 
     #[cfg(feature = "serde")]
     let serde_type_meta = parse_serde_type_attributes(&item_struct.attrs);
 
-    // A hidden `rename_all` reshapes every field name, so the item is rejected before a single
-    // field is processed.
     #[cfg(feature = "serde")]
-    if let Some(rejection) = serde_type_meta.cfg_attr_rejection.as_ref()
-        && let Some(output) = guard_failure_output(
-            &item_struct,
-            &[cfg_attr_guard_error(rejection, &format!("type `{name}`"))],
-        )
+    if let Some(output) =
+        struct_cfg_attr_guard_output(&item_struct, serde_type_meta.cfg_attr_rejection.as_ref())
     {
         return output;
     }
@@ -1086,9 +1110,16 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
     #[cfg(not(feature = "serde"))]
     let rename_all: Option<String> = None;
 
+    // A tuple struct's slots have no keys, so the named-field emitters below would render every
+    // one of them under the empty ident it carries.
+    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+    if is_tuple_struct(&item_struct) {
+        return process_tuple_struct(item_struct, rename_all.as_deref());
+    }
+
     // Compute schema-module identifiers and register the struct in the alias registry.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    let (item_name, module_name, module_ident) = struct_module_idents(name);
+    let (item_name, module_name, module_ident) = struct_module_idents(&name);
 
     // Extract docs early for example extraction
     #[cfg(any(feature = "typescript", feature = "zod"))]
@@ -1121,7 +1152,7 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
     }
 
     #[cfg(feature = "typescript")]
-    let docs = build_item_jsdoc(docs_and_example.0.as_deref(), name);
+    let docs = build_item_jsdoc(docs_and_example.0.as_deref(), &name);
 
     // Generate the schema module methods. The schema module emits zod_schema without examples;
     // example injection happens in the delegating method on the type to avoid `super::` issues.
@@ -1144,7 +1175,7 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
     // schema_example must be directly on the type (not in the module) because the example code
     // uses type names that may not be accessible from the nested module.
     #[cfg(feature = "zod")]
-    let schema_example_method = build_struct_schema_example(docs_and_example.1.as_ref(), name);
+    let schema_example_method = build_struct_schema_example(docs_and_example.1.as_ref(), &name);
     #[cfg(all(
         not(feature = "zod"),
         any(feature = "typescript", feature = "jsonschema")
@@ -1176,7 +1207,7 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
         assemble_schema_output(
             &item_struct,
             &module_ident,
-            name,
+            &name,
             &schema_impl_items,
             &collected.2,
             &delegate_impl_items,
@@ -1191,6 +1222,190 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
         log::trace!("{output}");
         TokenStream::from(output)
     }
+}
+
+/// Returns whether a struct's slots are positional. A branded newtype is one too, and is
+/// dispatched ahead of this question.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+const fn is_tuple_struct(item_struct: &syn::ItemStruct) -> bool {
+    matches!(item_struct.fields, syn::Fields::Unnamed(_))
+}
+
+/// Walks a tuple struct's slots, returning their field defs in declaration order and the
+/// `compile_error!` tokens of every guard a slot violates.
+///
+/// Unlike [`collect_struct_fields`] the walk does not split on `#[serde(flatten)]`: a positional
+/// slot has no key for a flattened member to merge into, and dropping one here would silently
+/// change the arity the surfaces describe. The per-slot validators are dropped because a
+/// positional slot cannot carry a constraint — the guard that says so is what comes back instead.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn collect_tuple_slots(
+    fields: &mut syn::Fields,
+    rename_all: Option<&str>,
+    module_name: &str,
+    type_name: &str,
+) -> (Vec<FieldDef>, Vec<proc_macro2::TokenStream>) {
+    let mut slots: Vec<FieldDef> = Vec::new();
+    let mut guard_errors: Vec<proc_macro2::TokenStream> = Vec::new();
+    for field in fields.iter_mut() {
+        let (slot, _, _, slot_guard_errors) =
+            process_field(rename_all, field, Some(module_name), None, type_name);
+        guard_errors.extend(slot_guard_errors);
+        slots.push(slot);
+    }
+    (slots, guard_errors)
+}
+
+/// The TypeScript type a tuple struct describes as.
+///
+/// A single slot is the slot's own type: serde writes a newtype struct as that value alone, with
+/// nothing around it. Every other arity — the empty one included, which writes `[]` — is the fixed
+/// tuple the same slots describe as when they are written as a tuple field.
+#[cfg(feature = "typescript")]
+fn tuple_struct_ts_body(slots: &[FieldDef]) -> String {
+    if let [slot] = slots {
+        return slot.typescript_slot_typename();
+    }
+    format!(
+        "[{}]",
+        slots
+            .iter()
+            .map(FieldDef::typescript_slot_typename)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// [`tuple_struct_ts_body`] for the Zod surface.
+#[cfg(feature = "zod")]
+fn tuple_struct_zod_body(slots: &[FieldDef]) -> String {
+    if let [slot] = slots {
+        return slot.zod_slot_type();
+    }
+    format!(
+        "z.tuple([{}])",
+        slots
+            .iter()
+            .map(FieldDef::zod_slot_type)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// [`tuple_struct_ts_body`] for the JSON-schema surface, as a standalone `serde_json::Value`
+/// expression, or the diagnostic naming the type when a slot holds a value the dispatch cannot
+/// render.
+#[cfg(feature = "jsonschema")]
+fn tuple_struct_json_body(item_name: &str, slots: &[FieldDef]) -> proc_macro2::TokenStream {
+    let described = if let [slot] = slots {
+        build_tuple_element_json_schema(slot)
+    } else {
+        tuple_json_schema_value(slots)
+    };
+    match described {
+        Ok(value) => value,
+        Err(rejection) => {
+            let message = map_member_rejection_message(&format!("`{item_name}`"), &rejection);
+            quote! { compile_error!(#message) }
+        }
+    }
+}
+
+/// Builds the `ts_definition()` method for a tuple struct's schema module.
+#[cfg(feature = "typescript")]
+fn build_tuple_struct_ts_definition_method(
+    docs: &str,
+    item_name: &str,
+    ts_body: &str,
+) -> proc_macro2::TokenStream {
+    let type_str = format!("/**\n{docs}\n **/\nexport type {item_name} = {ts_body};");
+    quote! {
+        pub fn ts_definition() -> String {
+            #type_str.to_owned()
+        }
+    }
+}
+
+/// Builds the `zod_schema()` method for a tuple struct's schema module, in the same framing every
+/// unbranded type publishes: the raw schema, then the exported binding annotated with the
+/// TypeScript type the module's own `ts_definition()` writes.
+#[cfg(feature = "zod")]
+fn build_tuple_struct_zod_schema_method(
+    item_name: &str,
+    zod_body: &str,
+) -> proc_macro2::TokenStream {
+    #[cfg(feature = "typescript")]
+    let schema_str = format!(
+        "const {item_name}$RawSchema = {zod_body};\n\nexport const {item_name}$Schema: ZodType<{item_name}> = {item_name}$RawSchema;"
+    );
+    #[cfg(not(feature = "typescript"))]
+    let schema_str = format!("export const {item_name}$Schema = {zod_body};");
+    quote! {
+        pub fn zod_schema() -> String {
+            #schema_str.to_owned()
+        }
+    }
+}
+
+/// Processes a tuple struct that is not a branded newtype.
+///
+/// serde writes a one-slot tuple struct as the slot's value alone and every other arity as a
+/// fixed-arity array, so neither shape is the object the named-field emitters describe. Both are
+/// rendered from the slots read in slot position — the position a tuple field's elements are
+/// already read in, where a `None` reaches the wire as `null` rather than as an omitted key — so
+/// a tuple struct describes as the tuple of its slot types does wherever that tuple is written.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn process_tuple_struct(mut item_struct: syn::ItemStruct, rename_all: Option<&str>) -> TokenStream {
+    let name = item_struct.ident.clone();
+    let (item_name, module_name, module_ident) = struct_module_idents(&name);
+
+    let (slots, guard_errors) = collect_tuple_slots(
+        &mut item_struct.fields,
+        rename_all,
+        &module_name,
+        &name.to_string(),
+    );
+
+    // A violated slot guard makes the whole contract unsound, so the schema surface is dropped and
+    // only the original item plus the errors are emitted.
+    if let Some(output) = guard_failure_output(&item_struct, &guard_errors) {
+        return output;
+    }
+
+    #[cfg(any(feature = "typescript", feature = "zod"))]
+    let docs_and_example = struct_docs_and_example(&item_struct);
+
+    let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![
+        #[cfg(feature = "jsonschema")]
+        json_schema_methods(&item_name, &tuple_struct_json_body(&item_name, &slots)),
+        #[cfg(feature = "typescript")]
+        build_tuple_struct_ts_definition_method(
+            &build_item_jsdoc(docs_and_example.0.as_deref(), &name),
+            &item_name,
+            &tuple_struct_ts_body(&slots),
+        ),
+        #[cfg(feature = "zod")]
+        build_tuple_struct_zod_schema_method(&item_name, &tuple_struct_zod_body(&slots)),
+    ];
+
+    // schema_example must be directly on the type (not in the module) because the example code
+    // uses type names that may not be accessible from the nested module.
+    #[cfg(feature = "zod")]
+    let schema_example_method = build_struct_schema_example(docs_and_example.1.as_ref(), &name);
+    #[cfg(not(feature = "zod"))]
+    let schema_example_method: Option<proc_macro2::TokenStream> = None;
+
+    let delegate_impl_items =
+        build_struct_delegate_items(&module_ident, schema_example_method.as_ref(), None);
+
+    assemble_schema_output(
+        &item_struct,
+        &module_ident,
+        &name,
+        &schema_impl_items,
+        &[],
+        &delegate_impl_items,
+    )
 }
 
 /// Processes a branded newtype (transparent single-field tuple struct) and generates
@@ -1210,8 +1425,10 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
 /// cannot be resolved at macro-expansion time.
 /// Builds the `validate_value`/`deserialize_value` functions for a constrained branded newtype.
 ///
-/// Returns `None` when the newtype has no string constraints. Uses `ToString` so it works for
-/// `String`, `ObjectId`, and any generic `ID_TYPE` that implements `Display`.
+/// Returns `None` when the newtype has no string constraints. A path inner is measured by the
+/// string serde writes for it, exactly as a path field is; every other inner is reached through
+/// `ToString`, so it works for `String`, `ObjectId`, and any generic `ID_TYPE` implementing
+/// `Display`.
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
@@ -1220,8 +1437,11 @@ fn build_branded_validation(
     args: &ModelSchemaArgs,
     is_generic: bool,
     inner_ty: &syn::Type,
-) -> Option<(proc_macro2::TokenStream, proc_macro2::TokenStream)> {
+) -> Option<BrandedValidation> {
     args.has_string_constraints().then(|| {
+        let measures_path = branded_inner_measures_path(inner_ty);
+        let (checked_param, rendering) = checked_value_parts(measures_path);
+        let checked_v = branded_checked_value(measures_path, &quote! { v });
         let mut checks: Vec<proc_macro2::TokenStream> = Vec::new();
 
         if let Some(min_len) = args.min_length {
@@ -1263,7 +1483,8 @@ fn build_branded_validation(
         }
 
         let validate_fn = quote! {
-            pub fn validate_value(value: &str) -> Result<(), String> {
+            pub fn validate_value(#checked_param) -> Result<(), String> {
+                #rendering
                 #(#checks)*
                 Ok(())
             }
@@ -1278,7 +1499,7 @@ fn build_branded_validation(
                 {
                     use serde::Deserialize;
                     let v = T::deserialize(deserializer)?;
-                    validate_value(&v.to_string()).map_err(serde::de::Error::custom)?;
+                    validate_value(#checked_v).map_err(serde::de::Error::custom)?;
                     Ok(v)
                 }
             }
@@ -1294,14 +1515,59 @@ fn build_branded_validation(
                 {
                     use serde::Deserialize;
                     let v = <#inner_ty>::deserialize(deserializer)?;
-                    validate_value(&v.to_string()).map_err(serde::de::Error::custom)?;
+                    validate_value(#checked_v).map_err(serde::de::Error::custom)?;
                     Ok(v)
                 }
             }
         };
 
-        (validate_fn, deserialize_fn)
+        BrandedValidation {
+            checked_inner: branded_checked_value(measures_path, &quote! { self.0 }),
+            deserialize_fn,
+            validate_fn,
+        }
     })
+}
+
+/// Whether a brand's constrained checks reach its inner value as a path rather than through
+/// `Display`.
+///
+/// A brand's constrained value is the inner field itself, with no walk to reach it, so only an
+/// inner that *is* a path answers here — one merely holding paths writes no string of its own for
+/// the checks to measure, and is refused by [`branded_constraint_inner_error`] before this. A
+/// transparent wrapper is nothing on the wire and derefs to what it holds, so a path written under
+/// any stack of them is still that same path, borrowed one coercion further out; an `Option` or a
+/// sequence is not, which is why only the transparent wraps pass.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+fn branded_inner_measures_path(inner_ty: &syn::Type) -> bool {
+    constrained_shape(inner_ty).is_some_and(|shape| {
+        matches!(shape.leaf, ConstraintLeaf::Path)
+            && shape
+                .wraps
+                .iter()
+                .all(|wrap| matches!(wrap, ConstraintWrap::Transparent))
+    })
+}
+
+/// How a constrained brand hands `receiver` to `validate_value`: a path goes borrowed — deref
+/// coercion carries it through whatever transparent wrappers it was written under — since the
+/// validator renders it itself; every other inner is rendered through `Display` first.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+fn branded_checked_value(
+    measures_path: bool,
+    receiver: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    if measures_path {
+        quote! { &#receiver }
+    } else {
+        quote! { &#receiver.to_string() }
+    }
 }
 
 /// Builds the `json_schema()` method for a branded newtype's schema module.
@@ -1614,7 +1880,9 @@ fn build_branded_display_impl(
 ///
 /// A constrained brand validates through `value.to_string()`, so the requirement outlives the impl
 /// the brand opted out of. Keeping the assertion is what turns that into an `E0277` at the inner
-/// field instead of the `E0599` the `to_string()` call raises against the attribute.
+/// field instead of the `E0599` the `to_string()` call raises against the attribute. A path inner
+/// is the exception: its checks read the path's own rendering and call no `to_string()`, so there
+/// is nothing left for the assertion to blame.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn build_branded_display_tokens(
     generics: &syn::Generics,
@@ -1624,7 +1892,8 @@ fn build_branded_display_tokens(
 ) -> proc_macro2::TokenStream {
     // Only the serde build emits the validation functions that call `to_string()`.
     #[cfg(feature = "serde")]
-    let validation_needs_display = args.has_string_constraints();
+    let validation_needs_display =
+        args.has_string_constraints() && !branded_inner_measures_path(&inner_field.ty);
     #[cfg(not(feature = "serde"))]
     let validation_needs_display = false;
 
@@ -1742,7 +2011,7 @@ fn build_branded_schema_example(
 ))]
 fn inject_branded_serde_attrs(
     mut owned_struct: syn::ItemStruct,
-    branded_validation: Option<&(proc_macro2::TokenStream, proc_macro2::TokenStream)>,
+    branded_validation: Option<&BrandedValidation>,
     is_generic: bool,
     generic_params: &[String],
     module_name: &str,
@@ -1752,7 +2021,7 @@ fn inject_branded_serde_attrs(
     proc_macro2::TokenStream,
     proc_macro2::TokenStream,
 ) {
-    let Some((validate_fn, deserialize_fn)) = branded_validation else {
+    let Some(validation) = branded_validation else {
         return (owned_struct, quote! {}, quote! {});
     };
 
@@ -1784,6 +2053,9 @@ fn inject_branded_serde_attrs(
         fields.unnamed.first_mut().unwrap().attrs.push(serde_attr);
     }
 
+    let validate_fn = &validation.validate_fn;
+    let deserialize_fn = &validation.deserialize_fn;
+    let checked_inner = &validation.checked_inner;
     let validation_tokens = quote! {
         #validate_fn
         #deserialize_fn
@@ -1791,7 +2063,7 @@ fn inject_branded_serde_attrs(
     let validate_method = quote! {
         pub fn validate(&self) -> Result<(), Vec<String>> {
             let mut errors = Vec::new();
-            if let Err(e) = #module_ident::validate_value(&self.0.to_string()) {
+            if let Err(e) = #module_ident::validate_value(#checked_inner) {
                 errors.push(e);
             }
             if errors.is_empty() { Ok(()) } else { Err(errors) }
@@ -3790,6 +4062,9 @@ fn write_tuple_multiple_variant_fields(
 /// which is always written — rather than around the array, which is what the outermost level does
 /// and is the caller's to apply.
 ///
+/// A level written as a fixed-size `[T; N]` carries its bounds, so the wrong-length payload serde
+/// refuses to deserialize is refused here too.
+///
 /// `item_schema` is a `serde_json::Value` expression, as is the result. Callers holding a literal
 /// fragment want [`arrayed_json_schema_fragment`].
 #[cfg(feature = "jsonschema")]
@@ -3803,7 +4078,8 @@ fn arrayed_json_schema_value(
         } else {
             level_schema
         };
-        quote! { serde_json::json!({ "type": "array", "items": #items }) }
+        let bounds = fixed_length_json_schema_bounds(fld, level);
+        quote! { serde_json::json!({ "type": "array", "items": #items #bounds }) }
     })
 }
 
@@ -3820,8 +4096,22 @@ fn arrayed_json_schema_fragment(
         } else {
             level_schema
         };
-        quote! { { "type": "array", "items": #items } }
+        let bounds = fixed_length_json_schema_bounds(fld, level);
+        quote! { { "type": "array", "items": #items #bounds } }
     })
+}
+
+/// The arity a fixed-size `[T; N]` level pins, as the `minItems`/`maxItems` pair a tuple pins its
+/// own arity with — the same constraint, the two spellings serde writes a fixed-length array from.
+///
+/// Empty for every other level, which is what leaves an unbounded array unbounded. The pair carries
+/// its own leading comma so that emptiness costs the caller nothing.
+#[cfg(feature = "jsonschema")]
+fn fixed_length_json_schema_bounds(fld: &FieldDef, level: u8) -> proc_macro2::TokenStream {
+    fld.fixed_length_at(level).map_or_else(
+        proc_macro2::TokenStream::new,
+        |length| quote! { , "minItems": #length, "maxItems": #length },
+    )
 }
 
 /// The JSON schema literal for a type that renders inline as a scalar — the object body itself,
@@ -4844,6 +5134,28 @@ fn helper_name_stem(field_ident: &str, variant_ident: Option<&str>) -> String {
     )
 }
 
+/// The parameter a string validator takes and the rendering its checks read `value` from.
+///
+/// A path is the one leaf the checks cannot be handed as-is: it arrives borrowed — the form every
+/// reach into one already ends at — and is rendered once through `to_string_lossy`, the string
+/// serde writes for it. Every other leaf already is that string, and renders nothing.
+#[cfg(feature = "serde")]
+fn checked_value_parts(
+    measures_path: bool,
+) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
+    if measures_path {
+        (
+            quote! { path: &std::path::Path },
+            quote! {
+                let rendered = path.to_string_lossy();
+                let value: &str = &rendered;
+            },
+        )
+    } else {
+        (quote! { value: &str }, quote! {})
+    }
+}
+
 /// Generates the static validator for a string-shaped field with constraints, plus the serde
 /// deserializer — written against the constrained value itself when the field is bare, and against
 /// the field's declared type when it is wrapped.
@@ -4870,17 +5182,7 @@ fn generate_string_validation_code(
         proc_macro2::Ident::new(&deserialize_fn_name, proc_macro2::Span::call_site());
 
     let measures_path = matches!(shape.leaf, ConstraintLeaf::Path);
-    let (checked_param, rendering) = if measures_path {
-        (
-            quote! { path: &std::path::Path },
-            quote! {
-                let rendered = path.to_string_lossy();
-                let value: &str = &rendered;
-            },
-        )
-    } else {
-        (quote! { value: &str }, quote! {})
-    };
+    let (checked_param, rendering) = checked_value_parts(measures_path);
 
     let field_name_lit = field_ident.to_owned();
 
