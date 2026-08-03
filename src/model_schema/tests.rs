@@ -450,7 +450,7 @@ fn struct_schema_example_carries_no_cfg_attribute() {
 #[test]
 fn branded_json_schema_method_carries_no_cfg_attribute() {
     let args = super::ModelSchemaArgs::default();
-    let tokens = super::build_branded_json_schema_method(&args, "string");
+    let tokens = super::build_branded_json_schema_method(&args, "string", "DocumentId");
     assert_no_cfg_attribute(&tokens, "build_branded_json_schema_method");
 }
 
@@ -519,8 +519,13 @@ fn an_alias_of_an_unrenderable_target_emits_only_the_compile_error() {
             "for {alias_source}, got: {tokens}"
         );
         assert!(
-            !tokens.contains("json !"),
-            "for {alias_source}, got: {tokens}"
+            tokens.contains("= compile_error !"),
+            "the description is the diagnostic, not a schema: for {alias_source}, got: {tokens}"
+        );
+        assert!(
+            !tokens.contains("\"type\""),
+            "no schema for the rejected target is left beside the diagnostic: \
+             for {alias_source}, got: {tokens}"
         );
     }
 }
@@ -544,7 +549,7 @@ fn an_alias_type_parameter_is_erased_at_every_depth() {
         let tokens =
             super::generate_alias_json_schema_method(&alias, "HolderType", &field_def).to_string();
         assert!(
-            !tokens.contains("Schema :: json_schema ()"),
+            !tokens.contains("_schema :: Schema ::"),
             "for {alias_source}, got: {tokens}"
         );
     }
@@ -1160,7 +1165,7 @@ fn a_nested_enum_keyed_map_value_renders_its_inner_members() {
         ),
         (
             "HashMap<Slot, HashMap<String, Inner>>",
-            r#"serde_json :: json ! ({ "type" : "object" , "additionalProperties" : inner_schema :: Schema :: json_schema () })"#,
+            r#"serde_json :: json ! ({ "type" : "object" , "additionalProperties" : inner_schema :: Schema :: json_schema_within (in_flight , hoisted_defs) })"#,
         ),
         (
             "HashMap<Slot, Vec<HashMap<String, String>>>",
@@ -1190,7 +1195,7 @@ fn a_nested_enum_keyed_map_value_renders_its_inner_members() {
 fn a_generic_sibling_enum_keyed_map_value_emits_the_sibling_schema() {
     let tokens = map_field_schema("HashMap<Slot, Wrapper<String>>").to_string();
     assert!(
-        tokens.contains("let value_schema = wrapper_schema :: Schema :: json_schema () ;"),
+        tokens.contains("let value_schema = wrapper_schema :: Schema :: json_schema_within (in_flight , hoisted_defs) ;"),
         "got: {tokens}"
     );
 }
@@ -1276,14 +1281,14 @@ fn a_vec_sibling_enum_keyed_map_value_arrays_the_sibling_schema() {
     let arrayed = map_field_schema("HashMap<Slot, Vec<Inner>>").to_string();
     assert!(
         arrayed.contains(
-            r#"let value_schema = serde_json :: json ! ({ "type" : "array" , "items" : inner_schema :: Schema :: json_schema () }) ;"#
+            r#"let value_schema = serde_json :: json ! ({ "type" : "array" , "items" : inner_schema :: Schema :: json_schema_within (in_flight , hoisted_defs) }) ;"#
         ),
         "got: {arrayed}"
     );
 
     let single = map_field_schema("HashMap<Slot, Inner>").to_string();
     assert!(
-        single.contains("let value_schema = inner_schema :: Schema :: json_schema () ;"),
+        single.contains("let value_schema = inner_schema :: Schema :: json_schema_within (in_flight , hoisted_defs) ;"),
         "got: {single}"
     );
 }
@@ -1545,7 +1550,7 @@ fn a_nested_string_keyed_map_value_renders_its_inner_members() {
         ),
         (
             "HashMap<String, HashMap<String, Inner>>",
-            r#"{ "type" : "object" , "additionalProperties" : inner_schema :: Schema :: json_schema () }"#,
+            r#"{ "type" : "object" , "additionalProperties" : inner_schema :: Schema :: json_schema_within (in_flight , hoisted_defs) }"#,
         ),
         (
             "HashMap<String, Option<HashMap<String, String>>>",
@@ -1580,7 +1585,7 @@ fn a_vec_of_maps_string_keyed_map_value_renders_its_inner_members() {
         ),
         (
             "HashMap<String, Vec<HashMap<String, Inner>>>",
-            r#"{ "type" : "array" , "items" : { "type" : "object" , "additionalProperties" : inner_schema :: Schema :: json_schema () } }"#,
+            r#"{ "type" : "array" , "items" : { "type" : "object" , "additionalProperties" : inner_schema :: Schema :: json_schema_within (in_flight , hoisted_defs) } }"#,
         ),
     ] {
         let tokens = map_field_schema(map_type).to_string();
@@ -1931,19 +1936,19 @@ fn a_sibling_string_keyed_map_value_emits_the_sibling_schema() {
     for (map_type, expected) in [
         (
             "HashMap<String, Inner>",
-            "inner_schema :: Schema :: json_schema ()",
+            "inner_schema :: Schema :: json_schema_within (in_flight , hoisted_defs)",
         ),
         (
             "HashMap<String, Vec<Inner>>",
-            r#"serde_json :: json ! ({ "type" : "array" , "items" : inner_schema :: Schema :: json_schema () })"#,
+            r#"serde_json :: json ! ({ "type" : "array" , "items" : inner_schema :: Schema :: json_schema_within (in_flight , hoisted_defs) })"#,
         ),
         (
             "HashMap<String, Option<Inner>>",
-            r#"serde_json :: json ! ({ "anyOf" : [inner_schema :: Schema :: json_schema () , { "type" : "null" }] })"#,
+            r#"serde_json :: json ! ({ "anyOf" : [inner_schema :: Schema :: json_schema_within (in_flight , hoisted_defs) , { "type" : "null" }] })"#,
         ),
         (
             "HashMap<String, Option<Vec<Inner>>>",
-            r#"serde_json :: json ! ({ "anyOf" : [serde_json :: json ! ({ "type" : "array" , "items" : inner_schema :: Schema :: json_schema () }) , { "type" : "null" }] })"#,
+            r#"serde_json :: json ! ({ "anyOf" : [serde_json :: json ! ({ "type" : "array" , "items" : inner_schema :: Schema :: json_schema_within (in_flight , hoisted_defs) }) , { "type" : "null" }] })"#,
         ),
     ] {
         let tokens = map_field_schema(map_type).to_string();
@@ -1973,7 +1978,9 @@ fn an_aliased_string_keyed_map_value_resolves_its_module_through_the_registry() 
     for map_type in ["HashMap<String, Inner>", "HashMap<String, Vec<Inner>>"] {
         let tokens = map_field_schema(map_type).to_string();
         assert!(
-            tokens.contains("inner_type_schema :: Schema :: json_schema ()"),
+            tokens.contains(
+                "inner_type_schema :: Schema :: json_schema_within (in_flight , hoisted_defs)"
+            ),
             "for {map_type}, got: {tokens}"
         );
     }

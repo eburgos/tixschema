@@ -8,57 +8,69 @@ pub const fn should_generate_json_schema() -> bool {
     true // Always true when this module is compiled (feature is enabled)
 }
 
-/// Where a document holds the body of the type it describes, once that body names itself.
+/// Where a document holds the definition of `def_name`.
 ///
 /// The crate writes draft 2020-12 (`prefixItems` with `"items": false` is that draft's fixed-arity
 /// array, and the draft before it spells the same array with `items`/`additionalItems`), whose
-/// recursive schema is a `$ref` into the document's own `$defs`.
-fn self_reference_pointer(def_name: &str) -> String {
+/// deferred schema is a `$ref` into the document's own `$defs`.
+fn defs_pointer(def_name: &str) -> String {
     format!("#/$defs/{def_name}")
 }
 
-/// Roots a document whose body names itself: the body moves under `$defs`, and the document
-/// becomes the `$ref` into it.
+/// The pair of JSON-schema methods every schema module publishes.
 ///
-/// The body's own references are pointers from the document root, so this rooting is the only
-/// arrangement that resolves them — a body left at the root would point into a `$defs` that is not
-/// there.
-pub fn recursive_document(
+/// `json_schema` is the document a caller asks for. `json_schema_within` is that same description
+/// written into a document already being built, and carries the two things that have to travel
+/// with it: the names whose descriptions are still being written, and the definitions the
+/// document's root must hold.
+///
+/// A cycle is only knowable there. A type names another by inlining it, and no expansion can see
+/// the cycle it is part of — the other type may not have been expanded yet, and one that has been
+/// cannot be revisited. So the name is recognized while the description runs: a name re-entered
+/// while still in flight describes as a `$ref` into `$defs`, and the frame that put it in flight
+/// hoists its body to the root that pointer resolves against.
+pub fn json_schema_methods(
     def_name: &str,
     body: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
-    let pointer = self_reference_pointer(def_name);
-    quote::quote! {
-        {
-            let mut defs = serde_json::Map::new();
-            defs.insert(#def_name.to_string(), #body);
-            let mut document = serde_json::Map::new();
-            document.insert("$defs".to_string(), serde_json::Value::Object(defs));
-            document.insert(
-                "$ref".to_string(),
-                serde_json::Value::String(#pointer.to_string()),
-            );
-            serde_json::Value::Object(document)
-        }
-    }
-}
-
-/// The reference a self-naming type is described by wherever it appears inside its own document.
-pub fn self_reference_value(def_name: &str) -> proc_macro2::TokenStream {
-    let pointer = self_reference_pointer(def_name);
-    quote::quote! { serde_json::json!({ "$ref": #pointer }) }
-}
-
-/// Wraps a `json_schema()` body in the method, rooting it as a recursive document when the
-/// expansion emitted a reference back to the type being described.
-fn json_schema_method(
-    body: &proc_macro2::TokenStream,
-    self_reference: Option<&str>,
-) -> proc_macro2::TokenStream {
-    let value = self_reference.map_or_else(|| body.clone(), |name| recursive_document(name, body));
+    let pointer = defs_pointer(def_name);
     quote::quote! {
         pub fn json_schema() -> serde_json::Value {
-            #value
+            let mut in_flight: Vec<&'static str> = Vec::new();
+            let mut hoisted_defs = serde_json::Map::new();
+            let described = Self::json_schema_within(&mut in_flight, &mut hoisted_defs);
+            if hoisted_defs.is_empty() {
+                return described;
+            }
+            // The pointers into them are from the root, so the definitions join it — ahead of the
+            // description, which is the rest of the document. Every description the crate writes
+            // is an object, which is what can take them as a member.
+            let mut rooted = serde_json::Map::new();
+            rooted.insert("$defs".to_string(), serde_json::Value::Object(hoisted_defs));
+            if let serde_json::Value::Object(members) = described {
+                rooted.extend(members);
+            }
+            serde_json::Value::Object(rooted)
+        }
+
+        pub fn json_schema_within(
+            in_flight: &mut Vec<&'static str>,
+            hoisted_defs: &mut serde_json::Map<String, serde_json::Value>,
+        ) -> serde_json::Value {
+            if in_flight.contains(&#def_name) {
+                // Reserved rather than written: the frame that put this name in flight is still
+                // writing the body, and fills the entry in once it has one.
+                hoisted_defs.entry(#def_name).or_insert(serde_json::Value::Null);
+                return serde_json::json!({ "$ref": #pointer });
+            }
+            in_flight.push(#def_name);
+            let described = #body;
+            in_flight.pop();
+            if hoisted_defs.contains_key(#def_name) {
+                hoisted_defs.insert(#def_name.to_string(), described);
+                return serde_json::json!({ "$ref": #pointer });
+            }
+            described
         }
     }
 }
@@ -72,14 +84,14 @@ fn json_schema_method(
 pub fn generate_struct_json_schema_method(
     json_schema_fields: &[proc_macro2::TokenStream],
     flatten_json_schemas: &[proc_macro2::TokenStream],
-    self_reference: Option<&str>,
+    def_name: &str,
 ) -> proc_macro2::TokenStream {
     let body = if flatten_json_schemas.is_empty() {
         closed_object_body(json_schema_fields)
     } else {
         flattened_object_body(json_schema_fields, flatten_json_schemas)
     };
-    json_schema_method(&body, self_reference)
+    json_schema_methods(def_name, &body)
 }
 
 /// The struct's own fields as one closed object.
@@ -203,9 +215,10 @@ fn flattened_object_body(
 /// Generates the JSON schema method implementation for plain enums.
 pub fn generate_plain_enum_json_schema_method(
     enumerated: &[proc_macro2::TokenStream],
+    def_name: &str,
 ) -> proc_macro2::TokenStream {
-    quote::quote! {
-        pub fn json_schema() -> serde_json::Value {
+    let body = quote::quote! {
+        {
             let mut schema_obj = serde_json::Map::new();
             schema_obj.insert("type".to_string(), serde_json::Value::String("string".to_string()));
             schema_obj.insert("enum".to_string(), serde_json::Value::Array(
@@ -214,7 +227,8 @@ pub fn generate_plain_enum_json_schema_method(
 
             serde_json::Value::Object(schema_obj)
         }
-    }
+    };
+    json_schema_methods(def_name, &body)
 }
 
 #[cfg(test)]
