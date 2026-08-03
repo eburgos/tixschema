@@ -8,7 +8,13 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::parse::Parser as _;
 use syn::punctuated::Punctuated;
-use syn::{Field, Item, ItemType, MetaNameValue, Token, parse_macro_input};
+use syn::{Field, Item, ItemType, Meta, MetaNameValue, Token, parse_macro_input};
+
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+use quote::quote_spanned;
+
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+use syn::spanned::Spanned as _;
 
 #[cfg(feature = "typescript")]
 use syn::GenericParam;
@@ -109,7 +115,7 @@ type StructFieldData = (
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 struct BrandedNewtypeOutput<'parts> {
     delegate_impl_items: &'parts [proc_macro2::TokenStream],
-    display_impl: &'parts proc_macro2::TokenStream,
+    display_tokens: &'parts proc_macro2::TokenStream,
     generics: &'parts syn::Generics,
     generics_for_ty: &'parts syn::Generics,
     item_struct: &'parts syn::ItemStruct,
@@ -135,6 +141,9 @@ struct ModelSchemaArgs {
     max_length: Option<usize>,
     min_length: Option<usize>,
     name_override: Option<String>,
+    /// Opt-out of the branded newtype `Display` impl (and its inner-type assertion) for brands
+    /// whose inner type is a container rather than a scalar.
+    no_display: bool,
     pattern: Option<String>,
 }
 
@@ -154,38 +163,22 @@ impl ModelSchemaArgs {
     }
 }
 
-fn parse_model_schema_args(args: TokenStream) -> ModelSchemaArgs {
+fn parse_model_schema_args(args: proc_macro2::TokenStream) -> ModelSchemaArgs {
     let mut result = ModelSchemaArgs::default();
 
     if args.is_empty() {
         return result;
     }
 
-    let parser = Punctuated::<MetaNameValue, Token![,]>::parse_terminated;
-    if let Ok(parsed) = parser.parse(args) {
+    let parser = Punctuated::<Meta, Token![,]>::parse_terminated;
+    if let Ok(parsed) = parser.parse2(args) {
         for meta in parsed {
-            if meta.path.is_ident("name")
-                && let syn::Expr::Lit(expr_lit) = &meta.value
-                && let syn::Lit::Str(lit_str) = &expr_lit.lit
-            {
-                result.name_override = Some(lit_str.value());
-            } else if meta.path.is_ident("pattern")
-                && let syn::Expr::Lit(expr_lit) = &meta.value
-                && let syn::Lit::Str(lit_str) = &expr_lit.lit
-            {
-                result.pattern = Some(lit_str.value());
-            } else if meta.path.is_ident("minLength")
-                && let syn::Expr::Lit(expr_lit) = &meta.value
-                && let syn::Lit::Int(lit_int) = &expr_lit.lit
-            {
-                result.min_length = Some(lit_int.base10_parse::<usize>().unwrap());
-            } else if meta.path.is_ident("maxLength")
-                && let syn::Expr::Lit(expr_lit) = &meta.value
-                && let syn::Lit::Int(lit_int) = &expr_lit.lit
-            {
-                result.max_length = Some(lit_int.base10_parse::<usize>().unwrap());
-            } else {
-                // Ignore unknown model_schema args.
+            match &meta {
+                Meta::Path(path) if path.is_ident("no_display") => result.no_display = true,
+                Meta::NameValue(name_value) => apply_named_arg(&mut result, name_value),
+                Meta::Path(_) | Meta::List(_) => {
+                    // Ignore unknown model_schema args.
+                }
             }
         }
     }
@@ -193,11 +186,43 @@ fn parse_model_schema_args(args: TokenStream) -> ModelSchemaArgs {
     result
 }
 
+/// Applies one `key = value` argument to `result`, ignoring unknown keys and mistyped literals.
+fn apply_named_arg(result: &mut ModelSchemaArgs, meta: &MetaNameValue) {
+    if meta.path.is_ident("name")
+        && let syn::Expr::Lit(expr_lit) = &meta.value
+        && let syn::Lit::Str(lit_str) = &expr_lit.lit
+    {
+        result.name_override = Some(lit_str.value());
+    } else if meta.path.is_ident("pattern")
+        && let syn::Expr::Lit(expr_lit) = &meta.value
+        && let syn::Lit::Str(lit_str) = &expr_lit.lit
+    {
+        result.pattern = Some(lit_str.value());
+    } else if meta.path.is_ident("minLength")
+        && let syn::Expr::Lit(expr_lit) = &meta.value
+        && let syn::Lit::Int(lit_int) = &expr_lit.lit
+    {
+        result.min_length = Some(lit_int.base10_parse::<usize>().unwrap());
+    } else if meta.path.is_ident("maxLength")
+        && let syn::Expr::Lit(expr_lit) = &meta.value
+        && let syn::Lit::Int(lit_int) = &expr_lit.lit
+    {
+        result.max_length = Some(lit_int.base10_parse::<usize>().unwrap());
+    } else if meta.path.is_ident("no_display")
+        && let syn::Expr::Lit(expr_lit) = &meta.value
+        && let syn::Lit::Bool(lit_bool) = &expr_lit.lit
+    {
+        result.no_display = lit_bool.value();
+    } else {
+        // Ignore unknown model_schema args.
+    }
+}
+
 /// Executes the `model_schema` macro processing to generate TypeScript and Zod schema definitions.
 ///
 /// This function is the main entry point for the `model_schema` macro and handles both struct and enum types.
 pub fn exec_model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
-    let parsed_args = parse_model_schema_args(args);
+    let parsed_args = parse_model_schema_args(args.into());
     let item = parse_macro_input!(input as Item);
     if let Item::Struct(item_struct) = item {
         process_struct(item_struct, &parsed_args)
@@ -1291,8 +1316,16 @@ fn build_branded_delegate_items(
 }
 
 /// Builds the `Display` impl for a branded newtype, delegating to the inner field's `Display`.
+///
+/// The delegating call carries the inner field's span, so the method-resolution failure it raises
+/// on a non-`Display` inner is reported at the field rather than at `#[model_schema()]`. Only the
+/// span changes; the emitted tokens are the same either way.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-fn build_branded_display_impl(generics: &syn::Generics, name: &Ident) -> proc_macro2::TokenStream {
+fn build_branded_display_impl(
+    generics: &syn::Generics,
+    name: &Ident,
+    inner_field: &Field,
+) -> proc_macro2::TokenStream {
     let (_, type_generics, _) = generics.split_for_impl();
     let mut display_generics = generics.clone();
     for param in &mut display_generics.params {
@@ -1301,13 +1334,91 @@ fn build_branded_display_impl(generics: &syn::Generics, name: &Ident) -> proc_ma
         }
     }
     let (display_impl_generics, _, display_where_clause) = display_generics.split_for_impl();
+    let delegate = quote_spanned! {inner_field.ty.span()=> self.0.fmt(f) };
     quote! {
         impl #display_impl_generics std::fmt::Display for #name #type_generics #display_where_clause {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                self.0.fmt(f)
+                #delegate
             }
         }
     }
+}
+
+/// Builds a branded newtype's `Display` impl together with the static assertion guarding it, or
+/// nothing at all when the brand opted out with `no_display`.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn build_branded_display_tokens(
+    generics: &syn::Generics,
+    name: &Ident,
+    inner_field: &Field,
+    args: &ModelSchemaArgs,
+) -> proc_macro2::TokenStream {
+    if args.no_display {
+        return quote! {};
+    }
+    let display_assertion = build_branded_display_assertion(inner_field, generics);
+    let display_impl = build_branded_display_impl(generics, name, inner_field);
+    quote! {
+        #display_assertion
+        #display_impl
+    }
+}
+
+/// Builds a static assertion that the branded newtype's inner type implements `Display`, spanned
+/// on the inner field so a violation surfaces as an `E0277` naming the trait at the field instead
+/// of the `E0599` raised by `self.0.fmt(f)` deep inside the generated impl.
+///
+/// Emits nothing when the inner type mentions one of the struct's generic parameters: a `const`
+/// item cannot name them, and the `Display` bound the impl adds to every type parameter already
+/// carries the requirement to the instantiation site.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn build_branded_display_assertion(
+    inner_field: &Field,
+    generics: &syn::Generics,
+) -> proc_macro2::TokenStream {
+    if type_mentions_generic_param(&inner_field.ty, generics) {
+        return quote! {};
+    }
+    let inner_ty = &inner_field.ty;
+    // The bound goes in a `where` clause: these tokens carry the user's span, so a consumer's
+    // lints judge them as if they were hand-written there.
+    quote_spanned! {inner_field.ty.span()=>
+        const _: () = {
+            const fn assert_display<T>()
+            where
+                T: std::fmt::Display,
+            {
+            }
+            assert_display::<#inner_ty>();
+        };
+    }
+}
+
+/// Reports whether `ty` names any of `generics`' parameters (type, lifetime, or const).
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn type_mentions_generic_param(ty: &syn::Type, generics: &syn::Generics) -> bool {
+    let param_names: Vec<String> = generics
+        .params
+        .iter()
+        .map(|param| match param {
+            syn::GenericParam::Type(type_param) => type_param.ident.to_string(),
+            syn::GenericParam::Lifetime(lifetime_param) => {
+                lifetime_param.lifetime.ident.to_string()
+            }
+            syn::GenericParam::Const(const_param) => const_param.ident.to_string(),
+        })
+        .collect();
+    !param_names.is_empty() && tokens_name_any(&quote! { #ty }, &param_names)
+}
+
+/// Reports whether `tokens` contains an identifier from `names` at any nesting depth.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn tokens_name_any(tokens: &proc_macro2::TokenStream, names: &[String]) -> bool {
+    tokens.clone().into_iter().any(|tree| match tree {
+        proc_macro2::TokenTree::Ident(ident) => names.iter().any(|name| ident == name.as_str()),
+        proc_macro2::TokenTree::Group(group) => tokens_name_any(&group.stream(), names),
+        proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => false,
+    })
 }
 
 /// Builds the `schema_example()` method for a branded newtype from extracted example code.
@@ -1418,7 +1529,7 @@ fn assemble_branded_output(parts: &BrandedNewtypeOutput) -> TokenStream {
     let (_, type_generics, _) = parts.generics_for_ty.split_for_impl();
     let (impl_generics, _, where_clause) = parts.generics.split_for_impl();
     let item_struct = parts.item_struct;
-    let display_impl = parts.display_impl;
+    let display_tokens = parts.display_tokens;
     let module_ident = parts.module_ident;
     let schema_impl_items = parts.schema_impl_items;
     let validation_tokens = parts.validation_tokens;
@@ -1430,7 +1541,7 @@ fn assemble_branded_output(parts: &BrandedNewtypeOutput) -> TokenStream {
     let output = quote! {
         #item_struct
 
-        #display_impl
+        #display_tokens
 
         pub mod #module_ident {
             use super::*;
@@ -1471,8 +1582,6 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
     let module_ident = Ident::new(&module_name, name.span());
 
     register_alias_info(&name.to_string(), &item_name, &module_name);
-    #[cfg(not(any(feature = "zod", feature = "jsonschema", feature = "serde")))]
-    let _: &_ = &args;
 
     // Extract docs and example
     #[cfg(feature = "zod")]
@@ -1560,8 +1669,9 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
     let generics_for_ty = item_struct.generics.clone();
     let generics = branded_impl_generics(&item_struct, is_generic, args);
 
-    // --- Generate Display impl for branded newtypes ---
-    let display_impl = build_branded_display_impl(&item_struct.generics, &name);
+    // --- Generate Display impl for branded newtypes (unless the brand opted out) ---
+    let display_tokens =
+        build_branded_display_tokens(&item_struct.generics, &name, inner_field, args);
 
     // --- Inject serde(deserialize_with) on inner field and generate validate() ---
     #[cfg(feature = "serde")]
@@ -1582,7 +1692,7 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
 
     assemble_branded_output(&BrandedNewtypeOutput {
         delegate_impl_items: &delegate_impl_items,
-        display_impl: &display_impl,
+        display_tokens: &display_tokens,
         generics: &generics,
         generics_for_ty: &generics_for_ty,
         item_struct: &output_struct,
