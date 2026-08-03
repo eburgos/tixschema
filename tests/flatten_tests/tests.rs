@@ -54,6 +54,25 @@ struct CycleSecond {
     second_own: String,
 }
 
+/// The same cycle with a union in the middle: the branch that closes it is the deferred name, and
+/// a reference carries none of the members it stands for.
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct CycleUnionNode {
+    #[serde(flatten)]
+    either: CycleUnionEither,
+    own: String,
+}
+
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum CycleUnionEither {
+    Only(Box<CycleUnionNode>),
+}
+
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct ExtraPart {
@@ -131,6 +150,103 @@ struct FlatOverBrand {
     own: String,
     #[serde(flatten)]
     slug: FlatSlug,
+}
+
+/// An untagged enum every member of which serde writes as an object, and the struct that flattens
+/// it. serde writes whichever member matched into the object the struct is writing, so what the
+/// struct writes is one key set per member.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatFirst {
+    a: String,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatSecond {
+    b: bool,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum FlatEither {
+    First(FlatFirst),
+    Second(FlatSecond),
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatOverUntagged {
+    #[serde(flatten)]
+    either: FlatEither,
+    own: String,
+}
+
+/// The same shape with one member serde writes as a string rather than an object. The union names
+/// no type of its own, so nothing before the merge can tell the two apart.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum FlatScalarEither {
+    Obj(FlatFirst),
+    Text(String),
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatOverScalarUntagged {
+    #[serde(flatten)]
+    either: FlatScalarEither,
+    own: String,
+}
+
+/// A union member that names itself, and the struct that flattens the union. The member describes
+/// as a reference into the definitions, and the body it points at is written by the time the merge
+/// asks for it.
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatSelfNode {
+    kids: Vec<Self>,
+    leaf: String,
+}
+
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum FlatSelfEither {
+    Node(FlatSelfNode),
+}
+
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatOverSelfUntagged {
+    #[serde(flatten)]
+    either: FlatSelfEither,
+    own: String,
+}
+
+/// Whether `payload` is accepted by a document every branch of which is an object closed by
+/// `additionalProperties: false`: some branch names every key the payload carries and requires no
+/// key it does not.
+#[cfg(feature = "jsonschema")]
+fn closed_document_accepts(schema: &serde_json::Value, payload: &serde_json::Value) -> bool {
+    let written = payload.as_object().unwrap();
+    let branches = schema.get("oneOf").map_or_else(
+        || vec![schema.clone()],
+        |one_of| one_of.as_array().unwrap().clone(),
+    );
+    branches.iter().any(|branch| {
+        let named = branch["properties"].as_object().unwrap();
+        let required = branch["required"].as_array().unwrap();
+        written.keys().all(|key| named.contains_key(key))
+            && required
+                .iter()
+                .all(|key| written.contains_key(key.as_str().unwrap()))
+    })
 }
 
 #[test]
@@ -371,6 +487,28 @@ fn test_flatten_cycle_is_rejected_from_either_end() {
     assert!(CycleSecond::json_schema().is_object());
 }
 
+/// A cycle that closes through one member of a union is the same cycle — there is no body to merge
+/// at the branch either — so the branch is named rather than merged as the reference it is, which
+/// contributes nothing and closes the document around the base alone.
+#[test]
+#[cfg(feature = "jsonschema")]
+#[should_panic(
+    expected = "`CycleUnionNode`: `#[serde(flatten)]` of `CycleUnionEither` closes a flatten cycle through a union member — its branch 1 is `CycleUnionNode`"
+)]
+fn test_a_flatten_cycle_through_a_union_member_is_rejected() {
+    assert!(CycleUnionNode::json_schema().is_object());
+}
+
+/// The remedy is the one a cycle closed through the value itself names.
+#[test]
+#[cfg(feature = "jsonschema")]
+#[should_panic(
+    expected = "write the field as a named member so the cycle defers through a reference"
+)]
+fn test_the_union_member_cycle_refusal_names_the_remedy() {
+    assert!(CycleUnionNode::json_schema().is_object());
+}
+
 /// Flattening a base that does not name itself writes the document it wrote before, byte for byte.
 #[test]
 #[cfg(feature = "jsonschema")]
@@ -390,6 +528,17 @@ fn test_non_recursive_flatten_documents_are_byte_identical() {
     assert_eq!(
         serde_json::to_string(&NoFlatten::json_schema()).unwrap(),
         r#"{"type":"object","additionalProperties":false,"properties":{"id":{"type":"string"},"name":{"type":"string"}},"required":["id","name"]}"#
+    );
+}
+
+/// And flattening a base that names itself with no union in the middle writes the document it wrote
+/// before, byte for byte: the whole-body path reads the deferred name as it always did.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_the_deferred_flatten_document_is_byte_identical() {
+    assert_eq!(
+        serde_json::to_string(&FlatHolder::json_schema()).unwrap(),
+        r##"{"$defs":{"FlatNode":{"type":"object","additionalProperties":false,"properties":{"children":{"type":"array","items":{"$ref":"#/$defs/FlatNode"}},"val":{"type":"string"}},"required":["children","val"]}},"type":"object","properties":{"extra":{"type":"string"},"children":{"type":"array","items":{"$ref":"#/$defs/FlatNode"}},"val":{"type":"string"}},"required":["extra","children","val"],"additionalProperties":false}"##
     );
 }
 
@@ -488,4 +637,152 @@ fn test_flattening_a_string_newtype_is_refused_by_the_merge() {
 #[should_panic(expected = "write the field as a named member so the value gets a key of its own")]
 fn test_the_flatten_merge_refusal_names_the_remedy() {
     assert!(FlatOverBrand::json_schema().is_object());
+}
+
+/// What serde writes for a flattened untagged enum: the struct's own fields, and beside them the
+/// members of whichever union member matched. One key set per member, and no key naming the field.
+#[test]
+fn test_flattening_an_untagged_enum_writes_the_matched_members_keys() {
+    assert_eq!(
+        serde_json::to_value(FlatOverUntagged {
+            own: "o".to_owned(),
+            either: FlatEither::First(FlatFirst { a: "x".to_owned() }),
+        })
+        .unwrap(),
+        serde_json::json!({ "own": "o", "a": "x" })
+    );
+    assert_eq!(
+        serde_json::to_value(FlatOverUntagged {
+            own: "o".to_owned(),
+            either: FlatEither::Second(FlatSecond { b: true }),
+        })
+        .unwrap(),
+        serde_json::json!({ "own": "o", "b": true })
+    );
+}
+
+/// So the merged schema is the union of the merges: the base multiplied over every member of the
+/// union, each branch closed around exactly the keys that member writes.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_flattening_an_untagged_enum_multiplies_the_base_over_its_members() {
+    assert_eq!(
+        serde_json::to_string(&FlatOverUntagged::json_schema()).unwrap(),
+        r#"{"type":"object","oneOf":[{"type":"object","properties":{"own":{"type":"string"},"a":{"type":"string"}},"required":["own","a"],"additionalProperties":false},{"type":"object","properties":{"own":{"type":"string"},"b":{"type":"boolean"}},"required":["own","b"],"additionalProperties":false}]}"#
+    );
+}
+
+/// And every payload serde writes is accepted by it. Before the base multiplied out, the document
+/// closed around `own` alone and rejected both.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_the_untagged_flatten_schema_accepts_every_payload_serde_writes() {
+    let schema = FlatOverUntagged::json_schema();
+    for payload in [
+        serde_json::json!({ "own": "o", "a": "x" }),
+        serde_json::json!({ "own": "o", "b": true }),
+    ] {
+        assert!(
+            closed_document_accepts(&schema, &payload),
+            "{payload} is rejected by {schema}"
+        );
+    }
+    assert!(
+        !closed_document_accepts(
+            &serde_json::json!({
+                "type": "object",
+                "properties": { "own": { "type": "string" } },
+                "required": ["own"],
+                "additionalProperties": false
+            }),
+            &serde_json::json!({ "own": "o", "a": "x" })
+        ),
+        "the document closed around the base alone accepts a key it does not name"
+    );
+}
+
+/// A union member serde writes as a string is a member serde cannot flatten at all.
+#[test]
+fn test_flattening_an_untagged_enum_over_a_string_member_is_unserializable() {
+    let refusal = serde_json::to_value(FlatOverScalarUntagged {
+        own: "o".to_owned(),
+        either: FlatScalarEither::Text("t".to_owned()),
+    })
+    .unwrap_err()
+    .to_string();
+    assert!(
+        refusal.contains("can only flatten structs and maps"),
+        "Got: {refusal}"
+    );
+}
+
+/// So the merge refuses the whole union, naming the branch that cannot join the object.
+#[test]
+#[cfg(feature = "jsonschema")]
+#[should_panic(
+    expected = "`FlatOverScalarUntagged`: `#[serde(flatten)]` of `FlatScalarEither` writes a union member that is not an object — its branch 2 describes a `string`"
+)]
+fn test_a_string_member_of_a_flattened_untagged_enum_is_refused_by_the_merge() {
+    assert!(FlatOverScalarUntagged::json_schema().is_object());
+}
+
+/// The remedy that refusal names is the same one every flattened non-object gets.
+#[test]
+#[cfg(feature = "jsonschema")]
+#[should_panic(expected = "write the field as a named member so the value gets a key of its own")]
+fn test_the_untagged_branch_refusal_names_the_remedy() {
+    assert!(FlatOverScalarUntagged::json_schema().is_object());
+}
+
+/// A union member that names itself writes its own keys beside the struct's, the same as any other
+/// member: what it describes as says nothing about what it writes.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_flattening_a_self_naming_union_member_writes_its_keys() {
+    assert_eq!(
+        serde_json::to_value(FlatOverSelfUntagged {
+            own: "o".to_owned(),
+            either: FlatSelfEither::Node(FlatSelfNode {
+                kids: Vec::new(),
+                leaf: "l".to_owned(),
+            }),
+        })
+        .unwrap(),
+        serde_json::json!({ "own": "o", "kids": [], "leaf": "l" })
+    );
+}
+
+/// So the member merges as the body it names, reference and all: before it was read back it carried
+/// no members, and the document closed around the base alone.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_a_deferred_union_member_merges_as_the_body_it_names() {
+    assert_eq!(
+        serde_json::to_string(&FlatOverSelfUntagged::json_schema()).unwrap(),
+        r##"{"$defs":{"FlatSelfNode":{"type":"object","additionalProperties":false,"properties":{"kids":{"type":"array","items":{"$ref":"#/$defs/FlatSelfNode"}},"leaf":{"type":"string"}},"required":["kids","leaf"]}},"type":"object","properties":{"own":{"type":"string"},"kids":{"type":"array","items":{"$ref":"#/$defs/FlatSelfNode"}},"leaf":{"type":"string"}},"required":["own","kids","leaf"],"additionalProperties":false}"##
+    );
+}
+
+/// And the document accepts what serde writes, self-reference resolving from the container's root.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_the_deferred_union_member_schema_accepts_the_payload_serde_writes() {
+    let schema = FlatOverSelfUntagged::json_schema();
+    let payload = serde_json::json!({ "own": "o", "kids": [], "leaf": "l" });
+    assert!(
+        closed_document_accepts(&schema, &payload),
+        "{payload} is rejected by {schema}"
+    );
+    let reference = schema["properties"]["kids"]["items"]["$ref"]
+        .as_str()
+        .unwrap();
+    let resolved = schema
+        .pointer(reference.strip_prefix('#').unwrap())
+        .unwrap();
+    assert!(
+        resolved["properties"]
+            .as_object()
+            .unwrap()
+            .contains_key("leaf")
+    );
 }

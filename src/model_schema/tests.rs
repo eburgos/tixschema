@@ -325,6 +325,77 @@ fn untagged_tuple_variant_option_is_exempt() {
     assert!(errors.is_empty(), "got: {errors:?}");
 }
 
+/// A variant's member renders the map its written type earns exactly as a struct field does, so the
+/// key the registry rules out is refused in this position too rather than naming keys nothing can
+/// supply.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn untagged_member_reaching_a_map_key_with_no_members_is_refused() {
+    register_alias_info(
+        "Ledger",
+        "Ledger",
+        "ledger_schema",
+        AliasKind::NoEnumMembers,
+    );
+    for member_type in [
+        quote::quote! { HashMap<Ledger, u32> },
+        quote::quote! { Vec<HashMap<Ledger, u32>> },
+        quote::quote! { HashMap<String, HashMap<Ledger, u32>> },
+    ] {
+        let errors = untagged_guard_errors(syn::parse_quote! {
+            enum Untagged {
+                Counts { counts: #member_type },
+            }
+        });
+        assert_eq!(errors.len(), 1, "for {member_type}, got: {errors:?}");
+        assert!(
+            errors[0].contains("compile_error"),
+            "for {member_type}: {}",
+            errors[0]
+        );
+        assert!(
+            errors[0].contains("field `counts`"),
+            "for {member_type}: {}",
+            errors[0]
+        );
+        assert!(
+            errors[0].contains("a map key must be a plain"),
+            "for {member_type}: {}",
+            errors[0]
+        );
+        assert!(
+            errors[0].contains("Ledger"),
+            "for {member_type}: {}",
+            errors[0]
+        );
+    }
+}
+
+/// The guard turns away only what the registry proves has no members: a member keyed by a plain
+/// enum, or by a `String`, keeps the variant it had.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn untagged_member_with_an_enumerable_map_key_is_left_alone() {
+    register_alias_info("Bucket", "Bucket", "bucket_schema", AliasKind::EnumMembers);
+    for member_type in [
+        quote::quote! { HashMap<Bucket, u32> },
+        quote::quote! { HashMap<String, u32> },
+    ] {
+        let errors = untagged_guard_errors(syn::parse_quote! {
+            enum Untagged {
+                Counts { counts: #member_type },
+            }
+        });
+        assert!(errors.is_empty(), "for {member_type}, got: {errors:?}");
+    }
+}
+
 /// Collects the internally tagged path's guard failures as rendered `compile_error!` token strings.
 #[cfg(feature = "serde")]
 fn internal_guard_errors(item: &syn::ItemEnum) -> Vec<String> {
