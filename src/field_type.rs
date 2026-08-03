@@ -131,7 +131,8 @@ pub enum FieldDefType {
 ///
 /// Fields:
 /// - `is_optional`: In struct-field position, adds `| undefined` / `z.union([type, z.undefined()])`.
-///   In tuple-element position, adds `| null` / `z.nullable(type)` — a positional `None` serializes as `null`.
+///   In tuple-element and map-value position, adds `| null` / `z.nullable(type)` — neither slot can
+///   be dropped the way an object key can, so a `None` there serializes as `null`.
 /// - name: Safe field name (uses serde rename if feature enabled)
 /// - docs: Doc comments from Rust - included in generated TS as `JSDoc`
 /// - `field_type`: The core type classification (see `FieldDefType`)
@@ -294,22 +295,13 @@ impl FieldDef {
 
     /// Builds the TypeScript type before the struct-field optional wrap: the type match
     /// plus the `is_array` wrap. The `| undefined` wrap lives in `typescript_typename`.
-    /// An optional tuple element is null-flavored here (`{base} | null`): a positional
-    /// slot cannot be omitted, so serde emits `null` for a `None`.
     fn typescript_base(&self) -> String {
         let result = match &self.field_type {
             FieldDefType::Unknown => "unknown".to_owned(),
             FieldDefType::Tuple(lst) => {
                 let elements = lst
                     .iter()
-                    .map(|element| {
-                        let base = element.typescript_base();
-                        if element.is_optional {
-                            format!("{base} | null")
-                        } else {
-                            base
-                        }
-                    })
+                    .map(Self::typescript_slot_typename)
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("[{elements}]")
@@ -344,7 +336,7 @@ impl FieldDef {
                 format!(
                     "Partial<Record<{}, {}>>",
                     k.typescript_typename(),
-                    v.typescript_typename()
+                    v.typescript_slot_typename()
                 )
             }
             FieldDefType::Boolean => "boolean".to_owned(),
@@ -385,6 +377,19 @@ impl FieldDef {
         }
     }
 
+    /// The TypeScript type for a value in a slot that cannot be dropped — a tuple element or a
+    /// map entry. An `Option` there is null-flavored (`{base} | null`) rather than
+    /// undefined-flavored: only an object key can be omitted, so serde emits `null` for a `None`
+    /// in either position.
+    fn typescript_slot_typename(&self) -> String {
+        let base = self.typescript_base();
+        if self.is_optional {
+            format!("{base} | null")
+        } else {
+            base
+        }
+    }
+
     /// Generates the TypeScript type name for this field.
     ///
     /// This method is the core of TypeScript type generation. It recursively builds
@@ -393,8 +398,9 @@ impl FieldDef {
     /// Process:
     /// 1. Match on `field_type` to get base type
     /// 2. If `is_array`, wrap in Array<...>
-    /// 3. If `is_optional`: struct-field position adds `| undefined`; tuple-element position adds `| null`
-    ///    (a positional `None` serializes as `null`, so a tuple slot cannot be omitted like an object key)
+    /// 3. If `is_optional`: struct-field position adds `| undefined`; tuple-element and map-value
+    ///    positions add `| null` (neither can be omitted like an object key, so a `None` there
+    ///    serializes as `null`)
     ///
     /// Feature notes:
     /// - "`object_id"`: Uses special `ObjectId` type
@@ -420,9 +426,7 @@ impl FieldDef {
 
     /// Builds the Zod schema before the struct-field optional wrap: the type match, the
     /// `is_array` wrap, and the preprocess wrap. The
-    /// `z.union([…, z.undefined()]).prefault(undefined)` wrap lives in `zod_type`. An
-    /// optional tuple element is null-flavored here (`z.nullable({base})`): a positional
-    /// slot cannot be omitted, so serde emits `null` for a `None`.
+    /// `z.union([…, z.undefined()]).prefault(undefined)` wrap lives in `zod_type`.
     #[cfg(feature = "zod")]
     fn zod_base(&self) -> String {
         let result = match &self.field_type {
@@ -430,14 +434,7 @@ impl FieldDef {
             FieldDefType::Tuple(lst) => {
                 let elements = lst
                     .iter()
-                    .map(|element| {
-                        let base = element.zod_base();
-                        if element.is_optional {
-                            format!("z.nullable({base})")
-                        } else {
-                            base
-                        }
-                    })
+                    .map(Self::zod_slot_type)
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("z.tuple([{elements}])")
@@ -461,7 +458,7 @@ impl FieldDef {
                 }
             }
             FieldDefType::Map(k, v) => {
-                format!("z.record({}, {})", k.zod_type(), v.zod_type())
+                format!("z.record({}, {})", k.zod_type(), v.zod_slot_type())
             }
             FieldDefType::Boolean => "z.boolean()".to_owned(),
             FieldDefType::String => self.zod_string_type(),
@@ -529,6 +526,20 @@ impl FieldDef {
         result
     }
 
+    /// The Zod schema for a value in a slot that cannot be dropped — a tuple element or a map
+    /// entry. An `Option` there is null-flavored (`z.nullable({base})`) rather than
+    /// undefined-flavored: only an object key can be omitted, so serde emits `null` for a `None`
+    /// in either position.
+    #[cfg(feature = "zod")]
+    fn zod_slot_type(&self) -> String {
+        let base = self.zod_base();
+        if self.is_optional {
+            format!("z.nullable({base})")
+        } else {
+            base
+        }
+    }
+
     /// Builds the Zod schema string for a string field, applying any length/pattern constraints.
     #[cfg(feature = "zod")]
     fn zod_string_type(&self) -> String {
@@ -566,7 +577,8 @@ impl FieldDef {
     /// - For `ObjectId`: Uses regex validation for hex string
     /// - Wraps with `z.array()` if `is_array`
     /// - If `is_optional`: struct-field position wraps `z.union([type, z.undefined()])`;
-    ///   tuple-element position wraps `z.nullable(type)` (a positional `None` serializes as `null`)
+    ///   tuple-element and map-value positions wrap `z.nullable(type)` (neither can be omitted like
+    ///   an object key, so a `None` there serializes as `null`)
     ///
     /// Requires Zod v4 in frontend - generates v4-compatible syntax.
     /// See `notes/20250706_features.md` for Zod feature details.
