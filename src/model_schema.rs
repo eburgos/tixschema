@@ -4792,6 +4792,22 @@ fn check_optional_field_serialization(
     ))
 }
 
+/// Every guard error the field violates: the `OsString` guard first — it reads the written type,
+/// which no attribute can hide — then the serde-side guard when one fired.
+fn collect_field_guard_errors(
+    field: &Field,
+    field_def: &FieldDef,
+    raw_field_ident: &str,
+    serde_guard_error: Option<proc_macro2::TokenStream>,
+) -> Vec<proc_macro2::TokenStream> {
+    check_os_string_field(field, field_def, &field_label(raw_field_ident))
+        .err()
+        .map(|err| err.to_compile_error())
+        .into_iter()
+        .chain(serde_guard_error)
+        .collect()
+}
+
 /// Rejects a field that reaches an `OsString`/`OsStr`, at any depth.
 ///
 /// serde writes both as an externally tagged enum naming the target platform — `{"Unix":[u8, …]}`
@@ -4912,13 +4928,8 @@ fn process_field(
     #[cfg(not(feature = "serde"))]
     let serde_guard_error: Option<proc_macro2::TokenStream> = None;
 
-    let guard_errors: Vec<proc_macro2::TokenStream> =
-        check_os_string_field(field, &field_def, &field_label(&raw_field_ident))
-            .err()
-            .map(|err| err.to_compile_error())
-            .into_iter()
-            .chain(serde_guard_error)
-            .collect();
+    let guard_errors =
+        collect_field_guard_errors(field, &field_def, &raw_field_ident, serde_guard_error);
 
     // Resolve `Self` references to the concrete type name so recursive fields
     // (e.g. `Vec<Self>`) are treated exactly like `Vec<EnclosingType>`.
