@@ -17,6 +17,24 @@ pub struct WithSibling {
     pub pair: (DocumentId, String),
 }
 
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SlotKind {
+    Primary,
+    Secondary,
+}
+
+/// A map whose key enumerates its members, written in field position and in a tuple slot: the two
+/// hold the same type, so they must describe it the same way.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct EnumKeyedMapSlotRow {
+    pub field: HashMap<SlotKind, u32>,
+    pub nested_field: HashMap<String, HashMap<SlotKind, u32>>,
+    pub nested_slot: (String, HashMap<String, HashMap<SlotKind, u32>>),
+    pub slot: (String, HashMap<SlotKind, u32>),
+}
+
 /// Test 1 + 2 + 3: A `(String, String)` struct field renders as a tuple in
 /// TypeScript, Zod, and JSON Schema.
 #[test]
@@ -429,6 +447,73 @@ fn test_map_element_tuple_field_json_schema() {
         properties["slot"]["prefixItems"][0],
         serde_json::json!({ "type": "string" })
     );
+}
+
+/// A key that enumerates its members enumerates them in a tuple slot too: the slot dispatch reaches
+/// the map's own rendering, so a slot cannot describe as an open object what the same type in field
+/// position describes as a fixed set of keys.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn test_enum_keyed_map_element_tuple_field_json_schema() {
+    let schema = EnumKeyedMapSlotRow::json_schema();
+    let properties = &schema["properties"];
+
+    let members = SlotKind::enum_members();
+    assert_eq!(properties["field"]["additionalProperties"], false);
+    assert_eq!(
+        properties["field"]["properties"].as_object().unwrap().len(),
+        members.len(),
+        "in: {}",
+        properties["field"]
+    );
+    for member in members {
+        assert_eq!(
+            properties["field"]["properties"][&member],
+            serde_json::json!({ "type": "integer" }),
+            "member {member} in: {}",
+            properties["field"]
+        );
+    }
+
+    assert_eq!(
+        properties["slot"]["prefixItems"][1], properties["field"],
+        "An enum-keyed map slot must describe as the map field does. Got: {}",
+        properties["slot"]["prefixItems"][1]
+    );
+    assert_eq!(
+        properties["nested_slot"]["prefixItems"][1], properties["nested_field"],
+        "A nested enum-keyed map slot must recurse as the nested map field does. Got: {}",
+        properties["nested_slot"]["prefixItems"][1]
+    );
+    assert_eq!(
+        properties["nested_field"]["additionalProperties"], properties["field"],
+        "Got: {}",
+        properties["nested_field"]
+    );
+}
+
+/// TypeScript and Zod already carry the key into a slot; pinned so the json-schema fix cannot be
+/// read as the only surface that owes the enum-keyed map its keys.
+#[test]
+fn test_enum_keyed_map_element_tuple_field_ts_and_zod() {
+    let ts = EnumKeyedMapSlotRow::ts_definition();
+    for expected in [
+        "slot: [string, Partial<Record<SlotKind, number>>]",
+        "nested_slot: [string, Partial<Record<string, Partial<Record<SlotKind, number>>>>]",
+    ] {
+        assert!(ts.contains(expected), "missing {expected}, got: {ts}");
+    }
+
+    #[cfg(feature = "zod")]
+    {
+        let zod = EnumKeyedMapSlotRow::zod_schema();
+        for expected in [
+            "slot: z.tuple([z.string(), z.record(SlotKind$Schema, z.number().int())])",
+            "nested_slot: z.tuple([z.string(), z.record(z.string(), z.record(SlotKind$Schema, z.number().int()))])",
+        ] {
+            assert!(zod.contains(expected), "missing {expected}, got: {zod}");
+        }
+    }
 }
 
 /// The sibling reference survives the map wrap inside a slot: a map of siblings in a tuple element
