@@ -257,12 +257,15 @@ struct VecSlotValues {
     tuple_labels: (u32, Vec<String>),
 }
 
-// A slot holding a value the mapping renders inline is untouched by the wrapper normalization: a
-// sibling in a tuple element still describes as the bare object it always has.
+// A sibling is carried by reference wherever it sits, so a tuple element names the schema module a
+// field and a map member name — under a sequence wrapper, the array of that reference, the wrapper
+// having normalized onto the element like any other.
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct SiblingSlotValues {
-    tuple_tag: (String, MetricTag),
+    bare: (String, MetricTag),
+    setted: (String, HashSet<MetricTag>),
+    vecced: (String, Vec<MetricTag>),
 }
 
 fn one<T, C>(item: T) -> C
@@ -307,6 +310,15 @@ fn vec_slot_values() -> VecSlotValues {
         small_ids: HashMap::from([("k".to_owned(), one(7_u32))]),
         tuple_ids: ("t".to_owned(), one(7_u32)),
         tuple_labels: (7, one("t".to_owned())),
+    }
+}
+
+/// The same sibling in each slot the fixture opens: bare, and under each wrapper spelling.
+fn sibling_slot_values() -> SiblingSlotValues {
+    SiblingSlotValues {
+        bare: ("t".to_owned(), metric_tag()),
+        setted: ("t".to_owned(), one(metric_tag())),
+        vecced: ("t".to_owned(), vec![metric_tag()]),
     }
 }
 
@@ -1505,15 +1517,19 @@ fn test_a_set_slot_writes_what_the_vec_slot_writes() {
     }
 }
 
-/// A slot holding a value that is no sequence writes what that value writes — an object here — so
-/// its description is the one it always had, the normalization reaching only the wrappers.
+/// A slot holding a value that is no sequence writes what that value writes — an object here — and
+/// a wrapped one writes the array of those objects, which is what the schemas below describe.
 #[test]
 fn test_a_sibling_slot_writes_the_object_its_value_writes() {
-    let payload = serde_json::to_value(SiblingSlotValues {
-        tuple_tag: ("t".to_owned(), metric_tag()),
-    })
-    .unwrap();
-    assert!(payload["tuple_tag"][1].is_object(), "Got: {payload}");
+    let payload = serde_json::to_value(sibling_slot_values()).unwrap();
+    assert!(payload["bare"][1].is_object(), "Got: {payload}");
+    for field in ["setted", "vecced"] {
+        assert_eq!(
+            payload[field][1],
+            serde_json::json!([metric_tag()]),
+            "{field} wrote: {payload}"
+        );
+    }
 }
 
 /// Writing the same array as the `Vec` spelling of the same slot, a set describes as one — on both
@@ -1550,15 +1566,64 @@ fn test_set_slots_describe_as_arrays_of_their_element() {
     );
 }
 
-/// A value the mapping renders inline is left where it was: a sibling in a tuple element describes
-/// as the bare object it always has, the normalization reaching only the wrappers.
+/// A sibling in a tuple element describes as the sibling does — its own schema, the one a field and
+/// a map member reach for — rather than as the open object any value at all satisfies.
 #[test]
 #[cfg(feature = "jsonschema")]
-fn test_a_sibling_tuple_slot_still_describes_as_a_bare_object() {
+fn test_a_sibling_tuple_slot_describes_as_the_sibling_it_holds() {
+    let properties = SiblingSlotValues::json_schema()["properties"].clone();
     assert_eq!(
-        SiblingSlotValues::json_schema()["properties"]["tuple_tag"]["prefixItems"][1],
+        properties["bare"]["prefixItems"][1],
+        MetricTag::json_schema()
+    );
+    assert_ne!(
+        MetricTag::json_schema(),
         serde_json::json!({ "type": "object" })
     );
+}
+
+/// And under a wrapper, the array of that schema — the same array the wrapper writes, so a slot
+/// holding a sequence of siblings admits a sequence rather than any object at all.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_a_wrapped_sibling_tuple_slot_describes_as_the_array_of_that_sibling() {
+    let properties = SiblingSlotValues::json_schema()["properties"].clone();
+    let tag_array = serde_json::json!({ "type": "array", "items": MetricTag::json_schema() });
+    for field in ["setted", "vecced"] {
+        assert_eq!(
+            properties[field]["prefixItems"][1], tag_array,
+            "for: {field}"
+        );
+    }
+}
+
+/// The TypeScript surface, which names the sibling in every one of those slots already: pinned so
+/// the JSON schema above is held against a rendering that does not move under it.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_sibling_tuple_slots_type_as_the_sibling_they_hold() {
+    let ts_definition = SiblingSlotValues::ts_definition();
+    for spelling in [
+        "bare: [string, MetricTag];",
+        "setted: [string, Array<MetricTag>];",
+        "vecced: [string, Array<MetricTag>];",
+    ] {
+        assert!(ts_definition.contains(spelling), "Got: {ts_definition}");
+    }
+}
+
+/// And the Zod surface, which validates each of them against the sibling's schema already.
+#[test]
+#[cfg(feature = "zod")]
+fn test_sibling_tuple_slots_validate_against_the_sibling_they_hold() {
+    let zod_schema = SiblingSlotValues::zod_schema();
+    for spelling in [
+        "bare: z.tuple([z.string(), MetricTag$Schema]),",
+        "setted: z.tuple([z.string(), z.array(MetricTag$Schema)]),",
+        "vecced: z.tuple([z.string(), z.array(MetricTag$Schema)]),",
+    ] {
+        assert!(zod_schema.contains(spelling), "Got: {zod_schema}");
+    }
 }
 
 /// The TypeScript surface, which types a set slot as the array of its element already: pinned here
