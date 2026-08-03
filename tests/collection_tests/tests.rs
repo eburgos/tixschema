@@ -2141,10 +2141,26 @@ fn test_nested_sequences_describe_at_the_depth_they_are_written() {
         "items": { "type": "array", "items": { "type": "integer" } }
     });
 
-    for field in ["fixed_grid", "optional_rows", "set_of_rows", "small_ids"] {
+    for field in ["optional_rows", "set_of_rows", "small_ids"] {
         assert_eq!(properties[field], integer_rows, "for: {field}");
     }
     assert_eq!(properties["vec_of_sets"], integer_rows);
+    // Every level of a fixed-size array is the same array of arrays, bounded at each level by the
+    // length it was written with.
+    assert_eq!(
+        properties["fixed_grid"],
+        serde_json::json!({
+            "type": "array",
+            "items": {
+                "type": "array",
+                "items": { "type": "integer" },
+                "minItems": 2_u32,
+                "maxItems": 2_u32
+            },
+            "minItems": 2_u32,
+            "maxItems": 2_u32
+        })
+    );
     assert_eq!(
         properties["deep_ids"],
         serde_json::json!({ "type": "array", "items": integer_rows })
@@ -2257,7 +2273,7 @@ fn test_nested_sequences_validate_at_the_depth_they_are_written() {
         "aliased_rows: z.array(z.array(MetricTagRefType$Schema)),",
         "constrained_rows: z.array(z.array(z.string().min(3))),",
         "deep_ids: z.array(z.array(z.array(z.number().int()))),",
-        "fixed_grid: z.array(z.array(z.number().int())),",
+        "fixed_grid: z.array(z.array(z.number().int()).length(2)).length(2),",
         "labels: z.array(z.array(z.string())),",
         "set_of_rows: z.array(z.array(z.number().int())),",
         "sibling_rows: z.array(z.array(MetricTag$Schema)),",
