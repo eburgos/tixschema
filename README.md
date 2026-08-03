@@ -316,6 +316,62 @@ export const External$Schema: ZodType<External> = z.union([
 
 Add `#[serde(tag = "...", content = "...")]` to get the adjacently tagged `{ type, value }` form documented above instead.
 
+#### Internally Tagged Enums (`tag` With No `content`)
+
+An enum that names `tag` but no `content` is internally tagged: there is no key for a variant's data, so Serde writes it as members of the object the tag is written in. A struct variant's fields sit beside the tag, and so do the members of a newtype variant's inner type -- which the surfaces describe as an intersection, the same composition `#[serde(flatten)]` uses.
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TagPayload {
+    pub a: String,
+    pub b: bool,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "type")]
+pub enum Internal {
+    Bare,
+    Fields { a: String, b: bool },
+    Wrapped(TagPayload),
+}
+```
+
+Serialized by Serde:
+
+```json
+{ "type": "Bare" }
+{ "type": "Fields", "a": "a", "b": true }
+{ "type": "Wrapped", "a": "a", "b": true }
+```
+
+Generated TypeScript:
+
+```typescript
+export type Internal = {
+  type: "Bare";
+} | {
+  type: "Fields";
+  a: string;
+  b: boolean;
+} | {
+  type: "Wrapped";
+} & TagPayload;
+```
+
+Generated Zod -- a flattened member is an intersection, which has no shape of its own to read the discriminator out of, so a union holding one is a plain `z.union` rather than a `z.discriminatedUnion`:
+
+```typescript
+export const Internal$Schema: ZodType<Internal> = z.union([
+  z.strictObject({ type: z.literal("Bare") }),
+  z.strictObject({ type: z.literal("Fields"), a: z.string(), b: z.boolean() }),
+  z.strictObject({ type: z.literal("Wrapped") }).and(TagPayload$Schema),
+]);
+```
+
+Only a value Serde writes as an object has members to put beside the tag. A newtype variant wrapping a string, a number, a boolean, a sequence, an `Option` or a tuple is one Serde refuses to serialize at run time (`cannot serialize tagged newtype variant ... containing a string`), and a multi-element tuple variant is one Serde's own derive refuses outright. `#[model_schema()]` rejects all of those at expansion rather than describing a value that cannot reach the wire; name a `content` key so the value gets an object of its own, or wrap it in a struct whose fields can sit beside the tag.
+
 ### Intersection Types (`#[serde(flatten)]`)
 
 A struct field marked `#[serde(flatten)]` is lifted into the parent type as a TypeScript intersection (`A & B`) and a Zod `.and()` chain, instead of a nested object. This is the idiomatic way to compose a common set of fields with a discriminated union.
@@ -1411,7 +1467,7 @@ Supported Serde attributes:
 
 - `#[serde(rename = "...")]` -- rename individual fields
 - `#[serde(rename_all = "camelCase")]` -- rename all fields with a naming convention
-- `#[serde(tag = "...")]` -- set the discriminator field for tagged enums
+- `#[serde(tag = "...")]` -- internally tagged enums: the variant's data is written beside the discriminator
 - `#[serde(tag = "...", content = "...")]` -- adjacently tagged enums
 - `#[serde(untagged)]` -- untagged enums generate a union (`A | B`) / Zod `z.union([...])` / JSON Schema `anyOf`
 - `#[serde(flatten)]` -- flatten a field into the parent as an intersection type (`A & B`) / Zod `.and(...)`
