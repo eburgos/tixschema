@@ -16,6 +16,15 @@ use super::{
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use super::{AliasKind, branded_guard_errors, register_alias_info};
 
+#[cfg(feature = "typescript")]
+use super::tuple_struct_ts_body;
+
+#[cfg(feature = "zod")]
+use super::tuple_struct_zod_body;
+
+#[cfg(feature = "jsonschema")]
+use super::tuple_struct_json_body;
+
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use syn::spanned::Spanned as _;
 
@@ -2787,6 +2796,63 @@ fn a_field_without_a_constrainable_value_has_no_shape() {
             "spelling {spelling} should reach no constrainable value"
         );
     }
+}
+
+/// The slots a tuple struct is read from, at the three arities the dispatch answers for. The empty
+/// one has no declaration in this crate — `struct Nothing();` is refused by the lint table — so it
+/// is read here, where the slots are built rather than parsed off an item.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn tuple_slots(spellings: &[&str]) -> Vec<super::FieldDef> {
+    spellings
+        .iter()
+        .map(|spelling| get_field_def("", &syn::parse_str(spelling).unwrap(), ""))
+        .collect()
+}
+
+/// One slot is the slot's own type — serde writes a newtype struct as that value alone — and every
+/// other arity is the fixed tuple serde writes as an array.
+#[cfg(feature = "typescript")]
+#[test]
+fn a_tuple_struct_describes_as_its_arity_in_typescript() {
+    assert_eq!(tuple_struct_ts_body(&tuple_slots(&[])), "[]");
+    assert_eq!(tuple_struct_ts_body(&tuple_slots(&["String"])), "string");
+    assert_eq!(
+        tuple_struct_ts_body(&tuple_slots(&["String", "u32"])),
+        "[string, number]"
+    );
+}
+
+/// [`a_tuple_struct_describes_as_its_arity_in_typescript`] for the Zod surface.
+#[cfg(feature = "zod")]
+#[test]
+fn a_tuple_struct_describes_as_its_arity_in_zod() {
+    assert_eq!(tuple_struct_zod_body(&tuple_slots(&[])), "z.tuple([])");
+    assert_eq!(
+        tuple_struct_zod_body(&tuple_slots(&["String"])),
+        "z.string()"
+    );
+    assert_eq!(
+        tuple_struct_zod_body(&tuple_slots(&["String", "u32"])),
+        "z.tuple([z.string(), z.number().int()])"
+    );
+}
+
+/// [`a_tuple_struct_describes_as_its_arity_in_typescript`] for the JSON-schema surface, whose
+/// fixed array carries the arity as its own bounds.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_tuple_struct_describes_as_its_arity_in_json_schema() {
+    let empty = tuple_struct_json_body("Nothing", &tuple_slots(&[])).to_string();
+    assert!(empty.contains("prefixItems"), "Got: {empty}");
+    assert!(empty.contains("minItems"), "Got: {empty}");
+
+    let single = tuple_struct_json_body("Plain", &tuple_slots(&["String"])).to_string();
+    assert!(single.contains("string"), "Got: {single}");
+    assert!(!single.contains("prefixItems"), "Got: {single}");
+
+    let pair = tuple_struct_json_body("Pair", &tuple_slots(&["String", "u32"])).to_string();
+    assert!(pair.contains("prefixItems"), "Got: {pair}");
+    assert!(pair.contains("maxItems"), "Got: {pair}");
 }
 
 /// A path writes a string on the wire, which is the value the rendered constraint describes, so
