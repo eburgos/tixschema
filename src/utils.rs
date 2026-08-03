@@ -2,7 +2,7 @@ use core::cell::RefCell;
 #[cfg(feature = "typescript")]
 use core::iter;
 use std::collections::HashMap;
-use syn::{Attribute, Expr, Field, Lit, Meta, Variant};
+use syn::{Attribute, Expr, Field, Lit, LitStr, Meta, Variant};
 
 #[cfg(any(feature = "typescript", feature = "zod"))]
 use syn::{ItemEnum, ItemStruct};
@@ -321,6 +321,18 @@ const fn js_line_terminator_escape(ch: char) -> Option<&'static str> {
         '\u{2029}' => Some("u2029"),
         _ => None,
     }
+}
+
+/// The `regex` crate's own rejection of a `pattern` attribute value, spanned on the literal the
+/// author wrote, or `None` when the pattern parses.
+///
+/// Both splice points hand the string to `regex::Regex::new(...).unwrap()` inside the generated
+/// validator, so a pattern that does not parse here is a panic at the first validation there. The
+/// macro holds the string and links `regex`, so the parse happens at expansion instead.
+pub fn regex_rejection(lit: &LitStr) -> Option<syn::Error> {
+    regex::Regex::new(&lit.value())
+        .err()
+        .map(|err| syn::Error::new_spanned(lit, err))
 }
 
 /// Escapes a regex pattern for splicing between the `/` delimiters of a JavaScript regex literal.

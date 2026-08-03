@@ -5,6 +5,8 @@
 
 use syn::{Attribute, LitStr, Type};
 
+use crate::utils::regex_rejection;
+
 /// Metadata for `model_schema_prop` attributes applied to a field.
 ///
 /// # Supported attributes
@@ -78,6 +80,8 @@ pub struct ModelSchemaPropMeta {
     pub min_length: Option<usize>, // e.g., 1 from minLength = 1
     pub minimum: Option<f64>, // e.g., 0.0 from minimum = 0
     pub pattern: Option<String>, // e.g., "^[0-9a-fA-F]{24}$" from pattern = "^[0-9a-fA-F]{24}$"
+    /// The `regex` crate's rejection of `pattern`, spanned on the literal it was written as.
+    pub pattern_rejection: Option<syn::Error>,
     pub preprocess: Vec<String>, // e.g., ["epoch_to_date", "trim"] from preprocess = ["epoch_to_date", "trim"]
     pub ts_optional: bool,
 }
@@ -155,6 +159,7 @@ pub fn parse_model_schema_prop_attributes(attrs: &[Attribute]) -> ModelSchemaPro
                 else if nested.path.is_ident("pattern") {
                     let value = nested.value()?;
                     let lit: LitStr = value.parse()?;
+                    meta.pattern_rejection = regex_rejection(&lit);
                     meta.pattern = Some(lit.value());
                 }
                 // Handle `preprocess = ["fn1", "fn2"]`

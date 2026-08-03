@@ -33,7 +33,7 @@ use crate::{
 use crate::utils::{escape_js_regex_literal, extract_example_from_docs};
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-use crate::utils::{AliasKind, lookup_alias_info};
+use crate::utils::{AliasKind, lookup_alias_info, regex_rejection};
 
 #[cfg(feature = "serde")]
 use crate::features::serde::{SerdeFieldMeta, SerdeTypeMeta, has_serde_default};
@@ -267,6 +267,11 @@ struct ModelSchemaArgs {
     /// whose inner type is a container rather than a scalar.
     no_display: bool,
     pattern: Option<String>,
+    /// The `regex` crate's rejection of `pattern`, spanned on the literal it was written as. Only
+    /// the brand path splices the argument, and only a schema feature builds that path; without
+    /// one, a type-level constraint never reaches a surface at all.
+    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+    pattern_rejection: Option<syn::Error>,
 }
 
 /// Mutable output buffers shared by the discriminated-enum variant writers. Bundled so each writer
@@ -333,6 +338,15 @@ fn parse_model_schema_args(args: proc_macro2::TokenStream) -> ModelSchemaArgs {
     result
 }
 
+/// Records the `regex` crate's verdict on a `pattern` argument, for the brand path that splices it.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn record_pattern_rejection(result: &mut ModelSchemaArgs, lit_str: &syn::LitStr) {
+    result.pattern_rejection = regex_rejection(lit_str);
+}
+
+#[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+const fn record_pattern_rejection(_result: &mut ModelSchemaArgs, _lit_str: &syn::LitStr) {}
+
 /// Applies one `key = value` argument to `result`, ignoring unknown keys and mistyped literals.
 fn apply_named_arg(result: &mut ModelSchemaArgs, meta: &MetaNameValue) {
     if meta.path.is_ident("name")
@@ -344,6 +358,7 @@ fn apply_named_arg(result: &mut ModelSchemaArgs, meta: &MetaNameValue) {
         && let syn::Expr::Lit(expr_lit) = &meta.value
         && let syn::Lit::Str(lit_str) = &expr_lit.lit
     {
+        record_pattern_rejection(result, lit_str);
         result.pattern = Some(lit_str.value());
     } else if meta.path.is_ident("minLength")
         && let syn::Expr::Lit(expr_lit) = &meta.value
@@ -748,6 +763,24 @@ fn cfg_attr_guard_error(rejection: &syn::Error, item: &str) -> proc_macro2::Toke
     .to_compile_error()
 }
 
+/// Turns a rejected `pattern` into `compile_error!` tokens naming what carries it, keeping the
+/// literal's span so the diagnostic points at the pattern as written.
+///
+/// The generated validator builds the pattern with `regex::Regex::new(...).unwrap()`, so accepting
+/// one the crate cannot parse only moves the failure to the first value that reaches it — as a
+/// panic, from inside a `LazyLock` the author never wrote.
+fn pattern_guard_error(rejection: &syn::Error, subject: &str) -> proc_macro2::TokenStream {
+    syn::Error::new(
+        rejection.span(),
+        format!(
+            "model_schema: {subject}: `pattern` is not a regex the `regex` crate can parse. The \
+             generated validator builds it with `regex::Regex::new(...).unwrap()`, so accepting \
+             it here would turn the first validated value into a panic. {rejection}"
+        ),
+    )
+    .to_compile_error()
+}
+
 /// Names a field in a guard message; tuple slots have no ident to name.
 fn field_label(raw_field_ident: &str) -> String {
     if raw_field_ident.is_empty() {
@@ -939,9 +972,22 @@ const fn branded_cfg_attr_guard_errors(
     Vec::new()
 }
 
+/// The `compile_error!` tokens for a brand whose `pattern` argument the `regex` crate rejects, or
+/// `None` when it carries none or it parses.
+///
+/// The brand is the only shape that reads a type-level `pattern`, and it splices the string into
+/// the Rust validator, the Zod literal and the JSON schema alike; every other shape is refused the
+/// argument before a surface is built.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn branded_pattern_error(name: &Ident, args: &ModelSchemaArgs) -> Option<proc_macro2::TokenStream> {
+    args.pattern_rejection
+        .as_ref()
+        .map(|rejection| pattern_guard_error(rejection, &format!("type `{name}`")))
+}
+
 /// The `compile_error!` tokens for every guard a branded newtype violates: a `cfg_attr`-wrapped
-/// serde attribute on the type or on its inner slot, an `Option` inner type, and string
-/// constraints over an inner type that cannot carry them.
+/// serde attribute on the type or on its inner slot, an `Option` inner type, string constraints
+/// over an inner type that cannot carry them, and a `pattern` that is not a regex.
 ///
 /// The branded path renders the inner type straight into the brand instead of walking fields, so
 /// it has to collect these itself; the ordinary struct walk never sees a transparent newtype.
@@ -959,6 +1005,7 @@ fn branded_guard_errors(
             inner_field,
             args,
         ))
+        .chain(branded_pattern_error(&item_struct.ident, args))
         .collect()
 }
 
@@ -5571,17 +5618,24 @@ fn field_guard_errors(
 }
 
 /// Every guard error the field violates: the `OsString` guard first — it reads the written type,
-/// which no attribute can hide — then the serde-side guards when any fired.
+/// which no attribute can hide — then the unparseable `pattern`, then the serde-side guards when
+/// any fired.
+///
+/// The `pattern` guard stands under every feature subset: the string reaches the Rust validator,
+/// the Zod literal and the JSON schema alike, and no toggle makes an unparseable one mean anything.
 fn collect_field_guard_errors(
     field: &Field,
     field_def: &FieldDef,
     raw_field_ident: &str,
+    pattern_rejection: Option<&syn::Error>,
     serde_guard_errors: Vec<proc_macro2::TokenStream>,
 ) -> Vec<proc_macro2::TokenStream> {
-    check_os_string_field(field, field_def, &field_label(raw_field_ident))
+    let label = field_label(raw_field_ident);
+    check_os_string_field(field, field_def, &label)
         .err()
         .map(|err| err.to_compile_error())
         .into_iter()
+        .chain(pattern_rejection.map(|rejection| pattern_guard_error(rejection, &label)))
         .chain(serde_guard_errors)
         .collect()
 }
@@ -5697,8 +5751,13 @@ fn process_field(
     #[cfg(not(feature = "serde"))]
     let serde_guard_errors: Vec<proc_macro2::TokenStream> = Vec::new();
 
-    let guard_errors =
-        collect_field_guard_errors(field, &field_def, &raw_field_ident, serde_guard_errors);
+    let guard_errors = collect_field_guard_errors(
+        field,
+        &field_def,
+        &raw_field_ident,
+        model_schema_prop_meta.pattern_rejection.as_ref(),
+        serde_guard_errors,
+    );
 
     // Resolve `Self` references to the concrete type name so recursive fields
     // (e.g. `Vec<Self>`) are treated exactly like `Vec<EnclosingType>`.
