@@ -935,20 +935,159 @@ fn map_field_schema(map_type: &str) -> proc_macro2::TokenStream {
 /// A value type the enum-key branch cannot render must yield the `compile_error!` *instead of* the
 /// per-member insertion loop: leaving the loop in place adds an E0425 on the `value_schema` the
 /// failed arm never bound, and that second error names macro-internal state the author cannot act on.
+/// The diagnostic names the field and the type, as the `String`-key branch's does — a message that
+/// names neither leaves the author nothing to act on.
 #[cfg(feature = "jsonschema")]
 #[test]
 fn an_unsupported_enum_keyed_map_value_emits_only_the_compile_error() {
     for map_type in [
-        "HashMap<Slot, HashMap<String, String>>",
-        "HashMap<Slot, Wrapper<String>>",
         "HashMap<Slot, (String, u32)>",
+        "HashMap<Slot, HashMap<String, (String, u32)>>",
+        "HashMap<Slot, Vec<HashMap<String, (String, u32)>>>",
     ] {
-        assert_eq!(
-            map_field_schema(map_type).to_string(),
-            r#"compile_error ! ("Unsupported map value type") ;"#,
-            "for {map_type}"
+        let tokens = map_field_schema(map_type).to_string();
+        assert!(
+            tokens.starts_with("compile_error !"),
+            "for {map_type}, got: {tokens}"
+        );
+        assert!(
+            !tokens.contains("enum_members"),
+            "for {map_type}, got: {tokens}"
+        );
+        assert!(
+            !tokens.contains("properties . insert"),
+            "for {map_type}, got: {tokens}"
+        );
+        assert!(
+            tokens.contains("field `m`"),
+            "for {map_type}, got: {tokens}"
+        );
+        assert!(
+            tokens.contains("a tuple is not supported as a map value"),
+            "for {map_type}, got: {tokens}"
         );
     }
+}
+
+/// The enum-key branch's binding for a map value built by hand, for the value types no source type
+/// produces.
+#[cfg(feature = "jsonschema")]
+fn enum_key_map_value_binding(field_type: FieldDefType) -> String {
+    let ty: syn::Type = syn::parse_str("String").unwrap();
+    let mut value = super::get_field_def("m", &ty, "");
+    value.field_type = field_type;
+    super::build_enum_key_map_value_binding(&value)
+        .unwrap()
+        .to_string()
+}
+
+/// A key that enumerates its members says nothing about what each member holds, so an enum-keyed
+/// member is the member the `String`-key path renders — materialized as a `serde_json::Value` for
+/// the insertion loop, and recursing to the same depth.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_nested_enum_keyed_map_value_renders_its_inner_members() {
+    for (map_type, expected) in [
+        (
+            "HashMap<Slot, HashMap<String, String>>",
+            r#"serde_json :: json ! ({ "type" : "object" , "additionalProperties" : { "type" : "string" } })"#,
+        ),
+        (
+            "HashMap<Slot, HashMap<String, Vec<u64>>>",
+            r#"serde_json :: json ! ({ "type" : "object" , "additionalProperties" : { "type" : "array" , "items" : { "type" : "integer" } } })"#,
+        ),
+        (
+            "HashMap<Slot, HashMap<String, HashMap<String, f64>>>",
+            r#"serde_json :: json ! ({ "type" : "object" , "additionalProperties" : { "type" : "object" , "additionalProperties" : { "type" : "number" } } })"#,
+        ),
+        (
+            "HashMap<Slot, HashMap<String, Inner>>",
+            r#"serde_json :: json ! ({ "type" : "object" , "additionalProperties" : inner_schema :: Schema :: json_schema () })"#,
+        ),
+        (
+            "HashMap<Slot, Vec<HashMap<String, String>>>",
+            r#"serde_json :: json ! ({ "type" : "array" , "items" : serde_json :: json ! ({ "type" : "object" , "additionalProperties" : { "type" : "string" } }) })"#,
+        ),
+        (
+            "HashMap<Slot, Option<HashMap<String, String>>>",
+            r#"serde_json :: json ! ({ "anyOf" : [serde_json :: json ! ({ "type" : "object" , "additionalProperties" : { "type" : "string" } }) , { "type" : "null" }] })"#,
+        ),
+    ] {
+        let tokens = map_field_schema(map_type).to_string();
+        assert!(
+            tokens.contains(&format!("let value_schema = {expected} ;")),
+            "for {map_type}, got: {tokens}"
+        );
+        assert!(
+            tokens.contains("Slot :: enum_members ()"),
+            "for {map_type}, got: {tokens}"
+        );
+    }
+}
+
+/// A generic sibling is a map value the `String`-key path renders through its schema module, so the
+/// enum-key path renders it there too.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_generic_sibling_enum_keyed_map_value_emits_the_sibling_schema() {
+    let tokens = map_field_schema("HashMap<Slot, Wrapper<String>>").to_string();
+    assert!(
+        tokens.contains("let value_schema = wrapper_schema :: Schema :: json_schema () ;"),
+        "got: {tokens}"
+    );
+}
+
+/// An opaque value has no type name to narrow with on either key path, so the member stays
+/// permissive rather than collapsing the whole field to a diagnostic.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_opaque_enum_keyed_map_value_stays_permissive() {
+    let tokens = enum_key_map_value_binding(FieldDefType::Unknown);
+    assert_eq!(tokens, "let value_schema = serde_json :: json ! ({ }) ;");
+}
+
+/// A string literal keeps the `const` it carries on the `String`-key path.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_string_literal_enum_keyed_map_value_keeps_its_const() {
+    let tokens = enum_key_map_value_binding(FieldDefType::StringLiteral("Tixena".to_owned()));
+    assert_eq!(
+        tokens,
+        r#"let value_schema = serde_json :: json ! ({ "type" : "string" , "const" : "Tixena" }) ;"#
+    );
+}
+
+/// A chrono value keeps the format it carries in field position, as it does under a `String` key.
+#[cfg(all(feature = "chrono", feature = "jsonschema"))]
+#[test]
+fn a_chrono_enum_keyed_map_value_keeps_its_format() {
+    for (map_type, format) in [
+        ("HashMap<Slot, NaiveDate>", "date"),
+        ("HashMap<Slot, NaiveTime>", "time"),
+        ("HashMap<Slot, NaiveDateTime>", "date-time"),
+        ("HashMap<Slot, DateTime<Utc>>", "date-time"),
+    ] {
+        let tokens = map_field_schema(map_type).to_string();
+        assert!(
+            tokens.contains(&format!(
+                r#"let value_schema = serde_json :: json ! ({{ "type" : "string" , "format" : "{format}" }}) ;"#
+            )),
+            "for {map_type}, got: {tokens}"
+        );
+    }
+}
+
+/// An `ObjectId` is the one value the two key paths spell differently: a `String`-keyed member
+/// carries a closed, unpatterned `$oid` object where an enum-keyed member carries the field-position
+/// form. Pinned so the divergence stays a decision rather than a drift.
+#[cfg(all(feature = "object_id", feature = "jsonschema"))]
+#[test]
+fn an_object_id_enum_keyed_map_value_keeps_the_field_position_oid_object() {
+    let tokens = enum_key_map_value_binding(FieldDefType::ObjectId);
+    assert_eq!(
+        tokens,
+        r#"let value_schema = serde_json :: json ! ({ "type" : "object" , "properties" : { "$oid" : { "type" : "string" , "pattern" : "^[a-f\\d]{24}$" } } , "required" : ["$oid"] }) ;"#
+    );
 }
 
 #[cfg(feature = "jsonschema")]

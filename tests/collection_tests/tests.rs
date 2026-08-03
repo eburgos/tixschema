@@ -63,6 +63,27 @@ struct EnumKeyedSiblingValueMaps {
     sample_value: HashMap<MetricSlot, MetricSample>,
 }
 
+// A key that enumerates its members says nothing about what each member holds, so a value that is
+// itself a map is described at every level here exactly as it is under the String key of the twin
+// below — the key path decides which keys exist, never which values are renderable.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct EnumKeyedNestedMapValues {
+    counts: HashMap<MetricSlot, HashMap<String, u64>>,
+    labels: HashMap<MetricSlot, HashMap<String, String>>,
+    rows: HashMap<MetricSlot, Vec<HashMap<String, String>>>,
+    samples: HashMap<MetricSlot, HashMap<String, MetricSample>>,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct StringKeyedNestedMapValues {
+    counts: HashMap<String, HashMap<String, u64>>,
+    labels: HashMap<String, HashMap<String, String>>,
+    rows: HashMap<String, Vec<HashMap<String, String>>>,
+    samples: HashMap<String, HashMap<String, MetricSample>>,
+}
+
 // A String key enumerates nothing, so one `additionalProperties` schema stands for every member —
 // and it is the value type's own, which is what the enum-keyed twin above spells out per key.
 #[model_schema()]
@@ -501,6 +522,124 @@ fn test_enum_keyed_sibling_array_member_matches_the_serialized_form() {
         json_type_name(&serde_json::to_value(&sample).unwrap()),
         "in: {member}"
     );
+}
+
+#[test]
+fn test_nested_map_values_constructible_on_both_key_paths() {
+    let enum_keyed = EnumKeyedNestedMapValues {
+        counts: HashMap::new(),
+        labels: HashMap::from([(
+            MetricSlot::Daily,
+            HashMap::from([("a".to_owned(), "one".to_owned())]),
+        )]),
+        rows: HashMap::new(),
+        samples: HashMap::new(),
+    };
+    assert_eq!(enum_keyed.labels[&MetricSlot::Daily]["a"], "one");
+
+    let string_keyed = StringKeyedNestedMapValues {
+        counts: HashMap::new(),
+        labels: HashMap::from([(
+            "daily".to_owned(),
+            HashMap::from([("a".to_owned(), "one".to_owned())]),
+        )]),
+        rows: HashMap::new(),
+        samples: HashMap::new(),
+    };
+    assert_eq!(string_keyed.labels["daily"]["a"], "one");
+}
+
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_enum_keyed_nested_map_values_json_schema() {
+    let schema = EnumKeyedNestedMapValues::json_schema();
+    let properties = schema["properties"].as_object().unwrap();
+
+    assert_enum_keyed_map_value(
+        properties,
+        "counts",
+        &serde_json::json!({
+            "type": "object",
+            "additionalProperties": { "type": "integer" }
+        }),
+    );
+    assert_enum_keyed_map_value(
+        properties,
+        "labels",
+        &serde_json::json!({
+            "type": "object",
+            "additionalProperties": { "type": "string" }
+        }),
+    );
+    assert_enum_keyed_map_value(
+        properties,
+        "rows",
+        &serde_json::json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+            }
+        }),
+    );
+    assert_enum_keyed_map_value(
+        properties,
+        "samples",
+        &serde_json::json!({
+            "type": "object",
+            "additionalProperties": MetricSample::json_schema()
+        }),
+    );
+}
+
+/// Both key paths render a map value through the same member dispatcher, so the member an enum key
+/// spells out per key and the one a `String` key states once are the same schema — the twin types
+/// hold that to the value types, field by field.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_enum_keyed_nested_map_values_match_their_string_keyed_members() {
+    let string_keyed = StringKeyedNestedMapValues::json_schema();
+    let enum_keyed = EnumKeyedNestedMapValues::json_schema();
+    let properties = enum_keyed["properties"].as_object().unwrap();
+
+    for field_name in ["counts", "labels", "rows", "samples"] {
+        let member = &string_keyed["properties"][field_name]["additionalProperties"];
+        assert_ne!(*member, serde_json::json!(true), "for {field_name}");
+        assert_enum_keyed_map_value(properties, field_name, member);
+    }
+}
+
+/// TypeScript and Zod recurse through a map value whatever the key is, so the nesting they render
+/// under an enum key is the one the JSON schema now describes — pinned so the three surfaces stay
+/// in step.
+#[test]
+#[cfg(all(feature = "typescript", feature = "zod"))]
+fn test_enum_keyed_nested_map_values_typescript_generation() {
+    let ts_definition = EnumKeyedNestedMapValues::ts_definition();
+    for expected in [
+        "counts: Partial<Record<MetricSlot, Partial<Record<string, number>>>>;",
+        "labels: Partial<Record<MetricSlot, Partial<Record<string, string>>>>;",
+        "rows: Partial<Record<MetricSlot, Array<Partial<Record<string, string>>>>>;",
+        "samples: Partial<Record<MetricSlot, Partial<Record<string, MetricSample>>>>;",
+    ] {
+        assert!(
+            ts_definition.contains(expected),
+            "missing {expected}, got: {ts_definition}"
+        );
+    }
+
+    let zod_schema = EnumKeyedNestedMapValues::zod_schema();
+    for expected in [
+        "counts: z.record(MetricSlot$Schema, z.record(z.string(), z.number().int())),",
+        "labels: z.record(MetricSlot$Schema, z.record(z.string(), z.string())),",
+        "rows: z.record(MetricSlot$Schema, z.array(z.record(z.string(), z.string()))),",
+        "samples: z.record(MetricSlot$Schema, z.record(z.string(), MetricSample$Schema)),",
+    ] {
+        assert!(
+            zod_schema.contains(expected),
+            "missing {expected}, got: {zod_schema}"
+        );
+    }
 }
 
 #[test]
