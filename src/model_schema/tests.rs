@@ -8,7 +8,7 @@ use super::{
 };
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-use super::branded_guard_errors;
+use super::{AliasKind, branded_guard_errors, register_alias_info};
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use syn::spanned::Spanned as _;
@@ -683,4 +683,84 @@ fn a_scalar_enum_keyed_map_value_expands_to_the_per_member_loop() {
         tokens.contains(r#"serde_json :: json ! ({ "type" : "string" })"#),
         "got: {tokens}"
     );
+}
+
+/// The kind an alias registers is its *target's* answer, because a type path resolves through the
+/// alias. `Vec<Slot>` is the collection, not the enum it holds; a target this expansion has not
+/// seen registered is `Unknown`, which is not a negative.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn an_alias_registers_the_kind_of_what_it_targets() {
+    register_alias_info("Slot", "Slot", "slot_schema", AliasKind::EnumMembers);
+    register_alias_info("Doc", "Doc", "doc_schema", AliasKind::NoEnumMembers);
+    for (target, expected) in [
+        ("Slot", AliasKind::EnumMembers),
+        ("Doc", AliasKind::NoEnumMembers),
+        ("String", AliasKind::NoEnumMembers),
+        ("u32", AliasKind::NoEnumMembers),
+        ("Vec<Slot>", AliasKind::NoEnumMembers),
+        ("HashMap<Slot, String>", AliasKind::NoEnumMembers),
+        ("Wrapper<Slot>", AliasKind::NoEnumMembers),
+        ("Ghost", AliasKind::Unknown),
+    ] {
+        let ty: syn::Type = syn::parse_str(target).unwrap();
+        let kind = super::alias_target_kind(&super::get_field_def("AliasType", &ty, ""));
+        assert_eq!(kind, expected, "for alias target {target}");
+    }
+}
+
+/// An alias of an alias of a plain enum is still a plain enum at the type path, so the chain
+/// carries `EnumMembers` through every link.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn an_alias_chain_carries_the_enum_kind_to_its_end() {
+    register_alias_info("Slot", "Slot", "slot_schema", AliasKind::EnumMembers);
+    let first_target: syn::Type = syn::parse_str("Slot").unwrap();
+    let first = super::alias_target_kind(&super::get_field_def("FirstType", &first_target, ""));
+    register_alias_info("First", "FirstType", "first_type_schema", first);
+
+    let second_target: syn::Type = syn::parse_str("First").unwrap();
+    let second = super::alias_target_kind(&super::get_field_def("SecondType", &second_target, ""));
+    assert_eq!(second, AliasKind::EnumMembers);
+}
+
+/// A key the registry positively rules out never reaches the emitting path: `enum_members()` on it
+/// resolves through the alias to a type that has no such method, and rustc blames the attribute for
+/// a method the author never wrote.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_map_key_known_to_lack_enum_members_names_the_requirement() {
+    register_alias_info(
+        "KeyAlias",
+        "KeyAliasType",
+        "key_alias_type_schema",
+        AliasKind::NoEnumMembers,
+    );
+    let tokens = map_field_schema("HashMap<KeyAlias, String>").to_string();
+    assert!(
+        !tokens.contains("KeyAlias :: enum_members"),
+        "got: {tokens}"
+    );
+    assert!(tokens.starts_with("compile_error !"), "got: {tokens}");
+    assert!(
+        tokens.contains("a map key must be a plain"),
+        "got: {tokens}"
+    );
+    assert!(tokens.contains("KeyAlias"), "got: {tokens}");
+}
+
+/// The registry extension is a filter, never a rewrite: for every key that compiled before it —
+/// a plain enum, an alias of one, or a name this expansion cannot classify — the emitted tokens
+/// are the ones an unregistered key has always produced.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_map_key_that_may_have_enum_members_expands_exactly_as_before() {
+    let unregistered = map_field_schema("HashMap<Slot, String>").to_string();
+    for kind in [AliasKind::EnumMembers, AliasKind::Unknown] {
+        register_alias_info("Slot", "Slot", "slot_schema", kind);
+        assert_eq!(
+            map_field_schema("HashMap<Slot, String>").to_string(),
+            unregistered
+        );
+    }
 }
