@@ -36,6 +36,32 @@ fn test_json_schema_method_flatten_emits_merge() {
     assert!(with_flatten.contains("oneOf"));
 }
 
+/// The wrapper the merge writes is the one its source used, which is only knowable once the source
+/// has described itself. So the spelling is read off the source beside its branches and carried
+/// into the wrapping, rather than fixed where the document is written.
+#[test]
+fn test_the_merge_wraps_branches_in_the_spelling_its_source_used() {
+    let merge = generate_struct_json_schema_method(
+        &[],
+        &[MergedSource {
+            label: "Base".to_owned(),
+            value: quote::quote! { serde_json::json!({ "type": "object" }) },
+        }],
+        "Node",
+    )
+    .to_string();
+
+    assert!(
+        merge.contains("let (fs_spelling , fs_branches) = branches_of (fs_body)"),
+        "{merge}"
+    );
+    assert!(
+        merge.contains("multiplied (& fs_objects , fs_spelling)"),
+        "{merge}"
+    );
+    assert!(merge.contains("\"anyOf\""), "{merge}");
+}
+
 /// The two methods are one mechanism: the guarded one is what siblings call, and the entry point
 /// is what turns the definitions it collected into a document root.
 #[test]
