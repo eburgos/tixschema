@@ -155,7 +155,12 @@ fn collect_doc_lines(attrs: &[Attribute]) -> Option<Vec<String>> {
     }
 }
 
-#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[cfg(any(
+    feature = "typescript",
+    feature = "zod",
+    feature = "jsonschema",
+    feature = "serde"
+))]
 pub fn to_snake_case(name: &str) -> String {
     let mut result = String::new();
     let mut prev_lower = false;

@@ -269,17 +269,82 @@ fn test_a_transparent_wrapper_keeps_the_array_levels_of_what_it_wraps() {
     }
 }
 
-/// The borrowed form of a mapped owned type writes what the owned form writes, and a wrapper is how
-/// a field reaches it at all.
+/// The borrowed form of a mapped owned type writes what the owned form writes, and a wrapper or a
+/// reference is how a field reaches it at all.
 #[test]
 fn test_a_borrowed_string_parses_as_a_string() {
-    for spelling in ["Arc<str>", "Box<str>", "Cow<'a, str>", "Rc<str>", "String"] {
+    for spelling in [
+        "Arc<str>",
+        "Box<str>",
+        "Cow<'a, str>",
+        "Rc<str>",
+        "String",
+        "&str",
+        "&'a str",
+        "Arc<Path>",
+        "Box<Path>",
+        "Cow<'a, Path>",
+        "Rc<Path>",
+        "PathBuf",
+        "&Path",
+        "&'a Path",
+    ] {
         let ty: syn::Type = syn::parse_str(spelling).unwrap();
         let parsed = super::get_field_def("label", &ty, "");
         assert!(
             matches!(parsed.field_type, FieldDefType::String),
             "for: {spelling}"
         );
+    }
+}
+
+/// `OsString`/`OsStr` are the owned/borrowed pair held out of the string mapping: serde writes
+/// them as an externally tagged enum naming the target platform, so no portable schema describes
+/// them. The parse leaves them as siblings and reports them from wherever they were written.
+#[test]
+fn test_an_os_string_is_reported_wherever_it_was_written() {
+    for spelling in [
+        "OsString",
+        "OsStr",
+        "&OsStr",
+        "Box<OsStr>",
+        "Cow<'a, OsStr>",
+        "Rc<OsStr>",
+        "Arc<OsStr>",
+        "Option<OsString>",
+        "Vec<OsString>",
+        "HashMap<String, OsString>",
+        "(String, OsString)",
+        "Wrapper<OsString>",
+    ] {
+        let ty: syn::Type = syn::parse_str(spelling).unwrap();
+        let parsed = super::get_field_def("location", &ty, "");
+        assert!(
+            parsed
+                .os_string_name()
+                .is_some_and(|name| name == "OsString" || name == "OsStr"),
+            "for: {spelling}"
+        );
+    }
+}
+
+/// The report is for those two names alone: a path, a string, and a user type that merely carries
+/// one of them inside its own name all describe a wire form and stay unreported.
+#[test]
+fn test_a_schematizable_field_is_not_reported_as_an_os_string() {
+    for spelling in [
+        "String",
+        "PathBuf",
+        "Box<Path>",
+        "Option<String>",
+        "Vec<PathBuf>",
+        "HashMap<String, String>",
+        "OsStringHolder",
+        "Wrapper<PathBuf>",
+    ] {
+        let ty: syn::Type = syn::parse_str(spelling).unwrap();
+        let parsed = super::get_field_def("location", &ty, "");
+        assert_eq!(parsed.os_string_name(), None, "for: {spelling}");
     }
 }
 

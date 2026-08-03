@@ -71,7 +71,12 @@ use crate::utils::{format_docs_for_ts, get_item_docs};
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::register_alias_info;
 
-#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[cfg(any(
+    feature = "typescript",
+    feature = "zod",
+    feature = "jsonschema",
+    feature = "serde"
+))]
 use crate::utils::to_snake_case;
 
 use crate::rename_rule::resolve_rename_rule;
@@ -724,7 +729,6 @@ fn cfg_attr_guard_error(rejection: &syn::Error, item: &str) -> proc_macro2::Toke
 }
 
 /// Names a field in a guard message; tuple slots have no ident to name.
-#[cfg(feature = "serde")]
 fn field_label(raw_field_ident: &str) -> String {
     if raw_field_ident.is_empty() {
         "tuple field".to_owned()
@@ -959,12 +963,10 @@ fn collect_struct_fields(
         #[cfg(not(feature = "serde"))]
         let is_flatten = false;
 
-        let (f_def, validation_fn, validate_body, guard_error) =
-            process_field(rename_all, field, module_name_opt, type_name);
+        let (f_def, validation_fn, validate_body, field_guard_errors) =
+            process_field(rename_all, field, module_name_opt, None, type_name);
 
-        if let Some(err) = guard_error {
-            guard_errors.push(err);
-        }
+        guard_errors.extend(field_guard_errors);
 
         if is_flatten {
             let _: (&_, &_) = (&validation_fn, &validate_body);
@@ -2334,20 +2336,24 @@ fn collect_discriminated_variants(
         #[cfg(not(feature = "serde"))]
         let field_rename: Option<String> = None;
 
+        let variant_ident = item.ident.to_string();
         let final_name =
-            get_final_variant_name(&item.ident.to_string(), field_rename.as_deref(), rename_all);
+            get_final_variant_name(&variant_ident, field_rename.as_deref(), rename_all);
         let variant_kind = classify_variant(item);
 
         let mut field_defs: Vec<FieldDef> = Vec::new();
         for field in &mut item.fields {
-            let (f_def, validation_fn, _validate_body, guard_error) =
-                process_field(rename_all, field, enum_module_name_opt, &enum_type_name);
+            let (f_def, validation_fn, _validate_body, field_guard_errors) = process_field(
+                rename_all,
+                field,
+                enum_module_name_opt,
+                Some(&variant_ident),
+                &enum_type_name,
+            );
             if let Some(vfn) = validation_fn {
                 enum_validation_fns.push(vfn);
             }
-            if let Some(err) = guard_error {
-                guard_errors.push(err);
-            }
+            guard_errors.extend(field_guard_errors);
             field_defs.push(f_def);
         }
 
@@ -2854,6 +2860,9 @@ fn collect_untagged_members(item_enum: &mut syn::ItemEnum) -> UntaggedMemberData
                 .map(ToString::to_string)
                 .unwrap_or_default();
             let mut field_def = get_field_def(&field_name, &field.ty, "");
+            if let Err(err) = check_os_string_field(field, &field_def, &field_label(&field_name)) {
+                guard_errors.push(err.to_compile_error());
+            }
             let serde_field_meta = parse_serde_field_attributes(&field.attrs);
             if let Some(rejection) = serde_field_meta.cfg_attr_rejection.as_ref() {
                 guard_errors.push(cfg_attr_guard_error(rejection, &field_label(&field_name)));
@@ -4404,6 +4413,20 @@ fn build_wrapped_deserializer(
     }
 }
 
+/// The stem the per-field helpers are named from: `validate_{stem}_value` and `deserialize_{stem}`.
+///
+/// A field name is unique only within the variant that declares it, while one schema module holds
+/// every variant's helpers — so a variant's field carries its variant into the stem, and two
+/// variants naming one field name two constraints instead of colliding. A struct field has no
+/// variant and keeps the bare field name its helpers have always been spelled with.
+#[cfg(feature = "serde")]
+fn helper_name_stem(field_ident: &str, variant_ident: Option<&str>) -> String {
+    variant_ident.map_or_else(
+        || field_ident.to_owned(),
+        |variant| format!("{}_{field_ident}", to_snake_case(variant)),
+    )
+}
+
 /// Generates the static validator for a String field with constraints, plus the serde deserializer
 /// — written against the constrained value itself when the field is bare, and against the field's
 /// declared type when it is wrapped.
@@ -4412,15 +4435,16 @@ fn build_wrapped_deserializer(
 #[cfg(feature = "serde")]
 fn generate_string_validation_code(
     field_ident: &str,
+    helper_stem: &str,
     meta: &ModelSchemaPropMeta,
     shape: &ConstrainedShape,
     field_ty: &syn::Type,
 ) -> FieldValidationCode {
     let wraps: &[ConstraintWrap] = &shape.wraps;
-    let validate_value_fn_name = format!("validate_{field_ident}_value");
+    let validate_value_fn_name = format!("validate_{helper_stem}_value");
     let validate_value_fn_ident =
         proc_macro2::Ident::new(&validate_value_fn_name, proc_macro2::Span::call_site());
-    let deserialize_fn_name = format!("deserialize_{field_ident}");
+    let deserialize_fn_name = format!("deserialize_{helper_stem}");
     let deserialize_fn_ident =
         proc_macro2::Ident::new(&deserialize_fn_name, proc_macro2::Span::call_site());
 
@@ -4515,16 +4539,17 @@ fn generate_string_validation_code(
 #[cfg(feature = "serde")]
 fn generate_numeric_validation_code(
     field_ident: &str,
+    helper_stem: &str,
     rust_type_str: &str,
     meta: &ModelSchemaPropMeta,
     shape: &ConstrainedShape,
     field_ty: &syn::Type,
 ) -> FieldValidationCode {
     let wraps: &[ConstraintWrap] = &shape.wraps;
-    let validate_value_fn_name = format!("validate_{field_ident}_value");
+    let validate_value_fn_name = format!("validate_{helper_stem}_value");
     let validate_value_fn_ident =
         proc_macro2::Ident::new(&validate_value_fn_name, proc_macro2::Span::call_site());
-    let deserialize_fn_name = format!("deserialize_{field_ident}");
+    let deserialize_fn_name = format!("deserialize_{helper_stem}");
     let deserialize_fn_ident =
         proc_macro2::Ident::new(&deserialize_fn_name, proc_macro2::Span::call_site());
 
@@ -4767,19 +4792,60 @@ fn check_optional_field_serialization(
     ))
 }
 
+/// Every guard error the field violates: the `OsString` guard first — it reads the written type,
+/// which no attribute can hide — then the serde-side guard when one fired.
+fn collect_field_guard_errors(
+    field: &Field,
+    field_def: &FieldDef,
+    raw_field_ident: &str,
+    serde_guard_error: Option<proc_macro2::TokenStream>,
+) -> Vec<proc_macro2::TokenStream> {
+    check_os_string_field(field, field_def, &field_label(raw_field_ident))
+        .err()
+        .map(|err| err.to_compile_error())
+        .into_iter()
+        .chain(serde_guard_error)
+        .collect()
+}
+
+/// Rejects a field that reaches an `OsString`/`OsStr`, at any depth.
+///
+/// serde writes both as an externally tagged enum naming the target platform — `{"Unix":[u8, …]}`
+/// or `{"Windows":[u16, …]}` — so one Rust field has two wire forms and no schema describes both.
+/// Their owned string counterparts are what a portable field is written as instead.
+fn check_os_string_field(
+    field: &Field,
+    field_def: &FieldDef,
+    label: &str,
+) -> Result<(), syn::Error> {
+    let Some(name) = field_def.os_string_name() else {
+        return Ok(());
+    };
+    Err(syn::Error::new_spanned(
+        field,
+        format!(
+            "model_schema: {label} reaches `{name}`, which serde writes as an externally tagged \
+             enum naming the target platform (`{{\"Unix\":[u8, ...]}}` or \
+             `{{\"Windows\":[u16, ...]}}`), not a string, so no schema can describe it portably. \
+             Use `String`, or `PathBuf` for a filesystem path."
+        ),
+    ))
+}
+
 /// Processes a field and returns its definition, optional module items (validators/deserializers),
 /// optional `validate_body` (contribution to the type-level `validate()` method), and the
-/// `compile_error!` tokens for any guard the field violates.
+/// `compile_error!` tokens for every guard the field violates.
 fn process_field(
     rename_all: Option<&str>,
     field: &mut Field,
     schema_module_name: Option<&str>,
+    variant_ident: Option<&str>,
     type_name: &str,
 ) -> (
     FieldDef,
     Option<proc_macro2::TokenStream>,
     Option<proc_macro2::TokenStream>,
-    Option<proc_macro2::TokenStream>,
+    Vec<proc_macro2::TokenStream>,
 ) {
     let mut new_attrs = Vec::new();
 
@@ -4819,6 +4885,7 @@ fn process_field(
         field,
         schema_module_name,
         &raw_field_ident,
+        variant_ident,
         &model_schema_prop_meta,
         &mut new_attrs,
     );
@@ -4829,7 +4896,7 @@ fn process_field(
         Option<proc_macro2::TokenStream>,
     ) = (None, None);
     #[cfg(not(feature = "serde"))]
-    let _: &_ = &schema_module_name;
+    let _: &_ = &(schema_module_name, variant_ident);
 
     field.attrs = new_attrs;
 
@@ -4842,9 +4909,10 @@ fn process_field(
     let mut field_def = get_field_def(&final_name, field_type, &field_docs);
 
     // A hidden serde attribute leaves every other field diagnostic unreliable — the Option-null
-    // guard included, since the wrapper is exactly what kept its evidence out of the meta.
+    // guard included, since the wrapper is exactly what kept its evidence out of the meta. The
+    // `OsString` guard reads the written type, which no attribute can hide, so it stands apart.
     #[cfg(feature = "serde")]
-    let guard_error = serde_field_meta.cfg_attr_rejection.as_ref().map_or_else(
+    let serde_guard_error = serde_field_meta.cfg_attr_rejection.as_ref().map_or_else(
         || {
             check_optional_field_serialization(field, field_def.is_optional(), &serde_field_meta)
                 .err()
@@ -4858,7 +4926,10 @@ fn process_field(
         },
     );
     #[cfg(not(feature = "serde"))]
-    let guard_error: Option<proc_macro2::TokenStream> = None;
+    let serde_guard_error: Option<proc_macro2::TokenStream> = None;
+
+    let guard_errors =
+        collect_field_guard_errors(field, &field_def, &raw_field_ident, serde_guard_error);
 
     // Resolve `Self` references to the concrete type name so recursive fields
     // (e.g. `Vec<Self>`) are treated exactly like `Vec<EnclosingType>`.
@@ -4906,7 +4977,7 @@ fn process_field(
     // Update field docs to include length/range constraint information
     apply_constraint_docs(&mut field_def, &final_name);
 
-    (field_def, validation_fn, validate_body, guard_error)
+    (field_def, validation_fn, validate_body, guard_errors)
 }
 
 /// Whether the field needs a `#[serde(default)]` written for it alongside the `deserialize_with`.
@@ -4937,6 +5008,7 @@ fn generate_field_validation(
     field: &Field,
     schema_module_name: Option<&str>,
     raw_field_ident: &str,
+    variant_ident: Option<&str>,
     model_schema_prop_meta: &ModelSchemaPropMeta,
     new_attrs: &mut Vec<syn::Attribute>,
 ) -> (
@@ -4954,10 +5026,12 @@ fn generate_field_validation(
         return (None, None);
     };
 
+    let helper_stem = helper_name_stem(raw_field_ident, variant_ident);
     let generated = match shape.leaf {
         ConstraintLeaf::Str => has_string_constraints.then(|| {
             generate_string_validation_code(
                 raw_field_ident,
+                &helper_stem,
                 model_schema_prop_meta,
                 &shape,
                 &field.ty,
@@ -4966,6 +5040,7 @@ fn generate_field_validation(
         ConstraintLeaf::Number(rust_type) => has_numeric_constraints.then(|| {
             generate_numeric_validation_code(
                 raw_field_ident,
+                &helper_stem,
                 rust_type,
                 model_schema_prop_meta,
                 &shape,
@@ -4977,7 +5052,7 @@ fn generate_field_validation(
         return (None, None);
     };
 
-    let deserialize_with_path = format!("{module_name}::deserialize_{raw_field_ident}");
+    let deserialize_with_path = format!("{module_name}::deserialize_{helper_stem}");
     let path_lit = syn::LitStr::new(&deserialize_with_path, proc_macro2::Span::call_site());
     new_attrs.push(syn::parse_quote! {
         #[serde(deserialize_with = #path_lit)]

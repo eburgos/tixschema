@@ -823,6 +823,8 @@ The macro also generates into the type's schema module:
 - `validate_{field}_value(&FieldType) -> Result<(), String>` -- pure static validator per field
 - `deserialize_{field}(D) -> Result<FieldType, E>` -- serde hook that calls the static validator
 
+A constrained field of an enum variant is named for its variant too -- `validate_{variant}_{field}_value` and `deserialize_{variant}_{field}`, with `{variant}` in `snake_case`. One schema module holds every variant's helpers, and a field name is unique only within the variant that declares it, so two variants naming one field carry their own constraints.
+
 #### Constraints under `Option`, wrappers, and sequences
 
 A constraint describes the value the field puts on the wire, wherever it was written. `validate()` therefore reaches through everything the parser reads through -- an `Option`, a transparent wrapper (`Box`, `Rc`, `Arc`, `Cow`), and every sequence level (`Vec`, `VecDeque`, `HashSet`, `BTreeSet`, `LinkedList`, `BinaryHeap`, arrays and slices) -- and checks the innermost value, which is the same place the Zod, TypeScript and JSON Schema surfaces put it.
