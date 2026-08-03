@@ -1994,7 +1994,7 @@ fn enum_key_map_value_binding(field_type: FieldDefType) -> String {
     let ty: syn::Type = syn::parse_str("String").unwrap();
     let mut value = super::get_field_def("m", &ty, "");
     value.field_type = field_type;
-    super::enum_key_map_json_schema_value("Slot", &value)
+    super::enum_key_map_json_schema_value("Slot", proc_macro2::Span::call_site(), &value)
         .unwrap()
         .to_string()
 }
@@ -3026,6 +3026,31 @@ fn a_sibling_reference_emits_the_tokens_it_always_has() {
         sole_field_json_schema("struct Outer { inner: Inner }").to_string(),
         "properties . insert (\"inner\" . to_string () , inner_schema :: Schema :: json_schema_within (in_flight , hoisted_defs)) ;"
     );
+}
+
+/// The registry is filled as items expand, so a key declared after the type that writes the map —
+/// like a key foreign to this crate — reads as unclassified and keeps the emitting path. Its
+/// `enum_members()` call is therefore spanned on the key the field names, so a key that carries no
+/// such method is blamed at the user's type instead of at `#[model_schema()]`. Every position a
+/// map is written in names the key the same way.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_enum_keyed_map_points_its_members_call_at_the_key_the_field_names() {
+    for source in [
+        "struct Outer { m: HashMap<Slot, String> }",
+        "struct Outer { m: Vec<HashMap<Slot, String>> }",
+        "struct Outer { m: HashMap<String, HashMap<Slot, String>> }",
+        "struct Outer { m: (HashMap<Slot, String>, u32) }",
+    ] {
+        let tokens = sole_field_json_schema(source);
+        for named in ["Slot", "enum_members"] {
+            assert_eq!(
+                ident_source_texts(&tokens, named),
+                vec![Some("Slot".to_owned())],
+                "for {source}, at `{named}`, got: {tokens}"
+            );
+        }
+    }
 }
 
 /// The tuple-field insertion for a field type built by hand.
