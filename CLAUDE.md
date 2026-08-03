@@ -127,7 +127,7 @@ pub struct FieldDef {
     pub name: String,                // Field name (respects Serde rename)
     pub docs: String,                // Rust doc comments → JSDoc
     pub field_type: FieldDefType,    // The actual type category
-    pub is_array: bool,              // Vec<T> → Array<T>
+    pub array_depth: u8,             // Vec<T> → Array<T>, one level per Vec/slice/set written
     pub array_num: Option<u16>,      // Future: fixed-size arrays
     pub model_schema_prop_meta: ..., // Field-level overrides
 }

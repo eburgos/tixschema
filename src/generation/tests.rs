@@ -18,7 +18,7 @@ fn test_typescript_field_formatting() {
         name: "test_field".to_owned(),
         docs: "Test documentation".to_owned(),
         field_type: FieldDefType::String,
-        is_array: false,
+        array_depth: 0,
         array_num: None,
         model_schema_prop_meta: None,
     };

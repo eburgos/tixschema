@@ -325,7 +325,7 @@ fn alias_target_kind(alias_field_def: &FieldDef) -> AliasKind {
     let FieldDefType::SiblingType(target_name, generic_args) = &alias_field_def.field_type else {
         return AliasKind::NoEnumMembers;
     };
-    if !generic_args.is_empty() || alias_field_def.is_array {
+    if !generic_args.is_empty() || alias_field_def.is_array() {
         return AliasKind::NoEnumMembers;
     }
     lookup_alias_info(target_name).map_or(AliasKind::Unknown, |target| target.kind)
@@ -801,7 +801,7 @@ fn branded_constraint_inner_error(
 /// string and so can carry the string constraints.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 const fn non_string_inner_shape(inner: &FieldDef) -> Option<&'static str> {
-    if inner.is_array {
+    if inner.is_array() {
         return Some("container");
     }
     match &inner.field_type {
@@ -2781,16 +2781,7 @@ fn field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
         }
     };
 
-    if fld.is_array {
-        quote! {
-            serde_json::json!({
-                "type": "array",
-                "items": #inner
-            })
-        }
-    } else {
-        inner
-    }
+    arrayed_json_schema_value(fld, inner)
 }
 
 /// Collects each untagged variant's union-member parts: the TypeScript member type, the Zod member
@@ -2978,19 +2969,9 @@ fn generate_type_schema(
     field_name_str: &str,
     type_json_schema: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
-    if fld.is_array {
-        quote! {
-            properties.insert(#field_name_str.to_string(), {
-                serde_json::json!({
-                    "type": "array",
-                    "items": #type_json_schema
-                })
-            });
-        }
-    } else {
-        quote! {
-            properties.insert(#field_name_str.to_string(), #type_json_schema);
-        }
+    let schema = arrayed_json_schema_value(fld, type_json_schema.clone());
+    quote! {
+        properties.insert(#field_name_str.to_string(), #schema);
     }
 }
 
@@ -3328,21 +3309,36 @@ fn write_tuple_multiple_variant_fields(
     let _: &_ = &&json_schema_variant_fields;
 }
 
-/// Arrays `item_schema` when the field is a `Vec`, and hands it back untouched otherwise.
+/// Arrays `item_schema` once per array level the field carries, and hands it back untouched when
+/// the field carries none.
 ///
 /// Every value position that can hold a `Vec` — a field, a tuple element, an enum-keyed map member
 /// — carries the array-ness on the field itself rather than in its type, so the wrap belongs here
-/// once instead of in each renderer.
+/// once instead of in each renderer. The levels are the ones the field was written at, so a
+/// `Vec<Vec<T>>` describes as the array of arrays serde writes for it.
+///
+/// `item_schema` is a `serde_json::Value` expression, as is the result. Callers holding a literal
+/// fragment want [`arrayed_json_schema_fragment`].
 #[cfg(feature = "jsonschema")]
 fn arrayed_json_schema_value(
     fld: &FieldDef,
     item_schema: proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
-    if fld.is_array {
-        quote! { serde_json::json!({ "type": "array", "items": #item_schema }) }
-    } else {
-        item_schema
-    }
+    (0..fld.array_depth).fold(item_schema, |items, _| {
+        quote! { serde_json::json!({ "type": "array", "items": #items }) }
+    })
+}
+
+/// [`arrayed_json_schema_value`] for a caller holding a literal fragment: each wrap nests inside
+/// the one `serde_json::json!` the fragment is written into rather than materializing a value.
+#[cfg(feature = "jsonschema")]
+fn arrayed_json_schema_fragment(
+    fld: &FieldDef,
+    item_schema: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    (0..fld.array_depth).fold(item_schema.clone(), |items, _| {
+        quote! { { "type": "array", "items": #items } }
+    })
 }
 
 /// The JSON schema literal for a type that renders inline as a scalar — the object body itself,
@@ -3350,8 +3346,8 @@ fn arrayed_json_schema_value(
 /// `serde_json::Value` wraps — or `None` for the composite types (sibling references, maps,
 /// tuples, unknowns) that have no inline rendering.
 ///
-/// Neither `is_array` nor `is_optional` is consulted: both describe the slot the value sits in,
-/// not its type, so each caller wraps this item itself.
+/// Neither the array levels nor `is_optional` are consulted: both describe the slot the value sits
+/// in, not its type, so each caller wraps this item itself.
 #[cfg(feature = "jsonschema")]
 fn scalar_field_json_schema_item(fld: &FieldDef) -> Option<proc_macro2::TokenStream> {
     let item_schema = match &fld.field_type {
@@ -3617,23 +3613,14 @@ fn build_nested_map_member_item(
     })
 }
 
-/// Wraps a member's base schema for the slot it sits in — arrayed when the value is a `Vec`,
-/// nullable when it is an `Option`.
+/// Wraps a member's base schema for the slot it sits in — arrayed once per array level the value
+/// carries, nullable when it is an `Option`.
 #[cfg(feature = "jsonschema")]
 fn map_member_slot_schema(
     value: &FieldDef,
     item_schema: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
-    let arrayed = if value.is_array {
-        quote! {
-            {
-                "type": "array",
-                "items": #item_schema
-            }
-        }
-    } else {
-        item_schema.clone()
-    };
+    let arrayed = arrayed_json_schema_fragment(value, item_schema);
     nullable_slot_json_schema(value, &arrayed).unwrap_or(arrayed)
 }
 
@@ -3926,32 +3913,16 @@ fn build_string_field_schema(fld: &FieldDef, field_name_str: &str) -> proc_macro
         quote! { schema_obj.insert("pattern".to_string(), serde_json::json!(#pattern)); }
     });
 
-    if fld.is_array {
-        quote! {
-            properties.insert(#field_name_str.to_string(), {
-                let mut schema_obj = serde_json::Map::new();
-                schema_obj.insert("type".to_string(), serde_json::json!("string"));
-                #min_len_insert
-                #max_len_insert
-                #pattern_insert
-                let items = serde_json::Value::Object(schema_obj);
-                serde_json::json!({
-                    "type": "array",
-                    "items": items
-                })
-            });
-        }
-    } else {
-        quote! {
-            properties.insert(#field_name_str.to_string(), {
-                let mut schema_obj = serde_json::Map::new();
-                schema_obj.insert("type".to_string(), serde_json::json!("string"));
-                #min_len_insert
-                #max_len_insert
-                #pattern_insert
-                serde_json::Value::Object(schema_obj)
-            });
-        }
+    let schema = arrayed_json_schema_value(fld, quote! { serde_json::Value::Object(schema_obj) });
+    quote! {
+        properties.insert(#field_name_str.to_string(), {
+            let mut schema_obj = serde_json::Map::new();
+            schema_obj.insert("type".to_string(), serde_json::json!("string"));
+            #min_len_insert
+            #max_len_insert
+            #pattern_insert
+            #schema
+        });
     }
 }
 
@@ -3962,24 +3933,12 @@ fn build_string_literal_field_schema(
     field_name_str: &str,
     literal: &str,
 ) -> proc_macro2::TokenStream {
-    if fld.is_array {
-        quote! {
-            properties.insert(#field_name_str.to_string(), {
-                serde_json::json!({
-                    "type": "array",
-                    "items": serde_json::json!({ "type": "string", "const": #literal })
-                })
-            });
-        }
-    } else {
-        quote! {
-            properties.insert(#field_name_str.to_string(), {
-                serde_json::json!({
-                    "type": "string",
-                    "const": #literal
-                })
-            });
-        }
+    let schema = arrayed_json_schema_value(
+        fld,
+        quote! { serde_json::json!({ "type": "string", "const": #literal }) },
+    );
+    quote! {
+        properties.insert(#field_name_str.to_string(), { #schema });
     }
 }
 
@@ -3999,53 +3958,25 @@ fn build_numeric_field_schema(
         quote! { schema_obj.insert("maximum".to_string(), serde_json::json!(#max)); }
     });
 
-    if fld.is_array {
-        quote! {
-            properties.insert(#field_name_str.to_string(), {
-                let mut schema_obj = serde_json::Map::new();
-                schema_obj.insert("type".to_string(), serde_json::json!(#json_type));
-                #minimum_insert
-                #maximum_insert
-                let items = serde_json::Value::Object(schema_obj);
-                serde_json::json!({
-                    "type": "array",
-                    "items": items
-                })
-            });
-        }
-    } else {
-        quote! {
-            properties.insert(#field_name_str.to_string(), {
-                let mut schema_obj = serde_json::Map::new();
-                schema_obj.insert("type".to_string(), serde_json::json!(#json_type));
-                #minimum_insert
-                #maximum_insert
-                serde_json::Value::Object(schema_obj)
-            });
-        }
+    let schema = arrayed_json_schema_value(fld, quote! { serde_json::Value::Object(schema_obj) });
+    quote! {
+        properties.insert(#field_name_str.to_string(), {
+            let mut schema_obj = serde_json::Map::new();
+            schema_obj.insert("type".to_string(), serde_json::json!(#json_type));
+            #minimum_insert
+            #maximum_insert
+            #schema
+        });
     }
 }
 
 /// Builds the JSON schema for a `bool` field.
 #[cfg(feature = "jsonschema")]
 fn build_boolean_field_schema(fld: &FieldDef, field_name_str: &str) -> proc_macro2::TokenStream {
-    if fld.is_array {
-        quote! {
-            properties.insert(#field_name_str.to_string(), {
-                serde_json::json!({
-                    "type": "array",
-                    "items": serde_json::json!({ "type": "boolean" })
-                })
-            });
-        }
-    } else {
-        quote! {
-            properties.insert(#field_name_str.to_string(), {
-                serde_json::json!({
-                    "type": "boolean",
-                })
-            });
-        }
+    let schema =
+        arrayed_json_schema_value(fld, quote! { serde_json::json!({ "type": "boolean" }) });
+    quote! {
+        properties.insert(#field_name_str.to_string(), { #schema });
     }
 }
 
@@ -4087,35 +4018,21 @@ fn build_sibling_type_field_schema(
 /// Builds the JSON schema for a `MongoDB` `ObjectId` field (`{ "$oid": string }`).
 #[cfg(all(feature = "jsonschema", feature = "object_id"))]
 fn build_object_id_field_schema(fld: &FieldDef, field_name_str: &str) -> proc_macro2::TokenStream {
-    if fld.is_array {
+    let schema = arrayed_json_schema_value(
+        fld,
         quote! {
-            properties.insert(#field_name_str.to_string(), {
-                serde_json::json!({
-                    "type": "array",
-                    "items": serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "$oid": { "type": "string" }
-                        },
-                        "required": ["$oid"],
-                        "additionalProperties": false
-                    })
-                })
-            });
-        }
-    } else {
-        quote! {
-            properties.insert(#field_name_str.to_string(), {
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "$oid": { "type": "string" }
-                    },
-                    "required": ["$oid"],
-                    "additionalProperties": false
-                })
-            });
-        }
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "$oid": { "type": "string" }
+                },
+                "required": ["$oid"],
+                "additionalProperties": false
+            })
+        },
+    );
+    quote! {
+        properties.insert(#field_name_str.to_string(), { #schema });
     }
 }
 
@@ -4126,24 +4043,12 @@ fn build_string_format_field_schema(
     field_name_str: &str,
     format: &str,
 ) -> proc_macro2::TokenStream {
-    if fld.is_array {
-        quote! {
-            properties.insert(#field_name_str.to_string(), {
-                serde_json::json!({
-                    "type": "array",
-                    "items": { "type": "string", "format": #format }
-                })
-            });
-        }
-    } else {
-        quote! {
-            properties.insert(#field_name_str.to_string(), {
-                serde_json::json!({
-                    "type": "string",
-                    "format": #format
-                })
-            });
-        }
+    let schema = arrayed_json_schema_value(
+        fld,
+        quote! { serde_json::json!({ "type": "string", "format": #format }) },
+    );
+    quote! {
+        properties.insert(#field_name_str.to_string(), { #schema });
     }
 }
 
@@ -4169,19 +4074,9 @@ fn build_tuple_field_schema(
         Err(rejection) => return map_member_rejection_error(field_name_str, &rejection),
     };
 
-    if fld.is_array {
-        quote! {
-            properties.insert(#field_name_str.to_string(), {
-                serde_json::json!({
-                    "type": "array",
-                    "items": #tuple_schema
-                })
-            });
-        }
-    } else {
-        quote! {
-            properties.insert(#field_name_str.to_string(), #tuple_schema);
-        }
+    let schema = arrayed_json_schema_value(fld, tuple_schema);
+    quote! {
+        properties.insert(#field_name_str.to_string(), #schema);
     }
 }
 
@@ -4193,19 +4088,9 @@ fn build_tuple_field_schema(
 fn build_unknown_field_schema(fld: &FieldDef, field_name_str: &str) -> proc_macro2::TokenStream {
     log::trace!("Unknown => field_name: {field_name_str}, fld: {fld:?}");
 
-    if fld.is_array {
-        quote! {
-            properties.insert(#field_name_str.to_string(), {
-                serde_json::json!({
-                    "type": "array",
-                    "items": {}
-                })
-            });
-        }
-    } else {
-        quote! {
-            properties.insert(#field_name_str.to_string(), serde_json::json!({}));
-        }
+    let schema = arrayed_json_schema_value(fld, quote! { serde_json::json!({}) });
+    quote! {
+        properties.insert(#field_name_str.to_string(), #schema);
     }
 }
 

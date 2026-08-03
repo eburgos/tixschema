@@ -15,7 +15,7 @@ fn field(field_type: FieldDefType) -> FieldDef {
         array_num: None,
         docs: String::new(),
         field_type,
-        is_array: false,
+        array_depth: 0,
         is_optional: false,
         model_schema_prop_meta: None,
         name: "items".to_owned(),
@@ -120,7 +120,7 @@ fn test_sequence_in_a_slot_renders_as_the_array_it_writes() {
 fn test_sequence_within_an_array_field_nests_both_wraps() {
     for wrapper in SEQUENCE_WRAPPERS {
         let mut nested = sequence_of(wrapper, FieldDefType::U32);
-        nested.is_array = true;
+        nested.array_depth = 1;
         assert_eq!(
             nested.typescript_typename(),
             "Array<Array<number>>",
@@ -147,4 +147,47 @@ fn test_optional_sequence_field_keeps_the_field_level_optionality() {
         optional.zod_type(),
         "z.union([z.array(z.string()), z.undefined()]).prefault(undefined)"
     );
+}
+
+/// A `Vec` inside a sequence wrapper is the mirror of the case above: the element already carries a
+/// level and the wrapper adds its own, so both survive rather than one standing in for the other.
+#[test]
+fn test_an_array_element_within_a_sequence_nests_both_wraps() {
+    for wrapper in SEQUENCE_WRAPPERS {
+        let mut element = field(FieldDefType::U32);
+        element.array_depth = 1;
+        let nested = field(FieldDefType::SiblingType(wrapper.to_owned(), vec![element]));
+        assert_eq!(
+            nested.typescript_typename(),
+            "Array<Array<number>>",
+            "for: {wrapper}"
+        );
+        #[cfg(feature = "zod")]
+        assert_eq!(
+            nested.zod_type(),
+            "z.array(z.array(z.number().int()))",
+            "for: {wrapper}"
+        );
+    }
+}
+
+/// The parser counts a level per wrapper written rather than setting a flag one wrapper can only
+/// set again, so the depth a field was written at is the depth the surfaces are handed.
+#[test]
+fn test_the_parser_counts_one_array_level_per_wrapper_written() {
+    for (spelling, array_depth) in [
+        ("u32", 0_u8),
+        ("Vec<u32>", 1),
+        ("Vec<Vec<u32>>", 2),
+        ("Vec<Vec<Vec<u32>>>", 3),
+        ("[[u32; 2]; 2]", 2),
+        ("Option<Vec<Vec<u32>>>", 2),
+    ] {
+        let ty: syn::Type = syn::parse_str(spelling).unwrap();
+        assert_eq!(
+            super::get_field_def("items", &ty, "").array_depth,
+            array_depth,
+            "for: {spelling}"
+        );
+    }
 }
