@@ -699,9 +699,81 @@ mod branded_no_display_tests {
     }
 }
 
-// `no_display` drops the `Display` impl, not the `Display` requirement: a constrained brand
-// validates through `to_string()`, so its inner still has to render. Compiling this module is the
-// assertion that the combination is accepted and still wired to the constraints.
+// A brand's constrained value is its inner field itself, so a path inner is measured the way a
+// path field is: by the string serde writes for it. `no_display` is what the brand's own `Display`
+// impl needs — a path has none to delegate to — and the constraints reach the value without one.
+// Compiling this module is the assertion that a path brand is emitted at all.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+mod constrained_path_brand_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[model_schema(no_display, minLength = 3, pattern = "^/[a-z]+$")]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct AssetPath(pub PathBuf);
+
+    #[test]
+    fn test_a_constrained_path_brand_is_held_to_its_bound_on_the_wire() {
+        let too_short = serde_json::from_str::<AssetPath>("\"/a\"").unwrap_err();
+        assert!(
+            too_short
+                .to_string()
+                .contains("value is too short: minimum length is 3, got 2"),
+            "Unexpected error: {too_short}"
+        );
+
+        let unmatched = serde_json::from_str::<AssetPath>("\"etc\"").unwrap_err();
+        assert!(
+            unmatched
+                .to_string()
+                .contains("value does not match pattern '^/[a-z]+$'"),
+            "Unexpected error: {unmatched}"
+        );
+
+        let accepted = serde_json::from_str::<AssetPath>("\"/etc\"").unwrap();
+        assert_eq!(accepted, AssetPath(PathBuf::from("/etc")));
+        assert!(
+            accepted.validate().is_ok(),
+            "A payload the wire admits must be one validate() admits: {:?}",
+            accepted.validate().err()
+        );
+    }
+
+    #[test]
+    fn test_a_constrained_path_brand_is_held_to_its_bound_by_validate() {
+        AssetPath(PathBuf::from("/etc")).validate().unwrap();
+        assert_eq!(
+            AssetPath(PathBuf::from("/a")).validate().unwrap_err(),
+            vec!["value is too short: minimum length is 3, got 2"]
+        );
+        assert_eq!(
+            AssetPath(PathBuf::from("etcetera")).validate().unwrap_err(),
+            vec!["value does not match pattern '^/[a-z]+$'"]
+        );
+    }
+
+    // The bound the brand renders and the bound it enforces are one bound; a schema that
+    // constrains what nothing checks is the disagreement this covers.
+    #[cfg(feature = "zod")]
+    #[test]
+    fn test_the_zod_bound_on_a_path_brand_is_the_bound_the_wire_enforces() {
+        let zod = AssetPath::zod_schema();
+        assert!(zod.contains("z.string().min(3)"), "Got:\n{zod}");
+        assert!(zod.contains("brand<\"AssetPath\">"), "Got:\n{zod}");
+        assert!(
+            serde_json::from_str::<AssetPath>("\"/a\"").is_err(),
+            "the rendered minimum admits no shorter value on the wire"
+        );
+    }
+}
+
+// `no_display` drops the `Display` impl, not the `Display` requirement: a brand whose checks read
+// the inner's `to_string()` still needs it to render. Compiling this module is the assertion that
+// the combination is accepted and still wired to the constraints.
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")

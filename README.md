@@ -584,7 +584,7 @@ error[E0277]: `Vec<String>` doesn't implement `std::fmt::Display`
    |                     ^^^^^^^^^^^ the trait `std::fmt::Display` is not implemented for `Vec<String>`
 ```
 
-Pass `no_display` for brands over container inner types. The brand then gets no `Display` impl and carries no such requirement; its schema and its serde transparency are unchanged. String constraints are a separate matter: `pattern`, `minLength`, and `maxLength` validate through `to_string()`, so a constrained brand needs a `Display` inner whether or not it passes `no_display` — and a container inner cannot carry them at all (see [Branded Newtype Validation Constraints](#branded-newtype-validation-constraints)).
+Pass `no_display` for brands over an inner type that has none — a container, or a `PathBuf`. The brand then gets no `Display` impl and carries no such requirement; its schema and its serde transparency are unchanged. String constraints are a separate matter: `pattern`, `minLength`, and `maxLength` validate through `to_string()` for every inner but a path, so a constrained brand over one of the others needs a `Display` inner whether or not it passes `no_display` — and a container inner cannot carry them at all (see [Branded Newtype Validation Constraints](#branded-newtype-validation-constraints)).
 
 ```rust
 use tixschema::model_schema;
@@ -605,6 +605,15 @@ You can add `pattern`, `minLength`, and `maxLength` constraints directly on the 
 **The inner type has to be one whose schema is a string** — `String`, `PathBuf`, `ObjectId`, a chrono date/time type, another brand, or a generic parameter. A numeric, boolean, container (`Vec`, array, `HashMap`, tuple), or opaque (`serde_json::Value`) inner is rejected at expansion time, because the three constraints are string checks and each surface would read them differently: Zod's `.min`/`.max` become bounds on the value itself, JSON Schema ignores `minLength`/`maxLength`/`pattern` outside `"type": "string"`, and `validate()` measures the inner's `Display` rendering.
 
 **The inner type also has to implement `Display`,** since validation runs against `to_string()`. That holds whether or not the brand passes `no_display`: the flag drops the `Display` impl, not the requirement.
+
+A `PathBuf` inner is the one exception, and needs no `Display`: its checks read the path's `to_string_lossy` rendering — the string serde writes for it — exactly as a constrained `PathBuf` field's do. Such a brand still passes `no_display`, since the impl a brand gets by default has no inner `Display` to delegate to:
+
+```rust
+#[model_schema(no_display, minLength = 3, pattern = "^/[a-z]+$")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AssetPath(pub std::path::PathBuf);
+```
 
 ```rust
 #[model_schema(pattern = "^[a-z0-9_]+$", minLength = 3, maxLength = 50)]
