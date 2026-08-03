@@ -674,6 +674,88 @@ fn branded_option_inner_error(
         })
 }
 
+/// The `compile_error!` tokens for a branded newtype that applies `pattern`, `minLength`, or
+/// `maxLength` to an inner type whose schema is not a string, or `None` when the inner can carry
+/// them.
+///
+/// The three constraints are string checks on every surface the brand renders, and each surface
+/// reads them differently the moment the inner stops being a string. A `u64` inner with
+/// `minLength = 3` renders `z.number().int().min(3)`, where `.min` is a numeric bound that admits
+/// `42`; renders `{"type": "number", "minLength": 3}`, where `minLength` is a string-only keyword
+/// that goes inert and enforces nothing; and validates in Rust against `to_string()`, which
+/// demands three decimal digits and so rejects `42`. Zod also has no `z.regex` check to apply to a
+/// number schema at all. A container inner never reaches that disagreement — it has no `Display`
+/// to render.
+///
+/// A `SiblingType` inner — another brand, an unresolved user type, or a bare generic parameter —
+/// is admitted, because expansion cannot know its shape. That is why the constrained path asserts
+/// `Display` separately: the guard bounds the schema surfaces, the assertion bounds the Rust one.
+///
+/// Resolved through the same `get_field_def` call the renderers make, so the guard and the
+/// contract cannot disagree about what a shape is.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn branded_constraint_inner_error(
+    name: &Ident,
+    inner_field: &Field,
+    args: &ModelSchemaArgs,
+) -> Option<proc_macro2::TokenStream> {
+    if !args.has_string_constraints() {
+        return None;
+    }
+    let shape = non_string_inner_shape(&get_field_def("_inner", &inner_field.ty, ""))?;
+    Some(
+        syn::Error::new_spanned(
+            inner_field,
+            format!(
+                "model_schema: branded newtype `{name}` applies string constraints (pattern, \
+                 minLength, maxLength) to a {shape} inner type, which cannot carry them: Zod \
+                 reads `.min`/`.max` as bounds on the value itself and has no regex check for a \
+                 non-string schema, JSON Schema ignores `minLength`/`maxLength`/`pattern` outside \
+                 `\"type\": \"string\"`, and `validate()` measures the inner's `Display` \
+                 rendering — three surfaces, three answers. Brand a string-typed inner, or drop \
+                 the constraints."
+            ),
+        )
+        .to_compile_error(),
+    )
+}
+
+/// Names the non-string schema shape an inner type resolves to, or `None` when it renders as a
+/// string and so can carry the string constraints.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+const fn non_string_inner_shape(inner: &FieldDef) -> Option<&'static str> {
+    if inner.is_array {
+        return Some("container");
+    }
+    match &inner.field_type {
+        FieldDefType::Map(..) | FieldDefType::Tuple(..) => Some("container"),
+        FieldDefType::Boolean => Some("boolean"),
+        FieldDefType::U8
+        | FieldDefType::U16
+        | FieldDefType::U32
+        | FieldDefType::U64
+        | FieldDefType::I8
+        | FieldDefType::I16
+        | FieldDefType::I32
+        | FieldDefType::I64
+        | FieldDefType::Usize
+        | FieldDefType::Isize
+        | FieldDefType::F32
+        | FieldDefType::F64 => Some("numeric"),
+        FieldDefType::Unknown => Some("opaque"),
+        FieldDefType::String | FieldDefType::StringLiteral(_) | FieldDefType::SiblingType(..) => {
+            None
+        }
+        #[cfg(feature = "object_id")]
+        FieldDefType::ObjectId => None,
+        #[cfg(feature = "chrono")]
+        FieldDefType::NaiveDate
+        | FieldDefType::NaiveTime
+        | FieldDefType::NaiveDateTime
+        | FieldDefType::DateTime => None,
+    }
+}
+
 /// The `compile_error!` tokens for every `cfg_attr`-wrapped serde attribute a branded newtype
 /// carries: on the type and on its inner slot, which is positional and so has no name to print.
 #[cfg(all(
@@ -711,16 +793,25 @@ const fn branded_cfg_attr_guard_errors(
 }
 
 /// The `compile_error!` tokens for every guard a branded newtype violates: a `cfg_attr`-wrapped
-/// serde attribute on the type or on its inner slot, and an `Option` inner type.
+/// serde attribute on the type or on its inner slot, an `Option` inner type, and string
+/// constraints over an inner type that cannot carry them.
 ///
 /// The branded path renders the inner type straight into the brand instead of walking fields, so
 /// it has to collect these itself; the ordinary struct walk never sees a transparent newtype.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-fn branded_guard_errors(item_struct: &syn::ItemStruct) -> Vec<proc_macro2::TokenStream> {
+fn branded_guard_errors(
+    item_struct: &syn::ItemStruct,
+    args: &ModelSchemaArgs,
+) -> Vec<proc_macro2::TokenStream> {
     let inner_field = item_struct.fields.iter().next().unwrap();
     branded_cfg_attr_guard_errors(item_struct, inner_field)
         .into_iter()
         .chain(branded_option_inner_error(&item_struct.ident, inner_field))
+        .chain(branded_constraint_inner_error(
+            &item_struct.ident,
+            inner_field,
+            args,
+        ))
         .collect()
 }
 
@@ -1059,6 +1150,10 @@ fn build_branded_validation(
                 }
             }
         } else {
+            // Deliberately unspanned: a `to_string()` carrying the user's span is judged by the
+            // consumer's lints as hand-written, and on a `String` inner it is a redundant clone.
+            // The inner field's `Display` requirement is blamed by the static assertion instead,
+            // which is inert wherever it lands.
             quote! {
                 pub fn deserialize_value<'de, D>(deserializer: D) -> Result<#inner_ty, D::Error>
                 where
@@ -1379,8 +1474,12 @@ fn build_branded_display_impl(
     }
 }
 
-/// Builds a branded newtype's `Display` impl together with the static assertion guarding it, or
-/// nothing at all when the brand opted out with `no_display`.
+/// Builds a branded newtype's `Display` impl together with the static assertion guarding it.
+/// `no_display` drops the impl; it drops the assertion only when nothing else needs `Display`.
+///
+/// A constrained brand validates through `value.to_string()`, so the requirement outlives the impl
+/// the brand opted out of. Keeping the assertion is what turns that into an `E0277` at the inner
+/// field instead of the `E0599` the `to_string()` call raises against the attribute.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn build_branded_display_tokens(
     generics: &syn::Generics,
@@ -1388,10 +1487,19 @@ fn build_branded_display_tokens(
     inner_field: &Field,
     args: &ModelSchemaArgs,
 ) -> proc_macro2::TokenStream {
-    if args.no_display {
+    // Only the serde build emits the validation functions that call `to_string()`.
+    #[cfg(feature = "serde")]
+    let validation_needs_display = args.has_string_constraints();
+    #[cfg(not(feature = "serde"))]
+    let validation_needs_display = false;
+
+    if args.no_display && !validation_needs_display {
         return quote! {};
     }
     let display_assertion = build_branded_display_assertion(inner_field, generics);
+    if args.no_display {
+        return display_assertion;
+    }
     let display_impl = build_branded_display_impl(generics, name, inner_field);
     quote! {
         #display_assertion
@@ -1607,7 +1715,9 @@ fn assemble_branded_output(parts: &BrandedNewtypeOutput) -> TokenStream {
 fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> TokenStream {
     // Checked before the type is registered in the alias registry: a rejected brand emits no
     // schema, so nothing else should be able to resolve a reference to one.
-    if let Some(output) = guard_failure_output(&item_struct, &branded_guard_errors(&item_struct)) {
+    if let Some(output) =
+        guard_failure_output(&item_struct, &branded_guard_errors(&item_struct, args))
+    {
         return output;
     }
 

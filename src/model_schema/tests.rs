@@ -442,10 +442,130 @@ fn alias_ts_definition_method_carries_no_cfg_attribute() {
 /// Collects a branded newtype's guard failures as rendered `compile_error!` token strings.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn branded_errors(item: &syn::ItemStruct) -> Vec<String> {
-    branded_guard_errors(item)
+    branded_errors_with(item, &super::ModelSchemaArgs::default())
+}
+
+/// [`branded_errors`] for a brand carrying `model_schema` arguments.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn branded_errors_with(item: &syn::ItemStruct, args: &super::ModelSchemaArgs) -> Vec<String> {
+    branded_guard_errors(item, args)
         .iter()
         .map(ToString::to_string)
         .collect()
+}
+
+/// The `model_schema` arguments of a brand carrying a lone `pattern`.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn pattern_args() -> super::ModelSchemaArgs {
+    super::parse_model_schema_args(quote::quote! { pattern = "^[a-z]+$" })
+}
+
+/// Every constraint the guard reacts to, applied one at a time: `has_string_constraints` is an
+/// or over three independent fields, so a guard wired to only one of them would still pass a
+/// pattern-only probe.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn each_string_constraint_alone_rejects_a_numeric_inner() {
+    for args in [
+        quote::quote! { pattern = "^[a-z]+$" },
+        quote::quote! { minLength = 3 },
+        quote::quote! { maxLength = 8 },
+    ] {
+        let rendered = format!("{args}");
+        let errors = branded_errors_with(
+            &syn::parse_quote! {
+                #[serde(transparent)]
+                struct BadNum(pub u64);
+            },
+            &super::parse_model_schema_args(args),
+        );
+        assert_eq!(errors.len(), 1, "for {rendered}, got: {errors:?}");
+        assert!(errors[0].contains("numeric"), "got: {}", errors[0]);
+    }
+}
+
+/// The shapes whose surfaces read the string constraints as something other than a string check.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn string_constraints_over_a_non_string_inner_are_rejected() {
+    for (inner, shape) in [
+        ("u64", "numeric"),
+        ("i32", "numeric"),
+        ("f64", "numeric"),
+        ("bool", "boolean"),
+        ("Vec<String>", "container"),
+        ("[u8; 4]", "container"),
+        ("HashMap<String, String>", "container"),
+        ("(String, String)", "container"),
+        ("serde_json::Value", "opaque"),
+    ] {
+        let ty: syn::Type = syn::parse_str(inner).unwrap();
+        let errors = branded_errors_with(
+            &syn::parse_quote! {
+                #[serde(transparent)]
+                struct Branded(pub #ty);
+            },
+            &pattern_args(),
+        );
+        assert_eq!(errors.len(), 1, "for {inner}, got: {errors:?}");
+        assert!(errors[0].contains("compile_error"), "got: {}", errors[0]);
+        assert!(errors[0].contains("`Branded`"), "got: {}", errors[0]);
+        assert!(errors[0].contains(shape), "for {inner}, got: {}", errors[0]);
+    }
+}
+
+/// The inners that carry the constraints faithfully. A `SiblingType` — another brand, an
+/// unresolved user type, or a bare generic parameter — is admitted because expansion cannot know
+/// its shape; the constrained path's `Display` assertion is what covers it.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn string_constraints_over_a_string_shaped_inner_pass() {
+    for inner in ["String", "PathBuf", "ObjectId", "SomeOtherBrand", "T"] {
+        let ty: syn::Type = syn::parse_str(inner).unwrap();
+        let errors = branded_errors_with(
+            &syn::parse_quote! {
+                #[serde(transparent)]
+                struct Branded<T>(pub #ty);
+            },
+            &pattern_args(),
+        );
+        assert!(errors.is_empty(), "for {inner}, got: {errors:?}");
+    }
+}
+
+/// The guard reads the constraints, not the inner type: an unconstrained brand over any of the
+/// rejected shapes is the shipped `no_display` contract and stays accepted.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn an_unconstrained_brand_over_a_non_string_inner_passes() {
+    for inner in ["u64", "bool", "Vec<String>", "serde_json::Value"] {
+        let ty: syn::Type = syn::parse_str(inner).unwrap();
+        let errors = branded_errors(&syn::parse_quote! {
+            #[serde(transparent)]
+            struct Branded(pub #ty);
+        });
+        assert!(errors.is_empty(), "for {inner}, got: {errors:?}");
+    }
+}
+
+/// The message has to name the surfaces that disagree, or it reads as an arbitrary restriction.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn the_constraint_guard_message_names_the_constraints_and_the_surfaces() {
+    let errors = branded_errors_with(
+        &syn::parse_quote! {
+            #[serde(transparent)]
+            struct BadNum(pub u64);
+        },
+        &pattern_args(),
+    );
+    for needle in ["pattern", "minLength", "maxLength", "Zod", "JSON Schema"] {
+        assert!(
+            errors[0].contains(needle),
+            "{needle} missing: {}",
+            errors[0]
+        );
+    }
 }
 
 #[cfg(all(
@@ -637,6 +757,164 @@ fn generic_display_impl_bounds_every_type_parameter() {
     assert_eq!(
         tokens.to_string(),
         "impl < IdType : std :: fmt :: Display > std :: fmt :: Display for DocumentId < IdType > { fn fmt (& self , f : & mut std :: fmt :: Formatter < '_ >) -> std :: fmt :: Result { self . 0 . fmt (f) } }"
+    );
+}
+
+/// Builds the whole `Display` block — assertion plus impl — for the sole field of `source`.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn display_tokens(source: &str, args: &proc_macro2::TokenStream) -> String {
+    let item: syn::ItemStruct = syn::parse_str(source).unwrap();
+    let field = item.fields.iter().next().unwrap();
+    super::build_branded_display_tokens(
+        &item.generics,
+        &item.ident,
+        field,
+        &super::parse_model_schema_args(args.clone()),
+    )
+    .to_string()
+}
+
+/// `no_display` drops the `Display` impl, never the requirement: the constrained path validates
+/// through `value.to_string()`, so a brand that opted out still has to prove the inner is
+/// `Display` — at the field, not at the attribute.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn constraints_keep_the_display_assertion_when_the_brand_opts_out_of_the_impl() {
+    let tokens = display_tokens(
+        "pub struct Slugs(pub Tags);",
+        &quote::quote! { no_display, pattern = "^[a-z]+$" },
+    );
+    assert!(
+        tokens.contains("assert_display :: < Tags > ()"),
+        "got: {tokens}"
+    );
+    assert!(
+        !tokens.contains("impl std :: fmt :: Display"),
+        "got: {tokens}"
+    );
+}
+
+/// The three combinations that predate the constrained-path assertion keep their exact tokens.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn the_display_block_is_unchanged_for_every_pre_existing_combination() {
+    let assertion_and_impl = display_tokens("pub struct UserId(pub String);", &quote::quote! {});
+    assert!(
+        assertion_and_impl.contains("assert_display :: < String > ()")
+            && assertion_and_impl.contains("impl std :: fmt :: Display for UserId"),
+        "got: {assertion_and_impl}"
+    );
+    assert_eq!(
+        display_tokens(
+            "pub struct SlugId(pub String);",
+            &quote::quote! { pattern = "^[a-z]+$" }
+        ),
+        assertion_and_impl.replace("UserId", "SlugId"),
+        "a constrained brand that kept its impl emits what an unconstrained one does"
+    );
+    assert_eq!(
+        display_tokens(
+            "pub struct Tags(pub Vec<String>);",
+            &quote::quote! { no_display }
+        ),
+        "",
+        "an unconstrained opt-out emits neither half"
+    );
+}
+
+/// How many tokens of each `to_string()` call site a constrained brand expands to point back at
+/// the inner field. Built from parsed source, so a token that carries the inner type's span has a
+/// location to report and a macro-synthesized one does not.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+fn constrained_brand_inner_spanned_tokens(source: &str, inner: &str) -> (usize, usize) {
+    let item: syn::ItemStruct = syn::parse_str(source).unwrap();
+    let args = super::parse_model_schema_args(quote::quote! { pattern = "^[a-z]+$" });
+    let validation =
+        super::build_branded_validation(&args, false, &item.fields.iter().next().unwrap().ty)
+            .unwrap();
+    let module_ident = syn::Ident::new("slug_id_schema", proc_macro2::Span::call_site());
+    let (_, _, validate_method) = super::inject_branded_serde_attrs(
+        item,
+        Some(&validation),
+        false,
+        &[],
+        "slug_id_schema",
+        &module_ident,
+    );
+    let count = |tokens| {
+        located_source_texts(tokens)
+            .iter()
+            .filter(|text| text.as_str() == inner)
+            .count()
+    };
+    (count(&validation.1), count(&validate_method))
+}
+
+/// Neither `to_string()` the constrained path emits may carry the inner field's span. Spanned
+/// tokens are judged by the consumer's lints as if hand-written, and on a `String` inner
+/// `self.0.to_string()` is a redundant clone — the whole test suite fails on it. The `Display`
+/// requirement is blamed by the static assertion instead, whose tokens are inert wherever they
+/// land. Only the interpolated `#inner_ty` may point at the field here.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn neither_constrained_to_string_call_carries_the_inner_fields_span() {
+    let (deserializer, validate_method) =
+        constrained_brand_inner_spanned_tokens("pub struct SlugId(pub Tags);", "Tags");
+    assert_eq!(
+        deserializer, 2,
+        "the two interpolated type names and nothing else"
+    );
+    assert_eq!(
+        validate_method, 0,
+        "`validate()` interpolates no inner type"
+    );
+}
+
+/// The constrained path's generated text is what it has always been.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn the_constrained_path_renders_the_same_to_string_calls_it_always_has() {
+    let item: syn::ItemStruct = syn::parse_quote!(
+        pub struct SlugId(pub String);
+    );
+    let args = super::parse_model_schema_args(quote::quote! { pattern = "^[a-z]+$" });
+    let validation =
+        super::build_branded_validation(&args, false, &item.fields.iter().next().unwrap().ty)
+            .unwrap();
+    let module_ident = syn::Ident::new("slug_id_schema", proc_macro2::Span::call_site());
+    let (_, _, validate_method) = super::inject_branded_serde_attrs(
+        item,
+        Some(&validation),
+        false,
+        &[],
+        "slug_id_schema",
+        &module_ident,
+    );
+    assert!(
+        validation
+            .1
+            .to_string()
+            .contains("validate_value (& v . to_string ())"),
+        "got: {}",
+        validation.1
+    );
+    assert!(
+        validate_method
+            .to_string()
+            .contains("slug_id_schema :: validate_value (& self . 0 . to_string ())"),
+        "got: {validate_method}"
     );
 }
 
