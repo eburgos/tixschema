@@ -5276,9 +5276,9 @@ fn build_nested_map_member_item(
     );
 
     Ok(match map_key_path(inner_key) {
-        MapKeyPath::Enumerated(key_type_name) => {
-            MapMemberItem::Value(enum_key_map_json_schema_value(key_type_name, inner_value)?)
-        }
+        MapKeyPath::Enumerated(key_type_name) => MapMemberItem::Value(
+            enum_key_map_json_schema_value(key_type_name, inner_key.type_span, inner_value)?,
+        ),
         MapKeyPath::Open => {
             let inner_member = build_map_member_schema(inner_value)?;
             MapMemberItem::Fragment(
@@ -5496,9 +5496,16 @@ fn build_enum_key_map_member_item(value: &FieldDef) -> Result<MapMemberItem, Map
 /// sound for a key that has them: whatever reaches this dispatch, a key the registry rules out
 /// leaves with a diagnostic naming it rather than with rustc blaming `#[model_schema()]` for a
 /// method the author never wrote.
+///
+/// The registry rules out only what it has already seen, and it is filled as items expand: a key
+/// declared after the type that writes the map, like one foreign to this crate, is unclassified
+/// here and keeps the emitting path — it must, since nothing distinguishes it from a type that
+/// does carry `enum_members()`. So the call is spanned on the key the field names, and the `E0599`
+/// a key without the method raises is reported at the user's type instead of at `#[model_schema()]`.
 #[cfg(feature = "jsonschema")]
 fn enum_key_map_json_schema_value(
     key_type_name: &str,
+    key_span: proc_macro2::Span,
     value: &FieldDef,
 ) -> Result<proc_macro2::TokenStream, MapMemberRejection> {
     if proves_no_enum_members(key_type_name) {
@@ -5507,14 +5514,15 @@ fn enum_key_map_json_schema_value(
 
     let normalized = normalized_slot_value(value);
     let member_value = build_enum_key_map_member_item(&normalized)?.into_member_value(&normalized);
-    let key_type_name_ident = Ident::new(key_type_name, proc_macro2::Span::call_site());
+    let key_type_name_ident = Ident::new(key_type_name, key_span);
+    let key_members = quote_spanned! {key_span=> #key_type_name_ident::enum_members() };
     Ok(quote! {
         serde_json::json!({
             "type": "object",
             "properties": ({
                 let value_schema = #member_value;
                 let mut map_properties = serde_json::Map::new();
-                for enum_key in #key_type_name_ident::enum_members() {
+                for enum_key in #key_members {
                     map_properties.insert(enum_key.to_string(), value_schema.clone());
                 }
                 map_properties
@@ -5543,7 +5551,7 @@ fn build_map_field_schema(
 
     let rendered = match map_key_path(key) {
         MapKeyPath::Enumerated(key_type_name) => {
-            enum_key_map_json_schema_value(key_type_name, value)
+            enum_key_map_json_schema_value(key_type_name, key.type_span, value)
         }
         MapKeyPath::Open => string_key_map_json_schema_value(value),
         MapKeyPath::Unnarrowed => Ok(unnarrowed_key_map_json_schema_value(key)),

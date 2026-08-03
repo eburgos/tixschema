@@ -425,6 +425,7 @@ Notes:
 - Multiple `#[serde(flatten)]` fields chain: `{ ... } & BasePart & ExtraPart` in TypeScript and `z.strictObject({ ... }).and(BasePart$Schema).and(ExtraPart$Schema)` in Zod.
 - A struct whose only field is flattened becomes a plain alias (e.g. `export type FlattenOnly = DataElementSampleValueVariant;`).
 - **JSON Schema** stays strict: rather than `allOf` (which cannot faithfully compose a tagged union under `additionalProperties: false`), the base properties are distributed into each branch of the flattened union, keeping every branch closed. Both spellings of a union are distributed into: a discriminated enum's `oneOf` and an untagged enum's `anyOf`. Plain-struct flattens merge into a single closed object; multiple flattened unions form a cross-product.
+- Each flattened union keeps the spelling it was written under. A discriminated enum's members are exclusive, so its branches stay a `oneOf`; an untagged enum is first-match-wins and its members may overlap (one member's keys a subset of another's, the difference optional), so its branches are an `anyOf` -- under `oneOf` the document would reject exactly what Serde writes for the narrower member, which matches both branches. An object flattening one of each nests the wrappers, the untagged `anyOf` sitting inside each branch of the discriminated `oneOf`.
 - Only a value Serde writes as an object can be flattened -- Serde refuses the rest at run time (`can only flatten structs and maps`). Flattening a plain `#[model_schema()]` enum is rejected at expansion; any other type that turns out not to be written as an object is caught when `json_schema()` runs, naming the field's type and the remedy (write the field as a named member). A flattened union whose members are described one by one is checked the same way, member by member: a member Serde does not write as an object is refused with its branch named.
 
 ### Untagged Enums (`#[serde(untagged)]`)
@@ -1568,6 +1569,37 @@ pub struct Config {
     pub settings: HashMap<String, String>,
 }
 ```
+
+#### Map Keys Without Enumerable Members
+
+**Error:** `no associated function or constant named enum_members found for <type>` (`E0599`), reported at the map's key type.
+
+A map key written as a type path must be a plain `#[model_schema()]` enum, whose members become the object's keys. A key the expansion has already seen is named directly — *a map key must be a plain `#[model_schema()]` enum ...* — but items expand in the order they are written, so a key declared after the type that writes the map, like one from another crate, has not been seen yet and is emitted as an enumerating key. When such a key carries no `enum_members()`, the requirement surfaces as an `E0599` at the key type:
+
+```rust
+// Wrong: `LateKey` resolves to `String`, which has no members to enumerate
+#[model_schema()]
+pub struct BadConfig {
+    pub slots: HashMap<LateKey, String>, // E0599, reported at `LateKey`
+}
+
+#[model_schema()]
+pub type LateKey = String;
+
+// Correct: the key is a plain enum, and its members become the object's keys
+#[model_schema()]
+pub enum Slot {
+    Primary,
+    Secondary,
+}
+
+#[model_schema()]
+pub struct Config {
+    pub slots: HashMap<Slot, String>,
+}
+```
+
+Declaration order decides only which of the two diagnostics is reported. A plain enum key works wherever it is declared.
 
 #### Function-Local Types
 
