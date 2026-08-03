@@ -1534,17 +1534,26 @@ fn build_branded_validation(
 ///
 /// A brand's constrained value is the inner field itself, with no walk to reach it, so only an
 /// inner that *is* a path answers here — one merely holding paths writes no string of its own for
-/// the checks to measure, and is refused by [`branded_constraint_inner_error`] before this.
+/// the checks to measure, and is refused by [`branded_constraint_inner_error`] before this. A
+/// transparent wrapper is nothing on the wire and derefs to what it holds, so a path written under
+/// any stack of them is still that same path, borrowed one coercion further out; an `Option` or a
+/// sequence is not, which is why only the transparent wraps pass.
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
 ))]
 fn branded_inner_measures_path(inner_ty: &syn::Type) -> bool {
-    constrained_shape(inner_ty)
-        .is_some_and(|shape| shape.wraps.is_empty() && matches!(shape.leaf, ConstraintLeaf::Path))
+    constrained_shape(inner_ty).is_some_and(|shape| {
+        matches!(shape.leaf, ConstraintLeaf::Path)
+            && shape
+                .wraps
+                .iter()
+                .all(|wrap| matches!(wrap, ConstraintWrap::Transparent))
+    })
 }
 
-/// How a constrained brand hands `receiver` to `validate_value`: a path goes borrowed, since the
+/// How a constrained brand hands `receiver` to `validate_value`: a path goes borrowed — deref
+/// coercion carries it through whatever transparent wrappers it was written under — since the
 /// validator renders it itself; every other inner is rendered through `Display` first.
 #[cfg(all(
     feature = "serde",

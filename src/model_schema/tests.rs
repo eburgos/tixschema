@@ -1149,40 +1149,54 @@ fn constrained_brand_emission(inner: &str, module: &str) -> (String, String, Str
     )
 }
 
-/// The constrained path's generated text is what it has always been.
+/// The constrained path's generated text is what it has always been. A wrapper that is not
+/// transparent stays here too: only a deref reaches a path from outside it, and an `Option` or a
+/// sequence has none to offer.
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
 ))]
 #[test]
 fn the_constrained_path_renders_the_same_to_string_calls_it_always_has() {
-    let (validate_fn, deserialize_fn, validate_method) =
-        constrained_brand_emission("String", "slug_id_schema");
-    assert!(
-        validate_fn
-            .starts_with("pub fn validate_value (value : & str) -> Result < () , String > {"),
-        "got: {validate_fn}"
-    );
-    assert!(
-        deserialize_fn.contains("validate_value (& v . to_string ())"),
-        "got: {deserialize_fn}"
-    );
-    assert!(
-        validate_method.contains("slug_id_schema :: validate_value (& self . 0 . to_string ())"),
-        "got: {validate_method}"
-    );
+    for spelling in ["String", "Option<PathBuf>", "Vec<PathBuf>"] {
+        let (validate_fn, deserialize_fn, validate_method) =
+            constrained_brand_emission(spelling, "slug_id_schema");
+        assert!(
+            validate_fn
+                .starts_with("pub fn validate_value (value : & str) -> Result < () , String > {"),
+            "for {spelling}, got: {validate_fn}"
+        );
+        assert!(
+            deserialize_fn.contains("validate_value (& v . to_string ())"),
+            "for {spelling}, got: {deserialize_fn}"
+        );
+        assert!(
+            validate_method
+                .contains("slug_id_schema :: validate_value (& self . 0 . to_string ())"),
+            "for {spelling}, got: {validate_method}"
+        );
+    }
 }
 
 /// A brand's constrained value is its inner field, so a path inner is reached the way a path field
 /// is: the validator takes the borrowed path and renders it once, and neither call site names a
-/// `to_string()` a path has none of.
+/// `to_string()` a path has none of. A transparent wrapper adds no call of its own — the borrow the
+/// bare spelling already writes is what deref coercion carries through it.
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
 ))]
 #[test]
 fn a_path_brand_is_checked_through_its_lossy_rendering() {
-    for spelling in ["PathBuf", "std::path::PathBuf"] {
+    for spelling in [
+        "PathBuf",
+        "std::path::PathBuf",
+        "Arc<Path>",
+        "Box<Path>",
+        "Cow<'static, Path>",
+        "Rc<std::path::Path>",
+        "Box<Arc<Path>>",
+    ] {
         let (validate_fn, deserialize_fn, validate_method) =
             constrained_brand_emission(spelling, "asset_path_schema");
         assert!(
