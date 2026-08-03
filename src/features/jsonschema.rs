@@ -199,10 +199,11 @@ fn merge_readers() -> proc_macro2::TokenStream {
             out
         }
 
-        // A flattened base that names itself describes as a reference into the definitions being
+        // A merged schema that names itself describes as a reference into the definitions being
         // hoisted, and a reference is the one thing with no properties to merge. The body it
         // points at is written by then — the frame that deferred the name fills the entry in
-        // before it returns — so the merge reads it back.
+        // before it returns — so the merge reads it back. A union member defers the same way the
+        // whole merged body does, so both ends read it through here.
         fn deferred_name(schema: &serde_json::Value) -> Option<&str> {
             schema.get("$ref")?.as_str()?.strip_prefix(#defs_prefix)
         }
@@ -233,6 +234,61 @@ fn merge_readers() -> proc_macro2::TokenStream {
     }
 }
 
+/// The objects one merged schema contributes, as the tokens that bind them.
+///
+/// A union names no type of its own, so the branch is where the questions the whole merged body was
+/// asked are asked again — and serde cannot write a branch that is not an object into the object
+/// being written any more than it could write the whole value that way. A branch that is a deferred
+/// name carries none of the members it stands for, so it is read back out of the definitions first,
+/// the same way the whole merged body is.
+///
+/// Reads `fs_body` and `label` from the frame that merges, and binds `fs_objects`.
+fn branch_objects(diagnostic: &MergeDiagnostic<'_>) -> proc_macro2::TokenStream {
+    let MergeDiagnostic {
+        cycle_remedy,
+        edge,
+        non_object_remedy,
+        subject,
+    } = *diagnostic;
+    quote::quote! {
+        let fs_branches = branches_of(fs_body);
+        let mut fs_objects: Vec<&serde_json::Map<String, serde_json::Value>> = Vec::new();
+        for (position, fb) in fs_branches.iter().enumerate() {
+            let branch = match deferred_name(fb) {
+                None => *fb,
+                Some(name) => match hoisted_defs.get(name) {
+                    Some(body) if body.is_object() => body,
+                    _ => panic!(
+                        "`{}`: {} `{}` closes a flatten cycle through a union member — its branch {} is `{}`, whose body does not exist to merge, and no finite value inhabits the type; {}",
+                        #subject,
+                        #edge,
+                        label,
+                        position + 1,
+                        name,
+                        #cycle_remedy,
+                    ),
+                },
+            };
+            if let Some(named) = described_type(branch) {
+                if named != "object" {
+                    panic!(
+                        "`{}`: {} `{}` writes a union member that is not an object — its branch {} describes a `{}`, which has no members to merge, and what serde writes for that member does not join the object being written; {}",
+                        #subject,
+                        #edge,
+                        label,
+                        position + 1,
+                        named,
+                        #non_object_remedy,
+                    );
+                }
+            }
+            if let Some(members) = branch.as_object() {
+                fs_objects.push(members);
+            }
+        }
+    }
+}
+
 pub fn merged_object_value(
     base: &proc_macro2::TokenStream,
     merged: &[MergedSource],
@@ -244,6 +300,7 @@ pub fn merged_object_value(
         non_object_remedy,
         subject,
     } = *diagnostic;
+    let branch_reader = branch_objects(diagnostic);
     let labels = merged.iter().map(|source| source.label.as_str());
     let values = merged.iter().map(|source| &source.value);
     let readers = merge_readers();
@@ -283,27 +340,7 @@ pub fn merged_object_value(
                         );
                     }
                 }
-                // A union names no type of its own, so the branch is where the same question is
-                // asked again — and serde cannot write a branch that is not an object into the
-                // object being written any more than it could write the whole value that way.
-                let fs_branches = branches_of(fs_body);
-                for (position, fb) in fs_branches.iter().enumerate() {
-                    if let Some(named) = described_type(fb) {
-                        if named != "object" {
-                            panic!(
-                                "`{}`: {} `{}` writes a union member that is not an object — its branch {} describes a `{}`, which has no members to merge, and what serde writes for that member does not join the object being written; {}",
-                                #subject,
-                                #edge,
-                                label,
-                                position + 1,
-                                named,
-                                #non_object_remedy,
-                            );
-                        }
-                    }
-                }
-                let fs_objects: Vec<&serde_json::Map<String, serde_json::Value>> =
-                    fs_branches.iter().filter_map(|fb| fb.as_object()).collect();
+                #branch_reader
                 if fs_objects.is_empty() {
                     continue;
                 }
