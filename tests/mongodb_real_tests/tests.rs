@@ -38,6 +38,15 @@ struct SlottedRefs {
     by_slot: HashMap<RefSlot, ObjectId>,
 }
 
+// A map value that is itself a map carries the same closed `$oid` object its members would carry
+// one level up.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct NestedRefMaps {
+    ids_by_group: HashMap<String, HashMap<String, ObjectId>>,
+    run_batches: HashMap<String, Vec<HashMap<String, ObjectId>>>,
+}
+
 // Basic struct with real ObjectId
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -220,6 +229,20 @@ fn test_real_objectid_json_schema_structure() {
 }
 
 #[test]
+fn test_nested_ref_maps_constructible() {
+    let oid = ObjectId::new();
+    let nested = NestedRefMaps {
+        ids_by_group: HashMap::from([("first".to_owned(), HashMap::from([("a".to_owned(), oid)]))]),
+        run_batches: HashMap::from([(
+            "first".to_owned(),
+            vec![HashMap::from([("a".to_owned(), oid)])],
+        )]),
+    };
+    assert_eq!(nested.ids_by_group["first"]["a"], oid);
+    assert_eq!(nested.run_batches["first"][0]["a"], oid);
+}
+
+#[test]
 fn test_slotted_refs_constructible() {
     let slotted = SlottedRefs {
         by_slot: HashMap::from([
@@ -254,6 +277,48 @@ fn test_enum_keyed_objectid_map_json_schema() {
         assert_eq!(
             value["required"][0], "$oid",
             "member {member} in: {by_slot}"
+        );
+    }
+}
+
+/// The member schema a nested map carries is the value type's own — for an `ObjectId` the closed
+/// `$oid` object, at whatever depth the map nests.
+#[test]
+#[cfg(all(feature = "object_id", feature = "jsonschema"))]
+fn test_nested_objectid_map_json_schema() {
+    let schema = NestedRefMaps::json_schema();
+    let properties = schema["properties"].as_object().unwrap();
+    let oid_member = serde_json::json!({
+        "type": "object",
+        "properties": { "$oid": { "type": "string" } },
+        "required": ["$oid"],
+        "additionalProperties": false
+    });
+
+    for (field_name, expected_value_schema) in [
+        (
+            "ids_by_group",
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": oid_member
+            }),
+        ),
+        (
+            "run_batches",
+            serde_json::json!({
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": oid_member
+                }
+            }),
+        ),
+    ] {
+        let field = &properties[field_name];
+        assert_eq!(field["type"], "object", "in: {field}");
+        assert_eq!(
+            field["additionalProperties"], expected_value_schema,
+            "in: {field}"
         );
     }
 }
