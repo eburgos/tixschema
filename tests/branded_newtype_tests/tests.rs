@@ -699,6 +699,34 @@ mod branded_no_display_tests {
     }
 }
 
+// `no_display` drops the `Display` impl, not the `Display` requirement: a constrained brand
+// validates through `to_string()`, so its inner still has to render. Compiling this module is the
+// assertion that the combination is accepted and still wired to the constraints.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+mod constrained_no_display_tests {
+    use super::*;
+
+    #[model_schema(no_display, pattern = "^[a-z0-9_]+$", minLength = 3)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct QuietSlug(pub String);
+
+    #[test]
+    fn test_constrained_no_display_brand_validates() {
+        QuietSlug("hello_world".to_owned()).validate().unwrap();
+        QuietSlug("NO".to_owned()).validate().unwrap_err();
+    }
+
+    #[test]
+    fn test_constrained_no_display_brand_enforces_constraints_through_serde() {
+        serde_json::from_str::<QuietSlug>("\"hello_world\"").unwrap();
+        serde_json::from_str::<QuietSlug>("\"NO\"").unwrap_err();
+    }
+}
+
 // zod=OFF, typescript=ON tests
 #[cfg(all(feature = "typescript", not(feature = "zod")))]
 mod no_zod_tests {
