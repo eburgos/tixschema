@@ -442,3 +442,125 @@ fn test_pattern_enum_variant_serde_validation() {
         "Error should mention pattern mismatch: {err_str}"
     );
 }
+
+// ==================== Forward slash inside the Zod regex literal ====================
+
+// The Zod surface splices a pattern into a JS regex literal, where `/` is the delimiter: an
+// unescaped one closes the literal early and the emitted TypeScript stops parsing. That escaping
+// belongs to the splice alone — JSON Schema and the Rust-side validator carry the pattern as a
+// plain string and must see it byte for byte as written.
+
+#[cfg(feature = "zod")]
+#[test]
+fn test_a_slash_in_a_field_pattern_escapes_the_zod_regex_delimiter() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize)]
+    pub struct SlashField {
+        #[model_schema_prop(pattern = "^/[a-z]+$")]
+        pub name: String,
+    }
+
+    let schema = SlashField::zod_schema();
+    assert!(
+        schema.contains(r".check(z.regex(/^\/[a-z]+$/))"),
+        "Expected the slash escaped inside the regex literal: {schema}"
+    );
+}
+
+#[cfg(all(feature = "zod", feature = "serde"))]
+#[test]
+fn test_a_slash_in_a_brand_pattern_escapes_the_zod_regex_delimiter() {
+    #[model_schema(pattern = "^/[a-z]+$")]
+    #[derive(Serialize, Deserialize, Debug)]
+    #[serde(transparent)]
+    pub struct SlashBrand(pub String);
+
+    let schema = SlashBrand::zod_schema();
+    assert!(
+        schema.contains(r".check(z.regex(/^\/[a-z]+$/))"),
+        "Expected the slash escaped inside the regex literal: {schema}"
+    );
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn test_an_already_escaped_slash_is_not_escaped_twice() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize)]
+    pub struct EscapedSlashField {
+        #[model_schema_prop(pattern = r"^\/[a-z]+$")]
+        pub name: String,
+    }
+
+    let schema = EscapedSlashField::zod_schema();
+    assert!(
+        schema.contains(r".check(z.regex(/^\/[a-z]+$/))"),
+        "Expected the existing escape carried through untouched: {schema}"
+    );
+    assert!(
+        !schema.contains(r"\\/"),
+        "An escaped slash must not gain a second backslash: {schema}"
+    );
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn test_a_backslash_escape_before_a_slash_is_read_as_one_unit() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize)]
+    pub struct LiteralBackslashField {
+        // `\\` is a literal backslash, so the `/` after it is unescaped and needs its own escape.
+        #[model_schema_prop(pattern = r"^\\/[a-z]+$")]
+        pub name: String,
+    }
+
+    let schema = LiteralBackslashField::zod_schema();
+    assert!(
+        schema.contains(r".check(z.regex(/^\\\/[a-z]+$/))"),
+        "Expected the slash after a literal backslash escaped: {schema}"
+    );
+}
+
+#[cfg(feature = "jsonschema")]
+#[test]
+fn test_a_slash_pattern_reaches_json_schema_unescaped() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize)]
+    pub struct SlashJsonSchema {
+        #[model_schema_prop(pattern = "^/[a-z]+$")]
+        pub name: String,
+    }
+
+    let schema_str = serde_json::to_string(&SlashJsonSchema::json_schema()).unwrap();
+    assert!(
+        schema_str.contains(r#""pattern":"^/[a-z]+$""#),
+        "JSON Schema must carry the pattern as written: {schema_str}"
+    );
+}
+
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_the_escaped_zod_pattern_matches_the_value_set_the_validator_enforces() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct SlashValidated {
+        #[model_schema_prop(pattern = "^/[a-z]+$")]
+        pub name: String,
+    }
+
+    serde_json::from_str::<SlashValidated>(r#"{"name": "/etc"}"#).unwrap();
+    for rejected in [
+        r#"{"name": "etc"}"#,
+        r#"{"name": "/ETC"}"#,
+        r#"{"name": "//etc"}"#,
+    ] {
+        let err = serde_json::from_str::<SlashValidated>(rejected).unwrap_err();
+        assert!(
+            err.to_string().contains("does not match pattern"),
+            "Expected a pattern rejection for {rejected}: {err}"
+        );
+    }
+}
