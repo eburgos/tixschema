@@ -316,6 +316,46 @@ struct SiblingSlotValues {
     vecced: (String, Vec<MetricTag>),
 }
 
+/// An alias whose target is a nested sequence: the alias publishes what a field written as the
+/// target publishes, so the levels have to survive the alias too.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[model_schema()]
+type MetricGrid = Vec<Vec<u32>>;
+
+// A sequence holding a sequence writes an array of arrays, so it describes as one: every level the
+// field is written at is a level of the description, whichever covered wrapper spells each level.
+// A constraint still has only the innermost element to land on — the levels above hold arrays, not
+// values a `minLength` could reach.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct NestedSequenceFields {
+    aliased_rows: Vec<Vec<MetricTagRef>>,
+    #[model_schema_prop(minLength = 3)]
+    constrained_rows: Vec<Vec<String>>,
+    deep_ids: Vec<Vec<Vec<u32>>>,
+    fixed_grid: [[u32; 2]; 2],
+    labels: Vec<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    optional_rows: Option<Vec<Vec<u32>>>,
+    set_of_rows: HashSet<Vec<u32>>,
+    sibling_rows: Vec<Vec<MetricTag>>,
+    small_ids: Vec<Vec<u32>>,
+    vec_of_sets: Vec<BTreeSet<u32>>,
+}
+
+// The same nesting in the slots that cannot be dropped — a map member, a tuple element — where the
+// wrapper chain is normalized onto the element before the slot wraps go on.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct NestedSequenceSlots {
+    enum_keyed_rows: HashMap<MetricSlot, Vec<Vec<u32>>>,
+    optional_rows: HashMap<String, Option<Vec<Vec<u32>>>>,
+    rows: HashMap<String, Vec<Vec<u32>>>,
+    set_rows: HashMap<String, HashSet<Vec<u32>>>,
+    sibling_rows: HashMap<String, Vec<Vec<MetricTag>>>,
+    tuple_rows: (String, Vec<Vec<u32>>),
+}
+
 fn one<T, C>(item: T) -> C
 where
     C: FromIterator<T>,
@@ -367,6 +407,35 @@ fn sibling_slot_values() -> SiblingSlotValues {
         bare: ("t".to_owned(), metric_tag()),
         setted: ("t".to_owned(), one(metric_tag())),
         vecced: ("t".to_owned(), vec![metric_tag()]),
+    }
+}
+
+/// One populated `NestedSequenceFields`, every field holding a single innermost value so the wire
+/// it writes is read for its nesting rather than for its order.
+fn nested_sequence_fields() -> NestedSequenceFields {
+    NestedSequenceFields {
+        aliased_rows: vec![vec![metric_tag()]],
+        constrained_rows: vec![vec!["abc".to_owned()]],
+        deep_ids: vec![vec![vec![7_u32]]],
+        fixed_grid: [[7_u32, 8_u32], [9_u32, 10_u32]],
+        labels: vec![vec!["t".to_owned()]],
+        optional_rows: Some(vec![vec![7_u32]]),
+        set_of_rows: one(vec![7_u32]),
+        sibling_rows: vec![vec![metric_tag()]],
+        small_ids: vec![vec![7_u32]],
+        vec_of_sets: vec![one(7_u32)],
+    }
+}
+
+/// The same nesting in every slot the slot fixture opens.
+fn nested_sequence_slots() -> NestedSequenceSlots {
+    NestedSequenceSlots {
+        enum_keyed_rows: HashMap::from([(MetricSlot::Daily, vec![vec![7_u32]])]),
+        optional_rows: HashMap::from([("k".to_owned(), Some(vec![vec![7_u32]]))]),
+        rows: HashMap::from([("k".to_owned(), vec![vec![7_u32]])]),
+        set_rows: HashMap::from([("k".to_owned(), one(vec![7_u32]))]),
+        sibling_rows: HashMap::from([("k".to_owned(), vec![vec![metric_tag()]])]),
+        tuple_rows: ("t".to_owned(), vec![vec![7_u32]]),
     }
 }
 
@@ -2000,5 +2069,219 @@ fn test_set_slots_validate_as_the_vec_slot_twin() {
     assert_eq!(
         zod_schema.replace("SetSlotValues", "VecSlotValues"),
         VecSlotValues::zod_schema()
+    );
+}
+
+/// The wire the nested fixtures write, read for its nesting: a sequence of sequences is an array
+/// whose members are arrays, which is what every description below is held against.
+#[test]
+fn test_a_nested_sequence_writes_an_array_of_arrays() {
+    let payload = serde_json::to_value(nested_sequence_fields()).unwrap();
+    for field in [
+        "aliased_rows",
+        "constrained_rows",
+        "deep_ids",
+        "fixed_grid",
+        "labels",
+        "optional_rows",
+        "set_of_rows",
+        "sibling_rows",
+        "small_ids",
+        "vec_of_sets",
+    ] {
+        assert!(payload[field][0].is_array(), "{field} wrote: {payload}");
+    }
+    assert!(payload["deep_ids"][0][0].is_array(), "Got: {payload}");
+
+    let slots = serde_json::to_value(nested_sequence_slots()).unwrap();
+    for field in ["enum_keyed_rows", "optional_rows", "rows", "set_rows"] {
+        for (key, member) in slots[field].as_object().unwrap() {
+            assert!(member[0].is_array(), "{field}[{key}] wrote: {member}");
+        }
+    }
+    assert!(slots["tuple_rows"][1][0].is_array(), "Got: {slots}");
+}
+
+/// Each of those levels is a level of the JSON schema: the array wrap goes on once per level the
+/// field is written at, whichever wrapper spells each one.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_nested_sequences_describe_at_the_depth_they_are_written() {
+    let properties = NestedSequenceFields::json_schema()["properties"].clone();
+    let integer_rows = serde_json::json!({
+        "type": "array",
+        "items": { "type": "array", "items": { "type": "integer" } }
+    });
+
+    for field in ["fixed_grid", "optional_rows", "set_of_rows", "small_ids"] {
+        assert_eq!(properties[field], integer_rows, "for: {field}");
+    }
+    assert_eq!(properties["vec_of_sets"], integer_rows);
+    assert_eq!(
+        properties["deep_ids"],
+        serde_json::json!({ "type": "array", "items": integer_rows })
+    );
+    assert_eq!(
+        properties["labels"],
+        serde_json::json!({
+            "type": "array",
+            "items": { "type": "array", "items": { "type": "string" } }
+        })
+    );
+    // A constraint has only the innermost element to land on: the levels above it hold arrays.
+    assert_eq!(
+        properties["constrained_rows"],
+        serde_json::json!({
+            "type": "array",
+            "items": {
+                "type": "array",
+                "items": { "type": "string", "minLength": 3_u32 }
+            }
+        })
+    );
+    for field in ["aliased_rows", "sibling_rows"] {
+        assert_eq!(
+            properties[field],
+            serde_json::json!({
+                "type": "array",
+                "items": { "type": "array", "items": MetricTag::json_schema() }
+            }),
+            "for: {field}"
+        );
+    }
+}
+
+/// A slot carries the nesting its value was written at too — the wrapper chain normalizes onto the
+/// element before the member and element wraps go on, so no level is dropped on the way.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_nested_sequence_slots_describe_at_the_depth_they_are_written() {
+    let properties = NestedSequenceSlots::json_schema()["properties"].clone();
+    let integer_rows = serde_json::json!({
+        "type": "array",
+        "items": { "type": "array", "items": { "type": "integer" } }
+    });
+
+    for field in ["rows", "set_rows"] {
+        assert_eq!(
+            properties[field]["additionalProperties"], integer_rows,
+            "for: {field}"
+        );
+    }
+    assert_eq!(
+        properties["optional_rows"]["additionalProperties"],
+        serde_json::json!({ "anyOf": [integer_rows, { "type": "null" }] })
+    );
+    assert_eq!(
+        properties["enum_keyed_rows"]["properties"]["Daily"],
+        integer_rows
+    );
+    assert_eq!(properties["tuple_rows"]["prefixItems"][1], integer_rows);
+    assert_eq!(
+        properties["sibling_rows"]["additionalProperties"],
+        serde_json::json!({
+            "type": "array",
+            "items": { "type": "array", "items": MetricTag::json_schema() }
+        })
+    );
+}
+
+/// The TypeScript surface at the same depth: one `Array<…>` per level written.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_nested_sequences_type_at_the_depth_they_are_written() {
+    let ts_definition = NestedSequenceFields::ts_definition();
+    for spelling in [
+        "aliased_rows: Array<Array<MetricTagRefType>>;",
+        "constrained_rows: Array<Array<string>>;",
+        "deep_ids: Array<Array<Array<number>>>;",
+        "fixed_grid: Array<Array<number>>;",
+        "labels: Array<Array<string>>;",
+        "optional_rows: Array<Array<number>> | undefined;",
+        "set_of_rows: Array<Array<number>>;",
+        "sibling_rows: Array<Array<MetricTag>>;",
+        "small_ids: Array<Array<number>>;",
+        "vec_of_sets: Array<Array<number>>;",
+    ] {
+        assert!(ts_definition.contains(spelling), "Got: {ts_definition}");
+    }
+
+    let slot_definition = NestedSequenceSlots::ts_definition();
+    for spelling in [
+        "enum_keyed_rows: Partial<Record<MetricSlot, Array<Array<number>>>>;",
+        "optional_rows: Partial<Record<string, Array<Array<number>> | null>>;",
+        "rows: Partial<Record<string, Array<Array<number>>>>;",
+        "set_rows: Partial<Record<string, Array<Array<number>>>>;",
+        "sibling_rows: Partial<Record<string, Array<Array<MetricTag>>>>;",
+        "tuple_rows: [string, Array<Array<number>>];",
+    ] {
+        assert!(slot_definition.contains(spelling), "Got: {slot_definition}");
+    }
+}
+
+/// And the Zod surface: one `z.array(…)` per level, the preprocess and constraint wraps landing
+/// where the single-level spelling puts them.
+#[test]
+#[cfg(feature = "zod")]
+fn test_nested_sequences_validate_at_the_depth_they_are_written() {
+    let zod_schema = NestedSequenceFields::zod_schema();
+    for spelling in [
+        "aliased_rows: z.array(z.array(MetricTagRefType$Schema)),",
+        "constrained_rows: z.array(z.array(z.string().min(3))),",
+        "deep_ids: z.array(z.array(z.array(z.number().int()))),",
+        "fixed_grid: z.array(z.array(z.number().int())),",
+        "labels: z.array(z.array(z.string())),",
+        "set_of_rows: z.array(z.array(z.number().int())),",
+        "sibling_rows: z.array(z.array(MetricTag$Schema)),",
+        "small_ids: z.array(z.array(z.number().int())),",
+        "vec_of_sets: z.array(z.array(z.number().int())),",
+    ] {
+        assert!(zod_schema.contains(spelling), "Got: {zod_schema}");
+    }
+
+    let slot_schema = NestedSequenceSlots::zod_schema();
+    for spelling in [
+        "enum_keyed_rows: z.record(MetricSlot$Schema, z.array(z.array(z.number().int()))),",
+        "optional_rows: z.record(z.string(), z.nullable(z.array(z.array(z.number().int())))),",
+        "rows: z.record(z.string(), z.array(z.array(z.number().int()))),",
+        "set_rows: z.record(z.string(), z.array(z.array(z.number().int()))),",
+        "sibling_rows: z.record(z.string(), z.array(z.array(MetricTag$Schema))),",
+        "tuple_rows: z.tuple([z.string(), z.array(z.array(z.number().int()))]),",
+    ] {
+        assert!(slot_schema.contains(spelling), "Got: {slot_schema}");
+    }
+}
+
+/// An alias of a nested sequence publishes the nesting its target was written at: an alias names a
+/// type, and the type it names is an array of arrays on every surface.
+#[test]
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn test_an_alias_of_a_nested_sequence_publishes_its_depth() {
+    let grid: MetricGrid = vec![vec![7_u32]];
+    assert!(
+        serde_json::to_value(&grid).unwrap()[0].is_array(),
+        "Got: {grid:?}"
+    );
+
+    #[cfg(feature = "typescript")]
+    assert!(
+        metric_grid_type_schema::Schema::ts_definition().contains("Array<Array<number>>"),
+        "Got: {}",
+        metric_grid_type_schema::Schema::ts_definition()
+    );
+    #[cfg(feature = "zod")]
+    assert!(
+        metric_grid_type_schema::Schema::zod_schema()
+            .contains("z.array(z.array(z.number().int()))"),
+        "Got: {}",
+        metric_grid_type_schema::Schema::zod_schema()
+    );
+    #[cfg(feature = "jsonschema")]
+    assert_eq!(
+        metric_grid_type_schema::Schema::json_schema(),
+        serde_json::json!({
+            "type": "array",
+            "items": { "type": "array", "items": { "type": "integer" } }
+        })
     );
 }

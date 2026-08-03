@@ -640,10 +640,9 @@ fn test_complex_alias_usage() {
         ts.contains("optional_id: DocumentId | undefined;"),
         "Should handle Optional<Alias>. Got: {ts}"
     );
-    // Note: Vec<Vec<T>> is currently flattened to Array<T> in the type system
-    // This is a known behavior - nested arrays are simplified to single array
+    // A `Vec<Vec<T>>` writes an array of arrays, so it types as one: a level per level written.
     assert!(
-        ts.contains("nested_ids: Array<DocumentId>;"),
+        ts.contains("nested_ids: Array<Array<DocumentId>>;"),
         "Should handle Vec<Vec<Alias>>. Got: {ts}"
     );
     assert!(
