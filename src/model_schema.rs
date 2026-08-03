@@ -3273,6 +3273,10 @@ fn write_tuple_single_variant_fields(
 }
 
 /// Writes the multi-element tuple portion of a discriminated enum variant.
+///
+/// Every element is a slot: serde writes each position of the tuple, so a `None` there reaches the
+/// wire as a `null` in place rather than shortening the tuple. All three surfaces read the elements
+/// through the slot spellings for that reason.
 fn write_tuple_multiple_variant_fields(
     field_defs: &[FieldDef],
     content_name: &str,
@@ -3285,7 +3289,7 @@ fn write_tuple_multiple_variant_fields(
     // Multi-element tuple: use TypeScript tuple type `value: [T1, T2, ...]`
     let ts_tuple_types: Vec<String> = field_defs
         .iter()
-        .map(super::field_type::FieldDef::typescript_typename)
+        .map(super::field_type::FieldDef::typescript_slot_typename)
         .collect();
     let ts_tuple = format!("[{}]", ts_tuple_types.join(", "));
 
@@ -3308,7 +3312,7 @@ fn write_tuple_multiple_variant_fields(
     {
         let zod_tuple_types: Vec<String> = field_defs
             .iter()
-            .map(super::field_type::FieldDef::zod_type)
+            .map(super::field_type::FieldDef::zod_slot_type)
             .collect();
         let zod_tuple = format!("z.tuple([{}])", zod_tuple_types.join(", "));
 
