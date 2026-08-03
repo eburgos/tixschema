@@ -46,7 +46,9 @@ pub fn safe_type_name(key: &str) -> String {
     }
 }
 
-#[cfg(feature = "typescript")]
+/// The export name is what `register_alias_info` stores and what the alias schema module is
+/// named after, so every feature that references an alias needs it — not just `typescript`.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 pub fn compute_alias_export_name(rust_ident: &str, override_name: Option<String>) -> String {
     match override_name {
         Some(name) if name.trim().is_empty() => format!("{rust_ident}Type"),
