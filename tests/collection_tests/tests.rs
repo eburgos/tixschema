@@ -284,11 +284,13 @@ struct SetSlotValues {
     enum_keyed_ids: HashMap<MetricSlot, HashSet<u32>>,
     enum_keyed_tags: HashMap<MetricSlot, BTreeSet<MetricTag>>,
     labels: HashMap<String, BTreeSet<String>>,
+    optional_element_ids: HashMap<String, HashSet<Option<u32>>>,
     optional_ids: HashMap<String, Option<HashSet<u32>>>,
     sibling_tags: HashMap<String, HashSet<MetricTag>>,
     small_ids: HashMap<String, HashSet<u32>>,
     tuple_ids: (String, HashSet<u32>),
     tuple_labels: (u32, BTreeSet<String>),
+    tuple_optional_ids: (String, BTreeSet<Option<u32>>),
 }
 
 #[model_schema()]
@@ -298,11 +300,13 @@ struct VecSlotValues {
     enum_keyed_ids: HashMap<MetricSlot, Vec<u32>>,
     enum_keyed_tags: HashMap<MetricSlot, Vec<MetricTag>>,
     labels: HashMap<String, Vec<String>>,
+    optional_element_ids: HashMap<String, Vec<Option<u32>>>,
     optional_ids: HashMap<String, Option<Vec<u32>>>,
     sibling_tags: HashMap<String, Vec<MetricTag>>,
     small_ids: HashMap<String, Vec<u32>>,
     tuple_ids: (String, Vec<u32>),
     tuple_labels: (u32, Vec<String>),
+    tuple_optional_ids: (String, Vec<Option<u32>>),
 }
 
 // A sibling is carried by reference wherever it sits, so a tuple element names the schema module a
@@ -378,11 +382,13 @@ fn set_slot_values() -> SetSlotValues {
         enum_keyed_ids: HashMap::from([(MetricSlot::Daily, one(7_u32))]),
         enum_keyed_tags: HashMap::from([(MetricSlot::Daily, one(metric_tag()))]),
         labels: HashMap::from([("k".to_owned(), one("t".to_owned()))]),
+        optional_element_ids: HashMap::from([("k".to_owned(), one(None))]),
         optional_ids: HashMap::from([("k".to_owned(), Some(one(7_u32)))]),
         sibling_tags: HashMap::from([("k".to_owned(), one(metric_tag()))]),
         small_ids: HashMap::from([("k".to_owned(), one(7_u32))]),
         tuple_ids: ("t".to_owned(), one(7_u32)),
         tuple_labels: (7, one("t".to_owned())),
+        tuple_optional_ids: ("t".to_owned(), one(None)),
     }
 }
 
@@ -393,11 +399,13 @@ fn vec_slot_values() -> VecSlotValues {
         enum_keyed_ids: HashMap::from([(MetricSlot::Daily, one(7_u32))]),
         enum_keyed_tags: HashMap::from([(MetricSlot::Daily, one(metric_tag()))]),
         labels: HashMap::from([("k".to_owned(), one("t".to_owned()))]),
+        optional_element_ids: HashMap::from([("k".to_owned(), one(None))]),
         optional_ids: HashMap::from([("k".to_owned(), Some(one(7_u32)))]),
         sibling_tags: HashMap::from([("k".to_owned(), one(metric_tag()))]),
         small_ids: HashMap::from([("k".to_owned(), one(7_u32))]),
         tuple_ids: ("t".to_owned(), one(7_u32)),
         tuple_labels: (7, one("t".to_owned())),
+        tuple_optional_ids: ("t".to_owned(), one(None)),
     }
 }
 
@@ -1904,6 +1912,7 @@ fn test_a_set_slot_writes_what_the_vec_slot_writes() {
         "enum_keyed_ids",
         "enum_keyed_tags",
         "labels",
+        "optional_element_ids",
         "optional_ids",
         "sibling_tags",
         "small_ids",
@@ -1912,7 +1921,7 @@ fn test_a_set_slot_writes_what_the_vec_slot_writes() {
             assert!(member.is_array(), "{field}[{key}] wrote: {member}");
         }
     }
-    for field in ["tuple_ids", "tuple_labels"] {
+    for field in ["tuple_ids", "tuple_labels", "tuple_optional_ids"] {
         let slots = payload[field].as_array().unwrap();
         assert!(
             slots.last().unwrap().is_array(),
@@ -1966,6 +1975,17 @@ fn test_set_slots_describe_as_arrays_of_their_element() {
     // A slot cannot be dropped, so a `None` there is `null` rather than an absent key.
     assert_eq!(
         properties["optional_ids"]["additionalProperties"],
+        serde_json::json!({ "anyOf": [integer_array, { "type": "null" }] })
+    );
+    // A `None` the wrapper itself holds is that same `null` to every reader of the slot: the
+    // element carries the wrapper's array-ness, so the optionality it carries is the slot's too —
+    // the one form the `Vec` spelling arrives in, and so the one a set has to describe as.
+    assert_eq!(
+        properties["optional_element_ids"]["additionalProperties"],
+        serde_json::json!({ "anyOf": [integer_array, { "type": "null" }] })
+    );
+    assert_eq!(
+        properties["tuple_optional_ids"]["prefixItems"][1],
         serde_json::json!({ "anyOf": [integer_array, { "type": "null" }] })
     );
 }
@@ -2039,10 +2059,12 @@ fn test_set_slots_type_as_the_vec_slot_twin() {
     for spelling in [
         "aliased_tags: Partial<Record<string, Array<MetricTagRefType>>>;",
         "enum_keyed_ids: Partial<Record<MetricSlot, Array<number>>>;",
+        "optional_element_ids: Partial<Record<string, Array<number> | null>>;",
         "optional_ids: Partial<Record<string, Array<number> | null>>;",
         "sibling_tags: Partial<Record<string, Array<MetricTag>>>;",
         "tuple_ids: [string, Array<number>];",
         "tuple_labels: [number, Array<string>];",
+        "tuple_optional_ids: [string, Array<number> | null];",
     ] {
         assert!(ts_definition.contains(spelling), "Got: {ts_definition}");
     }
@@ -2060,9 +2082,11 @@ fn test_set_slots_validate_as_the_vec_slot_twin() {
     for spelling in [
         "aliased_tags: z.record(z.string(), z.array(MetricTagRefType$Schema)),",
         "enum_keyed_tags: z.record(MetricSlot$Schema, z.array(MetricTag$Schema)),",
+        "optional_element_ids: z.record(z.string(), z.nullable(z.array(z.number().int()))),",
         "optional_ids: z.record(z.string(), z.nullable(z.array(z.number().int()))),",
         "tuple_ids: z.tuple([z.string(), z.array(z.number().int())]),",
         "tuple_labels: z.tuple([z.number().int(), z.array(z.string())]),",
+        "tuple_optional_ids: z.tuple([z.string(), z.nullable(z.array(z.number().int()))]),",
     ] {
         assert!(zod_schema.contains(spelling), "Got: {zod_schema}");
     }

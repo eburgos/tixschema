@@ -20,7 +20,7 @@ use syn::spanned::Spanned as _;
 const DECLARED_VARIANTS: [&str; 6] = ["Upload", "Generate", "Delete", "Rename", "Move", "Archive"];
 
 /// The covered wrappers, under the names a dispatch reads them by.
-#[cfg(feature = "jsonschema")]
+#[cfg(any(feature = "jsonschema", feature = "serde"))]
 const SEQUENCE_WRAPPERS: [&str; 6] = [
     "BTreeSet",
     "BinaryHeap",
@@ -92,6 +92,59 @@ fn bare_option_field_is_rejected() {
     let message = guard_result(&item).unwrap_err().to_string();
     assert!(message.contains("note"));
     assert!(message.contains("skip_serializing_if = \"Option::is_none\""));
+}
+
+/// The single-field `Report` written with `notes` at the given spelling.
+#[cfg(feature = "serde")]
+fn report_with(spelling: &str) -> syn::ItemStruct {
+    syn::parse_str(&format!("struct Report {{ notes: {spelling} }}")).unwrap()
+}
+
+/// A covered wrapper writes the JSON array its element decides, so a `None` the element holds
+/// reaches the wire as a `null` inside that array — which the absent-key form the field renders in
+/// cannot stand for. The guard therefore refuses it wherever it refuses the `Vec` spelling, `Vec`
+/// being the one wrapper the parser had always collapsed onto its element.
+#[cfg(feature = "serde")]
+#[test]
+fn a_covered_wrapper_of_option_is_rejected_as_the_vec_spelling_is() {
+    for wrapper in SEQUENCE_WRAPPERS {
+        let message = guard_result(&report_with(&format!("{wrapper}<Option<String>>")))
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("notes"), "{wrapper}: {message}");
+        assert!(
+            message.contains("skip_serializing_if"),
+            "{wrapper}: {message}"
+        );
+    }
+}
+
+/// Every level a wrapper is written at hands its element's optionality up, so a `None` is refused
+/// however deep the wrappers are stacked and whichever spelling each level takes.
+#[cfg(feature = "serde")]
+#[test]
+fn a_covered_wrapper_carries_its_element_optionality_at_every_depth() {
+    for spelling in [
+        "Vec<Vec<Option<String>>>",
+        "HashSet<Vec<Option<String>>>",
+        "Vec<HashSet<Option<String>>>",
+        "BTreeSet<VecDeque<Option<String>>>",
+    ] {
+        let message = guard_result(&report_with(spelling))
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("notes"), "{spelling}: {message}");
+    }
+}
+
+/// The optionality read through a wrapper is the element's own and nothing else: a plain element
+/// leaves the field non-optional, so no wrapper name alone can trip the guard.
+#[cfg(feature = "serde")]
+#[test]
+fn a_covered_wrapper_of_a_plain_element_satisfies_the_guard() {
+    for wrapper in SEQUENCE_WRAPPERS {
+        guard_result(&report_with(&format!("{wrapper}<String>"))).unwrap();
+    }
 }
 
 #[cfg(feature = "serde")]
