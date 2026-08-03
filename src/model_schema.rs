@@ -2600,6 +2600,10 @@ fn render_untagged_variant(
 }
 
 /// Renders a `TupleSingle` (`S(T)`) untagged variant as a union member (`T` / `T$Schema` / value).
+///
+/// The inner value is a slot: untagged, the variant carries no key of its own, so the content *is*
+/// the whole serialized value and a `None` there reaches the wire as a bare `null` rather than
+/// going absent. All three surfaces read it through the slot spellings for that reason.
 #[cfg(feature = "serde")]
 fn render_untagged_tuple_single(
     variant_name: &str,
@@ -2612,15 +2616,15 @@ fn render_untagged_tuple_single(
     );
     let fld = &field_defs[0];
 
-    let ts = fld.typescript_typename();
+    let ts = fld.typescript_slot_typename();
 
     #[cfg(feature = "zod")]
-    let zod = fld.zod_type();
+    let zod = fld.zod_slot_type();
     #[cfg(not(feature = "zod"))]
     let zod = String::new();
 
     #[cfg(feature = "jsonschema")]
-    let json_val = field_json_schema_value(fld);
+    let json_val = nullable_slot_json_schema_value(fld, field_json_schema_value(fld));
     #[cfg(not(feature = "jsonschema"))]
     let json_val = quote! {};
 
