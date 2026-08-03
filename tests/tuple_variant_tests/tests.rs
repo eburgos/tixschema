@@ -1,6 +1,21 @@
 use serde::{Deserialize, Serialize};
 use tixschema::model_schema;
 
+/// A generated schema module reaches its siblings through the enclosing module, and a function body
+/// is not one, so a type another type references is declared here rather than inside a test.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Inner {
+    pub field: String,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum Outer {
+    Paired(Inner, i64),
+    Wrapped(Inner),
+}
+
 /// Test 1: Single-element tuple variants.
 /// Each variant has exactly one tuple element.
 #[test]
@@ -471,19 +486,6 @@ fn test_optional_in_tuple() {
 /// Test 10: Tuple variant with nested custom type.
 #[test]
 fn test_tuple_with_custom_type() {
-    #[model_schema()]
-    #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub struct Inner {
-        pub field: String,
-    }
-
-    #[model_schema()]
-    #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub enum Outer {
-        Paired(Inner, i64),
-        Wrapped(Inner),
-    }
-
     let ts = Outer::ts_definition();
 
     // Should reference the inner type
@@ -494,6 +496,25 @@ fn test_tuple_with_custom_type() {
     assert!(
         ts.contains("value: [Inner, number]"),
         "Paired should have tuple with Inner"
+    );
+}
+
+/// And the JSON schema of that variant's tuple slot carries the same reference: the sibling's own
+/// schema, in the position the TypeScript above names it.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn test_tuple_variant_sibling_element_carries_the_sibling_schema() {
+    let schema = Outer::json_schema();
+    let variant = schema["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["properties"]["type"]["const"] == "Paired")
+        .unwrap();
+
+    assert_eq!(
+        variant["properties"]["value"]["prefixItems"][0],
+        Inner::json_schema()
     );
 }
 

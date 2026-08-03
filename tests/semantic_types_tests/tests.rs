@@ -454,16 +454,113 @@ fn test_struct_with_alias_zod_schema() {
 // JSON Schema Tests
 // ========================================================================
 
+/// An alias publishes the schema of the type it names, so a slot filled by the alias validates
+/// exactly what the aliased type validates — the scalar mapping being the same one a field written
+/// as the target reads.
 #[test]
 #[cfg(all(feature = "jsonschema", feature = "typescript"))]
-fn test_alias_json_schema_exists() {
-    // JSON schema generation for aliases currently returns a stub
-    let json_schema = document_id_schema::Schema::json_schema();
+fn test_scalar_alias_json_schema() {
+    for (alias, schema, expected) in [
+        (
+            "DocumentId",
+            document_id_schema::Schema::json_schema(),
+            serde_json::json!({ "type": "string" }),
+        ),
+        (
+            "Revision",
+            revision_schema::Schema::json_schema(),
+            serde_json::json!({ "type": "integer" }),
+        ),
+        (
+            "Score",
+            score_schema::Schema::json_schema(),
+            serde_json::json!({ "type": "number" }),
+        ),
+        (
+            "IsActive",
+            is_active_schema::Schema::json_schema(),
+            serde_json::json!({ "type": "boolean" }),
+        ),
+    ] {
+        assert_eq!(schema, expected, "for {alias}");
+    }
+}
 
-    // Verify the method exists and returns a JSON value
-    assert!(
-        json_schema.is_object(),
-        "JSON schema should return an object"
+/// An alias cannot be dropped the way an optional object key can — a slot written as the alias is
+/// filled with the `null` serde writes for a `None`, so the schema has to admit it.
+#[test]
+#[cfg(all(feature = "jsonschema", feature = "typescript"))]
+fn test_optional_alias_json_schema() {
+    assert_eq!(
+        optional_note_schema::Schema::json_schema(),
+        serde_json::json!({ "anyOf": [{ "type": "string" }, { "type": "null" }] })
+    );
+}
+
+#[test]
+#[cfg(all(feature = "jsonschema", feature = "typescript"))]
+fn test_sequence_alias_json_schema() {
+    assert_eq!(
+        tags_schema::Schema::json_schema(),
+        serde_json::json!({ "type": "array", "items": { "type": "string" } })
+    );
+}
+
+/// A tuple is the fixed-arity array serde writes it as, at the alias exactly as in field position.
+#[test]
+#[cfg(all(feature = "jsonschema", feature = "typescript"))]
+fn test_tuple_alias_json_schema() {
+    assert_eq!(
+        compact_link_row_schema::Schema::json_schema(),
+        serde_json::json!({
+            "type": "array",
+            "prefixItems": [
+                { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+                { "type": "array", "items": { "type": "integer" } },
+                { "type": "string" },
+                { "anyOf": [{ "type": "string" }, { "type": "null" }] }
+            ],
+            "items": false,
+            "minItems": 4_u64,
+            "maxItems": 4_u64
+        })
+    );
+}
+
+/// An alias of an alias carries the target's reference, which resolves through the registry — so
+/// the chain lands on the type at the end of it rather than on a link.
+#[test]
+#[cfg(all(feature = "jsonschema", feature = "typescript"))]
+fn test_nested_alias_json_schema() {
+    assert_eq!(
+        audit_id_schema::Schema::json_schema(),
+        order_id_schema::Schema::json_schema()
+    );
+    assert_eq!(
+        audit_id_schema::Schema::json_schema(),
+        serde_json::json!({ "type": "string" })
+    );
+}
+
+/// A type parameter names no type until the alias is instantiated, and every position that
+/// references an alias references it uninstantiated — so the parameter admits any value, while the
+/// shape around it is still described.
+#[test]
+#[cfg(all(feature = "jsonschema", feature = "typescript"))]
+fn test_generic_alias_json_schema() {
+    assert_eq!(
+        pair_schema::Schema::json_schema(),
+        serde_json::json!({
+            "type": "array",
+            "prefixItems": [{}, {}],
+            "items": false,
+            "minItems": 2_u64,
+            "maxItems": 2_u64
+        })
+    );
+    assert_eq!(
+        wrapper_schema::Schema::json_schema(),
+        serde_json::json!({ "anyOf": [{}, { "type": "null" }] })
     );
 }
 
@@ -481,6 +578,21 @@ fn test_struct_with_alias_json_schema() {
         schema["properties"].is_object(),
         "Should have properties. Got: {schema:?}"
     );
+
+    // A field written as an alias carries the alias module's schema, so what the field validates
+    // is what the alias publishes — every slot naming the alias agrees with every other.
+    for (field, alias_schema) in [
+        ("document_id", document_id_schema::Schema::json_schema()),
+        ("is_active", is_active_schema::Schema::json_schema()),
+        ("note", optional_note_schema::Schema::json_schema()),
+        ("revision", revision_schema::Schema::json_schema()),
+        ("score", score_schema::Schema::json_schema()),
+    ] {
+        assert_eq!(
+            schema["properties"][field], alias_schema,
+            "for {field} in: {schema}"
+        );
+    }
 }
 
 // ========================================================================
