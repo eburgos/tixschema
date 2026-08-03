@@ -1710,3 +1710,52 @@ fn test_deserialize_and_validate_agree_on_every_wrapped_shape() {
         );
     }
 }
+
+/// A field name is unique only within the variant that declares it, so the helpers a variant's
+/// field generates are named for that variant: two variants naming one field carry two constraints.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_two_variants_naming_one_field_keep_their_own_constraints() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    #[serde(tag = "kind")]
+    pub enum Action {
+        Delete {
+            #[model_schema_prop(minLength = 5)]
+            note: String,
+        },
+        Upload {
+            #[model_schema_prop(minLength = 3)]
+            note: String,
+        },
+    }
+
+    let too_short_for_delete =
+        serde_json::from_str::<Action>(r#"{"kind":"Delete","note":"abc"}"#).unwrap_err();
+    assert!(
+        too_short_for_delete
+            .to_string()
+            .contains("'note' is too short: minimum length is 5, got 3"),
+        "Unexpected error: {too_short_for_delete}"
+    );
+    assert!(
+        serde_json::from_str::<Action>(r#"{"kind":"Delete","note":"abcde"}"#).is_ok(),
+        "Delete admits its own minimum"
+    );
+
+    let too_short_for_upload =
+        serde_json::from_str::<Action>(r#"{"kind":"Upload","note":"ab"}"#).unwrap_err();
+    assert!(
+        too_short_for_upload
+            .to_string()
+            .contains("'note' is too short: minimum length is 3, got 2"),
+        "Unexpected error: {too_short_for_upload}"
+    );
+    assert!(
+        serde_json::from_str::<Action>(r#"{"kind":"Upload","note":"abc"}"#).is_ok(),
+        "A value Upload admits is not held to Delete's minimum"
+    );
+}

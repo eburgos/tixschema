@@ -71,7 +71,12 @@ use crate::utils::{format_docs_for_ts, get_item_docs};
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::register_alias_info;
 
-#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[cfg(any(
+    feature = "typescript",
+    feature = "zod",
+    feature = "jsonschema",
+    feature = "serde"
+))]
 use crate::utils::to_snake_case;
 
 use crate::rename_rule::resolve_rename_rule;
@@ -960,7 +965,7 @@ fn collect_struct_fields(
         let is_flatten = false;
 
         let (f_def, validation_fn, validate_body, guard_error) =
-            process_field(rename_all, field, module_name_opt, type_name);
+            process_field(rename_all, field, module_name_opt, None, type_name);
 
         if let Some(err) = guard_error {
             guard_errors.push(err);
@@ -2334,14 +2339,20 @@ fn collect_discriminated_variants(
         #[cfg(not(feature = "serde"))]
         let field_rename: Option<String> = None;
 
+        let variant_ident = item.ident.to_string();
         let final_name =
-            get_final_variant_name(&item.ident.to_string(), field_rename.as_deref(), rename_all);
+            get_final_variant_name(&variant_ident, field_rename.as_deref(), rename_all);
         let variant_kind = classify_variant(item);
 
         let mut field_defs: Vec<FieldDef> = Vec::new();
         for field in &mut item.fields {
-            let (f_def, validation_fn, _validate_body, guard_error) =
-                process_field(rename_all, field, enum_module_name_opt, &enum_type_name);
+            let (f_def, validation_fn, _validate_body, guard_error) = process_field(
+                rename_all,
+                field,
+                enum_module_name_opt,
+                Some(&variant_ident),
+                &enum_type_name,
+            );
             if let Some(vfn) = validation_fn {
                 enum_validation_fns.push(vfn);
             }
@@ -4404,6 +4415,20 @@ fn build_wrapped_deserializer(
     }
 }
 
+/// The stem the per-field helpers are named from: `validate_{stem}_value` and `deserialize_{stem}`.
+///
+/// A field name is unique only within the variant that declares it, while one schema module holds
+/// every variant's helpers — so a variant's field carries its variant into the stem, and two
+/// variants naming one field name two constraints instead of colliding. A struct field has no
+/// variant and keeps the bare field name its helpers have always been spelled with.
+#[cfg(feature = "serde")]
+fn helper_name_stem(field_ident: &str, variant_ident: Option<&str>) -> String {
+    variant_ident.map_or_else(
+        || field_ident.to_owned(),
+        |variant| format!("{}_{field_ident}", to_snake_case(variant)),
+    )
+}
+
 /// Generates the static validator for a String field with constraints, plus the serde deserializer
 /// — written against the constrained value itself when the field is bare, and against the field's
 /// declared type when it is wrapped.
@@ -4412,15 +4437,16 @@ fn build_wrapped_deserializer(
 #[cfg(feature = "serde")]
 fn generate_string_validation_code(
     field_ident: &str,
+    helper_stem: &str,
     meta: &ModelSchemaPropMeta,
     shape: &ConstrainedShape,
     field_ty: &syn::Type,
 ) -> FieldValidationCode {
     let wraps: &[ConstraintWrap] = &shape.wraps;
-    let validate_value_fn_name = format!("validate_{field_ident}_value");
+    let validate_value_fn_name = format!("validate_{helper_stem}_value");
     let validate_value_fn_ident =
         proc_macro2::Ident::new(&validate_value_fn_name, proc_macro2::Span::call_site());
-    let deserialize_fn_name = format!("deserialize_{field_ident}");
+    let deserialize_fn_name = format!("deserialize_{helper_stem}");
     let deserialize_fn_ident =
         proc_macro2::Ident::new(&deserialize_fn_name, proc_macro2::Span::call_site());
 
@@ -4515,16 +4541,17 @@ fn generate_string_validation_code(
 #[cfg(feature = "serde")]
 fn generate_numeric_validation_code(
     field_ident: &str,
+    helper_stem: &str,
     rust_type_str: &str,
     meta: &ModelSchemaPropMeta,
     shape: &ConstrainedShape,
     field_ty: &syn::Type,
 ) -> FieldValidationCode {
     let wraps: &[ConstraintWrap] = &shape.wraps;
-    let validate_value_fn_name = format!("validate_{field_ident}_value");
+    let validate_value_fn_name = format!("validate_{helper_stem}_value");
     let validate_value_fn_ident =
         proc_macro2::Ident::new(&validate_value_fn_name, proc_macro2::Span::call_site());
-    let deserialize_fn_name = format!("deserialize_{field_ident}");
+    let deserialize_fn_name = format!("deserialize_{helper_stem}");
     let deserialize_fn_ident =
         proc_macro2::Ident::new(&deserialize_fn_name, proc_macro2::Span::call_site());
 
@@ -4774,6 +4801,7 @@ fn process_field(
     rename_all: Option<&str>,
     field: &mut Field,
     schema_module_name: Option<&str>,
+    variant_ident: Option<&str>,
     type_name: &str,
 ) -> (
     FieldDef,
@@ -4819,6 +4847,7 @@ fn process_field(
         field,
         schema_module_name,
         &raw_field_ident,
+        variant_ident,
         &model_schema_prop_meta,
         &mut new_attrs,
     );
@@ -4829,7 +4858,7 @@ fn process_field(
         Option<proc_macro2::TokenStream>,
     ) = (None, None);
     #[cfg(not(feature = "serde"))]
-    let _: &_ = &schema_module_name;
+    let _: &_ = &(schema_module_name, variant_ident);
 
     field.attrs = new_attrs;
 
@@ -4937,6 +4966,7 @@ fn generate_field_validation(
     field: &Field,
     schema_module_name: Option<&str>,
     raw_field_ident: &str,
+    variant_ident: Option<&str>,
     model_schema_prop_meta: &ModelSchemaPropMeta,
     new_attrs: &mut Vec<syn::Attribute>,
 ) -> (
@@ -4954,10 +4984,12 @@ fn generate_field_validation(
         return (None, None);
     };
 
+    let helper_stem = helper_name_stem(raw_field_ident, variant_ident);
     let generated = match shape.leaf {
         ConstraintLeaf::Str => has_string_constraints.then(|| {
             generate_string_validation_code(
                 raw_field_ident,
+                &helper_stem,
                 model_schema_prop_meta,
                 &shape,
                 &field.ty,
@@ -4966,6 +4998,7 @@ fn generate_field_validation(
         ConstraintLeaf::Number(rust_type) => has_numeric_constraints.then(|| {
             generate_numeric_validation_code(
                 raw_field_ident,
+                &helper_stem,
                 rust_type,
                 model_schema_prop_meta,
                 &shape,
@@ -4977,7 +5010,7 @@ fn generate_field_validation(
         return (None, None);
     };
 
-    let deserialize_with_path = format!("{module_name}::deserialize_{raw_field_ident}");
+    let deserialize_with_path = format!("{module_name}::deserialize_{helper_stem}");
     let path_lit = syn::LitStr::new(&deserialize_with_path, proc_macro2::Span::call_site());
     new_attrs.push(syn::parse_quote! {
         #[serde(deserialize_with = #path_lit)]
