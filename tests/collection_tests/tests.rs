@@ -50,6 +50,19 @@ struct EnumKeyedScalarValueMaps {
     u64_value: HashMap<MetricSlot, u64>,
 }
 
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct MetricSample {
+    label: String,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct EnumKeyedSiblingValueMaps {
+    sample_array: HashMap<MetricSlot, Vec<MetricSample>>,
+    sample_value: HashMap<MetricSlot, MetricSample>,
+}
+
 // Test struct with collections
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -88,6 +101,20 @@ fn assert_hashmap_array_type(
         properties[field_name]["additionalProperties"]["items"]["type"],
         expected_item_type
     );
+}
+
+/// The JSON Schema `type` a value carries on the wire, so an emitted schema can be held against
+/// what serde actually produces for it.
+#[cfg(feature = "jsonschema")]
+const fn json_type_name(value: &serde_json::Value) -> &'static str {
+    match *value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
 }
 
 #[cfg(feature = "jsonschema")]
@@ -340,6 +367,90 @@ fn test_enum_keyed_scalar_value_maps_typescript_generation() {
     );
     assert!(
         zod_schema.contains("string_array: z.record(MetricSlot$Schema, z.array(z.string()))"),
+        "Got: {zod_schema}"
+    );
+}
+
+#[test]
+fn test_enum_keyed_sibling_value_maps_constructible() {
+    let maps = EnumKeyedSiblingValueMaps {
+        sample_array: HashMap::from([(
+            MetricSlot::Daily,
+            vec![MetricSample {
+                label: "d".to_owned(),
+            }],
+        )]),
+        sample_value: HashMap::new(),
+    };
+    assert_eq!(maps.sample_array[&MetricSlot::Daily].len(), 1);
+}
+
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_enum_keyed_sibling_value_maps_json_schema() {
+    let sample_schema = MetricSample::json_schema();
+    let schema = EnumKeyedSiblingValueMaps::json_schema();
+    let properties = schema["properties"].as_object().unwrap();
+
+    assert_enum_keyed_map_value(properties, "sample_value", &sample_schema);
+    assert_enum_keyed_map_value(
+        properties,
+        "sample_array",
+        &serde_json::json!({ "type": "array", "items": sample_schema }),
+    );
+}
+
+/// A `Vec` map value is an array of siblings on the wire, so the member schema has to admit that
+/// form and turn away the single sibling object a dropped array wrap would have accepted.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_enum_keyed_sibling_array_member_matches_the_serialized_form() {
+    let sample = MetricSample {
+        label: "d".to_owned(),
+    };
+    let maps = EnumKeyedSiblingValueMaps {
+        sample_array: HashMap::from([(MetricSlot::Daily, vec![sample.clone()])]),
+        sample_value: HashMap::new(),
+    };
+    let payload = serde_json::to_value(&maps).unwrap();
+    let member = &EnumKeyedSiblingValueMaps::json_schema()["properties"]["sample_array"]["properties"]
+        ["Daily"];
+
+    assert_eq!(
+        member["type"],
+        json_type_name(&payload["sample_array"]["Daily"]),
+        "in: {member}"
+    );
+    assert_eq!(member["items"], MetricSample::json_schema(), "in: {member}");
+    assert_ne!(
+        member["type"],
+        json_type_name(&serde_json::to_value(&sample).unwrap()),
+        "in: {member}"
+    );
+}
+
+#[test]
+#[cfg(all(feature = "typescript", feature = "zod"))]
+fn test_enum_keyed_sibling_value_maps_typescript_generation() {
+    let ts_definition = EnumKeyedSiblingValueMaps::ts_definition();
+
+    assert!(
+        ts_definition.contains("sample_value: Partial<Record<MetricSlot, MetricSample>>;"),
+        "Got: {ts_definition}"
+    );
+    assert!(
+        ts_definition.contains("sample_array: Partial<Record<MetricSlot, Array<MetricSample>>>;"),
+        "Got: {ts_definition}"
+    );
+
+    let zod_schema = EnumKeyedSiblingValueMaps::zod_schema();
+    assert!(
+        zod_schema.contains("sample_value: z.record(MetricSlot$Schema, MetricSample$Schema)"),
+        "Got: {zod_schema}"
+    );
+    assert!(
+        zod_schema
+            .contains("sample_array: z.record(MetricSlot$Schema, z.array(MetricSample$Schema))"),
         "Got: {zod_schema}"
     );
 }
