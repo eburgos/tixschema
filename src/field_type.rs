@@ -352,6 +352,54 @@ impl FieldDef {
         }
     }
 
+    /// The name of the first `OsString`/`OsStr` this field reaches, at any depth.
+    ///
+    /// Neither has a primitive mapping and neither can get one: serde writes them as an externally
+    /// tagged enum whose variant is the target platform — `{"Unix":[u8, …]}` or
+    /// `{"Windows":[u16, …]}` — so the same Rust field has two wire forms and no schema can
+    /// describe both. Left unmapped they read as an ordinary `SiblingType`, and the generated code
+    /// would reference a schema module the user never wrote; the caller turns this into a guard
+    /// error naming the field instead.
+    ///
+    /// Recurses through `SiblingType` generics, `Map` keys/values, and `Tuple` elements.
+    pub fn os_string_name(&self) -> Option<&str> {
+        match &self.field_type {
+            FieldDefType::SiblingType(name, generics) => {
+                if matches!(name.as_str(), "OsString" | "OsStr") {
+                    return Some(name);
+                }
+                generics.iter().find_map(Self::os_string_name)
+            }
+            FieldDefType::Map(key, value) => {
+                key.os_string_name().or_else(|| value.os_string_name())
+            }
+            FieldDefType::Tuple(elements) => elements.iter().find_map(Self::os_string_name),
+            FieldDefType::Unknown
+            | FieldDefType::StringLiteral(_)
+            | FieldDefType::Boolean
+            | FieldDefType::String
+            | FieldDefType::U8
+            | FieldDefType::U16
+            | FieldDefType::U32
+            | FieldDefType::U64
+            | FieldDefType::I8
+            | FieldDefType::I16
+            | FieldDefType::I32
+            | FieldDefType::I64
+            | FieldDefType::Usize
+            | FieldDefType::Isize
+            | FieldDefType::F32
+            | FieldDefType::F64 => None,
+            #[cfg(feature = "object_id")]
+            FieldDefType::ObjectId => None,
+            #[cfg(feature = "chrono")]
+            FieldDefType::NaiveDate
+            | FieldDefType::NaiveTime
+            | FieldDefType::NaiveDateTime
+            | FieldDefType::DateTime => None,
+        }
+    }
+
     /// Rewrites any `Self` type reference to the concrete enclosing type name.
     ///
     /// A recursive type may refer to itself with the `Self` keyword
@@ -1028,9 +1076,12 @@ fn get_field_def_type_or_sibling(t_name: &str) -> FieldDefType {
     }
     match t_name {
         "bool" => FieldDefType::Boolean,
-        // `str` is `String`'s borrowed form and writes the same JSON string. It is reachable only
-        // behind a wrapper or a reference, both of which the parser reads through to land here.
-        "String" | "PathBuf" | "str" => FieldDefType::String,
+        // `str` and `Path` are the borrowed forms of `String` and `PathBuf`, and each writes the
+        // same JSON string its owned form does. Both are reachable only behind a wrapper or a
+        // reference, and the parser reads through either to land here. `OsString`/`OsStr` are
+        // deliberately absent: serde writes them as an externally tagged enum, not a string, so
+        // they fall through to `SiblingType` and are rejected by `os_string_name`.
+        "String" | "PathBuf" | "str" | "Path" => FieldDefType::String,
         "Value" => FieldDefType::Unknown,
         "u8" => FieldDefType::U8,
         "u16" => FieldDefType::U16,
