@@ -309,12 +309,28 @@ pub fn strip_examples_from_docs(docs: &[String]) -> Vec<String> {
     result
 }
 
+/// The escape body a JavaScript regex literal spells a line terminator with, i.e. what follows
+/// the backslash. The literal grammar excludes a raw line terminator outright, both on its own
+/// and as the character a backslash escapes, so these are the only spellings available.
+#[cfg(feature = "zod")]
+const fn js_line_terminator_escape(ch: char) -> Option<&'static str> {
+    match ch {
+        '\n' => Some("n"),
+        '\r' => Some("r"),
+        '\u{2028}' => Some("u2028"),
+        '\u{2029}' => Some("u2029"),
+        _ => None,
+    }
+}
+
 /// Escapes a regex pattern for splicing between the `/` delimiters of a JavaScript regex literal.
 ///
-/// The pattern is already a regex, so the delimiter is the only character the literal syntax adds
-/// a meaning to: every unescaped `/` becomes `\/`. A backslash escape is consumed whole, which
-/// keeps an authored `\/` from gaining a second backslash and keeps a literal `\\` from being read
-/// as the escape for the `/` that follows it.
+/// The pattern is already a regex, so what needs work is what the literal syntax alone gives a
+/// meaning to: the `/` delimiter, which becomes `\/`, and a raw line terminator, which the literal
+/// cannot carry at all and so becomes its escape. A backslash escape is consumed whole, which keeps
+/// an authored `\/` from gaining a second backslash and keeps a literal `\\` from being read as the
+/// escape for the `/` that follows it. A backslash before a raw line terminator is an identity
+/// escape, and the escape form denotes that same character.
 #[cfg(feature = "zod")]
 pub fn escape_js_regex_literal(pattern: &str) -> String {
     let mut result = String::with_capacity(pattern.len());
@@ -324,11 +340,20 @@ pub fn escape_js_regex_literal(pattern: &str) -> String {
             '\\' => {
                 result.push('\\');
                 if let Some(escaped) = chars.next() {
-                    result.push(escaped);
+                    match js_line_terminator_escape(escaped) {
+                        Some(escape) => result.push_str(escape),
+                        None => result.push(escaped),
+                    }
                 }
             }
             '/' => result.push_str("\\/"),
-            _ => result.push(ch),
+            _ => match js_line_terminator_escape(ch) {
+                Some(escape) => {
+                    result.push('\\');
+                    result.push_str(escape);
+                }
+                None => result.push(ch),
+            },
         }
     }
     result
