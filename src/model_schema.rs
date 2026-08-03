@@ -602,6 +602,93 @@ fn enum_cfg_attr_guard_errors(
         .collect()
 }
 
+/// The `compile_error!` tokens for a branded newtype whose inner type is `Option`, or `None` for
+/// every other inner type.
+///
+/// The shape is refused outright instead of being guarded, because no attribute can repair it.
+/// `#[serde(transparent)]` puts the inner value on the wire by itself, so a `None` arrives as
+/// `null`, and nothing suppresses that: `skip_serializing_if` needs a key to omit and a
+/// transparent newtype has none. Meanwhile every generated surface contradicts that wire — the
+/// TypeScript brand renders `T | undefined & $brand<"Name">`, which parses as
+/// `T | (undefined & $brand<"Name">)` and so admits an unbranded `T`; the Zod schema brands a
+/// `z.union([T, z.undefined()])` while its own annotation still claims the un-unioned inner; and
+/// the JSON schema keeps the inner's `type`, which rejects `null`. The generic arm is no better:
+/// it renders the type parameter and drops the `Option` entirely.
+///
+/// `is_optional` off the same `get_field_def` call the renderers make keeps the guard and the
+/// contract from ever disagreeing about what counts as an `Option`.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn branded_option_inner_error(
+    name: &Ident,
+    inner_field: &Field,
+) -> Option<proc_macro2::TokenStream> {
+    get_field_def("_inner", &inner_field.ty, "")
+        .is_optional
+        .then(|| {
+            syn::Error::new_spanned(
+                inner_field,
+                format!(
+                    "model_schema: branded newtype `{name}` wraps an `Option`, which has no \
+                     representable schema: #[serde(transparent)] writes a `None` to the wire as \
+                     `null` (skip_serializing_if cannot suppress it — a transparent newtype has \
+                     no key to omit), while the generated brand renders the inner type alone. \
+                     Brand the inner type and make the use site optional instead: `Option<{name}>`."
+                ),
+            )
+            .to_compile_error()
+        })
+}
+
+/// The `compile_error!` tokens for every `cfg_attr`-wrapped serde attribute a branded newtype
+/// carries: on the type and on its inner slot, which is positional and so has no name to print.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+fn branded_cfg_attr_guard_errors(
+    item_struct: &syn::ItemStruct,
+    inner_field: &Field,
+) -> Vec<proc_macro2::TokenStream> {
+    let name = &item_struct.ident;
+    parse_serde_type_attributes(&item_struct.attrs)
+        .cfg_attr_rejection
+        .as_ref()
+        .map(|rejection| cfg_attr_guard_error(rejection, &format!("type `{name}`")))
+        .into_iter()
+        .chain(
+            parse_serde_field_attributes(&inner_field.attrs)
+                .cfg_attr_rejection
+                .as_ref()
+                .map(|rejection| cfg_attr_guard_error(rejection, &field_label(""))),
+        )
+        .collect()
+}
+
+#[cfg(all(
+    not(feature = "serde"),
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+const fn branded_cfg_attr_guard_errors(
+    _item_struct: &syn::ItemStruct,
+    _inner_field: &Field,
+) -> Vec<proc_macro2::TokenStream> {
+    Vec::new()
+}
+
+/// The `compile_error!` tokens for every guard a branded newtype violates: a `cfg_attr`-wrapped
+/// serde attribute on the type or on its inner slot, and an `Option` inner type.
+///
+/// The branded path renders the inner type straight into the brand instead of walking fields, so
+/// it has to collect these itself; the ordinary struct walk never sees a transparent newtype.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn branded_guard_errors(item_struct: &syn::ItemStruct) -> Vec<proc_macro2::TokenStream> {
+    let inner_field = item_struct.fields.iter().next().unwrap();
+    branded_cfg_attr_guard_errors(item_struct, inner_field)
+        .into_iter()
+        .chain(branded_option_inner_error(&item_struct.ident, inner_field))
+        .collect()
+}
+
 /// Processes every field of a struct, returning the regular field defs, the `#[serde(flatten)]`
 /// field defs, the per-field serde validation functions and `validate()` body fragments, and the
 /// `compile_error!` tokens for any field-level guard violations.
@@ -1382,6 +1469,12 @@ fn assemble_branded_output(parts: &BrandedNewtypeOutput) -> TokenStream {
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> TokenStream {
+    // Checked before the type is registered in the alias registry: a rejected brand emits no
+    // schema, so nothing else should be able to resolve a reference to one.
+    if let Some(output) = guard_failure_output(&item_struct, &branded_guard_errors(&item_struct)) {
+        return output;
+    }
+
     let name = item_struct.ident.clone();
     let item_name = safe_type_name(&name.to_string());
     let module_name = format!("{}_schema", to_snake_case(&item_name));
