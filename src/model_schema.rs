@@ -3272,18 +3272,19 @@ fn arrayed_json_schema_value(
     }
 }
 
-/// The JSON schema value expression for a field whose type renders inline as a scalar — arrayed
-/// when the field is a `Vec` — or `None` for the composite types (sibling references, maps,
+/// The JSON schema literal for a type that renders inline as a scalar — the object body itself,
+/// which a caller writing inside a `serde_json::json!` inlines and one needing a standalone
+/// `serde_json::Value` wraps — or `None` for the composite types (sibling references, maps,
 /// tuples, unknowns) that have no inline rendering.
 ///
-/// `is_optional` is not consulted: how an absent value is expressed depends on the position the
-/// value sits in, so each caller wraps this base itself.
+/// Neither `is_array` nor `is_optional` is consulted: both describe the slot the value sits in,
+/// not its type, so each caller wraps this item itself.
 #[cfg(feature = "jsonschema")]
-fn scalar_field_json_schema_value(fld: &FieldDef) -> Option<proc_macro2::TokenStream> {
+fn scalar_field_json_schema_item(fld: &FieldDef) -> Option<proc_macro2::TokenStream> {
     let item_schema = match &fld.field_type {
-        FieldDefType::String => quote! { serde_json::json!({ "type": "string" }) },
+        FieldDefType::String => quote! { { "type": "string" } },
         FieldDefType::StringLiteral(literal) => {
-            quote! { serde_json::json!({ "type": "string", "const": #literal }) }
+            quote! { { "type": "string", "const": #literal } }
         }
         FieldDefType::U8
         | FieldDefType::U16
@@ -3294,35 +3295,50 @@ fn scalar_field_json_schema_value(fld: &FieldDef) -> Option<proc_macro2::TokenSt
         | FieldDefType::I32
         | FieldDefType::I64
         | FieldDefType::Usize
-        | FieldDefType::Isize => quote! { serde_json::json!({ "type": "integer" }) },
-        FieldDefType::F32 | FieldDefType::F64 => quote! { serde_json::json!({ "type": "number" }) },
-        FieldDefType::Boolean => quote! { serde_json::json!({ "type": "boolean" }) },
+        | FieldDefType::Isize => quote! { { "type": "integer" } },
+        FieldDefType::F32 | FieldDefType::F64 => quote! { { "type": "number" } },
+        FieldDefType::Boolean => quote! { { "type": "boolean" } },
         #[cfg(feature = "chrono")]
         FieldDefType::NaiveDate => {
-            quote! { serde_json::json!({ "type": "string", "format": "date" }) }
+            quote! { { "type": "string", "format": "date" } }
         }
         #[cfg(feature = "chrono")]
         FieldDefType::NaiveTime => {
-            quote! { serde_json::json!({ "type": "string", "format": "time" }) }
+            quote! { { "type": "string", "format": "time" } }
         }
         #[cfg(feature = "chrono")]
         FieldDefType::NaiveDateTime | FieldDefType::DateTime => {
-            quote! { serde_json::json!({ "type": "string", "format": "date-time" }) }
+            quote! { { "type": "string", "format": "date-time" } }
         }
         #[cfg(feature = "object_id")]
-        FieldDefType::ObjectId => quote! { serde_json::json!({
+        FieldDefType::ObjectId => quote! { {
             "type": "object",
             "properties": {
                 "$oid": { "type": "string", "pattern": "^[a-f\\d]{24}$" }
             },
             "required": ["$oid"]
-        }) },
+        } },
         FieldDefType::Unknown
         | FieldDefType::SiblingType(..)
         | FieldDefType::Map(..)
         | FieldDefType::Tuple(..) => return None,
     };
-    Some(arrayed_json_schema_value(fld, item_schema))
+    Some(item_schema)
+}
+
+/// The JSON schema value expression for a field whose type renders inline as a scalar — arrayed
+/// when the field is a `Vec` — or `None` for the composite types (sibling references, maps,
+/// tuples, unknowns) that have no inline rendering.
+///
+/// `is_optional` is not consulted: how an absent value is expressed depends on the position the
+/// value sits in, so each caller wraps this base itself.
+#[cfg(feature = "jsonschema")]
+fn scalar_field_json_schema_value(fld: &FieldDef) -> Option<proc_macro2::TokenStream> {
+    let item_schema = scalar_field_json_schema_item(fld)?;
+    Some(arrayed_json_schema_value(
+        fld,
+        quote! { serde_json::json!(#item_schema) },
+    ))
 }
 
 /// Builds the base JSON schema for a tuple element, ignoring `is_optional`.
@@ -3713,34 +3729,42 @@ fn build_map_scalar_value_schema(
     }
 }
 
+/// Wraps the shared scalar mapping as a `String`-keyed map's `additionalProperties`, or fails with
+/// a single diagnostic when the value type has no inline rendering.
+#[cfg(feature = "jsonschema")]
+fn build_map_inline_value_schema(
+    value: &FieldDef,
+    field_name_str: &str,
+) -> proc_macro2::TokenStream {
+    // Emitted instead of the property insertion, never alongside it: an insertion left in place
+    // hands the author a schema the expansion has already rejected.
+    let Some(item_schema) = scalar_field_json_schema_item(value) else {
+        let message = format!(
+            "field `{field_name_str}`: a tuple is not supported as a map value — give the value a `#[model_schema()]` struct instead"
+        );
+        return quote! { compile_error!(#message); };
+    };
+    build_map_scalar_value_schema(value, field_name_str, &item_schema)
+}
+
 /// Builds the JSON schema for a map whose key type is `String`, dispatching on the value type.
+///
+/// A `String` key enumerates nothing, so one `additionalProperties` schema stands for every
+/// member — and it is the value type's own rendering, which the key never widens.
 #[cfg(feature = "jsonschema")]
 fn build_string_key_map_value_schema(
     value: &FieldDef,
     field_name_str: &str,
 ) -> proc_macro2::TokenStream {
     match &value.field_type {
-        FieldDefType::String => {
-            build_map_scalar_value_schema(value, field_name_str, &quote! { { "type": "string" } })
+        FieldDefType::Map(inner_key, inner_value) => {
+            build_map_nested_map_value_schema(value, inner_key, inner_value, field_name_str)
         }
-        FieldDefType::U8
-        | FieldDefType::U16
-        | FieldDefType::U32
-        | FieldDefType::U64
-        | FieldDefType::I8
-        | FieldDefType::I16
-        | FieldDefType::I32
-        | FieldDefType::I64
-        | FieldDefType::Usize
-        | FieldDefType::Isize => {
-            build_map_scalar_value_schema(value, field_name_str, &quote! { { "type": "integer" } })
+        FieldDefType::SiblingType(value_type_name, value_args) => {
+            build_map_sibling_value_schema(value_type_name, value_args, field_name_str)
         }
-        FieldDefType::F32 | FieldDefType::F64 => {
-            build_map_scalar_value_schema(value, field_name_str, &quote! { { "type": "number" } })
-        }
-        FieldDefType::Boolean => {
-            build_map_scalar_value_schema(value, field_name_str, &quote! { { "type": "boolean" } })
-        }
+        // A map member's `$oid` object is closed and unpatterned, where the shared mapping's
+        // field-position rendering carries the hex pattern and leaves the object open.
         #[cfg(feature = "object_id")]
         FieldDefType::ObjectId => build_map_scalar_value_schema(
             value,
@@ -3752,22 +3776,35 @@ fn build_string_key_map_value_schema(
                 "additionalProperties": false
             } },
         ),
-        FieldDefType::Map(inner_key, inner_value) => {
-            build_map_nested_map_value_schema(value, inner_key, inner_value, field_name_str)
+        // An opaque value carries no type name to narrow with, so a member admits any value: the
+        // permissive empty schema, as in field position.
+        FieldDefType::Unknown => {
+            build_map_scalar_value_schema(value, field_name_str, &quote! { {} })
         }
-        FieldDefType::SiblingType(value_type_name, value_args) => {
-            build_map_sibling_value_schema(value_type_name, value_args, field_name_str)
-        }
-        _ => {
-            quote! {
-                properties.insert(#field_name_str.to_string(), {
-                    serde_json::json!({
-                        "type": "object",
-                        "additionalProperties": true
-                    })
-                });
-            }
-        }
+        // The shared mapping renders every type named here except a tuple, which lands on the lone
+        // diagnostic. Named exhaustively rather than caught by a wildcard: a new variant must be
+        // given a member schema, not silently widened into an open object.
+        FieldDefType::Boolean
+        | FieldDefType::F32
+        | FieldDefType::F64
+        | FieldDefType::I8
+        | FieldDefType::I16
+        | FieldDefType::I32
+        | FieldDefType::I64
+        | FieldDefType::Isize
+        | FieldDefType::String
+        | FieldDefType::StringLiteral(_)
+        | FieldDefType::Tuple(..)
+        | FieldDefType::U8
+        | FieldDefType::U16
+        | FieldDefType::U32
+        | FieldDefType::U64
+        | FieldDefType::Usize => build_map_inline_value_schema(value, field_name_str),
+        #[cfg(feature = "chrono")]
+        FieldDefType::DateTime
+        | FieldDefType::NaiveDate
+        | FieldDefType::NaiveDateTime
+        | FieldDefType::NaiveTime => build_map_inline_value_schema(value, field_name_str),
     }
 }
 

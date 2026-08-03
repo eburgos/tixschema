@@ -36,7 +36,7 @@ struct DateMap {
 }
 
 // An enum-keyed map enumerates its keys, so every member carries the value schema outright
-// instead of the open `additionalProperties` the String-keyed `DateMap` above uses.
+// instead of the single `additionalProperties` the String-keyed `DateMap` above carries.
 #[model_schema()]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -51,6 +51,20 @@ enum ScheduleSlot {
 struct SlotSchedule {
     dates: HashMap<ScheduleSlot, NaiveDate>,
     timestamps: HashMap<ScheduleSlot, DateTime<Utc>>,
+}
+
+// A String-keyed map has no key list to enumerate, so one `additionalProperties` schema stands for
+// every member — and it is the value type's own rendering, arrayed and nullable as the value is.
+#[model_schema()]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq)]
+struct ChronoValueMaps {
+    dates: HashMap<String, NaiveDate>,
+    local_datetimes: HashMap<String, NaiveDateTime>,
+    optional_dates: HashMap<String, Option<NaiveDate>>,
+    times: HashMap<String, NaiveTime>,
+    timestamps: HashMap<String, DateTime<Utc>>,
+    windows: HashMap<String, Vec<NaiveTime>>,
 }
 
 // Test struct with NaiveDate field.
@@ -173,6 +187,20 @@ fn test_chrono_types_constructible() {
     };
     assert_eq!(slot_schedule.dates.len(), 2);
     assert!(slot_schedule.timestamps.is_empty());
+    let chrono_value_maps = ChronoValueMaps {
+        dates: HashMap::from([("opening".to_owned(), date)]),
+        local_datetimes: HashMap::new(),
+        optional_dates: HashMap::from([("closing".to_owned(), None)]),
+        times: HashMap::new(),
+        timestamps: HashMap::new(),
+        windows: HashMap::from([("opening".to_owned(), vec![time])]),
+    };
+    assert_eq!(chrono_value_maps.dates.len(), 1);
+    assert_eq!(chrono_value_maps.optional_dates["closing"], None);
+    assert_eq!(chrono_value_maps.windows["opening"], vec![time]);
+    assert!(chrono_value_maps.local_datetimes.is_empty());
+    assert!(chrono_value_maps.timestamps.is_empty());
+    assert!(chrono_value_maps.times.is_empty());
     let values = [
         FixedValue::Alphanumeric(String::new()),
         FixedValue::Boolean(false),
@@ -471,6 +499,61 @@ fn test_enum_keyed_chrono_map_json_schema() {
             );
         }
     }
+}
+
+/// A chrono value is rendered where the map's members are described, exactly as it is in field
+/// position: a `String` key opens the set of member names, never the schema those members carry.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_string_keyed_chrono_map_json_schema() {
+    let schema = ChronoValueMaps::json_schema();
+    let properties = schema["properties"].as_object().unwrap();
+
+    for (field_name, expected_value_schema) in [
+        (
+            "dates",
+            serde_json::json!({ "type": "string", "format": "date" }),
+        ),
+        (
+            "local_datetimes",
+            serde_json::json!({ "type": "string", "format": "date-time" }),
+        ),
+        (
+            "optional_dates",
+            serde_json::json!({
+                "anyOf": [{ "type": "string", "format": "date" }, { "type": "null" }]
+            }),
+        ),
+        (
+            "times",
+            serde_json::json!({ "type": "string", "format": "time" }),
+        ),
+        (
+            "timestamps",
+            serde_json::json!({ "type": "string", "format": "date-time" }),
+        ),
+        (
+            "windows",
+            serde_json::json!({
+                "type": "array",
+                "items": { "type": "string", "format": "time" }
+            }),
+        ),
+    ] {
+        let field = &properties[field_name];
+        assert_eq!(field["type"], "object", "in: {field}");
+        assert_eq!(
+            field["additionalProperties"], expected_value_schema,
+            "in: {field}"
+        );
+    }
+
+    let events = &DateMap::json_schema()["properties"]["events"];
+    assert_eq!(
+        events["additionalProperties"],
+        serde_json::json!({ "type": "string", "format": "date-time" }),
+        "in: {events}"
+    );
 }
 
 // ========== Enum Tests (Original Use Case) ==========
