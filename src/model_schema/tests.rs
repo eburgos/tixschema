@@ -10,6 +10,9 @@ use super::{
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use super::branded_guard_errors;
 
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+use syn::spanned::Spanned as _;
+
 #[test]
 fn ts_optional_ok_on_option_field() {
     validate_ts_optional_flag(true, true).unwrap();
@@ -513,4 +516,126 @@ fn compliant_branded_newtype_passes_every_guard() {
         struct UserId(#[cfg_attr(feature = "serde", doc = "documented in serde builds")] pub String);
     });
     assert!(errors.is_empty(), "got: {errors:?}");
+}
+
+#[test]
+fn no_display_is_accepted_as_a_bare_flag_and_as_a_named_bool() {
+    assert!(super::parse_model_schema_args(quote::quote! { no_display }).no_display);
+    assert!(super::parse_model_schema_args(quote::quote! { no_display = true }).no_display);
+    assert!(!super::parse_model_schema_args(quote::quote! { no_display = false }).no_display);
+    assert!(!super::parse_model_schema_args(proc_macro2::TokenStream::new()).no_display);
+}
+
+/// The bare flag shares the argument list with the `key = value` args, so parsing it must not
+/// cost the others: a parse failure here silently drops every argument.
+#[test]
+fn no_display_coexists_with_the_named_args() {
+    let args = super::parse_model_schema_args(quote::quote! {
+        name = "Slug", pattern = "^[a-z]+$", minLength = 1, maxLength = 8, no_display
+    });
+    assert_eq!(args.name_override.as_deref(), Some("Slug"));
+    assert_eq!(args.pattern.as_deref(), Some("^[a-z]+$"));
+    assert_eq!(args.min_length, Some(1));
+    assert_eq!(args.max_length, Some(8));
+    assert!(args.no_display);
+}
+
+/// Builds the `Display` assertion for the sole field of `source`, parsed from text so its spans
+/// carry file locations and `source_text()` can report what they point at.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn display_assertion(source: &str) -> proc_macro2::TokenStream {
+    let item: syn::ItemStruct = syn::parse_str(source).unwrap();
+    let field = item.fields.iter().next().unwrap();
+    super::build_branded_display_assertion(field, &item.generics)
+}
+
+/// Collects the source text each token in `tokens` points at, skipping the macro-synthesized
+/// tokens that carry no location.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn located_source_texts(tokens: &proc_macro2::TokenStream) -> Vec<String> {
+    let mut texts = Vec::new();
+    for tree in tokens.clone() {
+        match &tree {
+            proc_macro2::TokenTree::Group(group) => {
+                texts.extend(located_source_texts(&group.stream()));
+            }
+            proc_macro2::TokenTree::Ident(_)
+            | proc_macro2::TokenTree::Punct(_)
+            | proc_macro2::TokenTree::Literal(_) => texts.extend(tree.span().source_text()),
+        }
+    }
+    texts
+}
+
+/// Without a span carried over from the user's source there is no source text to report, which is
+/// what the assertion below would silently degrade into.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn the_span_probe_sees_an_unlocated_token_stream() {
+    let tokens = quote::quote! { const _: () = {}; };
+    assert!(tokens.span().source_text().is_none());
+    assert!(located_source_texts(&tokens).is_empty());
+}
+
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn display_assertion_names_the_trait_and_points_at_the_inner_field() {
+    let tokens = display_assertion("pub struct Tags(pub Vec<String>);");
+    let rendered = tokens.to_string();
+    assert!(
+        rendered.contains("std :: fmt :: Display"),
+        "got: {rendered}"
+    );
+    assert!(rendered.contains("Vec < String >"), "got: {rendered}");
+    assert_eq!(tokens.span().source_text().as_deref(), Some("Vec<String>"));
+}
+
+/// A `const` item cannot name the struct's generic parameters, and the `Display` bound the impl
+/// adds to each type parameter already reports the violation at the instantiation site.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn display_assertion_is_skipped_when_the_inner_names_a_generic_param() {
+    for source in [
+        "pub struct DocumentId<IdType>(pub IdType);",
+        "pub struct Wrapped<T>(pub Vec<T>);",
+        "pub struct Borrowed<'a>(pub &'a str);",
+        "pub struct Fixed<const N: usize>(pub [u8; N]);",
+    ] {
+        let tokens = display_assertion(source);
+        assert!(tokens.is_empty(), "expected no assertion for {source}");
+    }
+}
+
+/// Locks the delegating impl: the tokens are the ones branded newtypes have always carried, and
+/// every located one points at the inner field so a non-`Display` inner is blamed there.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn display_impl_delegates_from_the_inner_field_span() {
+    let item: syn::ItemStruct = syn::parse_str("pub struct UserId(pub String);").unwrap();
+    let field = item.fields.iter().next().unwrap();
+    let tokens = super::build_branded_display_impl(&item.generics, &item.ident, field);
+    assert_eq!(
+        tokens.to_string(),
+        "impl std :: fmt :: Display for UserId { fn fmt (& self , f : & mut std :: fmt :: Formatter < '_ >) -> std :: fmt :: Result { self . 0 . fmt (f) } }"
+    );
+    assert_eq!(
+        located_source_texts(&tokens).join(" "),
+        "UserId String String String String String String",
+        "the interpolated type name, then `self . 0 . fmt (f)` on the inner field"
+    );
+}
+
+/// The generic impl keeps its own `Display` bound on every type parameter; that bound, not the
+/// skipped assertion, is what carries the requirement.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn generic_display_impl_bounds_every_type_parameter() {
+    let item: syn::ItemStruct =
+        syn::parse_str("pub struct DocumentId<IdType>(pub IdType);").unwrap();
+    let field = item.fields.iter().next().unwrap();
+    let tokens = super::build_branded_display_impl(&item.generics, &item.ident, field);
+    assert_eq!(
+        tokens.to_string(),
+        "impl < IdType : std :: fmt :: Display > std :: fmt :: Display for DocumentId < IdType > { fn fmt (& self , f : & mut std :: fmt :: Formatter < '_ >) -> std :: fmt :: Result { self . 0 . fmt (f) } }"
+    );
 }

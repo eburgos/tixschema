@@ -658,6 +658,47 @@ mod branded_display_tests {
     }
 }
 
+// A container inner type implements no Display, so `no_display` opts the brand out of the Display
+// impl and of the assertion that guards it. Compiling this module is the assertion: emitting
+// either one over a `Vec` inner is a hard error.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+mod branded_no_display_tests {
+    use super::*;
+
+    #[model_schema(no_display)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct Tags(pub Vec<String>);
+
+    #[model_schema(no_display)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct TagList<T>(pub Vec<T>);
+
+    #[test]
+    fn test_no_display_brand_wraps_a_container() {
+        let tags = Tags(vec!["a".to_owned(), "b".to_owned()]);
+        assert_eq!(tags.0, vec!["a".to_owned(), "b".to_owned()]);
+
+        let list = TagList(vec![1_u8, 2_u8]);
+        assert_eq!(list.0, vec![1_u8, 2_u8]);
+    }
+
+    #[cfg(feature = "typescript")]
+    #[test]
+    fn test_no_display_brand_still_generates_typescript() {
+        let ts = Tags::ts_definition();
+        assert!(ts.contains("export type Tags"), "Got: {ts}");
+    }
+
+    #[cfg(feature = "zod")]
+    #[test]
+    fn test_no_display_brand_still_generates_zod() {
+        let zod = Tags::zod_schema();
+        assert!(zod.contains("brand<\"Tags\">"), "Got: {zod}");
+    }
+}
+
 // zod=OFF, typescript=ON tests
 #[cfg(all(feature = "typescript", not(feature = "zod")))]
 mod no_zod_tests {
