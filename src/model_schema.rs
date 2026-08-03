@@ -50,8 +50,11 @@ use crate::features::jsonschema::{
 #[cfg(any(feature = "typescript", feature = "zod"))]
 use crate::utils::{get_enum_docs, get_struct_docs, strip_examples_from_docs};
 
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+use crate::utils::compute_alias_export_name;
+
 #[cfg(feature = "typescript")]
-use crate::utils::{compute_alias_export_name, format_docs_for_ts, get_item_docs};
+use crate::utils::{format_docs_for_ts, get_item_docs};
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::register_alias_info;
@@ -209,7 +212,12 @@ pub fn exec_model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
     }
 }
 
-#[cfg(feature = "typescript")]
+/// The alias schema module is referenced by all three schema features — `typescript` and `zod`
+/// through the alias's registered export name, `jsonschema` through a Rust path to
+/// `#module_ident::Schema::json_schema()`. So the module and its `register_alias_info` call are
+/// driven by the union: gating them on `typescript` alone left the jsonschema references
+/// dangling. The module's *contents* are chosen per feature while building the tokens.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn process_type_alias(item_type: ItemType, args: &ModelSchemaArgs) -> TokenStream {
     let mut alias = item_type;
     alias
@@ -222,29 +230,11 @@ fn process_type_alias(item_type: ItemType, args: &ModelSchemaArgs) -> TokenStrea
     let module_name = format!("{}_schema", to_snake_case(&export_name));
     let module_ident = Ident::new(&module_name, rust_ident.span());
 
-    let docs_vec =
-        get_item_docs(&alias.attrs).unwrap_or_else(|| vec![export_name.clone(), String::new()]);
-    let docs_formatted = format_docs_for_ts(&docs_vec, &export_name);
-
     register_alias_info(&rust_ident_str, &export_name, &module_name);
-
-    let generics: Vec<String> = alias
-        .generics
-        .params
-        .iter()
-        .filter_map(|param| {
-            if let GenericParam::Type(tp) = param {
-                Some(crate::safe_type_name(&tp.ident.to_string()))
-            } else {
-                None
-            }
-        })
-        .collect();
 
     let alias_field_def = get_field_def(export_name.as_str(), &alias.ty, "");
 
-    let ts_method =
-        generate_ts_alias_method(&docs_formatted, &export_name, &generics, &alias_field_def);
+    let ts_method = generate_alias_ts_definition_method(&alias, &export_name, &alias_field_def);
     let json_schema_method = generate_alias_json_schema_stub();
     let zod_method = generate_alias_zod_method(&export_name, &alias_field_def);
 
@@ -268,7 +258,7 @@ fn process_type_alias(item_type: ItemType, args: &ModelSchemaArgs) -> TokenStrea
     TokenStream::from(output)
 }
 
-#[cfg(not(feature = "typescript"))]
+#[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
 fn process_type_alias(item_type: ItemType, _args: &ModelSchemaArgs) -> TokenStream {
     let mut alias = item_type;
     alias
@@ -4953,6 +4943,43 @@ fn generate_discriminated_enum_zod_schema_method(
     }
 }
 
+/// Builds the alias module's `ts_definition()`, or nothing when `typescript` is off. The doc
+/// block and the generic parameter list are only meaningful to TypeScript, so they are gathered
+/// inside the gate rather than by the caller.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn generate_alias_ts_definition_method(
+    alias: &ItemType,
+    export_name: &str,
+    field_def: &FieldDef,
+) -> proc_macro2::TokenStream {
+    #[cfg(feature = "typescript")]
+    {
+        let docs_vec = get_item_docs(&alias.attrs)
+            .unwrap_or_else(|| vec![export_name.to_owned(), String::new()]);
+        let docs_formatted = format_docs_for_ts(&docs_vec, export_name);
+
+        let generics: Vec<String> = alias
+            .generics
+            .params
+            .iter()
+            .filter_map(|param| {
+                if let GenericParam::Type(tp) = param {
+                    Some(crate::safe_type_name(&tp.ident.to_string()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        generate_ts_alias_method(&docs_formatted, export_name, &generics, field_def)
+    }
+    #[cfg(not(feature = "typescript"))]
+    {
+        let _: &_ = &(alias, export_name, field_def);
+        quote! {}
+    }
+}
+
 #[cfg(feature = "typescript")]
 fn generate_ts_alias_method(
     docs: &str,
@@ -4983,7 +5010,7 @@ fn generate_ts_alias_method(
     }
 }
 
-#[cfg(feature = "typescript")]
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn generate_alias_json_schema_stub() -> proc_macro2::TokenStream {
     #[cfg(feature = "jsonschema")]
     {
@@ -5003,7 +5030,7 @@ fn generate_alias_json_schema_stub() -> proc_macro2::TokenStream {
     }
 }
 
-#[cfg(feature = "typescript")]
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn generate_alias_zod_method(export_name: &str, field_def: &FieldDef) -> proc_macro2::TokenStream {
     #[cfg(feature = "zod")]
     {

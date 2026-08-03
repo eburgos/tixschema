@@ -407,20 +407,33 @@ fn discriminated_enum_ts_definition_carries_no_cfg_attribute() {
     assert_no_cfg_attribute(&tokens, "generate_discriminated_enum_ts_definition_method");
 }
 
-#[cfg(feature = "typescript")]
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn alias_json_schema_stub_carries_no_cfg_attribute() {
     let tokens = super::generate_alias_json_schema_stub();
     assert_no_cfg_attribute(&tokens, "generate_alias_json_schema_stub");
 }
 
-#[cfg(feature = "typescript")]
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn alias_zod_method_carries_no_cfg_attribute() {
     let ty: syn::Type = syn::parse_quote!(String);
     let field_def = super::get_field_def("AliasType", &ty, "");
     let tokens = super::generate_alias_zod_method("AliasType", &field_def);
     assert_no_cfg_attribute(&tokens, "generate_alias_zod_method");
+}
+
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn alias_ts_definition_method_carries_no_cfg_attribute() {
+    let alias: syn::ItemType = syn::parse_quote!(
+        /// An aliased identifier.
+        pub type AliasIdent = String;
+    );
+    let ty: syn::Type = syn::parse_quote!(String);
+    let field_def = super::get_field_def("AliasType", &ty, "");
+    let tokens = super::generate_alias_ts_definition_method(&alias, "AliasType", &field_def);
+    assert_no_cfg_attribute(&tokens, "generate_alias_ts_definition_method");
 }
 
 /// Collects a branded newtype's guard failures as rendered `compile_error!` token strings.
