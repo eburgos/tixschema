@@ -14,7 +14,10 @@ use super::{
 };
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-use super::{AliasKind, branded_guard_errors, register_alias_info};
+use super::{
+    AliasKind, alias_map_key_guard_error, branded_guard_errors, check_non_enum_map_key,
+    register_alias_info,
+};
 
 #[cfg(feature = "typescript")]
 use super::tuple_struct_ts_body;
@@ -664,6 +667,99 @@ fn a_path_field_is_left_alone() {
         });
         assert!(error.is_none(), "for {ty}, got: {error:?}");
     }
+}
+
+/// Runs the field walk the way [`super::process_field`] does and renders the map-key guard failure
+/// the field's written type earns, or the empty string when it earns none.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn field_map_key_error(field_type: &proc_macro2::TokenStream) -> String {
+    let item: syn::ItemStruct = syn::parse_quote! {
+        struct Report {
+            counts: #field_type,
+        }
+    };
+    let field = item.fields.iter().next().unwrap();
+    let field_def = get_field_def("counts", &field.ty, "");
+    check_non_enum_map_key(field, &field_def, &field_label("counts"))
+        .err()
+        .map_or_else(String::new, |err| err.to_compile_error().to_string())
+}
+
+/// The registry proves a struct-keyed map has no members to name, and it proves it whatever surface
+/// is being generated: the key is read off the field every one of them renders from, so the same
+/// source cannot be a schema under one feature set and a refusal under another.
+///
+/// Every depth the key can be written at is covered, those being the positions the surfaces reach
+/// it through: a field's own map, a map nested under either key flavor, a tuple slot, a sequence
+/// wrapper, and a sibling's generic argument.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_map_key_proved_to_lack_enum_members_is_refused_wherever_it_is_written() {
+    register_alias_info("Doc", "Doc", "doc_schema", AliasKind::NoEnumMembers);
+    register_alias_info("Slot", "Slot", "slot_schema", AliasKind::EnumMembers);
+    for field_type in [
+        quote::quote! { HashMap<Doc, u32> },
+        quote::quote! { HashMap<String, HashMap<Doc, u32>> },
+        quote::quote! { HashMap<Slot, HashMap<Doc, u32>> },
+        quote::quote! { Vec<HashMap<Doc, u32>> },
+        quote::quote! { Option<HashMap<Doc, u32>> },
+        quote::quote! { (String, HashMap<Doc, u32>) },
+        quote::quote! { Wrapper<HashMap<Doc, u32>> },
+        quote::quote! { HashMap<Doc, HashMap<Doc, u32>> },
+    ] {
+        let error = field_map_key_error(&field_type);
+        assert!(error.contains("compile_error"), "for {field_type}: {error}");
+        assert!(
+            error.contains("field `counts`"),
+            "for {field_type}: {error}"
+        );
+        assert!(
+            error.contains("a map key must be a plain"),
+            "for {field_type}: {error}"
+        );
+        assert!(error.contains("Doc"), "for {field_type}: {error}");
+    }
+}
+
+/// The guard is a filter, never a rewrite: a key the registry names as a plain enum, one it never
+/// saw registered, and one no position enumerates all keep the field they had.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_map_key_that_may_have_enum_members_is_left_alone() {
+    register_alias_info("Slot", "Slot", "slot_schema", AliasKind::EnumMembers);
+    for field_type in [
+        quote::quote! { HashMap<Slot, u32> },
+        quote::quote! { HashMap<String, u32> },
+        quote::quote! { HashMap<Ghost, u32> },
+        quote::quote! { HashMap<u32, u64> },
+        quote::quote! { HashMap<String, HashMap<Slot, u32>> },
+    ] {
+        let error = field_map_key_error(&field_type);
+        assert!(error.is_empty(), "for {field_type}, got: {error}");
+    }
+}
+
+/// An alias publishes the target type's own schema, so a target reaching a key with no members
+/// leaves every surface naming keys nothing can supply — the same refusal a field of that type
+/// earns, named for the alias the author wrote.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn an_alias_targeting_a_map_key_with_no_members_is_refused() {
+    register_alias_info("Doc", "Doc", "doc_schema", AliasKind::NoEnumMembers);
+    let alias: syn::ItemType = syn::parse_quote! {
+        pub type CountsByDoc = HashMap<Doc, u32>;
+    };
+    let field_def = get_field_def("CountsByDocType", &alias.ty, "");
+    let error = alias_map_key_guard_error(&alias, "CountsByDocType", &field_def)
+        .unwrap_or_default()
+        .to_string();
+    assert!(error.contains("compile_error"), "got: {error}");
+    assert!(
+        error.contains("type alias `CountsByDocType`"),
+        "got: {error}"
+    );
+    assert!(error.contains("a map key must be a plain"), "got: {error}");
+    assert!(error.contains("Doc"), "got: {error}");
 }
 
 /// Runs the field walk the way [`super::process_field`] does and renders the guard failures its
