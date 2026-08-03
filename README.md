@@ -821,7 +821,7 @@ match reg.validate() {
 
 The macro also generates into the type's schema module:
 - `validate_{field}_value(&FieldType) -> Result<(), String>` -- pure static validator per field
-- `deserialize_{field}(D) -> Result<FieldType, E>` -- serde hook that calls the static validator, emitted for a bare field only
+- `deserialize_{field}(D) -> Result<FieldType, E>` -- serde hook that calls the static validator
 
 #### Constraints under `Option`, wrappers, and sequences
 
@@ -840,7 +840,9 @@ pub struct Article {
 }
 ```
 
-Serde-side enforcement is narrower: the generated `deserialize_{field}` hook answers for the constrained value itself, so it is attached only when the field is written bare. A wrapped field is checked by `validate()`.
+Deserialization applies the same reach. A bare field's hook answers for the constrained value itself; a wrapped field's hook deserializes the field's own declared type and then runs that same walk over it, so a payload carrying a value the constraint rejects is rejected as it is read, not only when `validate()` is called. The two differ in one thing: `validate()` answers with every violation in the instance, while a `Deserializer` answers with one error, so the read stops at the first.
+
+A field whose key may be left out keeps that reading: an `Option` written outermost (under any number of transparent wrappers) is given `#[serde(default)]` alongside the hook, since a `deserialize_with` otherwise turns a missing key into an error. A field that writes its own `default` keeps the one it wrote.
 
 ### Literal Values
 

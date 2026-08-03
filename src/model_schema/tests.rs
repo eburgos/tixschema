@@ -5,9 +5,11 @@ use super::{
 
 #[cfg(feature = "serde")]
 use super::{
-    build_field_validation, cfg_attr_guard_error, check_optional_field_serialization,
-    collect_untagged_members, constrained_shape, enum_cfg_attr_guard_errors, field_label,
-    get_field_def, parse_serde_field_attributes, parse_serde_type_attributes,
+    ModelSchemaPropMeta, build_field_validation, cfg_attr_guard_error,
+    check_optional_field_serialization, collect_untagged_members, constrained_shape,
+    enum_cfg_attr_guard_errors, field_label, generate_numeric_validation_code,
+    generate_string_validation_code, get_field_def, needs_injected_default,
+    parse_serde_field_attributes, parse_serde_type_attributes,
 };
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -2391,6 +2393,201 @@ fn mixed_wrappers_compose_in_written_order() {
         emitted_validation("Option<Arc<[String]>>"),
         "{ let value_0 = & self . field ; if let Some (value_1) = value_0 { let value_2 = & * * value_1 ; for value_3 in value_2 { if let Err (e) = check (value_3) { errors . push (e) ; } } } }"
     );
+}
+
+/// The schema-module items emitted for a `minLength` field spelled `spelling`, as tokens.
+#[cfg(feature = "serde")]
+fn emitted_string_module(spelling: &str) -> String {
+    let ty: syn::Type = syn::parse_str(spelling).unwrap();
+    let shape = constrained_shape(&ty).unwrap();
+    let meta = ModelSchemaPropMeta {
+        min_length: Some(3),
+        ..ModelSchemaPropMeta::default()
+    };
+    generate_string_validation_code("field", &meta, &shape, &ty)
+        .module_items
+        .to_string()
+}
+
+/// Just the deserializer of [`emitted_string_module`], which is everything after the validator.
+#[cfg(feature = "serde")]
+fn emitted_string_deserializer(spelling: &str) -> String {
+    let module = emitted_string_module(spelling);
+    assert!(
+        module.contains("pub fn deserialize_field"),
+        "no deserializer emitted for {spelling}: {module}"
+    );
+    module[module.find("pub fn deserialize_field").unwrap()..].to_owned()
+}
+
+/// The one deserializer whose body predates the reach-through and must not move: it is what every
+/// already-generated bare field is gated by.
+#[cfg(feature = "serde")]
+#[test]
+fn a_bare_field_deserializes_the_constrained_value_itself() {
+    assert_eq!(
+        emitted_string_deserializer("String"),
+        "pub fn deserialize_field < 'de , D > (deserializer : D) -> Result < String , D :: Error > \
+         where D : serde :: Deserializer < 'de > , { use serde :: Deserialize ; \
+         let s = String :: deserialize (deserializer) ? ; \
+         validate_field_value (& s) . map_err (serde :: de :: Error :: custom) ? ; Ok (s) }"
+    );
+
+    let numeric_ty: syn::Type = syn::parse_str("u32").unwrap();
+    let numeric_meta = ModelSchemaPropMeta {
+        minimum: Some(5.0_f64),
+        ..ModelSchemaPropMeta::default()
+    };
+    let numeric = generate_numeric_validation_code(
+        "field",
+        "u32",
+        &numeric_meta,
+        &constrained_shape(&numeric_ty).unwrap(),
+        &numeric_ty,
+    )
+    .module_items
+    .to_string();
+    assert!(
+        numeric.ends_with(
+            "pub fn deserialize_field < 'de , D > (deserializer : D) -> Result < u32 , D :: Error > \
+             where D : serde :: Deserializer < 'de > , { use serde :: Deserialize ; \
+             let v = u32 :: deserialize (deserializer) ? ; \
+             validate_field_value (& v) . map_err (serde :: de :: Error :: custom) ? ; Ok (v) }"
+        ),
+        "bare numeric deserializer moved: {numeric}"
+    );
+}
+
+/// A wrapped field is gated on the way in by the walk that gates it in `validate()`, run over the
+/// field's own declared type — the one thing a hook attached to that field can answer for.
+#[cfg(feature = "serde")]
+#[test]
+fn a_wrapped_field_deserializes_its_declared_type() {
+    assert_eq!(
+        emitted_string_deserializer("Option<String>"),
+        "pub fn deserialize_field < 'de , D > (deserializer : D) -> Result < Option < String > , D :: Error > \
+         where D : serde :: Deserializer < 'de > , \
+         { fn deserialize_validated < 'de , D , T , F > (deserializer : D , check : F) -> Result < T , D :: Error > \
+         where D : serde :: Deserializer < 'de > , T : serde :: Deserialize < 'de > , F : FnOnce (& T) -> Result < () , String > , \
+         { use serde :: Deserialize ; let value = T :: deserialize (deserializer) ? ; \
+         check (& value) . map_err (serde :: de :: Error :: custom) ? ; Ok (value) } \
+         deserialize_validated (deserializer , | value_0 : & Option < String > | \
+         { if let Some (value_1) = value_0 { validate_field_value (value_1) ? ; } Ok (()) }) }"
+    );
+}
+
+/// The `validate()` walk for `spelling` rewritten into the ending the wire needs: the collected
+/// violation becomes the answered one, and nothing else about the walk is touched.
+#[cfg(feature = "serde")]
+fn wire_walk_of(spelling: &str) -> String {
+    let ty: syn::Type = syn::parse_str(spelling).unwrap();
+    let shape = constrained_shape(&ty).unwrap();
+    let field = proc_macro2::Ident::new("field", proc_macro2::Span::call_site());
+    let checker = proc_macro2::Ident::new("validate_field_value", proc_macro2::Span::call_site());
+    build_field_validation(&shape.wraps, &field, &checker)
+        .to_string()
+        .replace(
+            "if let Err (e) = validate_field_value (",
+            "validate_field_value (",
+        )
+        .replace(") { errors . push (e) ; }", ") ? ;")
+        .trim_start_matches("{ let value_0 = & self . field ; ")
+        .trim_end_matches(" }")
+        .to_owned()
+}
+
+/// The walk inside the hook is the walk `validate()` runs — same reach, same bindings, same order,
+/// differing only where it ends: a `Deserializer` answers with one error, so the wire walk stops at
+/// the first violation instead of collecting every one.
+#[cfg(feature = "serde")]
+#[test]
+fn the_wire_walk_is_the_validate_walk_shape_for_shape() {
+    for spelling in [
+        "Box<String>",
+        "Vec<String>",
+        "Cow<'static, str>",
+        "Option<Vec<String>>",
+        "Option<Arc<[String]>>",
+        "Vec<Vec<String>>",
+    ] {
+        let walk = wire_walk_of(spelling);
+        let deserializer = emitted_string_deserializer(spelling);
+        assert!(
+            deserializer.contains(&walk),
+            "spelling {spelling} walks differently on the wire than in validate(): \
+             expected {walk} within {deserializer}"
+        );
+    }
+}
+
+/// A lifetime the field spells is declared by the hook that returns that type: a free function is
+/// handed none of the struct's generics. `'static` needs no declaration and gets none.
+#[cfg(feature = "serde")]
+#[test]
+fn a_borrowed_field_type_carries_its_lifetime_into_the_hook() {
+    assert!(
+        emitted_string_deserializer("Cow<'a, str>").starts_with(
+            "pub fn deserialize_field < 'de , 'a , D > (deserializer : D) -> Result < Cow < 'a , str > , D :: Error >"
+        ),
+        "{}",
+        emitted_string_deserializer("Cow<'a, str>")
+    );
+    assert!(
+        emitted_string_deserializer("Cow<'static, str>").starts_with(
+            "pub fn deserialize_field < 'de , D > (deserializer : D) -> Result < Cow < 'static , str > , D :: Error >"
+        ),
+        "{}",
+        emitted_string_deserializer("Cow<'static, str>")
+    );
+
+    let ty: syn::Type = syn::parse_str("Option<Cow<'a, Cow<'a, str>>>").unwrap();
+    let lifetimes = constrained_shape(&ty).unwrap().lifetimes;
+    assert_eq!(
+        lifetimes.len(),
+        1,
+        "a lifetime spelled twice must still be declared once"
+    );
+}
+
+/// serde reads a missing key for an `Option` as a `None` only while the field deserializes itself,
+/// so the hook that replaces that reading is given the default which restores it — and only there.
+#[cfg(feature = "serde")]
+#[test]
+fn only_an_outermost_option_without_a_default_gets_one_injected() {
+    let defaulted = true;
+    let plain = false;
+
+    for spelling in [
+        "Option<String>",
+        "Option<Vec<String>>",
+        "Box<Option<String>>",
+        "Arc<Rc<Option<String>>>",
+    ] {
+        let ty: syn::Type = syn::parse_str(spelling).unwrap();
+        let wraps = constrained_shape(&ty).unwrap().wraps;
+        assert!(
+            needs_injected_default(&wraps, plain),
+            "{spelling} would answer a missing key with an error"
+        );
+        assert!(
+            !needs_injected_default(&wraps, defaulted),
+            "{spelling} already has a default of its own"
+        );
+    }
+
+    for spelling in [
+        "String",
+        "Vec<Option<String>>",
+        "Box<String>",
+        "Box<Vec<Option<String>>>",
+    ] {
+        let ty: syn::Type = syn::parse_str(spelling).unwrap();
+        let wraps = constrained_shape(&ty).unwrap().wraps;
+        assert!(
+            !needs_injected_default(&wraps, plain),
+            "{spelling} has no optional key to restore"
+        );
+    }
 }
 
 /// A field with no value for a length or a range to describe emits nothing at all.
