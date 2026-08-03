@@ -433,6 +433,97 @@ fn internally_tagged_empty_tuple_variant_is_accepted() {
     assert!(errors.is_empty(), "got: {errors:?}");
 }
 
+/// A name is not the criterion — what serde writes for it is. A plain enum writes its own variant
+/// name, which joins no object, and the registry is where the expansion learns that.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn internally_tagged_newtype_over_a_registered_plain_enum_is_rejected() {
+    register_alias_info("Hue", "Hue", "hue_schema", AliasKind::EnumMembers);
+    let errors = internal_guard_errors(&syn::parse_quote! {
+        enum E { V(Hue) }
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(errors[0].contains("variant `V`"), "got: {}", errors[0]);
+    assert!(errors[0].contains("`Hue`"), "got: {}", errors[0]);
+    assert!(
+        errors[0].contains("does not write as an object"),
+        "got: {}",
+        errors[0]
+    );
+    assert!(
+        errors[0].contains("Name a `content` key"),
+        "got: {}",
+        errors[0]
+    );
+}
+
+/// The two answers that leave the declaration alone: a type the registry rules out, and one it has
+/// never seen. Neither is a plain enum as far as this expansion can tell, and an `Unknown` is not a
+/// negative — it reaches the merge, which reads the schema instead of the name.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn internally_tagged_newtype_over_a_non_enum_or_unknown_name_is_accepted() {
+    register_alias_info(
+        "Payload",
+        "Payload",
+        "payload_schema",
+        AliasKind::NoEnumMembers,
+    );
+    for source in ["enum E { V(Payload) }", "enum E { V(NeverRegistered) }"] {
+        let errors = internal_guard_errors(&syn::parse_str(source).unwrap());
+        assert!(errors.is_empty(), "got: {errors:?} for {source}");
+    }
+}
+
+/// The same criterion at the other flattened position: a `#[serde(flatten)]` field puts what its
+/// type writes into the object being written, so a plain enum has nothing to put there either.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn flattening_a_registered_plain_enum_is_rejected() {
+    register_alias_info("Hue", "Hue", "hue_schema", AliasKind::EnumMembers);
+    register_alias_info(
+        "Payload",
+        "Payload",
+        "payload_schema",
+        AliasKind::NoEnumMembers,
+    );
+
+    let rejected: syn::Field = syn::parse_quote! { pub tone: Hue };
+    let error = super::flattened_field_guard_error(&rejected, "Holder")
+        .map(|tokens| tokens.to_string())
+        .unwrap_or_default();
+    assert!(error.contains("field `tone`"), "got: {error}");
+    assert!(error.contains("`Holder`"), "got: {error}");
+    assert!(error.contains("`Hue`"), "got: {error}");
+    assert!(error.contains("#[serde(flatten)]"), "got: {error}");
+    assert!(
+        error.contains("does not write as an object"),
+        "got: {error}"
+    );
+
+    for accepted in [
+        syn::parse_quote! { pub body: Payload },
+        syn::parse_quote! { pub body: NeverRegistered },
+        syn::parse_quote! { pub tones: Vec<Hue> },
+    ] {
+        let field: syn::Field = accepted;
+        assert!(
+            super::flattened_field_guard_error(&field, "Holder").is_none(),
+            "got a rejection for {}",
+            quote::ToTokens::to_token_stream(&field)
+        );
+    }
+}
+
 /// Collects an enum's `cfg_attr` guard failures as rendered `compile_error!` token strings.
 #[cfg(feature = "serde")]
 fn enum_cfg_attr_errors(item: &syn::ItemEnum) -> Vec<String> {

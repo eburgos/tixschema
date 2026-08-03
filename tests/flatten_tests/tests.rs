@@ -103,6 +103,36 @@ struct NoFlatten {
     name: String,
 }
 
+/// A plain enum flattened into a struct. Declared without `#[model_schema()]`: a plain enum writes
+/// its own variant name rather than an object, so the crate refuses the declaration and the wire
+/// form is only readable from a plain serde type.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+enum FlatHue {
+    Red,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatOverEnum {
+    own: String,
+    #[serde(flatten)]
+    tone: FlatHue,
+}
+
+/// A newtype over a `String` flattened into a struct: serde writes it as the string it wraps, and
+/// the registry cannot tell it apart from a struct — both register as having no enum members. So
+/// the declaration compiles and the divergence is left for the merge to catch.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatSlug(String);
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatOverBrand {
+    own: String,
+    #[serde(flatten)]
+    slug: FlatSlug,
+}
+
 #[test]
 fn test_flatten_structs_constructible() {
     let base = BasePart {
@@ -409,4 +439,53 @@ fn test_flatten_recursive_base_serializes_flat() {
 
     let back: FlatHolder = serde_json::from_value(json).unwrap();
     assert_eq!(back, holder);
+}
+
+/// What serde writes for a flattened plain enum: the enum's own variant name, as a key holding
+/// null. No schema closed around the struct's remaining fields names that key, which is why the
+/// declaration is refused rather than described.
+#[test]
+fn test_flattening_a_plain_enum_writes_a_key_the_struct_does_not_name() {
+    assert_eq!(
+        serde_json::to_value(FlatOverEnum {
+            own: "o".to_owned(),
+            tone: FlatHue::Red,
+        })
+        .unwrap(),
+        serde_json::json!({ "own": "o", "Red": null })
+    );
+}
+
+/// And what serde writes for a flattened newtype that reaches the wire as a string — nothing. A
+/// name got this one past the declaration guard; the value never reaches the wire at all.
+#[test]
+fn test_flattening_a_string_newtype_is_unserializable() {
+    let refusal = serde_json::to_value(FlatOverBrand {
+        own: "o".to_owned(),
+        slug: FlatSlug("s".to_owned()),
+    })
+    .unwrap_err()
+    .to_string();
+    assert!(
+        refusal.contains("can only flatten structs and maps"),
+        "Got: {refusal}"
+    );
+}
+
+/// So the merge refuses it too, rather than closing the object around the fields that are left.
+#[test]
+#[cfg(feature = "jsonschema")]
+#[should_panic(
+    expected = "`FlatOverBrand`: `#[serde(flatten)]` of `FlatSlug` is not written as an object"
+)]
+fn test_flattening_a_string_newtype_is_refused_by_the_merge() {
+    assert!(FlatOverBrand::json_schema().is_object());
+}
+
+/// The remedy the refusal names is one the author can act on.
+#[test]
+#[cfg(feature = "jsonschema")]
+#[should_panic(expected = "write the field as a named member so the value gets a key of its own")]
+fn test_the_flatten_merge_refusal_names_the_remedy() {
+    assert!(FlatOverBrand::json_schema().is_object());
 }
