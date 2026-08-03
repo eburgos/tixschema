@@ -1569,6 +1569,37 @@ pub struct Config {
 }
 ```
 
+#### Map Keys Without Enumerable Members
+
+**Error:** `no associated function or constant named enum_members found for <type>` (`E0599`), reported at the map's key type.
+
+A map key written as a type path must be a plain `#[model_schema()]` enum, whose members become the object's keys. A key the expansion has already seen is named directly — *a map key must be a plain `#[model_schema()]` enum ...* — but items expand in the order they are written, so a key declared after the type that writes the map, like one from another crate, has not been seen yet and is emitted as an enumerating key. When such a key carries no `enum_members()`, the requirement surfaces as an `E0599` at the key type:
+
+```rust
+// Wrong: `LateKey` resolves to `String`, which has no members to enumerate
+#[model_schema()]
+pub struct BadConfig {
+    pub slots: HashMap<LateKey, String>, // E0599, reported at `LateKey`
+}
+
+#[model_schema()]
+pub type LateKey = String;
+
+// Correct: the key is a plain enum, and its members become the object's keys
+#[model_schema()]
+pub enum Slot {
+    Primary,
+    Secondary,
+}
+
+#[model_schema()]
+pub struct Config {
+    pub slots: HashMap<Slot, String>,
+}
+```
+
+Declaration order decides only which of the two diagnostics is reported. A plain enum key works wherever it is declared.
+
 #### Function-Local Types
 
 **Error:** `cannot find module or crate <type>_schema in this scope` (`E0433`), reported at the field's type.
