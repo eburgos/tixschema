@@ -3334,21 +3334,28 @@ fn build_tuple_element_base_json_schema(fld: &FieldDef) -> proc_macro2::TokenStr
         .unwrap_or_else(|| quote! { serde_json::json!({ "type": "object" }) })
 }
 
-/// Builds JSON schema for a tuple element (used for single tuple and multi-tuple variants).
+/// The `anyOf [<base>, null]` form for a value in a slot that cannot be dropped — a tuple element
+/// or a map entry — or `None` when the value is not an `Option`. Only an object key can be
+/// omitted; in either of these positions serde writes a `None` as JSON `null`, so the schema has
+/// to admit it.
 ///
-/// An `Option` element renders as `anyOf [<base>, null]`: a tuple slot is positional, so
-/// serde serializes `None` as JSON `null` (the slot cannot be omitted the way an object key
-/// can).
+/// The tokens are a JSON value: a caller writing inside a `serde_json::json!` literal inlines
+/// them, one needing a standalone `serde_json::Value` wraps them in `serde_json::json!`.
+#[cfg(feature = "jsonschema")]
+fn nullable_slot_json_schema(
+    fld: &FieldDef,
+    base: &proc_macro2::TokenStream,
+) -> Option<proc_macro2::TokenStream> {
+    fld.is_optional
+        .then(|| quote! { { "anyOf": [#base, { "type": "null" }] } })
+}
+
+/// Builds JSON schema for a tuple element (used for single tuple and multi-tuple variants).
 #[cfg(feature = "jsonschema")]
 fn build_tuple_element_json_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
     let base = build_tuple_element_base_json_schema(fld);
-    if fld.is_optional {
-        quote! {
-            serde_json::json!({ "anyOf": [#base, { "type": "null" }] })
-        }
-    } else {
-        base
-    }
+    nullable_slot_json_schema(fld, &base)
+        .map_or(base, |nullable| quote! { serde_json::json!(#nullable) })
 }
 
 /// Fallback JSON schema for map fields whose key type is not specially handled.
@@ -3420,17 +3427,21 @@ fn build_map_nested_map_value_schema(
             }
         };
 
+        let arrayed = quote! {
+            {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": #inner_value_schema
+                }
+            }
+        };
+        let value_schema = nullable_slot_json_schema(value, &arrayed).unwrap_or(arrayed);
         quote! {
             properties.insert(#field_name_str.to_string(), {
                 serde_json::json!({
                     "type": "object",
-                    "additionalProperties": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": #inner_value_schema
-                        }
-                    }
+                    "additionalProperties": #value_schema
                 })
             });
         }
@@ -3674,34 +3685,31 @@ fn build_map_sibling_value_schema(
 }
 
 /// Wraps a scalar JSON schema as a `String`-keyed map's `additionalProperties`,
-/// arraying it when the value field is a `Vec`.
+/// arraying it when the value field is a `Vec` and nullable when it is an `Option`.
 #[cfg(feature = "jsonschema")]
 fn build_map_scalar_value_schema(
     value: &FieldDef,
     field_name_str: &str,
     item_schema: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
-    if value.is_array {
+    let arrayed = if value.is_array {
         quote! {
-            properties.insert(#field_name_str.to_string(), {
-                serde_json::json!({
-                    "type": "object",
-                    "additionalProperties": {
-                        "type": "array",
-                        "items": #item_schema
-                    }
-                })
-            });
+            {
+                "type": "array",
+                "items": #item_schema
+            }
         }
     } else {
-        quote! {
-            properties.insert(#field_name_str.to_string(), {
-                serde_json::json!({
-                    "type": "object",
-                    "additionalProperties": #item_schema
-                })
-            });
-        }
+        item_schema.clone()
+    };
+    let value_schema = nullable_slot_json_schema(value, &arrayed).unwrap_or(arrayed);
+    quote! {
+        properties.insert(#field_name_str.to_string(), {
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": #value_schema
+            })
+        });
     }
 }
 
@@ -3767,7 +3775,7 @@ fn build_string_key_map_value_schema(
 /// when the value type has no rendering here.
 #[cfg(feature = "jsonschema")]
 fn build_enum_key_map_value_binding(value: &FieldDef) -> Option<proc_macro2::TokenStream> {
-    if let FieldDefType::SiblingType(value_type_name, value_lst) = &value.field_type
+    let base = if let FieldDefType::SiblingType(value_type_name, value_lst) = &value.field_type
         && value_lst.is_empty()
     {
         // For json_schema(), use the module pattern. An alias's module is named after
@@ -3778,13 +3786,14 @@ fn build_enum_key_map_value_binding(value: &FieldDef) -> Option<proc_macro2::Tok
         };
         let value_module_ident =
             proc_macro2::Ident::new(value_module_name.as_str(), proc_macro2::Span::call_site());
-        let sibling_schema =
-            arrayed_json_schema_value(value, quote! { #value_module_ident::Schema::json_schema() });
-        return Some(quote! { let value_schema = #sibling_schema; });
-    }
+        arrayed_json_schema_value(value, quote! { #value_module_ident::Schema::json_schema() })
+    } else {
+        scalar_field_json_schema_value(value)?
+    };
 
-    let scalar_schema = scalar_field_json_schema_value(value)?;
-    Some(quote! { let value_schema = #scalar_schema; })
+    let value_schema = nullable_slot_json_schema(value, &base)
+        .map_or(base, |nullable| quote! { serde_json::json!(#nullable) });
+    Some(quote! { let value_schema = #value_schema; })
 }
 
 #[cfg(feature = "jsonschema")]

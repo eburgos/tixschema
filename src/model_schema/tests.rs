@@ -984,6 +984,46 @@ fn a_vec_sibling_enum_keyed_map_value_arrays_the_sibling_schema() {
     );
 }
 
+/// A map entry cannot be dropped the way an object key can, so serde writes an `Option` value's
+/// `None` as JSON `null`. Both key paths have to admit it, and through the same seam: the enum-key
+/// branch materializes the nullable form as a `serde_json::Value`, the `String`-key branch inlines
+/// it as the map's `additionalProperties`.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_optional_map_value_is_nullable_on_both_key_paths() {
+    let enum_keyed = map_field_schema("HashMap<Slot, Option<String>>").to_string();
+    assert!(
+        enum_keyed.contains(
+            r#"let value_schema = serde_json :: json ! ({ "anyOf" : [serde_json :: json ! ({ "type" : "string" }) , { "type" : "null" }] }) ;"#
+        ),
+        "got: {enum_keyed}"
+    );
+
+    let string_keyed = map_field_schema("HashMap<String, Option<String>>").to_string();
+    assert!(
+        string_keyed.contains(
+            r#""additionalProperties" : { "anyOf" : [{ "type" : "string" } , { "type" : "null" }] }"#
+        ),
+        "got: {string_keyed}"
+    );
+}
+
+/// A non-`Option` map value is untouched by the nullable seam — on either key path the tokens are
+/// the ones the value type has always produced.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_required_map_value_carries_no_nullable_wrap() {
+    for map_type in [
+        "HashMap<Slot, String>",
+        "HashMap<Slot, Vec<Inner>>",
+        "HashMap<String, String>",
+        "HashMap<String, Vec<u64>>",
+    ] {
+        let tokens = map_field_schema(map_type).to_string();
+        assert!(!tokens.contains("anyOf"), "for {map_type}, got: {tokens}");
+    }
+}
+
 /// The kind an alias registers is its *target's* answer, because a type path resolves through the
 /// alias. `Vec<Slot>` is the collection, not the enum it holds; a target this expansion has not
 /// seen registered is `Unknown`, which is not a negative.
