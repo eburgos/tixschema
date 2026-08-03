@@ -174,7 +174,9 @@ pub enum InternalOverUntagged {
     Wrapped(InternalEither),
 }
 
-/// The same wrapping over a union with one member serde writes as a string.
+/// The same wrapping over a union with one member serde writes as a string. Only the JSON-schema
+/// merge reads the pair, so both fixtures are declared where they are read.
+#[cfg(feature = "jsonschema")]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(untagged)]
@@ -183,6 +185,7 @@ pub enum InternalScalarEither {
     Text(String),
 }
 
+#[cfg(feature = "jsonschema")]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "type")]
