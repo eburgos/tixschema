@@ -1014,18 +1014,27 @@ fn the_constrained_path_renders_the_same_to_string_calls_it_always_has() {
     );
 }
 
-/// The JSON schema statements a map-typed field expands to, parsed from the map type's source.
+/// The JSON schema statements a map-typed field expands to, parsed from the map type's source and
+/// dispatched through the field entry point, so a wrapper spelling reaches the map arm the way a
+/// declared field reaches it.
 #[cfg(feature = "jsonschema")]
 fn map_field_schema(map_type: &str) -> proc_macro2::TokenStream {
     let ty: syn::Type = syn::parse_str(map_type).unwrap();
-    let field = super::get_field_def("m", &ty, "");
-    let map_parts = if let FieldDefType::Map(key, value) = &field.field_type {
-        Some((key, value))
-    } else {
-        None
-    };
-    let (key, value) = map_parts.unwrap();
-    super::build_map_field_schema(key, value, "m")
+    super::build_field_type_schema(&super::get_field_def("m", &ty, ""), "m")
+}
+
+/// The value a field's `properties` insertion carries, lifted out of the statement so a wrapped
+/// spelling can be held against the map it holds.
+#[cfg(feature = "jsonschema")]
+fn inserted_field_value(field_type: &str) -> String {
+    const PREFIX: &str = r#"properties . insert ("m" . to_string () , "#;
+    const SUFFIX: &str = ") ;";
+    let tokens = map_field_schema(field_type).to_string();
+    assert!(
+        tokens.starts_with(PREFIX) && tokens.ends_with(SUFFIX),
+        "for {field_type}, not a plain insertion: {tokens}"
+    );
+    tokens[PREFIX.len()..tokens.len() - SUFFIX.len()].to_owned()
 }
 
 /// A value type the enum-key branch cannot render must yield the `compile_error!` *instead of* the
@@ -1353,7 +1362,9 @@ fn string_key_map_value_schema(field_type: FieldDefType) -> String {
     let ty: syn::Type = syn::parse_str("String").unwrap();
     let mut value = super::get_field_def("m", &ty, "");
     value.field_type = field_type;
-    super::build_string_key_map_value_schema(&value, "m").to_string()
+    super::string_key_map_json_schema_value(&value)
+        .unwrap()
+        .to_string()
 }
 
 /// A `String` key says nothing about the value it holds, so a value type the crate renders is
@@ -1451,7 +1462,9 @@ fn nested_string_key_map_value_schema(inner_type: FieldDefType, is_array: bool) 
     let mut value = inner_key.clone();
     value.field_type = FieldDefType::Map(Box::new(inner_key), Box::new(inner_value));
     value.is_array = is_array;
-    super::build_string_key_map_value_schema(&value, "m").to_string()
+    super::string_key_map_json_schema_value(&value)
+        .unwrap()
+        .to_string()
 }
 
 /// A map value that is itself a map is dispatched the same way at every depth: the members of the
@@ -2041,6 +2054,66 @@ fn a_tuple_element_holding_an_unrenderable_map_emits_only_the_compile_error() {
             "for {field_type}, got: {tokens}"
         );
     }
+}
+
+/// A sequence wrapper around a map is the field's array, not the map's, so the field position
+/// applies the wrap every other field type applies — and the item it wraps is the map's own
+/// rendering, unchanged. Without it the same type describes as a bare object in a field and as an
+/// array in the slot positions that already wrap it, and the field schema rejects what serde writes.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_sequence_wrapped_map_field_describes_as_the_array_of_the_map_it_holds() {
+    for (map_type, wrapped_type) in [
+        ("HashMap<String, u64>", "Vec<HashMap<String, u64>>"),
+        ("HashMap<String, u64>", "VecDeque<HashMap<String, u64>>"),
+        ("HashMap<String, u64>", "Option<Vec<HashMap<String, u64>>>"),
+        ("HashMap<String, u64>", "Vec<Option<HashMap<String, u64>>>"),
+        ("HashMap<Slot, u64>", "Vec<HashMap<Slot, u64>>"),
+        (
+            "HashMap<Slot, Vec<u64>>",
+            "BTreeSet<HashMap<Slot, Vec<u64>>>",
+        ),
+        ("HashMap<u32, u64>", "Vec<HashMap<u32, u64>>"),
+        (
+            "HashMap<String, HashMap<Slot, u64>>",
+            "Vec<HashMap<String, HashMap<Slot, u64>>>",
+        ),
+    ] {
+        let item = inserted_field_value(map_type);
+        assert_eq!(
+            inserted_field_value(wrapped_type),
+            format!(r#"serde_json :: json ! ({{ "type" : "array" , "items" : {item} }})"#),
+            "for {wrapped_type}"
+        );
+    }
+}
+
+/// A map named without a sequence wrapper describes exactly as it always has, on every key path.
+/// An `Option` around one is not such a wrapper: field position spells optionality by leaving the
+/// name out of `required`, as it does for every other field type, so the map itself is untouched.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_unwrapped_map_field_keeps_the_object_it_has_always_described_as() {
+    let string_keyed = r#"serde_json :: json ! ({ "type" : "object" , "additionalProperties" : { "type" : "integer" } })"#;
+    for (map_type, expected) in [
+        ("HashMap<String, u64>", string_keyed),
+        ("BTreeMap<String, u64>", string_keyed),
+        ("Option<HashMap<String, u64>>", string_keyed),
+        (
+            "HashMap<u32, u64>",
+            r#"serde_json :: json ! ({ "type" : "object" , "additionalProperties" : true })"#,
+        ),
+        (
+            "Option<HashMap<u32, u64>>",
+            r#"serde_json :: json ! ({ "type" : "object" , "additionalProperties" : true })"#,
+        ),
+    ] {
+        assert_eq!(inserted_field_value(map_type), expected, "for {map_type}");
+    }
+    assert_eq!(
+        inserted_field_value("Option<HashMap<Slot, u64>>"),
+        inserted_field_value("HashMap<Slot, u64>")
+    );
 }
 
 /// The `ObjectId` divergence is frozen by position, so routing the tuple element through the map
