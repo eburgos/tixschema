@@ -59,6 +59,16 @@ enum CompliantUnion {
     },
 }
 
+// An untagged newtype variant's content has no key to drop: it is the whole serialized value, so
+// a `None` there reaches the wire as a bare `null`. The non-`Option` member beside it carries none.
+#[model_schema()]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum SlotUnion {
+    Maybe(Option<i64>),
+    Plain(String),
+}
+
 #[test]
 fn test_untagged_entry_constructible() {
     let entry = DataElementSampleValueEntry {
@@ -282,4 +292,63 @@ fn test_serde_round_trip_number_member() {
     assert_eq!(json, "5");
     let back: DateValue = serde_json::from_str(&json).unwrap();
     assert_eq!(back, value);
+}
+
+// ========================================================================
+// Untagged newtype variant holding an `Option` — the slot the three surfaces read against
+// ========================================================================
+
+/// What serde writes for an untagged newtype variant whose content is `None` — the capture the
+/// three surface assertions below are read against.
+#[test]
+fn test_untagged_newtype_option_content_writes_bare_null() {
+    assert_eq!(
+        serde_json::to_value(SlotUnion::Maybe(None)).unwrap(),
+        serde_json::Value::Null,
+        "The content is the whole value, so a `None` writes a bare `null`"
+    );
+}
+
+/// TypeScript describes that content as the slot it is.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_untagged_newtype_option_content_typescript_null_flavor() {
+    let ts = SlotUnion::ts_definition();
+
+    assert!(
+        ts.contains("export type SlotUnion = number | null | string;"),
+        "Maybe's content is the slot the `None` fills with `null`, Plain's carries no null. \
+         Got:\n{ts}"
+    );
+}
+
+/// The Zod schema admits the `null` serde writes. An untagged member cannot be omitted, so an
+/// undefined-flavored union there would leave the captured `null` unmatched.
+#[test]
+#[cfg(feature = "zod")]
+fn test_untagged_newtype_option_content_zod_null_flavor() {
+    let zod = SlotUnion::zod_schema();
+
+    assert!(
+        zod.contains("z.union([z.nullable(z.number().int()), z.string()])"),
+        "Got:\n{zod}"
+    );
+}
+
+/// The JSON schema admits it too: `field_json_schema_value` adds no null wrap on its own, so the
+/// member goes through the shared nullable-slot wrap.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_untagged_newtype_option_content_json_schema_null_flavor() {
+    let schema = SlotUnion::json_schema();
+    let any_of = schema["anyOf"].as_array().unwrap();
+
+    assert_eq!(any_of.len(), 2, "Got:\n{schema}");
+    assert_eq!(
+        any_of[0],
+        serde_json::json!({
+            "anyOf": [{ "type": "integer" }, { "type": "null" }]
+        })
+    );
+    assert_eq!(any_of[1], serde_json::json!({ "type": "string" }));
 }
