@@ -229,24 +229,92 @@ struct FlatOverSelfUntagged {
     own: String,
 }
 
-/// Whether `payload` is accepted by a document every branch of which is an object closed by
-/// `additionalProperties: false`: some branch names every key the payload carries and requires no
-/// key it does not.
+/// An untagged enum whose members overlap: one member's key set is a subset of the other's, and
+/// the difference is a key that member omits when it is absent. serde writes the first member that
+/// matches, so the payload it writes for the narrower member is one the wider member admits too.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct OverlapNarrow {
+    a: String,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct OverlapWide {
+    a: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    b: Option<String>,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum OverlapEither {
+    Narrow(OverlapNarrow),
+    Wide(OverlapWide),
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatOverOverlap {
+    #[serde(flatten)]
+    either: OverlapEither,
+    own: String,
+}
+
+/// One object that merges both spellings of a union: a discriminated enum, whose members are
+/// exclusive, and the overlapping untagged one, whose members are not.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "kind")]
+enum MixedTagged {
+    Left { left: String },
+    Right { right: bool },
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatOverMixed {
+    #[serde(flatten)]
+    either: OverlapEither,
+    own: String,
+    #[serde(flatten)]
+    tagged: MixedTagged,
+}
+
+/// Whether `payload` is accepted by a document every leaf of which is an object closed by
+/// `additionalProperties: false`: a leaf accepts when it names every key the payload carries and
+/// requires no key it does not.
+///
+/// A union is read by the rule its spelling names — `oneOf` accepts on exactly one matching branch
+/// and `anyOf` on at least one — so a document that nests one union inside another is read the way
+/// a validator reads it, wrapper by wrapper.
 #[cfg(feature = "jsonschema")]
 fn closed_document_accepts(schema: &serde_json::Value, payload: &serde_json::Value) -> bool {
+    if let Some(branches) = schema.get("oneOf") {
+        return accepting_branches(branches, payload) == 1;
+    }
+    if let Some(branches) = schema.get("anyOf") {
+        return accepting_branches(branches, payload) >= 1;
+    }
     let written = payload.as_object().unwrap();
-    let branches = schema.get("oneOf").map_or_else(
-        || vec![schema.clone()],
-        |one_of| one_of.as_array().unwrap().clone(),
-    );
-    branches.iter().any(|branch| {
-        let named = branch["properties"].as_object().unwrap();
-        let required = branch["required"].as_array().unwrap();
-        written.keys().all(|key| named.contains_key(key))
-            && required
-                .iter()
-                .all(|key| written.contains_key(key.as_str().unwrap()))
-    })
+    let named = schema["properties"].as_object().unwrap();
+    let required = schema["required"].as_array().unwrap();
+    written.keys().all(|key| named.contains_key(key))
+        && required
+            .iter()
+            .all(|key| written.contains_key(key.as_str().unwrap()))
+}
+
+/// How many of a union's branches accept `payload` — what the two spellings disagree about.
+#[cfg(feature = "jsonschema")]
+fn accepting_branches(branches: &serde_json::Value, payload: &serde_json::Value) -> usize {
+    branches
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|branch| closed_document_accepts(branch, payload))
+        .count()
 }
 
 #[test]
@@ -662,13 +730,14 @@ fn test_flattening_an_untagged_enum_writes_the_matched_members_keys() {
 }
 
 /// So the merged schema is the union of the merges: the base multiplied over every member of the
-/// union, each branch closed around exactly the keys that member writes.
+/// union, each branch closed around exactly the keys that member writes, under the spelling the
+/// untagged source used.
 #[test]
 #[cfg(feature = "jsonschema")]
 fn test_flattening_an_untagged_enum_multiplies_the_base_over_its_members() {
     assert_eq!(
         serde_json::to_string(&FlatOverUntagged::json_schema()).unwrap(),
-        r#"{"type":"object","oneOf":[{"type":"object","properties":{"own":{"type":"string"},"a":{"type":"string"}},"required":["own","a"],"additionalProperties":false},{"type":"object","properties":{"own":{"type":"string"},"b":{"type":"boolean"}},"required":["own","b"],"additionalProperties":false}]}"#
+        r#"{"type":"object","anyOf":[{"type":"object","properties":{"own":{"type":"string"},"a":{"type":"string"}},"required":["own","a"],"additionalProperties":false},{"type":"object","properties":{"own":{"type":"string"},"b":{"type":"boolean"}},"required":["own","b"],"additionalProperties":false}]}"#
     );
 }
 
@@ -785,4 +854,121 @@ fn test_the_deferred_union_member_schema_accepts_the_payload_serde_writes() {
             .unwrap()
             .contains_key("leaf")
     );
+}
+
+/// What serde writes for a flattened untagged enum whose members overlap: the narrower member's
+/// keys, which are a subset of the wider member's. serde takes the first member that matches, so
+/// this is the payload it both writes and reads back.
+#[test]
+fn test_flattening_an_overlapping_untagged_enum_writes_the_narrower_members_keys() {
+    let narrow = FlatOverOverlap {
+        own: "o".to_owned(),
+        either: OverlapEither::Narrow(OverlapNarrow { a: "x".to_owned() }),
+    };
+    let written = serde_json::to_value(&narrow).unwrap();
+    assert_eq!(written, serde_json::json!({ "own": "o", "a": "x" }));
+    let back: FlatOverOverlap = serde_json::from_value(written).unwrap();
+    assert_eq!(back, narrow);
+}
+
+/// And two branches of the merged document admit that payload: the narrow member's branch names
+/// exactly its keys, and the wide member's branch names one more that it does not require.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_the_overlapping_payload_is_admitted_by_two_branches() {
+    let schema = FlatOverOverlap::json_schema();
+    assert_eq!(
+        accepting_branches(
+            &schema["anyOf"],
+            &serde_json::json!({ "own": "o", "a": "x" })
+        ),
+        2,
+        "Got: {schema}"
+    );
+}
+
+/// So the merge keeps the spelling its source used. An untagged enum is first-match-wins, and more
+/// than one branch admitting a payload is its normal state, which is what `anyOf` says and `oneOf`
+/// denies.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_an_overlapping_untagged_flatten_keeps_the_any_of_spelling() {
+    assert_eq!(
+        serde_json::to_string(&FlatOverOverlap::json_schema()).unwrap(),
+        r#"{"type":"object","anyOf":[{"type":"object","properties":{"own":{"type":"string"},"a":{"type":"string"}},"required":["own","a"],"additionalProperties":false},{"type":"object","properties":{"own":{"type":"string"},"a":{"type":"string"},"b":{"type":"string"}},"required":["own","a"],"additionalProperties":false}]}"#
+    );
+}
+
+/// And the document accepts every payload serde writes for it. Wrapped in `oneOf`, the payload the
+/// narrower member writes matched two branches and was rejected.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_the_overlapping_untagged_flatten_schema_accepts_every_payload_serde_writes() {
+    let schema = FlatOverOverlap::json_schema();
+    for payload in [
+        serde_json::json!({ "own": "o", "a": "x" }),
+        serde_json::json!({ "own": "o", "a": "x", "b": "y" }),
+    ] {
+        assert!(
+            closed_document_accepts(&schema, &payload),
+            "{payload} is rejected by {schema}"
+        );
+    }
+}
+
+/// What serde writes for an object that flattens both spellings of a union: the discriminated
+/// enum's tag and members, the untagged enum's matched member, and the object's own keys.
+#[test]
+fn test_flattening_both_spellings_of_a_union_writes_every_members_keys() {
+    let mixed = FlatOverMixed {
+        own: "o".to_owned(),
+        tagged: MixedTagged::Left {
+            left: "l".to_owned(),
+        },
+        either: OverlapEither::Narrow(OverlapNarrow { a: "x".to_owned() }),
+    };
+    let written = serde_json::to_value(&mixed).unwrap();
+    assert_eq!(
+        written,
+        serde_json::json!({ "kind": "Left", "left": "l", "a": "x", "own": "o" })
+    );
+    let back: FlatOverMixed = serde_json::from_value(written).unwrap();
+    assert_eq!(back, mixed);
+}
+
+/// So each source keeps its own wrapper around its own branches, nested in the order the sources
+/// were merged: the untagged enum's overlapping members under `anyOf`, and inside each of them the
+/// discriminated enum's exclusive members under `oneOf`.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_a_mixed_merge_keeps_each_sources_wrapper() {
+    let schema = FlatOverMixed::json_schema();
+    let untagged = schema["anyOf"].as_array().unwrap();
+    assert_eq!(untagged.len(), 2, "Got: {schema}");
+    for branch in untagged {
+        assert_eq!(
+            branch["oneOf"].as_array().unwrap().len(),
+            2,
+            "Got: {schema}"
+        );
+    }
+}
+
+/// And the document accepts every payload serde writes for it, whichever member of either union
+/// matched.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_the_mixed_merge_schema_accepts_every_payload_serde_writes() {
+    let schema = FlatOverMixed::json_schema();
+    for payload in [
+        serde_json::json!({ "kind": "Left", "left": "l", "a": "x", "own": "o" }),
+        serde_json::json!({ "kind": "Left", "left": "l", "a": "x", "b": "y", "own": "o" }),
+        serde_json::json!({ "kind": "Right", "right": true, "a": "x", "own": "o" }),
+        serde_json::json!({ "kind": "Right", "right": true, "a": "x", "b": "y", "own": "o" }),
+    ] {
+        assert!(
+            closed_document_accepts(&schema, &payload),
+            "{payload} is rejected by {schema}"
+        );
+    }
 }

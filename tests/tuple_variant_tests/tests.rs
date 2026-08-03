@@ -1835,13 +1835,14 @@ fn test_bare_tag_over_an_untagged_enum_writes_the_matched_members_keys() {
 }
 
 /// Test 22n: so the tag multiplies over the union the way it already multiplies over a discriminated
-/// one — a branch per member, each closed around the tag plus that member's members.
+/// one — a branch per member, each closed around the tag plus that member's members — under the
+/// spelling the untagged content used, inside the enum's own choice of variant.
 #[cfg(feature = "jsonschema")]
 #[test]
 fn test_bare_tag_over_an_untagged_enum_multiplies_over_its_members() {
     assert_eq!(
         serde_json::to_string(&InternalOverUntagged::json_schema()).unwrap(),
-        r#"{"type":"object","oneOf":[{"type":"object","oneOf":[{"type":"object","properties":{"type":{"type":"string","const":"Wrapped"},"a":{"type":"string"}},"required":["type","a"],"additionalProperties":false},{"type":"object","properties":{"type":{"type":"string","const":"Wrapped"},"b":{"type":"boolean"}},"required":["type","b"],"additionalProperties":false}]}]}"#
+        r#"{"type":"object","oneOf":[{"type":"object","anyOf":[{"type":"object","properties":{"type":{"type":"string","const":"Wrapped"},"a":{"type":"string"}},"required":["type","a"],"additionalProperties":false},{"type":"object","properties":{"type":{"type":"string","const":"Wrapped"},"b":{"type":"boolean"}},"required":["type","b"],"additionalProperties":false}]}]}"#
     );
 }
 
@@ -1852,7 +1853,7 @@ fn test_bare_tag_over_an_untagged_enum_multiplies_over_its_members() {
 #[test]
 fn test_bare_tag_over_an_untagged_enum_requires_every_key_serde_writes() {
     let schema = InternalOverUntagged::json_schema();
-    let required: Vec<&serde_json::Value> = schema["oneOf"][0]["oneOf"]
+    let required: Vec<&serde_json::Value> = schema["oneOf"][0]["anyOf"]
         .as_array()
         .unwrap()
         .iter()
