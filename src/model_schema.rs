@@ -163,6 +163,14 @@ struct ConstrainedShape {
 enum ConstraintLeaf {
     /// The bare Rust numeric type, which is the validator's parameter type.
     Number(&'static str),
+    /// A filesystem path, whose checks read its `to_string_lossy` rendering.
+    ///
+    /// serde writes a path as the string its `to_str` yields and refuses to write one that has
+    /// none, so that rendering is the exact wire value for every path a payload can carry, and the
+    /// paths where it substitutes replacement characters are the ones no payload holds. That is
+    /// what lets a length or a pattern land on a path at all: it measures what the three surfaces
+    /// render a constrained string for.
+    Path,
     Str,
 }
 
@@ -4431,9 +4439,13 @@ fn helper_name_stem(field_ident: &str, variant_ident: Option<&str>) -> String {
     )
 }
 
-/// Generates the static validator for a String field with constraints, plus the serde deserializer
-/// — written against the constrained value itself when the field is bare, and against the field's
-/// declared type when it is wrapped.
+/// Generates the static validator for a string-shaped field with constraints, plus the serde
+/// deserializer — written against the constrained value itself when the field is bare, and against
+/// the field's declared type when it is wrapped.
+///
+/// A path leaf differs only in how the checked value is reached: the validator takes the borrowed
+/// path — which every wrap of the walk already ends at — and renders it once, so the checks below
+/// are the very ones a `String` field is held to, over the string serde writes for that path.
 ///
 /// Returns (`module_items`, `validate_body`) — both go into the schema module and `validate()` respectively.
 #[cfg(feature = "serde")]
@@ -4451,6 +4463,19 @@ fn generate_string_validation_code(
     let deserialize_fn_name = format!("deserialize_{helper_stem}");
     let deserialize_fn_ident =
         proc_macro2::Ident::new(&deserialize_fn_name, proc_macro2::Span::call_site());
+
+    let measures_path = matches!(shape.leaf, ConstraintLeaf::Path);
+    let (checked_param, rendering) = if measures_path {
+        (
+            quote! { path: &std::path::Path },
+            quote! {
+                let rendered = path.to_string_lossy();
+                let value: &str = &rendered;
+            },
+        )
+    } else {
+        (quote! { value: &str }, quote! {})
+    };
 
     let field_name_lit = field_ident.to_owned();
 
@@ -4498,13 +4523,20 @@ fn generate_string_validation_code(
     }
 
     let deserializer = if wraps.is_empty() {
+        // The owned form of the leaf, which is what a bare field of it is declared as: the
+        // borrowed form is unsized and cannot be a field by value.
+        let owned = if measures_path {
+            quote! { std::path::PathBuf }
+        } else {
+            quote! { String }
+        };
         quote! {
-            pub fn #deserialize_fn_ident<'de, D>(deserializer: D) -> Result<String, D::Error>
+            pub fn #deserialize_fn_ident<'de, D>(deserializer: D) -> Result<#owned, D::Error>
             where
                 D: serde::Deserializer<'de>,
             {
                 use serde::Deserialize;
-                let s = String::deserialize(deserializer)?;
+                let s = #owned::deserialize(deserializer)?;
                 #validate_value_fn_ident(&s).map_err(serde::de::Error::custom)?;
                 Ok(s)
             }
@@ -4520,7 +4552,8 @@ fn generate_string_validation_code(
     };
 
     let module_items = quote! {
-        pub fn #validate_value_fn_ident(value: &str) -> Result<(), String> {
+        pub fn #validate_value_fn_ident(#checked_param) -> Result<(), String> {
+            #rendering
             #(#checks)*
             Ok(())
         }
@@ -4717,12 +4750,14 @@ fn sole_type_argument(args: &syn::AngleBracketedGenericArguments) -> Option<&syn
     types.next().is_none().then_some(only)
 }
 
-/// The leaf a bare type name stands for. `str` is `String`'s borrowed form and answers as one; the
-/// numerics name themselves, since the validator's parameter is written from the name.
+/// The leaf a bare type name stands for. `str` is `String`'s borrowed form and answers as one, as
+/// `Path` does for `PathBuf`; the numerics name themselves, since the validator's parameter is
+/// written from the name.
 #[cfg(feature = "serde")]
 fn leaf_for_ident(ident: &str) -> Option<ConstraintLeaf> {
     match ident {
         "String" | "str" => Some(ConstraintLeaf::Str),
+        "PathBuf" | "Path" => Some(ConstraintLeaf::Path),
         "u8" => Some(ConstraintLeaf::Number("u8")),
         "u16" => Some(ConstraintLeaf::Number("u16")),
         "u32" => Some(ConstraintLeaf::Number("u32")),
@@ -5088,7 +5123,7 @@ fn generate_field_validation(
 
     let helper_stem = helper_name_stem(raw_field_ident, variant_ident);
     let generated = match shape.leaf {
-        ConstraintLeaf::Str => has_string_constraints.then(|| {
+        ConstraintLeaf::Path | ConstraintLeaf::Str => has_string_constraints.then(|| {
             generate_string_validation_code(
                 raw_field_ident,
                 &helper_stem,

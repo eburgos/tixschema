@@ -243,6 +243,10 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 ///
 /// Generated JSON Schema: `{ "type": "string", "minLength": 3, "maxLength": 50, "pattern": "^[a-z0-9_]+$" }`.
 ///
+/// A `PathBuf` field carries these too, as does the `Path` borrow behind a wrapper: serde writes a
+/// path as a JSON string, and the checks measure that string — the path's `to_string_lossy`
+/// rendering, which is the exact wire value for every path serde can write.
+///
 /// ### Numeric Constraints
 ///
 /// - `minimum = N` — minimum value (integers and floats)
