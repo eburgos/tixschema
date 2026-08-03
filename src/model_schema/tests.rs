@@ -1,4 +1,7 @@
-use super::{FieldDefType, validate_as_number_flag, validate_ts_optional_flag};
+use super::{
+    FieldDefType, collect_discriminated_variants, render_discriminated_variants,
+    validate_as_number_flag, validate_ts_optional_flag,
+};
 
 #[cfg(feature = "serde")]
 use super::{
@@ -12,6 +15,9 @@ use super::{AliasKind, branded_guard_errors, register_alias_info};
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use syn::spanned::Spanned as _;
+
+/// The variants of [`rendered_discriminated_union`]'s enum, in the order they are declared.
+const DECLARED_VARIANTS: [&str; 6] = ["Upload", "Generate", "Delete", "Rename", "Move", "Archive"];
 
 /// The covered wrappers, under the names a dispatch reads them by.
 #[cfg(feature = "jsonschema")]
@@ -423,9 +429,88 @@ fn discriminated_enum_ts_definition_carries_no_cfg_attribute() {
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
-fn alias_json_schema_stub_carries_no_cfg_attribute() {
-    let tokens = super::generate_alias_json_schema_stub();
-    assert_no_cfg_attribute(&tokens, "generate_alias_json_schema_stub");
+fn alias_json_schema_method_carries_no_cfg_attribute() {
+    let alias: syn::ItemType = syn::parse_quote!(
+        pub type AliasIdent = String;
+    );
+    let field_def = super::get_field_def("AliasType", &alias.ty, "");
+    let tokens = super::generate_alias_json_schema_method(&alias, "AliasType", &field_def);
+    assert_no_cfg_attribute(&tokens, "generate_alias_json_schema_method");
+}
+
+/// An alias whose target the dispatch cannot render fails the way a field of that target does: one
+/// diagnostic, naming the alias and the reason, in place of the whole body. A schema left there
+/// would be carried by every slot the alias fills.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_alias_of_an_unrenderable_target_emits_only_the_compile_error() {
+    for alias_source in [
+        "pub type Rows = HashMap<String, (u32, u32)>;",
+        "pub type Rows = Vec<HashMap<String, (u32, u32)>>;",
+        "pub type Rows = (String, HashMap<String, (u32, u32)>);",
+    ] {
+        let alias: syn::ItemType = syn::parse_str(alias_source).unwrap();
+        let field_def = super::get_field_def("RowsType", &alias.ty, "");
+        let tokens =
+            super::generate_alias_json_schema_method(&alias, "RowsType", &field_def).to_string();
+        assert!(
+            tokens.contains("compile_error !"),
+            "for {alias_source}, got: {tokens}"
+        );
+        assert!(
+            tokens.contains("type alias `RowsType`"),
+            "for {alias_source}, got: {tokens}"
+        );
+        assert!(
+            tokens.contains("a tuple is not supported as a map value"),
+            "for {alias_source}, got: {tokens}"
+        );
+        assert!(
+            !tokens.contains("json !"),
+            "for {alias_source}, got: {tokens}"
+        );
+    }
+}
+
+/// A type parameter reaches the mapping as a named type, and a name is carried by a reference to
+/// the schema module it registered — a module no expansion emits for a parameter. So the parameter
+/// is erased wherever it can be written, or the alias names a module that does not exist.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_alias_type_parameter_is_erased_at_every_depth() {
+    for alias_source in [
+        "pub type Holder<V> = V;",
+        "pub type Holder<V> = Vec<V>;",
+        "pub type Holder<V> = Option<V>;",
+        "pub type Holder<V> = (String, V);",
+        "pub type Holder<V> = HashMap<String, V>;",
+        "pub type Holder<V> = HashMap<String, Vec<V>>;",
+    ] {
+        let alias: syn::ItemType = syn::parse_str(alias_source).unwrap();
+        let field_def = super::get_field_def("HolderType", &alias.ty, "");
+        let tokens =
+            super::generate_alias_json_schema_method(&alias, "HolderType", &field_def).to_string();
+        assert!(
+            !tokens.contains("Schema :: json_schema ()"),
+            "for {alias_source}, got: {tokens}"
+        );
+    }
+}
+
+/// The stub this replaced answered every alias with an object carrying a lone `warning` key, which
+/// under JSON Schema constrains nothing — every slot naming an alias accepted every payload. No
+/// emission may carry one again.
+#[test]
+fn no_json_schema_emission_carries_a_warning_key() {
+    for (file, source) in [
+        ("model_schema.rs", include_str!("../model_schema.rs")),
+        (
+            "features/jsonschema.rs",
+            include_str!("../features/jsonschema.rs"),
+        ),
+    ] {
+        assert!(!source.contains("\"warning\""), "in: {file}");
+    }
 }
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -1991,4 +2076,79 @@ fn an_optional_sequence_wrapper_member_stays_nullable() {
             .unwrap()
             .to_string()
     );
+}
+
+/// Runs a fixed discriminated enum through the real collect/render pipeline, returning its
+/// TypeScript member fragments, Zod member fragments, and JSON-schema member fragments.
+///
+/// Rebuilt from scratch on every call so repeated calls exercise whatever ordering the collection
+/// stage imposes, not a single cached traversal.
+fn rendered_discriminated_union() -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut item: syn::ItemEnum = syn::parse_quote! {
+        enum Action {
+            Upload { path: String },
+            Generate,
+            Delete(String),
+            Rename { from: String, to: String },
+            Move(String, String),
+            Archive,
+        }
+    };
+    let variants = collect_discriminated_variants(&mut item, None, Some("action_schema"));
+    let rendered = render_discriminated_variants("type", "value", "Action", &variants.0);
+    (
+        rendered.0,
+        rendered
+            .1
+            .into_iter()
+            .map(|(schema_code, _optional)| schema_code)
+            .collect(),
+        rendered.2.iter().map(ToString::to_string).collect(),
+    )
+}
+
+/// Union member order is semantic, not cosmetic: serde tries untagged members in declaration
+/// order, so the emitted union must carry that same order on every surface.
+#[test]
+fn discriminated_union_members_follow_declaration_order() {
+    let (ts_members, zod_members, json_members) = rendered_discriminated_union();
+    assert_eq!(ts_members.len(), DECLARED_VARIANTS.len());
+    assert_eq!(zod_members.len(), DECLARED_VARIANTS.len());
+    assert_eq!(json_members.len(), DECLARED_VARIANTS.len());
+
+    for (position, declared) in DECLARED_VARIANTS.iter().enumerate() {
+        assert!(
+            ts_members[position].contains(&format!("type: \"{declared}\";")),
+            "TypeScript member {position} is not `{declared}`: {}",
+            ts_members[position]
+        );
+        assert!(
+            zod_members[position].contains(&format!("type: z.literal(\"{declared}\")")),
+            "Zod member {position} is not `{declared}`: {}",
+            zod_members[position]
+        );
+        #[cfg(feature = "jsonschema")]
+        assert!(
+            json_members[position].contains(&format!("\"const\" : \"{declared}\"")),
+            "JSON-schema member {position} is not `{declared}`: {}",
+            json_members[position]
+        );
+    }
+}
+
+/// Every per-variant collection feeding emission must be order-preserving. A hash-ordered one
+/// reseeds per instance, so the same source expands to a different union on each build — which
+/// this catches by rendering the same enum repeatedly inside one process.
+#[test]
+fn discriminated_union_rendering_is_stable_across_runs() {
+    const RUNS: usize = 32;
+
+    let first = rendered_discriminated_union();
+    for run in 1..RUNS {
+        assert_eq!(
+            rendered_discriminated_union(),
+            first,
+            "run {run} rendered a different union than run 0"
+        );
+    }
 }

@@ -87,7 +87,5 @@ redundant_test_prefix = "allow"
 # Integer division is used safely for threshold calculations and tests.
 integer_division = "allow"
 integer_division_remainder_used = "allow"
-# HashSet iteration order is irrelevant for set-comparison operations.
-iter_over_hash_type = "allow"
 # HashSet parameters use the default hasher; generalization adds complexity for no benefit.
 implicit_hasher = "allow"

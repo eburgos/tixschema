@@ -2,7 +2,6 @@ extern crate alloc;
 
 use alloc::borrow::ToOwned;
 use core::fmt::Write as _;
-use std::collections::HashMap;
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -73,13 +72,23 @@ use crate::utils::to_snake_case;
 
 use crate::rename_rule::resolve_rename_rule;
 
-/// Per-variant data collected from a discriminated enum: field defs, doc strings, and variant
-/// kinds (each keyed by serialized discriminator value), plus the collected serde validators and
+/// One variant of a discriminated enum, carrying everything its union member is rendered from.
+struct DiscriminatedVariant {
+    discriminator_value: String,
+    docs: String,
+    field_defs: Vec<FieldDef>,
+    kind: VariantKind,
+}
+
+/// Per-variant data collected from a discriminated enum, plus the collected serde validators and
 /// the `compile_error!` tokens for any field-level guard violations.
+///
+/// The variants are a sequence, not a map: their order is the enum's declaration order and it
+/// reaches the emitted output verbatim (JSON-schema `oneOf`, the TypeScript union, the Zod
+/// `discriminatedUnion`). Any hash-ordered container here would re-randomize that output per
+/// build.
 type DiscriminatedVariantData = (
-    HashMap<String, Vec<FieldDef>>,
-    HashMap<String, String>,
-    HashMap<String, VariantKind>,
+    Vec<DiscriminatedVariant>,
     Vec<proc_macro2::TokenStream>,
     Vec<proc_macro2::TokenStream>,
 );
@@ -347,7 +356,8 @@ fn process_type_alias(item_type: ItemType, args: &ModelSchemaArgs) -> TokenStrea
     register_alias_info(&rust_ident_str, &export_name, &module_name, kind);
 
     let ts_method = generate_alias_ts_definition_method(&alias, &export_name, &alias_field_def);
-    let json_schema_method = generate_alias_json_schema_stub();
+    let json_schema_method =
+        generate_alias_json_schema_method(&alias, &export_name, &alias_field_def);
     let zod_method = generate_alias_zod_method(&export_name, &alias_field_def);
 
     let output = quote! {
@@ -2259,16 +2269,13 @@ fn process_plain_enum(
 }
 
 /// Processes each variant of a discriminated enum, returning per-variant field defs, doc strings,
-/// and variant kinds (keyed by serialized discriminator value), plus the collected serde
-/// validation functions.
+/// and variant kinds in declaration order, plus the collected serde validation functions.
 fn collect_discriminated_variants(
     item_enum: &mut syn::ItemEnum,
     rename_all: Option<&str>,
     enum_module_name_opt: Option<&str>,
 ) -> DiscriminatedVariantData {
-    let mut field_defs_by_variant: HashMap<String, Vec<FieldDef>> = HashMap::new();
-    let mut docs_by_variant: HashMap<String, String> = HashMap::new();
-    let mut kinds_by_variant: HashMap<String, VariantKind> = HashMap::new();
+    let mut variants: Vec<DiscriminatedVariant> = Vec::new();
     let mut enum_validation_fns: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut guard_errors: Vec<proc_macro2::TokenStream> = Vec::new();
     let enum_type_name = item_enum.ident.to_string();
@@ -2296,8 +2303,6 @@ fn collect_discriminated_variants(
             field_defs.push(f_def);
         }
 
-        field_defs_by_variant.insert(final_name.clone(), field_defs);
-        kinds_by_variant.insert(final_name.clone(), variant_kind);
         let discriminator_docs = get_variant_docs(item).map_or_else(
             || {
                 [final_name.clone(), String::new()]
@@ -2316,16 +2321,15 @@ fn collect_discriminated_variants(
                     .join("\n")
             },
         );
-        docs_by_variant.insert(final_name, discriminator_docs);
+        variants.push(DiscriminatedVariant {
+            discriminator_value: final_name,
+            docs: discriminator_docs,
+            field_defs,
+            kind: variant_kind,
+        });
     }
 
-    (
-        field_defs_by_variant,
-        docs_by_variant,
-        kinds_by_variant,
-        enum_validation_fns,
-        guard_errors,
-    )
+    (variants, enum_validation_fns, guard_errors)
 }
 
 /// Renders the TypeScript type fragments, Zod schema fragments (with optional-field lists), and
@@ -2334,24 +2338,21 @@ fn render_discriminated_variants(
     tag_name: &str,
     content_name: &str,
     item_name: &str,
-    field_defs_by_variant: HashMap<String, Vec<FieldDef>>,
-    docs_by_variant: &HashMap<String, String>,
-    kinds_by_variant: &HashMap<String, VariantKind>,
+    variants: &[DiscriminatedVariant],
 ) -> RenderedVariants {
     let mut type_code_items = Vec::new();
     let mut schema_code_items = Vec::new();
     let mut json_schema_variants: Vec<proc_macro2::TokenStream> = Vec::new();
 
-    for (discriminator_value, field_defs) in field_defs_by_variant {
-        let variant_kind = &kinds_by_variant[&discriminator_value];
+    for variant in variants {
         let (variant_type_code, variant_schema_code, optional_fields, json_schema_variant) =
             generate_variant_code(
                 tag_name,
                 content_name,
-                &discriminator_value,
-                &field_defs,
-                variant_kind,
-                &docs_by_variant[&discriminator_value],
+                &variant.discriminator_value,
+                &variant.field_defs,
+                &variant.kind,
+                &variant.docs,
                 item_name,
             );
         type_code_items.push(variant_type_code);
@@ -2412,20 +2413,13 @@ fn process_discriminated_enum(
     let enum_module_name_opt = None;
 
     // Bind both result tuples whole so feature-gated field access marks them used (no per-element
-    // guards): `variants` = (field_defs, docs, kinds, validation_fns, guard_errors);
+    // guards): `variants` = (variants, validation_fns, guard_errors);
     // `rendered` = (ts, zod, json).
     let variants = collect_discriminated_variants(&mut item_enum, rename_all, enum_module_name_opt);
-    if let Some(output) = guard_failure_output(&item_enum, &variants.4) {
+    if let Some(output) = guard_failure_output(&item_enum, &variants.2) {
         return output;
     }
-    let rendered = render_discriminated_variants(
-        tag_name,
-        content_name,
-        item_name,
-        variants.0,
-        &variants.1,
-        &variants.2,
-    );
+    let rendered = render_discriminated_variants(tag_name, content_name, item_name, &variants.0);
     #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
     let _: &_ = &(name, &rendered);
 
@@ -2500,7 +2494,7 @@ fn process_discriminated_enum(
             &module_ident,
             name,
             &schema_impl_items,
-            &variants.3,
+            &variants.1,
             &delegate_impl_items,
         )
     }
@@ -3504,6 +3498,10 @@ fn sibling_json_schema_value(name: &str) -> proc_macro2::TokenStream {
 /// Builds JSON schema for a tuple element (used for tuple fields and for tuple variants), or the
 /// rejection when the element holds a value the dispatch cannot render — which the callers turn
 /// into the single diagnostic naming the field.
+///
+/// An alias's target is rendered through here too: an alias names a type, and this is the dispatch
+/// total over the types the crate renders, so what the alias publishes is what a field written as
+/// the target would carry.
 #[cfg(feature = "jsonschema")]
 fn build_tuple_element_json_schema(
     fld: &FieldDef,
@@ -3760,6 +3758,21 @@ fn build_map_member_schema(
     Ok(build_map_member_item(&normalized)?.into_member_schema(&normalized))
 }
 
+/// What a value the mapping cannot render is reported as. The `subject` names where the value was
+/// written — a field, an alias — which is what the author can act on and all that differs between
+/// those positions, so the reasons are worded once.
+#[cfg(feature = "jsonschema")]
+fn map_member_rejection_message(subject: &str, rejection: &MapMemberRejection) -> String {
+    match rejection {
+        MapMemberRejection::NonEnumKey(key_type_name) => format!(
+            "{subject}: a map key must be a plain `#[model_schema()]` enum, whose members become the object's keys — `{key_type_name}` resolves to a type with no `enum_members()`"
+        ),
+        MapMemberRejection::Tuple => format!(
+            "{subject}: a tuple is not supported as a map value — give the value a `#[model_schema()]` struct instead"
+        ),
+    }
+}
+
 /// The one diagnostic a slot the mapping cannot render produces — on either key path, at any depth,
 /// and in a tuple slot the value is reached through.
 ///
@@ -3772,14 +3785,7 @@ fn map_member_rejection_error(
     field_name_str: &str,
     rejection: &MapMemberRejection,
 ) -> proc_macro2::TokenStream {
-    let message = match rejection {
-        MapMemberRejection::NonEnumKey(key_type_name) => format!(
-            "field `{field_name_str}`: a map key must be a plain `#[model_schema()]` enum, whose members become the object's keys — `{key_type_name}` resolves to a type with no `enum_members()`"
-        ),
-        MapMemberRejection::Tuple => format!(
-            "field `{field_name_str}`: a tuple is not supported as a map value — give the value a `#[model_schema()]` struct instead"
-        ),
-    };
+    let message = map_member_rejection_message(&format!("field `{field_name_str}`"), rejection);
     quote! { compile_error!(#message); }
 }
 
@@ -5264,15 +5270,67 @@ fn generate_ts_alias_method(
     }
 }
 
+/// The alias target as the JSON mapping reads it: every reference to one of the alias's own type
+/// parameters replaced by the opaque type.
+///
+/// A parameter names no type until the alias is instantiated, and every position that references an
+/// alias references it uninstantiated — a field written as `Pair<A, B>` carries the alias module's
+/// one schema. So a parameter admits any value, as an opaque field does, while the shape around it
+/// — arity, array-ness, a map's keys — is still described.
+#[cfg(feature = "jsonschema")]
+fn alias_json_schema_field_def(alias: &ItemType, field_def: &FieldDef) -> FieldDef {
+    let parameters: Vec<String> = alias
+        .generics
+        .params
+        .iter()
+        .filter_map(|param| match param {
+            syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+            syn::GenericParam::Const(_) | syn::GenericParam::Lifetime(_) => None,
+        })
+        .collect();
+    let mut erased = field_def.clone();
+    erased.erase_type_parameters(&parameters);
+    erased
+}
+
+/// The diagnostic an alias whose target the dispatch cannot render emits, in place of the whole
+/// `json_schema()` body.
+///
+/// It replaces the body rather than joining it: a schema left there would describe a type the
+/// expansion has already rejected, and every slot naming the alias would carry it. The tokens are
+/// the body's tail expression — no trailing semicolon, so the method's return type raises no second
+/// error on top of the one the author can act on.
+#[cfg(feature = "jsonschema")]
+fn alias_json_schema_rejection(
+    export_name: &str,
+    rejection: &MapMemberRejection,
+) -> proc_macro2::TokenStream {
+    let message = map_member_rejection_message(&format!("type alias `{export_name}`"), rejection);
+    quote! { compile_error!(#message) }
+}
+
+/// Builds the alias module's `json_schema()`, or nothing when `jsonschema` is off.
+///
+/// An alias names a type, so it publishes that type's own schema: the target `FieldDef` — the one
+/// the TypeScript and Zod methods render from — through the dispatch a positional slot uses, that
+/// being the dispatch total over the types the crate renders and the one whose `ObjectId` is the
+/// field-position object. So the alias describes what a field written as the target describes. A
+/// sibling target is carried by the shared reference, which resolves through the registry: an alias
+/// of an alias lands on the type at the end of the chain, and an alias of a type that never
+/// expanded fails on the module it names, exactly as a field of that type does.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-fn generate_alias_json_schema_stub() -> proc_macro2::TokenStream {
+fn generate_alias_json_schema_method(
+    alias: &ItemType,
+    export_name: &str,
+    field_def: &FieldDef,
+) -> proc_macro2::TokenStream {
     #[cfg(feature = "jsonschema")]
     {
+        let body = build_tuple_element_json_schema(&alias_json_schema_field_def(alias, field_def))
+            .unwrap_or_else(|rejection| alias_json_schema_rejection(export_name, &rejection));
         quote! {
             pub fn json_schema() -> serde_json::Value {
-                serde_json::json!({
-                    "warning": "JSON schema generation for aliases is not yet supported"
-                })
+                #body
             }
         }
     }
@@ -5280,6 +5338,7 @@ fn generate_alias_json_schema_stub() -> proc_macro2::TokenStream {
     {
         // Nothing in this build references an alias module's `json_schema()`; the sibling
         // reference that would (`flatten_field_json_schema_ref`) is itself jsonschema-gated.
+        let _: &_ = &(alias, export_name, field_def);
         quote! {}
     }
 }
