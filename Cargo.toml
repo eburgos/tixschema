@@ -21,7 +21,9 @@ regex = ">=1.10"
 
 [dev-dependencies]
 mongodb = ">=3.7"
-serde = { version = "1", features = ["derive"] }
+# Test-only: `rc` supplies serde's `Rc`/`Arc` impls, without which the wire criterion the
+# transparent-wrapper coverage rests on cannot be read off an `Rc`/`Arc` field at all.
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 chrono = { version = ">=0.4.40", features = ["serde"] }
 regex = ">=1.10"
