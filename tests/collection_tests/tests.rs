@@ -360,6 +360,26 @@ struct NestedSequenceSlots {
     tuple_rows: (String, Vec<Vec<u32>>),
 }
 
+// A doc comment is written on the field, not on the shape its type spells, so the wrappers the
+// parser collapses onto their element describe with the same comment the spellings it leaves alone
+// describe with.
+#[cfg(feature = "typescript")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct DocumentedSequenceFields {
+    /// Documented nested field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    documented_nested: Option<Vec<u32>>,
+    /// Documented optional field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    documented_optional: Option<String>,
+    /// Documented set field.
+    documented_set: HashSet<String>,
+    /// Documented vec field.
+    documented_vec: Vec<String>,
+    undocumented_vec: Vec<String>,
+}
+
 fn one<T, C>(item: T) -> C
 where
     C: FromIterator<T>,
@@ -2328,4 +2348,22 @@ fn test_an_alias_of_a_nested_sequence_publishes_its_depth() {
             "items": { "type": "array", "items": { "type": "integer" } }
         })
     );
+}
+
+/// A field's doc comment reaches the generated TypeScript from every spelling: the wrappers the
+/// parser collapses onto their element carry the docs across the collapse, so a `Vec` and an
+/// `Option` describe with the comment the set spelling they share a wire form with already carried.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_a_doc_comment_reaches_ts_from_a_collapsed_wrapper_field() {
+    let ts = DocumentedSequenceFields::ts_definition();
+    for spelling in [
+        " * Documented nested field.\n * \n**/\n  documented_nested: Array<number> | undefined;",
+        " * Documented optional field.\n * \n**/\n  documented_optional: string | undefined;",
+        " * Documented set field.\n * \n**/\n  documented_set: Array<string>;",
+        " * Documented vec field.\n * \n**/\n  documented_vec: Array<string>;",
+        " * undocumented_vec\n * \n**/\n  undocumented_vec: Array<string>;",
+    ] {
+        assert!(ts.contains(spelling), "Got: {ts}");
+    }
 }
