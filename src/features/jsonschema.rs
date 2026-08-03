@@ -2,6 +2,9 @@
 //!
 //! This module handles JSON schema generation when the "jsonschema" feature is enabled.
 
+/// What every pointer the crate writes opens with; what follows it is the name being deferred.
+const DEFS_PREFIX: &str = "#/$defs/";
+
 /// Check if we should generate JSON schema methods.
 #[cfg(test)]
 pub const fn should_generate_json_schema() -> bool {
@@ -14,7 +17,7 @@ pub const fn should_generate_json_schema() -> bool {
 /// array, and the draft before it spells the same array with `items`/`additionalItems`), whose
 /// deferred schema is a `$ref` into the document's own `$defs`.
 fn defs_pointer(def_name: &str) -> String {
-    format!("#/$defs/{def_name}")
+    format!("{DEFS_PREFIX}{def_name}")
 }
 
 /// The pair of JSON-schema methods every schema module publishes.
@@ -123,6 +126,7 @@ fn flattened_object_body(
     json_schema_fields: &[proc_macro2::TokenStream],
     flatten_json_schemas: &[proc_macro2::TokenStream],
 ) -> proc_macro2::TokenStream {
+    let defs_prefix = DEFS_PREFIX;
     quote::quote! {
         {
             fn merge_object_schemas(
@@ -155,6 +159,21 @@ fn flattened_object_body(
                 out
             }
 
+            // A flattened base that names itself describes as a reference into the definitions
+            // being hoisted, and a reference is the one thing with no properties to merge. The
+            // body it points at is written by then — the frame that deferred the name fills the
+            // entry in before it returns — so the merge reads it back. The entry is still only
+            // reserved when the flatten is itself what came back around, and a base that holds
+            // itself has no closed object to contribute.
+            fn deferred_body<'doc>(
+                schema: &'doc serde_json::Value,
+                defs: &'doc serde_json::Map<String, serde_json::Value>,
+            ) -> Option<&'doc serde_json::Value> {
+                let pointer = schema.get("$ref")?.as_str()?;
+                let name = pointer.strip_prefix(#defs_prefix)?;
+                defs.get(name).filter(|body| body.is_object())
+            }
+
             fn branches_of(
                 schema: &serde_json::Value,
             ) -> Vec<serde_json::Map<String, serde_json::Value>> {
@@ -182,7 +201,8 @@ fn flattened_object_body(
 
             let mut branches: Vec<serde_json::Map<String, serde_json::Value>> = vec![schema_obj];
             for fs in &flattened {
-                let fs_branches = branches_of(fs);
+                let fs_body = deferred_body(fs, hoisted_defs).unwrap_or(fs);
+                let fs_branches = branches_of(fs_body);
                 if fs_branches.is_empty() {
                     continue;
                 }
