@@ -147,6 +147,8 @@ struct SetElementFields {
     #[model_schema_prop(minLength = 3)]
     constrained_labels: HashSet<String>,
     labels: HashSet<String>,
+    #[model_schema_prop(preprocess = ["trim"])]
+    preprocessed_labels: HashSet<String>,
     sibling_tags: HashSet<MetricTag>,
     small_ids: HashSet<u32>,
 }
@@ -159,6 +161,8 @@ struct VecElementFields {
     #[model_schema_prop(minLength = 3)]
     constrained_labels: Vec<String>,
     labels: Vec<String>,
+    #[model_schema_prop(preprocess = ["trim"])]
+    preprocessed_labels: Vec<String>,
     sibling_tags: Vec<MetricTag>,
     small_ids: Vec<u32>,
 }
@@ -1005,6 +1009,7 @@ fn test_element_fields_constructible_under_both_spellings() {
         big_ids: HashSet::from([9_u64]),
         constrained_labels: HashSet::from(["abc".to_owned()]),
         labels: HashSet::from(["t".to_owned()]),
+        preprocessed_labels: HashSet::from(["t".to_owned()]),
         sibling_tags: HashSet::from([tag.clone()]),
         small_ids: HashSet::from([7_u32]),
     };
@@ -1016,6 +1021,7 @@ fn test_element_fields_constructible_under_both_spellings() {
         big_ids: vec![9],
         constrained_labels: vec!["abc".to_owned()],
         labels: vec!["t".to_owned()],
+        preprocessed_labels: vec!["t".to_owned()],
         sibling_tags: vec![tag],
         small_ids: vec![7],
     };
@@ -1033,6 +1039,7 @@ fn test_set_element_json_schema() {
         big_ids: HashSet::from([9_u64]),
         constrained_labels: HashSet::new(),
         labels: HashSet::new(),
+        preprocessed_labels: HashSet::new(),
         sibling_tags: HashSet::new(),
         small_ids: HashSet::from([7_u32]),
     };
@@ -1090,29 +1097,69 @@ fn test_set_elements_render_as_vec_elements() {
     assert_eq!(set_schema["required"], vec_schema["required"]);
 }
 
-/// The TypeScript and Zod surfaces write the Rust container name through verbatim — `HashSet<T>` is
-/// neither a TypeScript type nor a Zod schema expression. Pinned as it stands so that the JSON
-/// schema agreeing with `Vec` is not read as those two having been settled with it.
+/// A set writes a JSON array of its element, so the TypeScript type is the array of whatever the
+/// element renders as — the Rust container name is not a TypeScript type at all. The aliased
+/// element is the case the naming cannot be guessed for: it resolves through the registry.
 #[test]
-#[cfg(all(feature = "typescript", feature = "zod"))]
+#[cfg(feature = "typescript")]
 fn test_set_element_typescript_generation() {
     let ts_definition = SetElementFields::ts_definition();
     for spelling in [
-        "aliased_tags: HashSet<MetricTagRefType>;",
-        "sibling_tags: HashSet<MetricTag>;",
-        "labels: HashSet<string>;",
-        "small_ids: HashSet<number>;",
+        "aliased_tags: Array<MetricTagRefType>;",
+        "big_ids: Array<number>;",
+        "constrained_labels: Array<string>;",
+        "labels: Array<string>;",
+        "preprocessed_labels: Array<string>;",
+        "sibling_tags: Array<MetricTag>;",
+        "small_ids: Array<number>;",
     ] {
         assert!(ts_definition.contains(spelling), "Got: {ts_definition}");
     }
+}
 
+/// The Zod schema of a set is the array schema of its element, constraints and all — the container
+/// name is not a Zod expression, and an element schema is what `z.array` has to be handed.
+#[test]
+#[cfg(feature = "zod")]
+fn test_set_element_zod_generation() {
     let zod_schema = SetElementFields::zod_schema();
     for spelling in [
-        "aliased_tags: HashSet<MetricTagRefType>,",
-        "sibling_tags: HashSet<MetricTag>,",
-        "labels: HashSet<string>,",
-        "small_ids: HashSet<number>,",
+        "aliased_tags: z.array(MetricTagRefType$Schema),",
+        "big_ids: z.array(z.number().int()),",
+        "constrained_labels: z.array(z.string().min(3)),",
+        "labels: z.array(z.string()),",
+        // The preprocess wrap belongs once, outside the array — where the `Vec` spelling puts it.
+        "preprocessed_labels: z.preprocess(trim, z.array(z.string())),",
+        "sibling_tags: z.array(MetricTag$Schema),",
+        "small_ids: z.array(z.number().int()),",
     ] {
         assert!(zod_schema.contains(spelling), "Got: {zod_schema}");
     }
+}
+
+/// Whatever a set field renders as, it is not the Rust wrapper's name: neither surface has any
+/// meaning for it, so the name surviving anywhere into the output is a syntax error in the output.
+#[test]
+#[cfg(any(feature = "typescript", feature = "zod"))]
+fn test_no_set_wrapper_name_survives_into_generated_output() {
+    let mut generated = String::new();
+    #[cfg(feature = "typescript")]
+    generated.push_str(&SetElementFields::ts_definition());
+    #[cfg(feature = "zod")]
+    generated.push_str(&SetElementFields::zod_schema());
+
+    for wrapper in ["HashSet", "BTreeSet"] {
+        assert!(!generated.contains(wrapper), "Got: {generated}");
+    }
+}
+
+/// A `HashSet<T>` and a `Vec<T>` serialize alike, so their Zod schemas validate alike — field for
+/// field, at every element type, once the type's own name is set aside.
+#[test]
+#[cfg(feature = "zod")]
+fn test_set_fields_validate_as_vec_fields() {
+    assert_eq!(
+        SetElementFields::zod_schema().replace("SetElementFields", "VecElementFields"),
+        VecElementFields::zod_schema()
+    );
 }

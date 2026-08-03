@@ -3886,22 +3886,6 @@ fn build_boolean_field_schema(fld: &FieldDef, field_name_str: &str) -> proc_macr
     }
 }
 
-/// The element of a collection wrapper, as the field the wrapper's own serialization makes it.
-///
-/// A `Vec<T>` and a `HashSet<T>` both write a JSON array of `T`, so the element carries the
-/// array-ness and answers for what the array holds. The field's own constraints ride along: a
-/// `Vec<T>` field applies them to its items, and a generic argument carries none of its own.
-#[cfg(feature = "jsonschema")]
-fn collection_element_field(fld: &FieldDef, element: &FieldDef) -> FieldDef {
-    let mut arrayed = element.clone();
-    arrayed.name.clone_from(&fld.name);
-    arrayed.is_array = true;
-    arrayed
-        .model_schema_prop_meta
-        .clone_from(&fld.model_schema_prop_meta);
-    arrayed
-}
-
 /// Builds the JSON schema for a `SiblingType` field (references to other generated types).
 #[cfg(feature = "jsonschema")]
 fn build_sibling_type_field_schema(
@@ -3918,7 +3902,7 @@ fn build_sibling_type_field_schema(
     if let [element] = lst
         && (name == "Vec" || name == "HashSet")
     {
-        build_field_type_schema(&collection_element_field(fld, element), field_name_str)
+        build_field_type_schema(&fld.collection_element_field(element), field_name_str)
     } else if (name == "HashMap" || name == "BTreeMap") && lst.len() == 2 {
         log::trace!("HashMap => field_name: {field_name_str}, lst: {lst:?}");
         quote! {
