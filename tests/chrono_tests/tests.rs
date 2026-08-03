@@ -67,6 +67,17 @@ struct ChronoValueMaps {
     windows: HashMap<String, Vec<NaiveTime>>,
 }
 
+// A chrono value keeps the rendering it has in field position however deep the map nesting goes:
+// the depth belongs to the map, never to the value type.
+#[model_schema()]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq)]
+struct NestedChronoMaps {
+    dates_by_group: HashMap<String, HashMap<String, NaiveDate>>,
+    timestamps_by_run: HashMap<String, HashMap<String, DateTime<Utc>>>,
+    window_batches: HashMap<String, Vec<HashMap<String, NaiveTime>>>,
+}
+
 // Test struct with NaiveDate field.
 #[model_schema()]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -198,6 +209,23 @@ fn test_chrono_types_constructible() {
     assert_eq!(chrono_value_maps.dates.len(), 1);
     assert_eq!(chrono_value_maps.optional_dates["closing"], None);
     assert_eq!(chrono_value_maps.windows["opening"], vec![time]);
+    let nested_chrono_maps = NestedChronoMaps {
+        dates_by_group: HashMap::from([(
+            "opening".to_owned(),
+            HashMap::from([("first".to_owned(), date)]),
+        )]),
+        timestamps_by_run: HashMap::new(),
+        window_batches: HashMap::from([(
+            "opening".to_owned(),
+            vec![HashMap::from([("first".to_owned(), time)])],
+        )]),
+    };
+    assert_eq!(nested_chrono_maps.dates_by_group["opening"]["first"], date);
+    assert_eq!(
+        nested_chrono_maps.window_batches["opening"][0]["first"],
+        time
+    );
+    assert!(nested_chrono_maps.timestamps_by_run.is_empty());
     assert!(chrono_value_maps.local_datetimes.is_empty());
     assert!(chrono_value_maps.timestamps.is_empty());
     assert!(chrono_value_maps.times.is_empty());
@@ -554,6 +582,78 @@ fn test_string_keyed_chrono_map_json_schema() {
         serde_json::json!({ "type": "string", "format": "date-time" }),
         "in: {events}"
     );
+}
+
+/// A nested map's members reach the same chrono mapping the outer members reach: the format is the
+/// value type's, and no depth of nesting is allowed to drop it.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_nested_string_keyed_chrono_map_json_schema() {
+    let schema = NestedChronoMaps::json_schema();
+    let properties = schema["properties"].as_object().unwrap();
+
+    for (field_name, expected_value_schema) in [
+        (
+            "dates_by_group",
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": { "type": "string", "format": "date" }
+            }),
+        ),
+        (
+            "timestamps_by_run",
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": { "type": "string", "format": "date-time" }
+            }),
+        ),
+        (
+            "window_batches",
+            serde_json::json!({
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": { "type": "string", "format": "time" }
+                }
+            }),
+        ),
+    ] {
+        let field = &properties[field_name];
+        assert_eq!(field["type"], "object", "in: {field}");
+        assert_eq!(
+            field["additionalProperties"], expected_value_schema,
+            "in: {field}"
+        );
+    }
+}
+
+/// TypeScript and Zod recurse through a map value on their own, so a nested chrono value keeps its
+/// rendering on those surfaces too — pinned so the three stay in step.
+#[test]
+#[cfg(all(feature = "typescript", feature = "zod"))]
+fn test_nested_string_keyed_chrono_map_typescript_and_zod() {
+    let ts_definition = NestedChronoMaps::ts_definition();
+    for expected in [
+        "dates_by_group: Partial<Record<string, Partial<Record<string, string>>>>;",
+        "timestamps_by_run: Partial<Record<string, Partial<Record<string, Date>>>>;",
+        "window_batches: Partial<Record<string, Array<Partial<Record<string, string>>>>>;",
+    ] {
+        assert!(
+            ts_definition.contains(expected),
+            "missing {expected}, got: {ts_definition}"
+        );
+    }
+
+    let zod_schema = NestedChronoMaps::zod_schema();
+    for expected in [
+        "dates_by_group: z.record(z.string(), z.record(z.string(), z.iso.date())),",
+        "timestamps_by_run: z.record(z.string(), z.record(z.string(), z.coerce.date())),",
+    ] {
+        assert!(
+            zod_schema.contains(expected),
+            "missing {expected}, got: {zod_schema}"
+        );
+    }
 }
 
 // ========== Enum Tests (Original Use Case) ==========

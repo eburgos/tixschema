@@ -120,6 +120,28 @@ struct SimpleComplexTest {
         feature = "serde"
     )
 ))]
+// A map value that is itself a map is described at every level: the outer members are inner maps,
+// and those maps' own members carry the value type's schema.
+#[model_schema()]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq)]
+struct NestedStringKeyedMaps {
+    counts_by_group: HashMap<String, HashMap<String, u64>>,
+    labels_by_group: HashMap<String, HashMap<String, String>>,
+    rows_by_group: HashMap<String, Vec<HashMap<String, String>>>,
+    scores_by_group: HashMap<String, HashMap<String, Option<f64>>>,
+    tallies_by_region: HashMap<String, HashMap<String, HashMap<String, u64>>>,
+}
+
+#[cfg(all(
+    test,
+    any(
+        feature = "typescript",
+        feature = "jsonschema",
+        feature = "zod",
+        feature = "serde"
+    )
+))]
 #[model_schema()]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
@@ -156,6 +178,24 @@ fn test_edge_case_structs_constructible() {
         string_to_vec_string: HashMap::new(),
     };
     assert!(original.problematic_map.is_empty());
+    let nested = NestedStringKeyedMaps {
+        counts_by_group: HashMap::new(),
+        labels_by_group: HashMap::from([(
+            "first".to_owned(),
+            HashMap::from([("a".to_owned(), "one".to_owned())]),
+        )]),
+        rows_by_group: HashMap::new(),
+        scores_by_group: HashMap::from([(
+            "first".to_owned(),
+            HashMap::from([("a".to_owned(), None)]),
+        )]),
+        tallies_by_region: HashMap::new(),
+    };
+    assert_eq!(nested.labels_by_group["first"]["a"], "one");
+    assert_eq!(nested.scores_by_group["first"]["a"], None);
+    assert!(nested.counts_by_group.is_empty());
+    assert!(nested.rows_by_group.is_empty());
+    assert!(nested.tallies_by_region.is_empty());
     let simple = SimpleComplexTest {
         nested_map_of_arrays: HashMap::new(),
     };
@@ -386,4 +426,98 @@ fn test_quadruple_nested_maps_compilation_serde() {
     // Check TypeScript contains our fields (exact types may be complex)
     assert!(ts_definition.contains("quadruple_nested"));
     assert!(ts_definition.contains("optional_nested"));
+}
+
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_nested_string_keyed_maps_json_schema() {
+    let schema = NestedStringKeyedMaps::json_schema();
+    let properties = schema["properties"].as_object().unwrap();
+
+    for (field_name, expected_value_schema) in [
+        (
+            "counts_by_group",
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": { "type": "integer" }
+            }),
+        ),
+        (
+            "labels_by_group",
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+            }),
+        ),
+        (
+            "rows_by_group",
+            serde_json::json!({
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" }
+                }
+            }),
+        ),
+        (
+            "scores_by_group",
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": {
+                    "anyOf": [{ "type": "number" }, { "type": "null" }]
+                }
+            }),
+        ),
+        (
+            "tallies_by_region",
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": {
+                    "type": "object",
+                    "additionalProperties": { "type": "integer" }
+                }
+            }),
+        ),
+    ] {
+        let field = &properties[field_name];
+        assert_eq!(field["type"], "object", "in: {field}");
+        assert_eq!(
+            field["additionalProperties"], expected_value_schema,
+            "in: {field}"
+        );
+    }
+}
+
+/// TypeScript and Zod recurse through a map value on their own, so the nesting they render is the
+/// one the JSON schema now describes — pinned here so the three surfaces stay in step.
+#[test]
+#[cfg(all(feature = "typescript", feature = "zod"))]
+fn test_nested_string_keyed_maps_typescript_and_zod() {
+    let ts_definition = NestedStringKeyedMaps::ts_definition();
+    for expected in [
+        "counts_by_group: Partial<Record<string, Partial<Record<string, number>>>>;",
+        "labels_by_group: Partial<Record<string, Partial<Record<string, string>>>>;",
+        "rows_by_group: Partial<Record<string, Array<Partial<Record<string, string>>>>>;",
+        "scores_by_group: Partial<Record<string, Partial<Record<string, number | null>>>>;",
+        "tallies_by_region: Partial<Record<string, Partial<Record<string, Partial<Record<string, number>>>>>>;",
+    ] {
+        assert!(
+            ts_definition.contains(expected),
+            "missing {expected}, got: {ts_definition}"
+        );
+    }
+
+    let zod_schema = NestedStringKeyedMaps::zod_schema();
+    for expected in [
+        "counts_by_group: z.record(z.string(), z.record(z.string(), z.number().int())),",
+        "labels_by_group: z.record(z.string(), z.record(z.string(), z.string())),",
+        "rows_by_group: z.record(z.string(), z.array(z.record(z.string(), z.string()))),",
+        "scores_by_group: z.record(z.string(), z.record(z.string(), z.nullable(z.number()))),",
+        "tallies_by_region: z.record(z.string(), z.record(z.string(), z.record(z.string(), z.number().int()))),",
+    ] {
+        assert!(
+            zod_schema.contains(expected),
+            "missing {expected}, got: {zod_schema}"
+        );
+    }
 }
