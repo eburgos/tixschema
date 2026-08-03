@@ -324,7 +324,7 @@ impl FieldDef {
             }
             FieldDefType::SiblingType(name, lst) => {
                 if let [element] = lst.as_slice()
-                    && is_set_wrapper(name)
+                    && is_sequence_wrapper(name)
                 {
                     // The element re-enters the whole per-type rendering as the arrayed field it
                     // stands for, so a set renders exactly as the `Vec` of that element does.
@@ -465,7 +465,7 @@ impl FieldDef {
             }
             FieldDefType::SiblingType(name, lst) => {
                 if let [element] = lst.as_slice()
-                    && is_set_wrapper(name)
+                    && is_sequence_wrapper(name)
                 {
                     self.collection_element_field(element).zod_array_base()
                 } else if let Some(info) = lookup_alias_info(name) {
@@ -628,12 +628,18 @@ impl FieldDef {
     }
 }
 
-/// The std set wrappers, which each write a JSON array of their element.
+/// The one list of std wrappers the crate renders as arrays, shared by every surface.
 ///
-/// `Vec` is absent because it never reaches a wrapper name: the parser collapses it onto its
-/// element with `is_array` set, long before anything asks what the wrapper is called.
-fn is_set_wrapper(name: &str) -> bool {
-    matches!(name, "BTreeSet" | "HashSet")
+/// Membership is decided on the wire and nothing else: serde writes each of these as a JSON array
+/// of its single element type, so each describes as the `Vec` of that element does. The maps are
+/// absent because they write objects; `Vec` is listed even though the parser collapses it onto its
+/// element with `is_array` set long before anything asks a wrapper's name, so that a `Vec` written
+/// where a wrapper name is read still takes the wrapper path.
+pub fn is_sequence_wrapper(name: &str) -> bool {
+    matches!(
+        name,
+        "BTreeSet" | "BinaryHeap" | "HashSet" | "LinkedList" | "Vec" | "VecDeque"
+    )
 }
 
 /// Classifies a `syn::Variant` into its `VariantKind`.

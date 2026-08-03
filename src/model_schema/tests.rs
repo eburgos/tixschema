@@ -1628,3 +1628,47 @@ fn an_aliased_string_keyed_map_value_resolves_its_module_through_the_registry() 
         );
     }
 }
+
+/// A field spelled as a wrapper around `u32`, built rather than parsed: the parser collapses a
+/// `Vec` onto its element before any wrapper name is read, so the `Vec` spelling of a wrapper name
+/// can only be put in front of the dispatch this way.
+#[cfg(feature = "jsonschema")]
+fn wrapped_u32_field_schema(wrapper: &str) -> String {
+    let element = super::get_field_def("", &syn::parse_quote!(u32), "");
+    let field = super::FieldDef {
+        array_num: None,
+        docs: String::new(),
+        field_type: FieldDefType::SiblingType(wrapper.to_owned(), vec![element]),
+        is_array: false,
+        is_optional: false,
+        model_schema_prop_meta: None,
+        name: "items".to_owned(),
+    };
+    super::build_field_type_schema(&field, "items").to_string()
+}
+
+/// Every wrapper serde writes as a JSON array describes as the `Vec` of its element does, that
+/// being the whole reason each is covered. One list answers for all of them, so none can fall
+/// through to a schema module of its own — a module the expansion never emits.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn every_sequence_wrapper_describes_as_the_vec_of_its_element() {
+    let parsed: syn::Type = syn::parse_quote!(Vec<u32>);
+    let expected =
+        super::build_field_type_schema(&super::get_field_def("items", &parsed, ""), "items")
+            .to_string();
+    for wrapper in [
+        "BTreeSet",
+        "BinaryHeap",
+        "HashSet",
+        "LinkedList",
+        "Vec",
+        "VecDeque",
+    ] {
+        assert_eq!(
+            wrapped_u32_field_schema(wrapper),
+            expected,
+            "for: {wrapper}"
+        );
+    }
+}
