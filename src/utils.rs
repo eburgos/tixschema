@@ -7,9 +7,27 @@ use syn::{Attribute, Expr, Field, Lit, Meta, Variant};
 #[cfg(any(feature = "typescript", feature = "zod"))]
 use syn::{ItemEnum, ItemStruct};
 
+/// Whether a registered Rust ident, *written as a type path*, resolves to something carrying an
+/// inherent `enum_members()` — the enumeration the JSON-schema map-key expansion calls. Only a
+/// plain unit enum gets that method, and a type path sees straight through an alias, so an alias
+/// answers for whatever it targets rather than for itself.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AliasKind {
+    /// A plain unit enum, or an alias chain ending in one.
+    EnumMembers,
+    /// Provably has none: a struct, a branded newtype, a non-plain enum, or an alias whose target
+    /// is a primitive, a collection, or one of those.
+    NoEnumMembers,
+    /// Undecidable at this expansion — an alias naming a type that was not registered before it.
+    Unknown,
+}
+
 #[derive(Clone)]
 pub struct AliasInfo {
     pub export_name: String,
+    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+    pub kind: AliasKind,
     #[cfg(feature = "jsonschema")]
     pub module_name: String,
 }
@@ -19,7 +37,12 @@ thread_local! {
 }
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-pub fn register_alias_info(rust_ident: &str, export_name: &str, module_name: &str) {
+pub fn register_alias_info(
+    rust_ident: &str,
+    export_name: &str,
+    module_name: &str,
+    kind: AliasKind,
+) {
     #[cfg(not(feature = "jsonschema"))]
     let _: &_ = &module_name;
     ALIAS_INFO.with(|map| {
@@ -27,6 +50,7 @@ pub fn register_alias_info(rust_ident: &str, export_name: &str, module_name: &st
             rust_ident.to_owned(),
             AliasInfo {
                 export_name: export_name.to_owned(),
+                kind,
                 #[cfg(feature = "jsonschema")]
                 module_name: module_name.to_owned(),
             },

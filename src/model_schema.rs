@@ -33,8 +33,8 @@ use crate::{
 #[cfg(feature = "zod")]
 use crate::utils::extract_example_from_docs;
 
-#[cfg(feature = "jsonschema")]
-use crate::utils::lookup_alias_info;
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+use crate::utils::{AliasKind, lookup_alias_info};
 
 #[cfg(feature = "serde")]
 use crate::features::serde::{SerdeFieldMeta, SerdeTypeMeta};
@@ -237,6 +237,24 @@ pub fn exec_model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
     }
 }
 
+/// Classifies what an alias resolves to, for the registry.
+///
+/// A `SiblingType` is the only shape that can reach a plain enum, and it answers with whatever the
+/// named type registered: an alias of an alias of an enum inherits `EnumMembers` down the chain.
+/// A target registered after its alias reads as `Unknown`, which callers must treat as "cannot
+/// rule it out" rather than as a negative. An array (`Vec<Slot>`, `[Slot; 4]`) is a collection, not
+/// the enum it holds.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn alias_target_kind(alias_field_def: &FieldDef) -> AliasKind {
+    let FieldDefType::SiblingType(target_name, generic_args) = &alias_field_def.field_type else {
+        return AliasKind::NoEnumMembers;
+    };
+    if !generic_args.is_empty() || alias_field_def.is_array {
+        return AliasKind::NoEnumMembers;
+    }
+    lookup_alias_info(target_name).map_or(AliasKind::Unknown, |target| target.kind)
+}
+
 /// The alias schema module is referenced by all three schema features — `typescript` and `zod`
 /// through the alias's registered export name, `jsonschema` through a Rust path to
 /// `#module_ident::Schema::json_schema()`. So the module and its `register_alias_info` call are
@@ -255,9 +273,11 @@ fn process_type_alias(item_type: ItemType, args: &ModelSchemaArgs) -> TokenStrea
     let module_name = format!("{}_schema", to_snake_case(&export_name));
     let module_ident = Ident::new(&module_name, rust_ident.span());
 
-    register_alias_info(&rust_ident_str, &export_name, &module_name);
-
+    // Registered only once the target has been classified: the alias's own expansion is the only
+    // place that still holds the aliased type's tokens.
     let alias_field_def = get_field_def(export_name.as_str(), &alias.ty, "");
+    let kind = alias_target_kind(&alias_field_def);
+    register_alias_info(&rust_ident_str, &export_name, &module_name, kind);
 
     let ts_method = generate_alias_ts_definition_method(&alias, &export_name, &alias_field_def);
     let json_schema_method = generate_alias_json_schema_stub();
@@ -778,8 +798,23 @@ fn struct_module_idents(name: &syn::Ident) -> (String, String, Ident) {
     let item_name = safe_type_name(&name.to_string());
     let module_name = format!("{}_schema", to_snake_case(&item_name));
     let module_ident = Ident::new(&module_name, name.span());
-    register_alias_info(&name.to_string(), &item_name, &module_name);
+    register_alias_info(
+        &name.to_string(),
+        &item_name,
+        &module_name,
+        AliasKind::NoEnumMembers,
+    );
     (item_name, module_name, module_ident)
+}
+
+/// The enum counterpart of [`struct_module_idents`]. `kind` differs per enum shape: only a plain
+/// unit enum is given an `enum_members()`, so only it can back an enum-keyed map.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn enum_module_idents(name: &syn::Ident, item_name: &str, kind: AliasKind) -> (String, Ident) {
+    let module_name = format!("{}_schema", to_snake_case(item_name));
+    let module_ident = Ident::new(&module_name, name.span());
+    register_alias_info(&name.to_string(), item_name, &module_name, kind);
+    (module_name, module_ident)
 }
 
 /// Extracts a struct's doc lines and the first ` ```rust example ` block (if any) from them.
@@ -1581,7 +1616,12 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
     let module_name = format!("{}_schema", to_snake_case(&item_name));
     let module_ident = Ident::new(&module_name, name.span());
 
-    register_alias_info(&name.to_string(), &item_name, &module_name);
+    register_alias_info(
+        &name.to_string(),
+        &item_name,
+        &module_name,
+        AliasKind::NoEnumMembers,
+    );
 
     // Extract docs and example
     #[cfg(feature = "zod")]
@@ -1909,15 +1949,9 @@ fn process_plain_enum(
     rename_all: Option<&str>,
     item_name: &str,
 ) -> TokenStream {
-    // Compute module name for schema struct (same pattern as type aliases)
+    // Compute the schema module name and register the enum so other types can find it.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    let module_name = format!("{}_schema", to_snake_case(item_name));
-    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    let module_ident = Ident::new(&module_name, name.span());
-
-    // Register enum in alias registry so other types can find it
-    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    register_alias_info(&name.to_string(), item_name, &module_name);
+    let (_, module_ident) = enum_module_idents(name, item_name, AliasKind::EnumMembers);
 
     // Extract docs early for example extraction
     #[cfg(any(feature = "typescript", feature = "zod"))]
@@ -2181,15 +2215,9 @@ fn process_discriminated_enum(
     rename_all: Option<&str>,
     item_name: &str,
 ) -> TokenStream {
-    // Compute module name for schema struct (same pattern as type aliases)
+    // Compute the schema module name and register the enum so other types can find it.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    let module_name = format!("{}_schema", to_snake_case(item_name));
-    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    let module_ident = Ident::new(&module_name, name.span());
-
-    // Register enum in alias registry so other types can find it
-    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    register_alias_info(&name.to_string(), item_name, &module_name);
+    let (module_name, module_ident) = enum_module_idents(name, item_name, AliasKind::NoEnumMembers);
 
     // Extract docs early for example extraction
     #[cfg(any(feature = "typescript", feature = "zod"))]
@@ -2656,15 +2684,9 @@ fn process_untagged_enum(
     name: &syn::Ident,
     item_name: &str,
 ) -> TokenStream {
-    // Compute module name for schema struct (same pattern as type aliases)
+    // Compute the schema module name and register the enum so other types can find it.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    let module_name = format!("{}_schema", to_snake_case(item_name));
-    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    let module_ident = Ident::new(&module_name, name.span());
-
-    // Register enum in alias registry so other types can find it
-    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    register_alias_info(&name.to_string(), item_name, &module_name);
+    let (_, module_ident) = enum_module_idents(name, item_name, AliasKind::NoEnumMembers);
 
     // Extract docs early for example extraction
     #[cfg(any(feature = "typescript", feature = "zod"))]
@@ -3702,6 +3724,21 @@ fn build_map_field_schema(
     match &key.field_type {
         FieldDefType::String => build_string_key_map_value_schema(value, field_name_str),
         FieldDefType::SiblingType(key_type_name, lst) if lst.is_empty() => {
+            // The loop below writes the key as a *type path*, which resolves through any alias, so
+            // an alias of a non-enum lands on a type with no `enum_members()` and rustc blames
+            // `#[model_schema()]` for a missing method the author never wrote. Only a target the
+            // registry positively rules out is rejected here: an unregistered name (a foreign type,
+            // or one expanded after this struct) stays on the emitting path, where it behaves as it
+            // always has.
+            if let Some(key_alias) = lookup_alias_info(key_type_name)
+                && key_alias.kind == AliasKind::NoEnumMembers
+            {
+                let message = format!(
+                    "field `{field_name_str}`: a map key must be a plain `#[model_schema()]` enum, whose members become the object's keys — `{key_type_name}` resolves to a type with no `enum_members()`"
+                );
+                return quote! { compile_error!(#message); };
+            }
+
             // For enum_members(), we call the type directly (delegation works)
             let key_type_name_ident =
                 proc_macro2::Ident::new(key_type_name.as_str(), proc_macro2::Span::call_site());
