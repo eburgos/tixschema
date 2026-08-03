@@ -2853,6 +2853,8 @@ fn a_tuple_struct_describes_as_its_arity_in_json_schema() {
     let pair = tuple_struct_json_body("Pair", &tuple_slots(&["String", "u32"])).to_string();
     assert!(pair.contains("prefixItems"), "Got: {pair}");
     assert!(pair.contains("maxItems"), "Got: {pair}");
+}
+
 /// A path writes a string on the wire, which is the value the rendered constraint describes, so
 /// every spelling of one reaches a leaf the checks can land on — the borrowed form included.
 #[cfg(feature = "serde")]
