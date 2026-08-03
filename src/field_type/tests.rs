@@ -12,7 +12,7 @@ const SEQUENCE_WRAPPERS: [&str; 5] = [
 
 fn field(field_type: FieldDefType) -> FieldDef {
     FieldDef {
-        array_num: None,
+        array_lengths: Vec::new(),
         docs: String::new(),
         field_type,
         array_depth: 0,
@@ -20,6 +20,17 @@ fn field(field_type: FieldDefType) -> FieldDef {
         nullable_levels: Vec::new(),
         name: "items".to_owned(),
     }
+}
+
+/// The field a sequence-wrapper spelling normalizes to, as every renderer asks for it — `None`
+/// when the spelling is not a wrapper around a single element.
+fn normalized_sequence(spelling: &str) -> Option<FieldDef> {
+    let ty: syn::Type = syn::parse_str(spelling).ok()?;
+    let parsed = super::get_field_def("items", &ty, "");
+    let FieldDefType::SiblingType(_, generics) = &parsed.field_type else {
+        return None;
+    };
+    Some(parsed.collection_element_field(generics.first()?))
 }
 
 fn sequence_of(wrapper: &str, element: FieldDefType) -> FieldDef {
@@ -189,6 +200,52 @@ fn test_the_parser_counts_one_array_level_per_wrapper_written() {
             array_depth,
             "for: {spelling}"
         );
+    }
+}
+
+/// A fixed-size array is written at one level and bounds that level alone, so the count lands on
+/// the level the `[T; N]` spells rather than on the field. A count the expansion cannot read — a
+/// const generic, a `const` item, a computed expression — and a slice, which spells no count at
+/// all, leave the level as unbounded as every other sequence spelling leaves it.
+#[test]
+fn test_the_parser_records_a_fixed_array_length_at_the_level_it_bounds() {
+    for (spelling, array_lengths) in [
+        ("u32", vec![]),
+        ("[u32; 3]", vec![(0_u8, 3_usize)]),
+        ("[[u32; 2]; 3]", vec![(0, 2), (1, 3)]),
+        ("Vec<[u32; 3]>", vec![(0, 3)]),
+        ("[Vec<u32>; 3]", vec![(1, 3)]),
+        ("Option<[u32; 3]>", vec![(0, 3)]),
+        ("[Option<u32>; 3]", vec![(0, 3)]),
+        ("Box<[u32; 3]>", vec![(0, 3)]),
+        ("[u32; SLOT_COUNT]", vec![]),
+        ("[u32; N]", vec![]),
+        ("[u32; 2 + 1]", vec![]),
+        ("[u32]", vec![]),
+        ("Vec<Vec<u32>>", vec![]),
+    ] {
+        let ty: syn::Type = syn::parse_str(spelling).unwrap();
+        assert_eq!(
+            super::get_field_def("items", &ty, "").array_lengths,
+            array_lengths,
+            "for: {spelling}"
+        );
+    }
+}
+
+/// A sequence wrapper normalizes onto its element before any surface reads it, and a bound has to
+/// survive that move from either side of the wrapper: the array written inside it keeps its own
+/// level, and the array it is written inside moves up by the level the wrapper adds.
+#[test]
+fn test_a_fixed_array_keeps_its_bound_across_the_sequence_normalization() {
+    for wrapper in SEQUENCE_WRAPPERS {
+        let inner = normalized_sequence(&format!("{wrapper}<[u32; 3]>")).unwrap();
+        let outer = normalized_sequence(&format!("[{wrapper}<u32>; 3]")).unwrap();
+
+        assert_eq!(inner.array_depth, 2, "for: {wrapper}");
+        assert_eq!(inner.array_lengths, vec![(0, 3)], "for: {wrapper}");
+        assert_eq!(outer.array_depth, 2, "for: {wrapper}");
+        assert_eq!(outer.array_lengths, vec![(1, 3)], "for: {wrapper}");
     }
 }
 

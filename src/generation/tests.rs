@@ -18,7 +18,7 @@ fn test_typescript_field_formatting() {
         docs: "Test documentation".to_owned(),
         field_type: FieldDefType::String,
         array_depth: 0,
-        array_num: None,
+        array_lengths: Vec::new(),
         model_schema_prop_meta: None,
         nullable_levels: Vec::new(),
     };

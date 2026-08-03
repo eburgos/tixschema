@@ -143,7 +143,15 @@ pub enum FieldDefType {
 /// - `field_type`: The core type classification (see `FieldDefType`)
 /// - `array_depth`: How many array levels wrap the type — one per `Vec`/slice/array/set the field
 ///   was written under, so `Vec<Vec<T>>` is 2. Zero is a bare value, which is what `is_array` asks.
-/// - `array_num`: Unused currently (future fixed-size array support?)
+/// - `array_lengths`: the element count of every level written as a fixed-size `[T; N]` with a
+///   literal `N`, one entry per such level and numbered the way `nullable_levels` numbers them. A
+///   level absent from the list holds however many items were written — what every other sequence
+///   spelling holds, and what a non-literal `N` records, the expansion having no value to read a
+///   const generic or a computed length from. Only the two validating surfaces spend it: the JSON
+///   schema pins the level with `minItems`/`maxItems` and Zod with `.length(N)`, so both reject the
+///   wrong-length payload serde itself refuses to deserialize. TypeScript keeps `Array<T>` — the
+///   fixed-length form its type system has is the N-element tuple, written out element by element,
+///   which stops being readable long before `N` stops being legal.
 /// - `model_schema_prop_meta`: Optional metadata from #[`model_schema_prop`] attribute
 ///   - Used for overrides like literals, minLength, etc.
 ///   - See Phase 5 in `notes/20250707_field_features.md` for minLength details
@@ -157,7 +165,7 @@ pub enum FieldDefType {
 #[derive(Clone, Debug)]
 pub struct FieldDef {
     pub array_depth: u8,
-    pub array_num: Option<u16>,
+    pub array_lengths: Vec<(u8, usize)>,
     pub docs: String,
     pub field_type: FieldDefType,
     pub model_schema_prop_meta: Option<ModelSchemaPropMeta>,
@@ -175,15 +183,19 @@ impl FieldDef {
     ///
     /// Every array level survives the move: the element's own, the one this wrapper adds, and the
     /// ones the wrapper itself sits under. The result therefore stands for the whole field, and a
-    /// caller must not re-apply the field's own levels on top of it. Each level keeps the
-    /// nullability it was written with, renumbered where it moved: the element's levels are the
-    /// innermost and keep their numbers, while the wrapper's own sit above the array it adds.
+    /// caller must not re-apply the field's own levels on top of it. Each level keeps what it was
+    /// written with — its nullability, and the fixed length of a `[T; N]` — renumbered where it
+    /// moved: the element's levels are the innermost and keep their numbers, while the wrapper's
+    /// own sit above the array it adds.
     pub fn collection_element_field(&self, element: &Self) -> Self {
         let mut arrayed = element.clone();
         arrayed.name.clone_from(&self.name);
         arrayed.array_depth = element.array_depth.saturating_add(1);
         for level in &self.nullable_levels {
             arrayed.mark_nullable_at(level.saturating_add(arrayed.array_depth));
+        }
+        for &(level, length) in &self.array_lengths {
+            arrayed.mark_fixed_length_at(level.saturating_add(arrayed.array_depth), length);
         }
         arrayed.array_depth = arrayed.array_depth.saturating_add(self.array_depth);
         arrayed
@@ -308,6 +320,17 @@ impl FieldDef {
         }
     }
 
+    /// The element count the array at `level` was written with, for a level written as a `[T; N]`
+    /// whose `N` the expansion could read. `None` is every other level: serde writes as many items
+    /// as it holds there, so nothing bounds it.
+    #[cfg(any(feature = "jsonschema", feature = "zod"))]
+    pub fn fixed_length_at(&self, level: u8) -> Option<usize> {
+        self.array_lengths
+            .iter()
+            .find(|&&(at, _)| at == level)
+            .map(|&(_, length)| length)
+    }
+
     #[cfg(feature = "chrono")]
     fn has_as_number(&self) -> bool {
         self.model_schema_prop_meta
@@ -344,6 +367,12 @@ impl FieldDef {
     /// in struct-field position, a `null` in a slot that cannot be dropped.
     pub fn is_optional(&self) -> bool {
         self.is_nullable_at(self.array_depth)
+    }
+
+    fn mark_fixed_length_at(&mut self, level: u8, length: usize) {
+        if !self.array_lengths.iter().any(|&(at, _)| at == level) {
+            self.array_lengths.push((level, length));
+        }
     }
 
     fn mark_nullable_at(&mut self, level: u8) {
@@ -607,7 +636,12 @@ impl FieldDef {
     }
 
     /// The type match plus one `z.array(…)` per array level, each carrying the `z.nullable(…)` of
-    /// the level it wraps, before the preprocess wrap.
+    /// the level it wraps and the `.length(N)` of a level written as a fixed-size `[T; N]`, before
+    /// the preprocess wrap.
+    ///
+    /// Zod is a validator, so it says what the JSON schema says: serde reads a `[T; N]` back only
+    /// from an array of exactly `N` items, and `.length` is that constraint spelled directly. The
+    /// TypeScript surface takes the other answer and stays `Array<T>` — see `array_lengths`.
     ///
     /// A set's element re-enters the rendering here rather than at `zod_base`: it carries a copy of
     /// the field's own metadata, and the preprocess wrap belongs once, outside the array — where
@@ -687,7 +721,10 @@ impl FieldDef {
             } else {
                 wrapped
             };
-            format!("z.array({item})")
+            let bound = self
+                .fixed_length_at(level)
+                .map_or_else(String::new, |length| format!(".length({length})"));
+            format!("z.array({item}){bound}")
         })
     }
 
@@ -778,7 +815,8 @@ impl FieldDef {
     /// - For literals: Uses z.literal(...)
     /// - For `ObjectId`: Uses regex validation for hex string
     /// - Wraps with `z.array()` once per `array_depth` level, wrapping `z.nullable(…)` inside it
-    ///   at each level written as an `Option`
+    ///   at each level written as an `Option` and appending `.length(N)` at each level written as a
+    ///   fixed-size `[T; N]`
     /// - If `is_optional`, which is that question asked of the outermost level: struct-field
     ///   position wraps `z.union([type, z.undefined()])`; tuple-element and map-value positions wrap
     ///   `z.nullable(type)` (neither can be omitted like an object key, so a `None` there
@@ -884,7 +922,7 @@ fn get_field_def_from_type_path(
             name: safe_name,
             field_type: FieldDefType::Unknown,
             array_depth: 0,
-            array_num: None,
+            array_lengths: Vec::new(),
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
@@ -896,7 +934,7 @@ fn get_field_def_from_type_path(
             name: safe_name,
             field_type: get_field_def_type_or_sibling(&ident),
             array_depth: 0,
-            array_num: None,
+            array_lengths: Vec::new(),
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
@@ -909,7 +947,7 @@ fn get_field_def_from_type_path(
             name: safe_name,
             field_type: FieldDefType::Unknown,
             array_depth: 0,
-            array_num: None,
+            array_lengths: Vec::new(),
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
@@ -947,7 +985,7 @@ fn get_field_def_from_generic_type(
             name: safe_name,
             field_type: FieldDefType::SiblingType(ident.to_owned(), vec![]),
             array_depth: 0,
-            array_num: None,
+            array_lengths: Vec::new(),
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
@@ -981,7 +1019,7 @@ fn get_field_def_from_generic_type(
         );
         FieldDef {
             array_depth: 0,
-            array_num: None,
+            array_lengths: Vec::new(),
             name: safe_name,
             field_type: FieldDefType::Map(
                 Box::new(arg_types[0].clone()),
@@ -1000,12 +1038,29 @@ fn get_field_def_from_generic_type(
             name: safe_name,
             field_type: FieldDefType::SiblingType(ident.to_owned(), arg_types),
             array_depth: 0,
-            array_num: None,
+            array_lengths: Vec::new(),
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
         }
     }
+}
+
+/// The element count a fixed-size array was written with, when the expansion can read it.
+///
+/// A literal is the whole of that. A const generic parameter, a `const` item and any computed
+/// length each name a value only the compiler has, and the macro runs before there is one to ask
+/// for; each therefore describes as the unbounded array every other sequence spelling describes as,
+/// which is the honest answer when the count is unknown.
+fn literal_array_length(len: &syn::Expr) -> Option<usize> {
+    let syn::Expr::Lit(syn::ExprLit {
+        lit: syn::Lit::Int(literal),
+        ..
+    }) = len
+    else {
+        return None;
+    };
+    literal.base10_parse::<usize>().ok()
 }
 
 /// Debug logging: Set `RUST_LOG=trace` to see HashMap/SiblingType creation.
@@ -1021,13 +1076,17 @@ pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
         get_field_def(name, type_ref.elem.as_ref(), field_docs)
     } else if let Type::Array(type_array) = ty {
         let mut def = get_field_def(name, &type_array.elem, field_docs);
+        // The array this spelling adds is the level the element's own depth counts up to, and the
+        // length is that level's — not the field's, which may sit under further wrappers.
+        let level = def.array_depth;
         def.array_depth = def.array_depth.saturating_add(1);
-        def.array_num = None; // type_array.len;
+        if let Some(length) = literal_array_length(&type_array.len) {
+            def.mark_fixed_length_at(level, length);
+        }
         def
     } else if let Type::Slice(type_slice) = ty {
         let mut def = get_field_def(name, &type_slice.elem, field_docs);
         def.array_depth = def.array_depth.saturating_add(1);
-        def.array_num = None; // type_array.len;
         def
     } else if let Type::Tuple(type_tuple) = ty {
         let elements: Vec<FieldDef> = type_tuple
@@ -1040,7 +1099,7 @@ pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
             name: safe_name,
             field_type: FieldDefType::Tuple(elements),
             array_depth: 0,
-            array_num: None,
+            array_lengths: Vec::new(),
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
@@ -1051,7 +1110,7 @@ pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
             name: safe_name,
             field_type: FieldDefType::Unknown,
             array_depth: 0,
-            array_num: None,
+            array_lengths: Vec::new(),
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
@@ -1185,7 +1244,7 @@ fn handle_datetime_generic_type(safe_name: String, field_docs: &str) -> FieldDef
         name: safe_name,
         field_type: FieldDefType::DateTime,
         array_depth: 0,
-        array_num: None,
+        array_lengths: Vec::new(),
         docs: field_docs.to_owned(),
         model_schema_prop_meta: None,
         nullable_levels: Vec::new(),
@@ -1199,7 +1258,7 @@ fn handle_datetime_generic_type(safe_name: String, field_docs: &str) -> FieldDef
         name: safe_name,
         field_type: FieldDefType::SiblingType("DateTime".to_owned(), vec![]),
         array_depth: 0,
-        array_num: None,
+        array_lengths: Vec::new(),
         docs: field_docs.to_owned(),
         model_schema_prop_meta: None,
         nullable_levels: Vec::new(),
