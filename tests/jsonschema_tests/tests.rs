@@ -74,6 +74,16 @@ struct MapFields {
 
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone)]
+struct OpaqueFields {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    optional_payload: Option<serde_json::Value>,
+    payload: serde_json::Value,
+    payloads: Vec<serde_json::Value>,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct OptionalFields {
     #[serde(skip_serializing_if = "Option::is_none")]
     optional_bool: Option<bool>,
@@ -207,6 +217,25 @@ fn test_hashmap_generates_object_with_additional_properties() {
         properties["counts"]["additionalProperties"]["type"],
         "integer"
     );
+}
+
+#[test]
+fn test_opaque_value_fields_generate_permissive_schemas() {
+    let schema = OpaqueFields::json_schema();
+
+    let properties = schema["properties"].as_object().unwrap();
+
+    // An opaque field carries no type name, so it admits any value.
+    assert_eq!(properties["payload"], serde_json::json!({}));
+    assert_eq!(properties["optional_payload"], serde_json::json!({}));
+
+    assert_eq!(properties["payloads"]["type"], "array");
+    assert_eq!(properties["payloads"]["items"], serde_json::json!({}));
+
+    let required = schema["required"].as_array().unwrap();
+    assert!(required.contains(&Value::String("payload".to_owned())));
+    assert!(required.contains(&Value::String("payloads".to_owned())));
+    assert!(!required.contains(&Value::String("optional_payload".to_owned())));
 }
 
 #[test]
