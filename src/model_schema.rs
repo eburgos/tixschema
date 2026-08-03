@@ -3886,6 +3886,22 @@ fn build_boolean_field_schema(fld: &FieldDef, field_name_str: &str) -> proc_macr
     }
 }
 
+/// The element of a collection wrapper, as the field the wrapper's own serialization makes it.
+///
+/// A `Vec<T>` and a `HashSet<T>` both write a JSON array of `T`, so the element carries the
+/// array-ness and answers for what the array holds. The field's own constraints ride along: a
+/// `Vec<T>` field applies them to its items, and a generic argument carries none of its own.
+#[cfg(feature = "jsonschema")]
+fn collection_element_field(fld: &FieldDef, element: &FieldDef) -> FieldDef {
+    let mut arrayed = element.clone();
+    arrayed.name.clone_from(&fld.name);
+    arrayed.is_array = true;
+    arrayed
+        .model_schema_prop_meta
+        .clone_from(&fld.model_schema_prop_meta);
+    arrayed
+}
+
 /// Builds the JSON schema for a `SiblingType` field (references to other generated types).
 #[cfg(feature = "jsonschema")]
 fn build_sibling_type_field_schema(
@@ -3895,17 +3911,14 @@ fn build_sibling_type_field_schema(
     lst: &[FieldDef],
 ) -> proc_macro2::TokenStream {
     log::trace!("SiblingType => name: {name}, lst: {lst:?}");
-    if (name == "Vec" || name == "HashSet") && lst.len() == 1 {
-        quote! {
-            properties.insert(#field_name_str.to_string(), {
-                serde_json::json!({
-                    "type": "array",
-                    "items": {
-                        "type": "string", // This would need to be mapped based on inner_type
-                    }
-                })
-            });
-        }
+    // The element is dispatched as the arrayed field it stands for, so a set renders exactly as the
+    // `Vec` of the same element does — element by element, at every type. A parsed `Vec<T>` field
+    // never arrives here, the parser having already handed it over in that arrayed form; a `Vec`
+    // spelled at this position is the same wrapper, and takes the same path.
+    if let [element] = lst
+        && (name == "Vec" || name == "HashSet")
+    {
+        build_field_type_schema(&collection_element_field(fld, element), field_name_str)
     } else if (name == "HashMap" || name == "BTreeMap") && lst.len() == 2 {
         log::trace!("HashMap => field_name: {field_name_str}, lst: {lst:?}");
         quote! {
@@ -4056,17 +4069,18 @@ fn build_unknown_field_schema(fld: &FieldDef, field_name_str: &str) -> proc_macr
     }
 }
 
-/// Builds JSON schema for a field.
+/// The `properties` insertion a field's type produces, without the `required` push.
+///
+/// The name is passed rather than read off `fld`: a collection element is dispatched through here
+/// standing in for the field it is the element of, and inserts under that field's name.
 #[cfg(feature = "jsonschema")]
-fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
-    let field_name = &fld.name;
-    let field_name_str = field_name.clone();
+fn build_field_type_schema(fld: &FieldDef, field_name_str: &str) -> proc_macro2::TokenStream {
     let field_type = &fld.field_type;
 
-    let schema_code = match field_type {
-        FieldDefType::String => build_string_field_schema(fld, &field_name_str),
+    match field_type {
+        FieldDefType::String => build_string_field_schema(fld, field_name_str),
         FieldDefType::StringLiteral(literal) => {
-            build_string_literal_field_schema(fld, &field_name_str, literal)
+            build_string_literal_field_schema(fld, field_name_str, literal)
         }
         FieldDefType::U32
         | FieldDefType::U16
@@ -4077,34 +4091,41 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
         | FieldDefType::I32
         | FieldDefType::I64
         | FieldDefType::Usize
-        | FieldDefType::Isize => build_numeric_field_schema(fld, &field_name_str, "integer"),
+        | FieldDefType::Isize => build_numeric_field_schema(fld, field_name_str, "integer"),
         FieldDefType::F32 | FieldDefType::F64 => {
-            build_numeric_field_schema(fld, &field_name_str, "number")
+            build_numeric_field_schema(fld, field_name_str, "number")
         }
-        FieldDefType::Boolean => build_boolean_field_schema(fld, &field_name_str),
+        FieldDefType::Boolean => build_boolean_field_schema(fld, field_name_str),
         #[cfg(feature = "object_id")]
-        FieldDefType::ObjectId => build_object_id_field_schema(fld, &field_name_str),
+        FieldDefType::ObjectId => build_object_id_field_schema(fld, field_name_str),
         #[cfg(feature = "chrono")]
-        FieldDefType::NaiveDate => build_string_format_field_schema(fld, &field_name_str, "date"),
+        FieldDefType::NaiveDate => build_string_format_field_schema(fld, field_name_str, "date"),
         #[cfg(feature = "chrono")]
-        FieldDefType::NaiveTime => build_string_format_field_schema(fld, &field_name_str, "time"),
+        FieldDefType::NaiveTime => build_string_format_field_schema(fld, field_name_str, "time"),
         #[cfg(feature = "chrono")]
         FieldDefType::NaiveDateTime => {
-            build_string_format_field_schema(fld, &field_name_str, "date-time")
+            build_string_format_field_schema(fld, field_name_str, "date-time")
         }
         #[cfg(feature = "chrono")]
         FieldDefType::DateTime => {
-            build_string_format_field_schema(fld, &field_name_str, "date-time")
+            build_string_format_field_schema(fld, field_name_str, "date-time")
         }
         FieldDefType::SiblingType(name, lst) => {
-            build_sibling_type_field_schema(fld, &field_name_str, name, lst)
+            build_sibling_type_field_schema(fld, field_name_str, name, lst)
         }
-        FieldDefType::Map(key, value) => build_map_field_schema(key, value, &field_name_str),
-        FieldDefType::Tuple(lst) => build_tuple_field_schema(fld, &field_name_str, lst),
+        FieldDefType::Map(key, value) => build_map_field_schema(key, value, field_name_str),
+        FieldDefType::Tuple(lst) => build_tuple_field_schema(fld, field_name_str, lst),
         // Named exhaustively rather than caught by a wildcard: a new variant must be given a
         // schema here, not silently routed to whatever the last arm happens to emit.
-        FieldDefType::Unknown => build_unknown_field_schema(fld, &field_name_str),
-    };
+        FieldDefType::Unknown => build_unknown_field_schema(fld, field_name_str),
+    }
+}
+
+/// Builds JSON schema for a field.
+#[cfg(feature = "jsonschema")]
+fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
+    let field_name_str = fld.name.clone();
+    let schema_code = build_field_type_schema(fld, &field_name_str);
 
     let required_code = if fld.is_optional {
         quote! {}
