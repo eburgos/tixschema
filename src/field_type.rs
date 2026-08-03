@@ -710,6 +710,22 @@ pub fn is_sequence_wrapper(name: &str) -> bool {
     )
 }
 
+/// The one list of std wrappers the crate reads straight through to what they hold.
+///
+/// Membership is decided on the wire and nothing else: serde writes each of these as its inner
+/// value, with nothing of its own around it, so a field written under one is the very field its
+/// inner type is. The parser therefore collapses them onto that inner field and no surface ever
+/// learns a wrapper was written — which is what keeps a wrapper name out of the generated output,
+/// where none of the three surfaces has any meaning for it.
+///
+/// `Cow` is covered on the same terms despite carrying a lifetime beside its type: the lifetime is
+/// not a type argument and never reaches the collected arguments, so a `Cow` arrives with the one
+/// argument a `Box` arrives with. The interior-mutability wrappers are absent — that is a wider
+/// list than this defect was measured over, not a claim that they write anything else.
+fn is_transparent_wrapper(name: &str) -> bool {
+    matches!(name, "Arc" | "Box" | "Cow" | "Rc")
+}
+
 /// Whether a generic type is optional on its element's behalf: true exactly when it is a covered
 /// sequence wrapper whose element is an `Option`.
 ///
@@ -799,75 +815,7 @@ fn get_field_def_from_type_path(
             model_schema_prop_meta: None,
         },
         PathArguments::AngleBracketed(args) => {
-            let arg_types: Vec<FieldDef> = args
-                .args
-                .iter()
-                .filter_map(|arg| {
-                    // Ignore lifetimes, const generics, etc.
-                    if let GenericArgument::Type(inner_ty) = arg {
-                        Some(get_field_def("", inner_ty, ""))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            if arg_types.is_empty() {
-                FieldDef {
-                    is_optional: false,
-                    name: safe_name,
-                    field_type: FieldDefType::SiblingType(ident, vec![]),
-                    array_depth: 0,
-                    array_num: None,
-                    docs: field_docs.to_owned(),
-                    model_schema_prop_meta: None,
-                }
-            } else if arg_types.len() == 1 && &ident == "Option" {
-                let mut result = arg_types[0].clone();
-                result.name = safe_name;
-                result.is_optional = true;
-                result
-            } else if arg_types.len() == 1 && &ident == "Vec" {
-                let mut result = arg_types[0].clone();
-                result.name = safe_name;
-                result.array_depth = result.array_depth.saturating_add(1);
-                result
-            } else if arg_types.len() == 2 && (ident == "HashMap" || ident == "BTreeMap") {
-                // Debug print to see what's happening
-                log::trace!(
-                    "Creating HashMap Map type - key: {:?}, value: {:?}",
-                    arg_types[0],
-                    arg_types[1]
-                );
-                FieldDef {
-                    array_depth: 0,
-                    is_optional: false,
-                    array_num: None,
-                    name: safe_name,
-                    field_type: FieldDefType::Map(
-                        Box::new(arg_types[0].clone()),
-                        Box::new(arg_types[1].clone()),
-                    ),
-                    docs: field_docs.to_owned(),
-                    model_schema_prop_meta: None,
-                }
-            } else if arg_types.len() == 1 && is_datetime_generic_type(&ident) {
-                // Handle DateTime<Tz> - the timezone type parameter is ignored
-                handle_datetime_generic_type(safe_name, field_docs)
-            }
-            // Fall through to SiblingType for other generic types
-            else {
-                // Debug print to see what's happening with SiblingType
-                log::trace!("Creating SiblingType - name: {ident}, arg_types: {arg_types:?}");
-                FieldDef {
-                    is_optional: sequence_element_optionality(&ident, &arg_types),
-                    name: safe_name,
-                    field_type: FieldDefType::SiblingType(ident, arg_types),
-                    array_depth: 0,
-                    array_num: None,
-                    docs: field_docs.to_owned(),
-                    model_schema_prop_meta: None,
-                }
-            }
+            get_field_def_from_generic_type(&ident, args, safe_name, field_docs)
         }
         // Function pointer types are unsupported; fall back to `unknown`.
         PathArguments::Parenthesized(_) => FieldDef {
@@ -879,6 +827,97 @@ fn get_field_def_from_type_path(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
         },
+    }
+}
+
+/// Builds a `FieldDef` for a named type written with generic arguments.
+///
+/// Handles `Option<T>`, `Vec<T>`, the transparent wrappers, `HashMap`/`BTreeMap` and
+/// `DateTime<Tz>`, and falls back to `SiblingType` for everything else.
+///
+/// Only the type arguments are read. A lifetime writes nothing, so a type carrying one arrives here
+/// with the arguments it would have without it — which is what lets `Cow<'a, T>` be answered for by
+/// the same single-argument arms as `Box<T>`.
+fn get_field_def_from_generic_type(
+    ident: &str,
+    args: &syn::AngleBracketedGenericArguments,
+    safe_name: String,
+    field_docs: &str,
+) -> FieldDef {
+    let arg_types: Vec<FieldDef> = args
+        .args
+        .iter()
+        .filter_map(|arg| {
+            if let GenericArgument::Type(inner_ty) = arg {
+                Some(get_field_def("", inner_ty, ""))
+            } else {
+                None
+            }
+        })
+        .collect();
+    if arg_types.is_empty() {
+        FieldDef {
+            is_optional: false,
+            name: safe_name,
+            field_type: FieldDefType::SiblingType(ident.to_owned(), vec![]),
+            array_depth: 0,
+            array_num: None,
+            docs: field_docs.to_owned(),
+            model_schema_prop_meta: None,
+        }
+    } else if arg_types.len() == 1 && ident == "Option" {
+        let mut result = arg_types[0].clone();
+        result.name = safe_name;
+        result.is_optional = true;
+        result
+    } else if arg_types.len() == 1 && ident == "Vec" {
+        let mut result = arg_types[0].clone();
+        result.name = safe_name;
+        result.array_depth = result.array_depth.saturating_add(1);
+        result
+    }
+    // A wrapper that is not on the wire adds nothing for the field to carry: the inner field stands
+    // in whole, under the wrapped field's own name and its own docs, which belong to where the
+    // field was written rather than to what it was written under. Everything a wrapper could sit
+    // around or inside — the optionality an `Option` lifts, the levels a sequence counts — is
+    // already on that field and rides along untouched.
+    else if arg_types.len() == 1 && is_transparent_wrapper(ident) {
+        let mut result = arg_types[0].clone();
+        result.name = safe_name;
+        field_docs.clone_into(&mut result.docs);
+        result
+    } else if arg_types.len() == 2 && (ident == "HashMap" || ident == "BTreeMap") {
+        log::trace!(
+            "Creating HashMap Map type - key: {:?}, value: {:?}",
+            arg_types[0],
+            arg_types[1]
+        );
+        FieldDef {
+            array_depth: 0,
+            is_optional: false,
+            array_num: None,
+            name: safe_name,
+            field_type: FieldDefType::Map(
+                Box::new(arg_types[0].clone()),
+                Box::new(arg_types[1].clone()),
+            ),
+            docs: field_docs.to_owned(),
+            model_schema_prop_meta: None,
+        }
+    } else if arg_types.len() == 1 && is_datetime_generic_type(ident) {
+        // The timezone type parameter says nothing about what is written.
+        handle_datetime_generic_type(safe_name, field_docs)
+    } else {
+        log::trace!("Creating SiblingType - name: {ident}, arg_types: {arg_types:?}");
+        FieldDef {
+            is_optional: sequence_element_optionality(ident, &arg_types),
+            name: safe_name,
+            field_type: FieldDefType::SiblingType(ident.to_owned(), arg_types),
+            array_depth: 0,
+            array_num: None,
+            docs: field_docs.to_owned(),
+            model_schema_prop_meta: None,
+        }
     }
 }
 
@@ -952,7 +991,9 @@ fn get_field_def_type_or_sibling(t_name: &str) -> FieldDefType {
     }
     match t_name {
         "bool" => FieldDefType::Boolean,
-        "String" | "PathBuf" => FieldDefType::String,
+        // `str` is `String`'s borrowed form and writes the same JSON string. It is reachable only
+        // behind a wrapper or a reference, both of which the parser reads through to land here.
+        "String" | "PathBuf" | "str" => FieldDefType::String,
         "Value" => FieldDefType::Unknown,
         "u8" => FieldDefType::U8,
         "u16" => FieldDefType::U16,
