@@ -3412,333 +3412,67 @@ fn map_key_fallback_schema(field_name_str: &str, key: &FieldDef) -> proc_macro2:
     }
 }
 
-/// Builds the JSON schema for a map whose `String`-keyed value is itself a map.
+/// The member schema for a `String`-keyed map whose value is itself a map: an object whose own
+/// members carry the inner value's rendering, or `None` when that value has no rendering here.
+///
+/// Only a `String` inner key opens a member set this dispatcher describes; an inner key of any
+/// other type names members this branch does not enumerate, so those members stay unconstrained —
+/// the value is still known to be an object, which is what the map guarantees.
 #[cfg(feature = "jsonschema")]
-fn build_map_nested_map_value_schema(
-    value: &FieldDef,
+fn build_map_nested_map_member_schema(
     inner_key: &FieldDef,
     inner_value: &FieldDef,
-    field_name_str: &str,
-) -> proc_macro2::TokenStream {
+) -> Option<proc_macro2::TokenStream> {
     log::trace!(
-        "Map Value is another Map => inner_key: {:?}, inner_value: {:?}, is_array: {}",
-        inner_key,
-        inner_value,
-        value.is_array
+        "Map Value is another Map => inner_key: {inner_key:?}, inner_value: {inner_value:?}"
     );
 
-    // Handle Vec<HashMap<String, T>> case
-    if value.is_array && matches!(inner_key.field_type, FieldDefType::String) {
-        let inner_value_schema = match &inner_value.field_type {
-            FieldDefType::U8
-            | FieldDefType::U16
-            | FieldDefType::U32
-            | FieldDefType::U64
-            | FieldDefType::I8
-            | FieldDefType::I16
-            | FieldDefType::I32
-            | FieldDefType::I64
-            | FieldDefType::Usize
-            | FieldDefType::Isize => {
-                quote! { { "type": "integer" } }
-            }
-            FieldDefType::F32 | FieldDefType::F64 => {
-                quote! { { "type": "number" } }
-            }
-            FieldDefType::String => {
-                quote! { { "type": "string" } }
-            }
-            FieldDefType::Boolean => {
-                quote! { { "type": "boolean" } }
-            }
-            #[cfg(feature = "object_id")]
-            FieldDefType::ObjectId => {
-                quote! { {
-                    "type": "object",
-                    "properties": {
-                        "$oid": { "type": "string" }
-                    },
-                    "required": ["$oid"],
-                    "additionalProperties": false
-                } }
-            }
-            _ => {
-                quote! { true }
-            }
-        };
-
-        let arrayed = quote! {
-            {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": #inner_value_schema
-                }
-            }
-        };
-        let value_schema = nullable_slot_json_schema(value, &arrayed).unwrap_or(arrayed);
-        quote! {
-            properties.insert(#field_name_str.to_string(), {
-                serde_json::json!({
-                    "type": "object",
-                    "additionalProperties": #value_schema
-                })
-            });
-        }
+    let inner_member = if matches!(inner_key.field_type, FieldDefType::String) {
+        build_map_member_schema(inner_value)?
     } else {
-        // Fallback for non-array Maps or complex cases
-        quote! {
-            properties.insert(#field_name_str.to_string(), {
-                serde_json::json!({
-                    "type": "object",
-                    "additionalProperties": true
-                })
-            });
-        }
-    }
-}
-
-/// JSON schema fragment for the value type of an innermost `Vec<HashMap<String, T>>` map.
-#[cfg(feature = "jsonschema")]
-fn map_inner_value_item_schema(inner_value: &FieldDef) -> proc_macro2::TokenStream {
-    match &inner_value.field_type {
-        FieldDefType::U8
-        | FieldDefType::U16
-        | FieldDefType::U32
-        | FieldDefType::U64
-        | FieldDefType::I8
-        | FieldDefType::I16
-        | FieldDefType::I32
-        | FieldDefType::I64
-        | FieldDefType::Usize
-        | FieldDefType::Isize => quote! { { "type": "integer" } },
-        FieldDefType::F32 | FieldDefType::F64 => quote! { { "type": "number" } },
-        FieldDefType::String => quote! { { "type": "string" } },
-        FieldDefType::Boolean => quote! { { "type": "boolean" } },
-        FieldDefType::Unknown
-        | FieldDefType::SiblingType(..)
-        | FieldDefType::Map(..)
-        | FieldDefType::Tuple(..)
-        | FieldDefType::StringLiteral(_) => quote! { true },
-        #[cfg(feature = "object_id")]
-        FieldDefType::ObjectId => quote! { true },
-        #[cfg(feature = "chrono")]
-        FieldDefType::NaiveDate
-        | FieldDefType::NaiveTime
-        | FieldDefType::NaiveDateTime
-        | FieldDefType::DateTime => quote! { true },
-    }
-}
-
-/// JSON schema for a map whose `String`-keyed value is `Vec<HashMap<inner_key, inner_value>>`.
-#[cfg(feature = "jsonschema")]
-fn build_map_vec_of_map_value_schema(
-    inner_key: &FieldDef,
-    inner_value: &FieldDef,
-    field_name_str: &str,
-) -> proc_macro2::TokenStream {
-    let generic = quote! {
-        properties.insert(#field_name_str.to_string(), {
-            serde_json::json!({
-                "type": "object",
-                "additionalProperties": true
-            })
-        });
+        quote! { true }
     };
-    match &inner_key.field_type {
-        FieldDefType::String => {
-            let inner_value_schema = map_inner_value_item_schema(inner_value);
-            quote! {
-                properties.insert(#field_name_str.to_string(), {
-                    serde_json::json!({
-                        "type": "object",
-                        "additionalProperties": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "additionalProperties": #inner_value_schema
-                            }
-                        }
-                    })
-                });
-            }
-        }
-        FieldDefType::Unknown
-        | FieldDefType::SiblingType(..)
-        | FieldDefType::Map(..)
-        | FieldDefType::Tuple(..)
-        | FieldDefType::Boolean
-        | FieldDefType::StringLiteral(_)
-        | FieldDefType::U8
-        | FieldDefType::U16
-        | FieldDefType::U32
-        | FieldDefType::U64
-        | FieldDefType::I8
-        | FieldDefType::I16
-        | FieldDefType::I32
-        | FieldDefType::I64
-        | FieldDefType::Usize
-        | FieldDefType::Isize
-        | FieldDefType::F32
-        | FieldDefType::F64 => generic,
-        #[cfg(feature = "object_id")]
-        FieldDefType::ObjectId => generic,
-        #[cfg(feature = "chrono")]
-        FieldDefType::NaiveDate
-        | FieldDefType::NaiveTime
-        | FieldDefType::NaiveDateTime
-        | FieldDefType::DateTime => generic,
-    }
+    Some(quote! { { "type": "object", "additionalProperties": #inner_member } })
 }
 
-/// JSON schema for a map whose `String`-keyed value is `Vec<T>`.
-#[cfg(feature = "jsonschema")]
-fn build_map_vec_value_schema(
-    inner_type: &FieldDef,
-    field_name_str: &str,
-) -> proc_macro2::TokenStream {
-    match &inner_type.field_type {
-        // Vec<HashMap<String, T>>
-        FieldDefType::Map(inner_key, inner_value) => {
-            build_map_vec_of_map_value_schema(inner_key, inner_value, field_name_str)
-        }
-        FieldDefType::U8
-        | FieldDefType::U16
-        | FieldDefType::U32
-        | FieldDefType::U64
-        | FieldDefType::I8
-        | FieldDefType::I16
-        | FieldDefType::I32
-        | FieldDefType::I64
-        | FieldDefType::Usize
-        | FieldDefType::Isize => {
-            quote! {
-                properties.insert(#field_name_str.to_string(), {
-                    serde_json::json!({
-                        "type": "object",
-                        "additionalProperties": {
-                            "type": "array",
-                            "items": { "type": "integer" }
-                        }
-                    })
-                });
-            }
-        }
-        FieldDefType::F32 | FieldDefType::F64 => {
-            quote! {
-                properties.insert(#field_name_str.to_string(), {
-                    serde_json::json!({
-                        "type": "object",
-                        "additionalProperties": {
-                            "type": "array",
-                            "items": { "type": "number" }
-                        }
-                    })
-                });
-            }
-        }
-        FieldDefType::String => {
-            quote! {
-                properties.insert(#field_name_str.to_string(), {
-                    serde_json::json!({
-                        "type": "object",
-                        "additionalProperties": {
-                            "type": "array",
-                            "items": { "type": "string" }
-                        }
-                    })
-                });
-            }
-        }
-        FieldDefType::Boolean => {
-            quote! {
-                properties.insert(#field_name_str.to_string(), {
-                    serde_json::json!({
-                        "type": "object",
-                        "additionalProperties": {
-                            "type": "array",
-                            "items": { "type": "boolean" }
-                        }
-                    })
-                });
-            }
-        }
-        #[cfg(feature = "object_id")]
-        FieldDefType::ObjectId => {
-            quote! {
-                properties.insert(#field_name_str.to_string(), {
-                    serde_json::json!({
-                        "type": "object",
-                        "additionalProperties": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "$oid": { "type": "string" }
-                                },
-                                "required": ["$oid"],
-                                "additionalProperties": false
-                            }
-                        }
-                    })
-                });
-            }
-        }
-        _ => {
-            quote! {
-                properties.insert(#field_name_str.to_string(), {
-                    serde_json::json!({
-                        "type": "object",
-                        "additionalProperties": true
-                    })
-                });
-            }
-        }
-    }
-}
-
-/// Builds the JSON schema for a map whose `String`-keyed value is a sibling/custom type.
+/// The member schema for a `String`-keyed map whose value is a sibling/custom type.
 ///
 /// The member is the sibling's own schema, as it is in field position and on the enum-key path.
 /// `is_array` and `is_optional` describe the slot rather than the type, so the array and nullable
 /// wraps are applied here over that one schema.
 #[cfg(feature = "jsonschema")]
-fn build_map_sibling_value_schema(
+fn build_map_sibling_member_schema(
     value: &FieldDef,
     value_type_name: &str,
     value_args: &[FieldDef],
-    field_name_str: &str,
-) -> proc_macro2::TokenStream {
+) -> Option<proc_macro2::TokenStream> {
     log::trace!(
         "Map Value SiblingType => value_type_name: {value_type_name}, value_args: {value_args:?}"
     );
 
-    // Handle Vec<T> as map value
-    if value_type_name == "Vec" && value_args.len() == 1 {
-        return build_map_vec_value_schema(&value_args[0], field_name_str);
+    // The parser collapses `Vec<T>` to `T` with `is_array` set, so a `Vec` type name reaches here
+    // only on a value built by hand: move the array-ness onto the element and dispatch that, which
+    // is the same member schema the collapsed form renders.
+    if value_type_name == "Vec"
+        && let [element] = value_args
+    {
+        let mut arrayed = element.clone();
+        arrayed.is_array = true;
+        return build_map_member_schema(&arrayed);
     }
 
     let value_module_ident = sibling_schema_module_ident(value_type_name);
-    let value_schema = nullable_slot_json_schema_value(
+    Some(nullable_slot_json_schema_value(
         value,
         arrayed_json_schema_value(value, quote! { #value_module_ident::Schema::json_schema() }),
-    );
-    quote! {
-        properties.insert(#field_name_str.to_string(), {
-            serde_json::json!({
-                "type": "object",
-                "additionalProperties": #value_schema
-            })
-        });
-    }
+    ))
 }
 
-/// Wraps a scalar JSON schema as a `String`-keyed map's `additionalProperties`,
-/// arraying it when the value field is a `Vec` and nullable when it is an `Option`.
+/// Wraps a member's base schema for the slot it sits in — arrayed when the value is a `Vec`,
+/// nullable when it is an `Option`.
 #[cfg(feature = "jsonschema")]
-fn build_map_scalar_value_schema(
+fn map_member_slot_schema(
     value: &FieldDef,
-    field_name_str: &str,
     item_schema: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
     let arrayed = if value.is_array {
@@ -3751,72 +3485,45 @@ fn build_map_scalar_value_schema(
     } else {
         item_schema.clone()
     };
-    let value_schema = nullable_slot_json_schema(value, &arrayed).unwrap_or(arrayed);
-    quote! {
-        properties.insert(#field_name_str.to_string(), {
-            serde_json::json!({
-                "type": "object",
-                "additionalProperties": #value_schema
-            })
-        });
-    }
+    nullable_slot_json_schema(value, &arrayed).unwrap_or(arrayed)
 }
 
-/// Wraps the shared scalar mapping as a `String`-keyed map's `additionalProperties`, or fails with
-/// a single diagnostic when the value type has no inline rendering.
-#[cfg(feature = "jsonschema")]
-fn build_map_inline_value_schema(
-    value: &FieldDef,
-    field_name_str: &str,
-) -> proc_macro2::TokenStream {
-    // Emitted instead of the property insertion, never alongside it: an insertion left in place
-    // hands the author a schema the expansion has already rejected.
-    let Some(item_schema) = scalar_field_json_schema_item(value) else {
-        let message = format!(
-            "field `{field_name_str}`: a tuple is not supported as a map value — give the value a `#[model_schema()]` struct instead"
-        );
-        return quote! { compile_error!(#message); };
-    };
-    build_map_scalar_value_schema(value, field_name_str, &item_schema)
-}
-
-/// Builds the JSON schema for a map whose key type is `String`, dispatching on the value type.
+/// The `additionalProperties` schema every member of a `String`-keyed map carries, or `None` when
+/// the value type has no rendering here.
 ///
-/// A `String` key enumerates nothing, so one `additionalProperties` schema stands for every
-/// member — and it is the value type's own rendering, which the key never widens.
+/// A map value is dispatched through this same function, so the members of a nested map carry the
+/// inner value type's own rendering at every depth rather than an open object.
+///
+/// A tuple is the only value the mapping cannot render, at any depth: the callers turn that `None`
+/// into the single diagnostic naming the field.
 #[cfg(feature = "jsonschema")]
-fn build_string_key_map_value_schema(
-    value: &FieldDef,
-    field_name_str: &str,
-) -> proc_macro2::TokenStream {
+fn build_map_member_schema(value: &FieldDef) -> Option<proc_macro2::TokenStream> {
     match &value.field_type {
-        FieldDefType::Map(inner_key, inner_value) => {
-            build_map_nested_map_value_schema(value, inner_key, inner_value, field_name_str)
-        }
+        FieldDefType::Map(inner_key, inner_value) => Some(map_member_slot_schema(
+            value,
+            &build_map_nested_map_member_schema(inner_key, inner_value)?,
+        )),
         FieldDefType::SiblingType(value_type_name, value_args) => {
-            build_map_sibling_value_schema(value, value_type_name, value_args, field_name_str)
+            build_map_sibling_member_schema(value, value_type_name, value_args)
         }
         // A map member's `$oid` object is closed and unpatterned, where the shared mapping's
         // field-position rendering carries the hex pattern and leaves the object open.
         #[cfg(feature = "object_id")]
-        FieldDefType::ObjectId => build_map_scalar_value_schema(
+        FieldDefType::ObjectId => Some(map_member_slot_schema(
             value,
-            field_name_str,
             &quote! { {
                 "type": "object",
                 "properties": { "$oid": { "type": "string" } },
                 "required": ["$oid"],
                 "additionalProperties": false
             } },
-        ),
+        )),
         // An opaque value carries no type name to narrow with, so a member admits any value: the
         // permissive empty schema, as in field position.
-        FieldDefType::Unknown => {
-            build_map_scalar_value_schema(value, field_name_str, &quote! { {} })
-        }
-        // The shared mapping renders every type named here except a tuple, which lands on the lone
-        // diagnostic. Named exhaustively rather than caught by a wildcard: a new variant must be
-        // given a member schema, not silently widened into an open object.
+        FieldDefType::Unknown => Some(map_member_slot_schema(value, &quote! { {} })),
+        // The shared mapping renders every type named here except a tuple, which is the lone
+        // `None`. Named exhaustively rather than caught by a wildcard: a new variant must be given
+        // a member schema, not silently widened into an open object.
         FieldDefType::Boolean
         | FieldDefType::F32
         | FieldDefType::F64
@@ -3832,12 +3539,45 @@ fn build_string_key_map_value_schema(
         | FieldDefType::U16
         | FieldDefType::U32
         | FieldDefType::U64
-        | FieldDefType::Usize => build_map_inline_value_schema(value, field_name_str),
+        | FieldDefType::Usize => Some(map_member_slot_schema(
+            value,
+            &scalar_field_json_schema_item(value)?,
+        )),
         #[cfg(feature = "chrono")]
         FieldDefType::DateTime
         | FieldDefType::NaiveDate
         | FieldDefType::NaiveDateTime
-        | FieldDefType::NaiveTime => build_map_inline_value_schema(value, field_name_str),
+        | FieldDefType::NaiveTime => Some(map_member_slot_schema(
+            value,
+            &scalar_field_json_schema_item(value)?,
+        )),
+    }
+}
+
+/// Builds the JSON schema for a map whose key type is `String`, dispatching on the value type.
+///
+/// A `String` key enumerates nothing, so one `additionalProperties` schema stands for every
+/// member — and it is the value type's own rendering, which the key never widens.
+#[cfg(feature = "jsonschema")]
+fn build_string_key_map_value_schema(
+    value: &FieldDef,
+    field_name_str: &str,
+) -> proc_macro2::TokenStream {
+    // Emitted instead of the property insertion, never alongside it: an insertion left in place
+    // hands the author a schema the expansion has already rejected.
+    let Some(value_schema) = build_map_member_schema(value) else {
+        let message = format!(
+            "field `{field_name_str}`: a tuple is not supported as a map value — give the value a `#[model_schema()]` struct instead"
+        );
+        return quote! { compile_error!(#message); };
+    };
+    quote! {
+        properties.insert(#field_name_str.to_string(), {
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": #value_schema
+            })
+        });
     }
 }
 

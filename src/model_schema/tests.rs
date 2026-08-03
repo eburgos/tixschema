@@ -1197,6 +1197,209 @@ fn a_scalar_string_keyed_map_value_expands_exactly_as_before() {
     }
 }
 
+/// The `String`-key branch's output for a nested map value built by hand: a `String`-keyed inner
+/// map holding `inner_type`, bare or behind a `Vec`, for the inner value types no source type
+/// produces.
+#[cfg(feature = "jsonschema")]
+fn nested_string_key_map_value_schema(inner_type: FieldDefType, is_array: bool) -> String {
+    let ty: syn::Type = syn::parse_str("String").unwrap();
+    let inner_key = super::get_field_def("m", &ty, "");
+    let mut inner_value = inner_key.clone();
+    inner_value.field_type = inner_type;
+    let mut value = inner_key.clone();
+    value.field_type = FieldDefType::Map(Box::new(inner_key), Box::new(inner_value));
+    value.is_array = is_array;
+    super::build_string_key_map_value_schema(&value, "m").to_string()
+}
+
+/// A map value that is itself a map is dispatched the same way at every depth: the members of the
+/// inner map carry the inner value type's own rendering. A member schema that stops at the outer
+/// map describes nothing about what the map holds.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_nested_string_keyed_map_value_renders_its_inner_members() {
+    for (map_type, expected) in [
+        (
+            "HashMap<String, HashMap<String, String>>",
+            r#"{ "type" : "object" , "additionalProperties" : { "type" : "string" } }"#,
+        ),
+        (
+            "HashMap<String, HashMap<String, Vec<u64>>>",
+            r#"{ "type" : "object" , "additionalProperties" : { "type" : "array" , "items" : { "type" : "integer" } } }"#,
+        ),
+        (
+            "HashMap<String, HashMap<String, Option<bool>>>",
+            r#"{ "type" : "object" , "additionalProperties" : { "anyOf" : [{ "type" : "boolean" } , { "type" : "null" }] } }"#,
+        ),
+        (
+            "HashMap<String, HashMap<String, HashMap<String, f64>>>",
+            r#"{ "type" : "object" , "additionalProperties" : { "type" : "object" , "additionalProperties" : { "type" : "number" } } }"#,
+        ),
+        (
+            "HashMap<String, HashMap<String, Inner>>",
+            r#"{ "type" : "object" , "additionalProperties" : inner_schema :: Schema :: json_schema () }"#,
+        ),
+        (
+            "HashMap<String, Option<HashMap<String, String>>>",
+            r#"{ "anyOf" : [{ "type" : "object" , "additionalProperties" : { "type" : "string" } } , { "type" : "null" }] }"#,
+        ),
+    ] {
+        let tokens = map_field_schema(map_type).to_string();
+        assert!(
+            tokens.contains(&format!(r#""additionalProperties" : {expected}"#)),
+            "for {map_type}, got: {tokens}"
+        );
+        assert!(
+            !tokens.contains(r#""additionalProperties" : true"#),
+            "for {map_type}, got: {tokens}"
+        );
+    }
+}
+
+/// A `Vec` of maps arrays the same member schema the bare inner map renders — the array wrap sits
+/// between the two dispatches, it does not replace the inner one.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_vec_of_maps_string_keyed_map_value_renders_its_inner_members() {
+    for (map_type, expected) in [
+        (
+            "HashMap<String, Vec<HashMap<String, String>>>",
+            r#"{ "type" : "array" , "items" : { "type" : "object" , "additionalProperties" : { "type" : "string" } } }"#,
+        ),
+        (
+            "HashMap<String, Vec<HashMap<String, u64>>>",
+            r#"{ "type" : "array" , "items" : { "type" : "object" , "additionalProperties" : { "type" : "integer" } } }"#,
+        ),
+        (
+            "HashMap<String, Vec<HashMap<String, Inner>>>",
+            r#"{ "type" : "array" , "items" : { "type" : "object" , "additionalProperties" : inner_schema :: Schema :: json_schema () } }"#,
+        ),
+    ] {
+        let tokens = map_field_schema(map_type).to_string();
+        assert!(
+            tokens.contains(&format!(r#""additionalProperties" : {expected}"#)),
+            "for {map_type}, got: {tokens}"
+        );
+        assert!(
+            !tokens.contains(r#""additionalProperties" : true"#),
+            "for {map_type}, got: {tokens}"
+        );
+    }
+}
+
+/// A chrono value keeps the format it carries in field position however deep the nesting goes: the
+/// depth is the map's, never the value type's.
+#[cfg(all(feature = "chrono", feature = "jsonschema"))]
+#[test]
+fn a_nested_chrono_map_value_keeps_its_format() {
+    for (map_type, expected) in [
+        (
+            "HashMap<String, HashMap<String, NaiveDate>>",
+            r#"{ "type" : "object" , "additionalProperties" : { "type" : "string" , "format" : "date" } }"#,
+        ),
+        (
+            "HashMap<String, HashMap<String, NaiveTime>>",
+            r#"{ "type" : "object" , "additionalProperties" : { "type" : "string" , "format" : "time" } }"#,
+        ),
+        (
+            "HashMap<String, Vec<HashMap<String, DateTime<Utc>>>>",
+            r#"{ "type" : "array" , "items" : { "type" : "object" , "additionalProperties" : { "type" : "string" , "format" : "date-time" } } }"#,
+        ),
+    ] {
+        let tokens = map_field_schema(map_type).to_string();
+        assert!(
+            tokens.contains(&format!(r#""additionalProperties" : {expected}"#)),
+            "for {map_type}, got: {tokens}"
+        );
+        assert!(
+            !tokens.contains(r#""additionalProperties" : true"#),
+            "for {map_type}, got: {tokens}"
+        );
+    }
+}
+
+/// The inner value types no source type produces reach the same mapping as the outer ones, whether
+/// the inner map stands alone or behind a `Vec`.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_nested_string_literal_map_value_keeps_its_const() {
+    let inner_member = r#"{ "type" : "object" , "additionalProperties" : { "type" : "string" , "const" : "Tixena" } }"#;
+    let bare =
+        nested_string_key_map_value_schema(FieldDefType::StringLiteral("Tixena".to_owned()), false);
+    assert!(
+        bare.contains(&format!(r#""additionalProperties" : {inner_member}"#)),
+        "got: {bare}"
+    );
+
+    let arrayed =
+        nested_string_key_map_value_schema(FieldDefType::StringLiteral("Tixena".to_owned()), true);
+    assert!(
+        arrayed.contains(&format!(
+            r#""additionalProperties" : {{ "type" : "array" , "items" : {inner_member} }}"#
+        )),
+        "got: {arrayed}"
+    );
+}
+
+/// A nested `ObjectId` member carries the closed `$oid` object the outer member carries.
+#[cfg(all(feature = "object_id", feature = "jsonschema"))]
+#[test]
+fn a_nested_object_id_map_value_keeps_its_oid_object() {
+    let inner_member = r#"{ "type" : "object" , "additionalProperties" : { "type" : "object" , "properties" : { "$oid" : { "type" : "string" } } , "required" : ["$oid"] , "additionalProperties" : false } }"#;
+    let bare = nested_string_key_map_value_schema(FieldDefType::ObjectId, false);
+    assert!(
+        bare.contains(&format!(r#""additionalProperties" : {inner_member}"#)),
+        "got: {bare}"
+    );
+
+    let arrayed = nested_string_key_map_value_schema(FieldDefType::ObjectId, true);
+    assert!(
+        arrayed.contains(&format!(
+            r#""additionalProperties" : {{ "type" : "array" , "items" : {inner_member} }}"#
+        )),
+        "got: {arrayed}"
+    );
+}
+
+/// An inner key type this branch does not enumerate leaves the inner members open — but the member
+/// is still known to be an object, which is more than an unconstrained value says.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_nested_map_under_an_unenumerated_key_still_renders_as_an_object() {
+    let tokens = map_field_schema("HashMap<String, HashMap<Slot, String>>").to_string();
+    assert!(
+        tokens.contains(
+            r#""additionalProperties" : { "type" : "object" , "additionalProperties" : true }"#
+        ),
+        "got: {tokens}"
+    );
+}
+
+/// A value the mapping cannot render fails wherever it sits: nested behind a map, the tuple is
+/// still a map value, and widening it to an open member would hide the rejection.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_unsupported_nested_map_value_emits_only_the_compile_error() {
+    for map_type in [
+        "HashMap<String, HashMap<String, (String, u32)>>",
+        "HashMap<String, Vec<HashMap<String, (String, u32)>>>",
+    ] {
+        let tokens = map_field_schema(map_type).to_string();
+        assert!(
+            tokens.starts_with("compile_error !"),
+            "for {map_type}, got: {tokens}"
+        );
+        assert!(
+            !tokens.contains("properties . insert"),
+            "for {map_type}, got: {tokens}"
+        );
+        assert!(
+            tokens.contains("a tuple is not supported as a map value"),
+            "for {map_type}, got: {tokens}"
+        );
+    }
+}
+
 /// The value half of a map type, parsed from the map type's source.
 #[cfg(feature = "jsonschema")]
 fn map_value_def(map_type: &str) -> super::FieldDef {
