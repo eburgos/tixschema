@@ -1,4 +1,9 @@
-use syn::{Fields, GenericArgument, ItemEnum, PathArguments, Type, Variant};
+use syn::{Fields, GenericArgument, Ident, ItemEnum, PathArguments, Type, Variant};
+
+#[cfg(feature = "jsonschema")]
+use proc_macro2::Span;
+#[cfg(feature = "jsonschema")]
+use syn::spanned::Spanned as _;
 
 #[cfg(feature = "serde")]
 use syn::Attribute;
@@ -158,6 +163,12 @@ pub enum FieldDefType {
 /// - `model_schema_prop_meta`: Optional metadata from #[`model_schema_prop`] attribute
 ///   - Used for overrides like literals, minLength, etc.
 ///   - See Phase 5 in `notes/20250707_field_features.md` for minLength details
+/// - `type_span`: where the type this field carries was written — the name segment of a path, the
+///   whole type otherwise, and the innermost name under a wrapper, so `Vec<Inner>` points at
+///   `Inner`. The JSON schema is the one surface that emits a Rust path built from a type name, so
+///   it is the one that can fail to resolve, and this is what its reference carries so the failure
+///   is reported at the user's type instead of at `#[model_schema()]`. Present only under
+///   `jsonschema` for that reason.
 ///
 /// Usage notes:
 /// - Created recursively for nested types
@@ -174,6 +185,8 @@ pub struct FieldDef {
     pub model_schema_prop_meta: Option<ModelSchemaPropMeta>,
     pub name: String,
     pub nullable_levels: Vec<u8>,
+    #[cfg(feature = "jsonschema")]
+    pub type_span: Span,
 }
 
 impl FieldDef {
@@ -930,6 +943,8 @@ fn get_field_def_from_type_path(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            #[cfg(feature = "jsonschema")]
+            type_span: type_path.span(),
         };
     };
     let ident = segment.ident.to_string();
@@ -942,9 +957,13 @@ fn get_field_def_from_type_path(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            // The name segment, not the whole path: it is what a generated module is named after,
+            // so a reference the module cannot resolve is blamed on the name it was built from.
+            #[cfg(feature = "jsonschema")]
+            type_span: segment.ident.span(),
         },
         PathArguments::AngleBracketed(args) => {
-            get_field_def_from_generic_type(&ident, args, safe_name, field_docs)
+            get_field_def_from_generic_type(&segment.ident, args, safe_name, field_docs)
         }
         // Function pointer types are unsupported; fall back to `unknown`.
         PathArguments::Parenthesized(_) => FieldDef {
@@ -955,6 +974,8 @@ fn get_field_def_from_type_path(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            #[cfg(feature = "jsonschema")]
+            type_span: segment.ident.span(),
         },
     }
 }
@@ -968,11 +989,13 @@ fn get_field_def_from_type_path(
 /// with the arguments it would have without it — which is what lets `Cow<'a, T>` be answered for by
 /// the same single-argument arms as `Box<T>`.
 fn get_field_def_from_generic_type(
-    ident: &str,
+    type_ident: &Ident,
     args: &syn::AngleBracketedGenericArguments,
     safe_name: String,
     field_docs: &str,
 ) -> FieldDef {
+    let ident_name = type_ident.to_string();
+    let ident = ident_name.as_str();
     let arg_types: Vec<FieldDef> = args
         .args
         .iter()
@@ -993,6 +1016,8 @@ fn get_field_def_from_generic_type(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            #[cfg(feature = "jsonschema")]
+            type_span: type_ident.span(),
         }
     } else if arg_types.len() == 1 && ident == "Option" {
         let mut result = arg_types[0].clone();
@@ -1032,10 +1057,22 @@ fn get_field_def_from_generic_type(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            #[cfg(feature = "jsonschema")]
+            type_span: type_ident.span(),
         }
     } else if arg_types.len() == 1 && is_datetime_generic_type(ident) {
         // The timezone type parameter says nothing about what is written.
-        handle_datetime_generic_type(safe_name, field_docs)
+        FieldDef {
+            name: safe_name,
+            field_type: datetime_field_type(),
+            array_depth: 0,
+            array_lengths: Vec::new(),
+            docs: field_docs.to_owned(),
+            model_schema_prop_meta: None,
+            nullable_levels: Vec::new(),
+            #[cfg(feature = "jsonschema")]
+            type_span: type_ident.span(),
+        }
     } else {
         log::trace!("Creating SiblingType - name: {ident}, arg_types: {arg_types:?}");
         FieldDef {
@@ -1046,6 +1083,8 @@ fn get_field_def_from_generic_type(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            #[cfg(feature = "jsonschema")]
+            type_span: type_ident.span(),
         }
     }
 }
@@ -1107,6 +1146,8 @@ pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            #[cfg(feature = "jsonschema")]
+            type_span: ty.span(),
         }
     } else {
         // Fallback for BareFn, ImplTrait, etc.
@@ -1118,6 +1159,8 @@ pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            #[cfg(feature = "jsonschema")]
+            type_span: ty.span(),
         }
     }
 }
@@ -1240,33 +1283,18 @@ const fn is_datetime_generic_type(_type_name: &str) -> bool {
     false
 }
 
-/// Handle `DateTime<Tz>` generic type (chrono feature).
-/// Creates a `FieldDef` with `DateTime` type, ignoring the timezone parameter.
+/// What a `DateTime<Tz>` field carries: the chrono type, the timezone parameter saying nothing
+/// about what is written.
 #[cfg(feature = "chrono")]
-fn handle_datetime_generic_type(safe_name: String, field_docs: &str) -> FieldDef {
-    FieldDef {
-        name: safe_name,
-        field_type: FieldDefType::DateTime,
-        array_depth: 0,
-        array_lengths: Vec::new(),
-        docs: field_docs.to_owned(),
-        model_schema_prop_meta: None,
-        nullable_levels: Vec::new(),
-    }
+const fn datetime_field_type() -> FieldDefType {
+    FieldDefType::DateTime
 }
 
+/// Unreachable without chrono — `is_datetime_generic_type` answers `false` there — and named as
+/// any other unknown type would be.
 #[cfg(not(feature = "chrono"))]
-fn handle_datetime_generic_type(safe_name: String, field_docs: &str) -> FieldDef {
-    // Fallback - should never be called since is_datetime_generic_type returns false
-    FieldDef {
-        name: safe_name,
-        field_type: FieldDefType::SiblingType("DateTime".to_owned(), vec![]),
-        array_depth: 0,
-        array_lengths: Vec::new(),
-        docs: field_docs.to_owned(),
-        model_schema_prop_meta: None,
-        nullable_levels: Vec::new(),
-    }
+fn datetime_field_type() -> FieldDefType {
+    FieldDefType::SiblingType("DateTime".to_owned(), vec![])
 }
 
 #[cfg(test)]

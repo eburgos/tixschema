@@ -173,6 +173,28 @@ pub struct Document {
 /// `ObjectId` fields are serialized using `MongoDB`'s standard format: `{ "$oid": "hex_string" }`
 /// and include proper validation for 24-character hexadecimal `ObjectId` strings.
 ///
+/// ## Where a Referenced Type Must Be Declared
+///
+/// A `#[model_schema()]` type publishes its schema in a module beside the type, and a type that
+/// references it reaches that module through `use super::*`. **A type referenced by another must
+/// therefore be declared at item scope** — in a module or at crate level, not inside a function
+/// body, which no generated module is a child of. The referencing type itself is unconstrained: it
+/// may be declared inside a function body as long as everything it names is not.
+///
+/// A reference to a function-local type fails to compile with an `E0433` naming the module the
+/// macro built from that type's name, reported at the field's type:
+///
+/// ```text
+/// error[E0433]: cannot find module or crate `inner_schema` in this scope
+///   --> src/lib.rs:9:20
+///    |
+///  9 |     pub inner: Inner,
+///    |                ^^^^^ use of unresolved module or unlinked crate `inner_schema`
+/// ```
+///
+/// Moving the named type out of the function body — to the module the referencing type is written
+/// in, or any module in scope there — is what resolves it.
+///
 /// ## Branded Newtypes and `no_display`
 ///
 /// A `#[serde(transparent)]` single-field tuple struct becomes a branded type, and the macro gives
