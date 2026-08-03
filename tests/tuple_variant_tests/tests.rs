@@ -116,6 +116,34 @@ pub enum InternalScalar {
     Single(String),
 }
 
+/// A plain enum, and a bare tag over it. Also declared without `#[model_schema()]`: a name says
+/// nothing about what serde writes for it, and this one writes no object, so the crate refuses the
+/// declaration — leaving the wire form readable only from a plain serde type.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum InternalHue {
+    Red,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "type")]
+pub enum InternalOverEnum {
+    EnumInner(InternalHue),
+}
+
+/// A newtype over a `String`: serde writes it as the string it wraps, and the registry cannot tell
+/// it apart from a struct — both register as having no enum members. So the declaration compiles
+/// and the divergence is left for the merge to catch.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct InternalSlug(pub String);
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "type")]
+pub enum InternalOverBrand {
+    Branded(InternalSlug),
+}
+
 /// A recursive enum with no tagging attributes: what sits under a key is the enum itself. Only the
 /// Zod surface spells the deferral, so the fixture is declared where it is read.
 #[cfg(feature = "zod")]
@@ -1676,4 +1704,62 @@ fn test_adjacent_twin_keeps_its_content_key() {
 
     let ts = Adjacent::ts_definition();
     assert!(ts.contains("value: string"), "Got: {ts}");
+}
+
+/// Test 22h: what serde writes for a bare tag over a plain enum. The enum writes its own variant
+/// name, so what lands beside the tag is a key holding null — a key no member closed around the tag
+/// names, which is why the declaration is refused rather than described.
+#[test]
+fn test_bare_tag_over_a_plain_enum_writes_a_key_the_tag_does_not_name() {
+    assert_eq!(
+        serde_json::to_value(InternalOverEnum::EnumInner(InternalHue::Red)).unwrap(),
+        serde_json::json!({ "type": "EnumInner", "Red": null })
+    );
+}
+
+/// Test 22i: and what serde writes for a bare tag over a newtype that reaches the wire as a string
+/// — nothing. The run-time refusal is the same one every scalar content gets; the name in front of
+/// it is all that let this one past the declaration guard.
+#[test]
+fn test_bare_tag_over_a_string_newtype_is_unserializable() {
+    let refusal = serde_json::to_value(InternalOverBrand::Branded(InternalSlug("s".to_owned())))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refusal.contains("cannot serialize tagged newtype variant"),
+        "Got: {refusal}"
+    );
+    assert!(refusal.contains("containing a string"), "Got: {refusal}");
+}
+
+/// Test 22j: so the merge refuses it too, rather than closing the object around the tag alone. The
+/// schema the content resolves to is what says it, and it is read at the moment the wrong document
+/// would otherwise be written.
+#[cfg(feature = "jsonschema")]
+#[test]
+#[should_panic(
+    expected = "`InternalOverBrand`: the content of variant `Branded`, `InternalSlug` is not written as an object"
+)]
+fn test_bare_tag_over_a_string_newtype_is_refused_by_the_merge() {
+    assert!(InternalOverBrand::json_schema().is_object());
+}
+
+/// Test 22k: the remedy the refusal names is one the author can act on.
+#[cfg(feature = "jsonschema")]
+#[test]
+#[should_panic(expected = "name a `content` key so the content gets an object of its own")]
+fn test_the_merge_refusal_names_the_remedy() {
+    assert!(InternalOverBrand::json_schema().is_object());
+}
+
+/// Test 22l: a struct inner is untouched by either refusal — the document a bare tag wrote before
+/// them, byte for byte. Only the flattened member goes through the merge, which is why only it
+/// carries the merge's own `"type": "object"`.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn test_bare_tag_over_a_struct_documents_byte_identically() {
+    assert_eq!(
+        serde_json::to_string(&Internal::json_schema()).unwrap(),
+        r#"{"type":"object","oneOf":[{"additionalProperties":false,"properties":{"type":{"type":"string","const":"Bare"}},"required":["type"]},{"additionalProperties":false,"properties":{"type":{"type":"string","const":"Fields"},"a":{"type":"string"},"b":{"type":"boolean"}},"required":["type","a","b"]},{"type":"object","properties":{"type":{"type":"string","const":"Wrapped"},"a":{"type":"string"},"b":{"type":"boolean"}},"required":["type","a","b"],"additionalProperties":false}]}"#
+    );
 }
