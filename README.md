@@ -103,7 +103,7 @@ pub struct UserWithOptionals {
 
 ### Collections and Maps
 
-`Vec<T>` becomes `Array<T>`. Only `HashMap<String, T>` is supported (non-string keys will cause compilation errors).
+`Vec<T>` becomes `Array<T>`, and so does `HashSet<T>`: a set is written as a JSON array of its element, so it is typed and validated as that array. Only `HashMap<String, T>` is supported (non-string keys will cause compilation errors).
 
 ```rust
 use std::collections::HashMap;
