@@ -30,7 +30,7 @@ use crate::{
 };
 
 #[cfg(feature = "zod")]
-use crate::utils::extract_example_from_docs;
+use crate::utils::{escape_js_regex_literal, extract_example_from_docs};
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::{AliasKind, lookup_alias_info};
@@ -1723,7 +1723,8 @@ fn branded_zod_inner(args: &ModelSchemaArgs, is_generic: bool, inner_ty: &syn::T
         result = format!("{result}.max({max_len})");
     }
     if let Some(pattern) = &args.pattern {
-        result = format!("{result}.check(z.regex(/{pattern}/))");
+        let literal_body = escape_js_regex_literal(pattern);
+        result = format!("{result}.check(z.regex(/{literal_body}/))");
     }
     result
 }
@@ -3878,7 +3879,7 @@ fn string_field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
 #[cfg(all(feature = "serde", feature = "jsonschema"))]
 fn field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
     let inner = match &fld.field_type {
-        FieldDefType::SiblingType(name, _) => sibling_json_schema_value(name),
+        FieldDefType::SiblingType(name, _) => sibling_json_schema_value(name, fld.type_span),
         FieldDefType::String => string_field_json_schema_value(fld),
         FieldDefType::StringLiteral(literal) => {
             quote! { serde_json::json!({ "type": "string", "const": #literal }) }
@@ -4676,13 +4677,19 @@ fn nullable_slot_json_schema_value(
 /// reproduce, so the registry answers first. A name it does not hold is one this expansion has not
 /// seen — a type expanded later, or one from another crate — and takes the naming every
 /// `#[model_schema()]` type follows.
+///
+/// The ident is spanned on where the sibling was named rather than on the attribute. Nothing the
+/// macro can read tells it whether the module will be in scope — a generated module reaches its
+/// siblings through `use super::*`, which a type declared inside a function body never joins — so
+/// the `E0433` naming a module the author never wrote is the only report there is, and the span is
+/// what lands it on the type they did write.
 #[cfg(feature = "jsonschema")]
-fn sibling_schema_module_ident(name: &str) -> Ident {
+fn sibling_schema_module_ident(name: &str, span: proc_macro2::Span) -> Ident {
     let module_name = match lookup_alias_info(name) {
         Some(alias) => alias.module_name,
         None => format!("{}_schema", to_snake_case(&safe_type_name(name))),
     };
-    Ident::new(module_name.as_str(), proc_macro2::Span::call_site())
+    Ident::new(module_name.as_str(), span)
 }
 
 /// A sibling's own schema as a standalone `serde_json::Value` expression: the module the reference
@@ -4696,10 +4703,15 @@ fn sibling_schema_module_ident(name: &str) -> Ident {
 /// written into a document already in progress, and it is the run that knows whether asking has
 /// come back around to a name still being written. So the names in flight and the definitions the
 /// root will carry travel into the call.
+///
+/// The whole call is spanned on where the sibling was named, so every failure it can raise — the
+/// unresolved module a function-local sibling produces, the missing method a type expanded without
+/// `#[model_schema()]` produces — is reported at the type rather than at the attribute. Only the
+/// spans change; the tokens are the ones a reference has always carried.
 #[cfg(feature = "jsonschema")]
-fn sibling_json_schema_value(name: &str) -> proc_macro2::TokenStream {
-    let module_ident = sibling_schema_module_ident(name);
-    quote! { #module_ident::Schema::json_schema_within(in_flight, hoisted_defs) }
+fn sibling_json_schema_value(name: &str, span: proc_macro2::Span) -> proc_macro2::TokenStream {
+    let module_ident = sibling_schema_module_ident(name, span);
+    quote_spanned! {span=> #module_ident::Schema::json_schema_within(in_flight, hoisted_defs) }
 }
 
 /// Builds JSON schema for a tuple element (used for tuple fields and for tuple variants), or the
@@ -4897,7 +4909,7 @@ fn build_map_member_item(value: &FieldDef) -> Result<MapMemberItem, MapMemberRej
             log::trace!(
                 "Slot SiblingType => value_type_name: {value_type_name}, value_args: {value_args:?}"
             );
-            MapMemberItem::Value(sibling_json_schema_value(value_type_name))
+            MapMemberItem::Value(sibling_json_schema_value(value_type_name, value.type_span))
         }
         // A map member's `$oid` object is closed and unpatterned, where the shared mapping's
         // field-position rendering carries the hex pattern and leaves the object open.
@@ -5224,7 +5236,11 @@ fn build_sibling_type_field_schema(
         // Covers both non-generic sibling types (lst.is_empty()) and generic branded wrappers
         // like DocumentTypeId<String>: for a transparent newtype the JSON schema is defined on
         // the wrapper type's own schema module, and type params don't affect it.
-        generate_type_schema(fld, field_name_str, &sibling_json_schema_value(name))
+        generate_type_schema(
+            fld,
+            field_name_str,
+            &sibling_json_schema_value(name, fld.type_span),
+        )
     }
 }
 
@@ -6392,7 +6408,7 @@ fn generate_json_schema_method(
 #[cfg(feature = "jsonschema")]
 fn flatten_field_json_schema_ref(fld: &FieldDef) -> proc_macro2::TokenStream {
     if let FieldDefType::SiblingType(name, _) = &fld.field_type {
-        sibling_json_schema_value(name)
+        sibling_json_schema_value(name, fld.type_span)
     } else {
         quote! { serde_json::json!({ "type": "object" }) }
     }

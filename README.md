@@ -514,6 +514,8 @@ pub struct UserWithAddress {
 }
 ```
 
+A referenced type must be declared at item scope — in a module or at crate level, not inside a function body. Each type publishes its schema in a module beside itself, and a type that references one reaches that module through `use super::*`, which a module nested in a function body is not part of. The referencing type is unconstrained: it may sit inside a function body as long as everything it names does not. See [Function-Local Types](#function-local-types) for the error a violation produces.
+
 ### Recursive Types
 
 The library supports recursive and self-referential types. In the generated Zod schema, recursive fields use JavaScript getter syntax to defer the reference and avoid "use before declaration" errors.
@@ -1561,6 +1563,42 @@ pub struct BadConfig {
 // Correct: use string keys
 pub struct Config {
     pub settings: HashMap<String, String>,
+}
+```
+
+#### Function-Local Types
+
+**Error:** `cannot find module or crate <type>_schema in this scope` (`E0433`), reported at the field's type.
+
+A referenced type must be declared at item scope. A type declared inside a function body publishes its schema module inside that same body, where the `use super::*` of the referencing type's own module never reaches it:
+
+```rust
+// Wrong: `Inner` is declared inside the function body
+#[test]
+fn builds_the_schema() {
+    #[model_schema()]
+    pub struct Inner {
+        pub id: String,
+    }
+
+    #[model_schema()]
+    pub struct Outer {
+        pub inner: Inner, // E0433: cannot find module or crate `inner_schema` in this scope
+    }
+}
+
+// Correct: `Inner` is declared at item scope; `Outer` may stay in the function body
+#[model_schema()]
+pub struct Inner {
+    pub id: String,
+}
+
+#[test]
+fn builds_the_schema() {
+    #[model_schema()]
+    pub struct Outer {
+        pub inner: Inner,
+    }
 }
 ```
 

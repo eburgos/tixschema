@@ -2256,6 +2256,7 @@ fn wrapped_u32_value(wrapper: &str) -> super::FieldDef {
         model_schema_prop_meta: None,
         nullable_levels: Vec::new(),
         name: "items".to_owned(),
+        type_span: proc_macro2::Span::call_site(),
     }
 }
 
@@ -2333,6 +2334,75 @@ fn a_sibling_slot_carries_the_schema_module_reference() {
             super::build_map_member_schema(&parsed).unwrap().to_string()
         );
     }
+}
+
+/// The JSON-schema insertion for the sole field of `source`, parsed from text so its spans carry
+/// file locations and `source_text()` can report what they point at.
+#[cfg(feature = "jsonschema")]
+fn sole_field_json_schema(source: &str) -> proc_macro2::TokenStream {
+    let item: syn::ItemStruct = syn::parse_str(source).unwrap();
+    let field = item.fields.iter().next().unwrap();
+    let field_name = field.ident.as_ref().unwrap().to_string();
+    let def = get_field_def(&field_name, &field.ty, "");
+    super::build_field_type_schema(&def, &field_name)
+}
+
+/// The source text each occurrence of the ident `name` points at, `None` for an occurrence carrying
+/// no location.
+#[cfg(feature = "jsonschema")]
+fn ident_source_texts(tokens: &proc_macro2::TokenStream, name: &str) -> Vec<Option<String>> {
+    let mut found = Vec::new();
+    for tree in tokens.clone() {
+        match &tree {
+            proc_macro2::TokenTree::Group(group) => {
+                found.extend(ident_source_texts(&group.stream(), name));
+            }
+            proc_macro2::TokenTree::Ident(ident) if ident == name => {
+                found.push(tree.span().source_text());
+            }
+            proc_macro2::TokenTree::Ident(_)
+            | proc_macro2::TokenTree::Punct(_)
+            | proc_macro2::TokenTree::Literal(_) => {}
+        }
+    }
+    found
+}
+
+/// A generated module reaches its siblings through `use super::*`, which a type declared inside a
+/// function body never joins, and nothing the macro can read says whether it will resolve. So the
+/// whole reference is spanned on the name the module was built from — the module ident included,
+/// that being the one the `E0433` blames — and the failure is reported at the user's type instead
+/// of at `#[model_schema()]`. Every position that carries a sibling names it the same way.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_sibling_reference_points_at_the_type_the_field_names() {
+    for source in [
+        "struct Outer { inner: Inner }",
+        "struct Outer { inner: Vec<Inner> }",
+        "struct Outer { inner: Box<Inner> }",
+        "struct Outer { inner: HashMap<String, Inner> }",
+        "struct Outer { inner: (Inner, u32) }",
+    ] {
+        let tokens = sole_field_json_schema(source);
+        for named in ["inner_schema", "Schema", "json_schema_within"] {
+            assert_eq!(
+                ident_source_texts(&tokens, named),
+                vec![Some("Inner".to_owned())],
+                "for {source}, at `{named}`, got: {tokens}"
+            );
+        }
+    }
+}
+
+/// The reference an item-scope sibling emits is the one it has always emitted — only the spans its
+/// tokens carry are new.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_sibling_reference_emits_the_tokens_it_always_has() {
+    assert_eq!(
+        sole_field_json_schema("struct Outer { inner: Inner }").to_string(),
+        "properties . insert (\"inner\" . to_string () , inner_schema :: Schema :: json_schema_within (in_flight , hoisted_defs)) ;"
+    );
 }
 
 /// The tuple-field insertion for a field type built by hand.

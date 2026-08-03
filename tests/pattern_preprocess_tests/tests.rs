@@ -442,3 +442,276 @@ fn test_pattern_enum_variant_serde_validation() {
         "Error should mention pattern mismatch: {err_str}"
     );
 }
+
+// ==================== Forward slash inside the Zod regex literal ====================
+
+// The Zod surface splices a pattern into a JS regex literal, where `/` is the delimiter: an
+// unescaped one closes the literal early and the emitted TypeScript stops parsing. That escaping
+// belongs to the splice alone — JSON Schema and the Rust-side validator carry the pattern as a
+// plain string and must see it byte for byte as written.
+
+#[cfg(feature = "zod")]
+#[test]
+fn test_a_slash_in_a_field_pattern_escapes_the_zod_regex_delimiter() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize)]
+    pub struct SlashField {
+        #[model_schema_prop(pattern = "^/[a-z]+$")]
+        pub name: String,
+    }
+
+    let schema = SlashField::zod_schema();
+    assert!(
+        schema.contains(r".check(z.regex(/^\/[a-z]+$/))"),
+        "Expected the slash escaped inside the regex literal: {schema}"
+    );
+}
+
+#[cfg(all(feature = "zod", feature = "serde"))]
+#[test]
+fn test_a_slash_in_a_brand_pattern_escapes_the_zod_regex_delimiter() {
+    #[model_schema(pattern = "^/[a-z]+$")]
+    #[derive(Serialize, Deserialize, Debug)]
+    #[serde(transparent)]
+    pub struct SlashBrand(pub String);
+
+    let schema = SlashBrand::zod_schema();
+    assert!(
+        schema.contains(r".check(z.regex(/^\/[a-z]+$/))"),
+        "Expected the slash escaped inside the regex literal: {schema}"
+    );
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn test_an_already_escaped_slash_is_not_escaped_twice() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize)]
+    pub struct EscapedSlashField {
+        #[model_schema_prop(pattern = r"^\/[a-z]+$")]
+        pub name: String,
+    }
+
+    let schema = EscapedSlashField::zod_schema();
+    assert!(
+        schema.contains(r".check(z.regex(/^\/[a-z]+$/))"),
+        "Expected the existing escape carried through untouched: {schema}"
+    );
+    assert!(
+        !schema.contains(r"\\/"),
+        "An escaped slash must not gain a second backslash: {schema}"
+    );
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn test_a_backslash_escape_before_a_slash_is_read_as_one_unit() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize)]
+    pub struct LiteralBackslashField {
+        // `\\` is a literal backslash, so the `/` after it is unescaped and needs its own escape.
+        #[model_schema_prop(pattern = r"^\\/[a-z]+$")]
+        pub name: String,
+    }
+
+    let schema = LiteralBackslashField::zod_schema();
+    assert!(
+        schema.contains(r".check(z.regex(/^\\\/[a-z]+$/))"),
+        "Expected the slash after a literal backslash escaped: {schema}"
+    );
+}
+
+#[cfg(feature = "jsonschema")]
+#[test]
+fn test_a_slash_pattern_reaches_json_schema_unescaped() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize)]
+    pub struct SlashJsonSchema {
+        #[model_schema_prop(pattern = "^/[a-z]+$")]
+        pub name: String,
+    }
+
+    let schema_str = serde_json::to_string(&SlashJsonSchema::json_schema()).unwrap();
+    assert!(
+        schema_str.contains(r#""pattern":"^/[a-z]+$""#),
+        "JSON Schema must carry the pattern as written: {schema_str}"
+    );
+}
+
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_the_escaped_zod_pattern_matches_the_value_set_the_validator_enforces() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct SlashValidated {
+        #[model_schema_prop(pattern = "^/[a-z]+$")]
+        pub name: String,
+    }
+
+    serde_json::from_str::<SlashValidated>(r#"{"name": "/etc"}"#).unwrap();
+    for rejected in [
+        r#"{"name": "etc"}"#,
+        r#"{"name": "/ETC"}"#,
+        r#"{"name": "//etc"}"#,
+    ] {
+        let err = serde_json::from_str::<SlashValidated>(rejected).unwrap_err();
+        assert!(
+            err.to_string().contains("does not match pattern"),
+            "Expected a pattern rejection for {rejected}: {err}"
+        );
+    }
+}
+
+// ==================== Line terminators inside the Zod regex literal ====================
+
+// A JS regex literal cannot carry a raw line terminator: the literal ends at the line break and
+// the emitted TypeScript stops parsing, exactly as an unescaped delimiter did. The escape form
+// denotes the same character, so the literal keeps matching what the Rust-side validator enforces,
+// and the surfaces that carry the pattern as a plain string still see it byte for byte.
+
+#[cfg(feature = "zod")]
+#[test]
+fn test_a_raw_newline_in_a_field_pattern_escapes_for_the_zod_regex_literal() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize)]
+    pub struct NewlineField {
+        #[model_schema_prop(pattern = "^a\n[a-z]+$")]
+        pub name: String,
+    }
+
+    let schema = NewlineField::zod_schema();
+    assert!(
+        schema.contains(r".check(z.regex(/^a\n[a-z]+$/))"),
+        "Expected the newline escaped inside the regex literal: {schema}"
+    );
+    assert!(
+        !schema.contains("z.regex(/^a\n"),
+        "The regex literal must not be split by a raw line terminator: {schema}"
+    );
+}
+
+#[cfg(all(feature = "zod", feature = "serde"))]
+#[test]
+fn test_a_raw_newline_in_a_brand_pattern_escapes_for_the_zod_regex_literal() {
+    #[model_schema(pattern = "^a\n[a-z]+$")]
+    #[derive(Serialize, Deserialize, Debug)]
+    #[serde(transparent)]
+    pub struct NewlineBrand(pub String);
+
+    let schema = NewlineBrand::zod_schema();
+    assert!(
+        schema.contains(r".check(z.regex(/^a\n[a-z]+$/))"),
+        "Expected the newline escaped inside the regex literal: {schema}"
+    );
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn test_every_other_raw_line_terminator_escapes_for_the_zod_regex_literal() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize)]
+    pub struct CarriageReturnField {
+        #[model_schema_prop(pattern = "^a\r[a-z]+$")]
+        pub name: String,
+    }
+
+    #[model_schema()]
+    #[derive(Serialize, Deserialize)]
+    pub struct LineSeparatorField {
+        #[model_schema_prop(pattern = "^a\u{2028}[a-z]+$")]
+        pub name: String,
+    }
+
+    #[model_schema()]
+    #[derive(Serialize, Deserialize)]
+    pub struct ParagraphSeparatorField {
+        #[model_schema_prop(pattern = "^a\u{2029}[a-z]+$")]
+        pub name: String,
+    }
+
+    let cr = CarriageReturnField::zod_schema();
+    assert!(
+        cr.contains(r".check(z.regex(/^a\r[a-z]+$/))"),
+        "Expected the carriage return escaped: {cr}"
+    );
+    let ls = LineSeparatorField::zod_schema();
+    assert!(
+        ls.contains(r".check(z.regex(/^a\u2028[a-z]+$/))"),
+        "Expected the line separator escaped: {ls}"
+    );
+    let ps = ParagraphSeparatorField::zod_schema();
+    assert!(
+        ps.contains(r".check(z.regex(/^a\u2029[a-z]+$/))"),
+        "Expected the paragraph separator escaped: {ps}"
+    );
+    for schema in [&cr, &ls, &ps] {
+        assert!(
+            !schema.contains('\r') && !schema.contains('\u{2028}') && !schema.contains('\u{2029}'),
+            "No raw line terminator may reach the emitted schema: {schema}"
+        );
+    }
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn test_an_authored_newline_escape_is_not_escaped_twice() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize)]
+    pub struct EscapedNewlineField {
+        #[model_schema_prop(pattern = r"^a\n[a-z]+$")]
+        pub name: String,
+    }
+
+    let schema = EscapedNewlineField::zod_schema();
+    assert!(
+        schema.contains(r".check(z.regex(/^a\n[a-z]+$/))"),
+        "Expected the existing escape carried through untouched: {schema}"
+    );
+    assert!(
+        !schema.contains(r"\\n"),
+        "An escaped newline must not gain a second backslash: {schema}"
+    );
+}
+
+#[cfg(feature = "jsonschema")]
+#[test]
+fn test_a_raw_newline_pattern_reaches_json_schema_unescaped() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize)]
+    pub struct NewlineJsonSchema {
+        #[model_schema_prop(pattern = "^a\n[a-z]+$")]
+        pub name: String,
+    }
+
+    let schema_str = serde_json::to_string(&NewlineJsonSchema::json_schema()).unwrap();
+    assert!(
+        schema_str.contains(r#""pattern":"^a\n[a-z]+$""#),
+        "JSON Schema must carry the pattern as written: {schema_str}"
+    );
+}
+
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_the_escaped_newline_literal_matches_the_value_set_the_validator_enforces() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct NewlineValidated {
+        #[model_schema_prop(pattern = "^a\n[a-z]+$")]
+        pub name: String,
+    }
+
+    serde_json::from_str::<NewlineValidated>(r#"{"name": "a\nbc"}"#).unwrap();
+    for rejected in [r#"{"name": "abc"}"#, r#"{"name": "a\n\nbc"}"#] {
+        let err = serde_json::from_str::<NewlineValidated>(rejected).unwrap_err();
+        assert!(
+            err.to_string().contains("does not match pattern"),
+            "Expected a pattern rejection for {rejected}: {err}"
+        );
+    }
+}
