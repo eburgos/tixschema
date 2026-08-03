@@ -47,10 +47,7 @@ use crate::field_type::is_sequence_wrapper;
 #[cfg(feature = "serde")]
 use crate::field_type::is_transparent_wrapper;
 
-use crate::features::model_schema_prop::parse_model_schema_prop_attributes;
-
-#[cfg(feature = "serde")]
-use crate::features::model_schema_prop::ModelSchemaPropMeta;
+use crate::features::model_schema_prop::{ModelSchemaPropMeta, parse_model_schema_prop_attributes};
 
 #[cfg(feature = "jsonschema")]
 use crate::features::jsonschema::{
@@ -793,6 +790,21 @@ fn pattern_guard_error(rejection: &syn::Error, subject: &str) -> proc_macro2::To
              generated validator builds it with `regex::Regex::new(...).unwrap()`, so accepting \
              it here would turn the first validated value into a panic. {rejection}"
         ),
+    )
+    .to_compile_error()
+}
+
+/// Turns the parser's refusal of a `model_schema_prop` attribute into `compile_error!` tokens
+/// naming what carries it, keeping the refusal's span so the diagnostic points at the key or value
+/// as written.
+///
+/// Reading the attribute is the only thing that acts on it, so a key or value the parser stops at
+/// is one no emitter ever sees: without this the field is emitted as though the attribute had been
+/// left off, and the author gets a schema that enforces nothing.
+fn prop_attr_guard_error(rejection: &syn::Error, subject: &str) -> proc_macro2::TokenStream {
+    syn::Error::new(
+        rejection.span(),
+        format!("model_schema: {subject}: {rejection}"),
     )
     .to_compile_error()
 }
@@ -6061,16 +6073,17 @@ fn field_guard_errors(
 }
 
 /// Every guard error the field violates: the `OsString` guard first — it reads the written type,
-/// which no attribute can hide — then the unparseable `pattern`, then the serde-side guards when
-/// any fired.
+/// which no attribute can hide — then what the `model_schema_prop` parser refused, then the
+/// unparseable `pattern`, then the serde-side guards when any fired.
 ///
-/// The `pattern` guard stands under every feature subset: the string reaches the Rust validator,
-/// the Zod literal and the JSON schema alike, and no toggle makes an unparseable one mean anything.
+/// Both `model_schema_prop` guards stand under every feature subset: an unread key and an
+/// unparseable `pattern` alike reach the Rust validator, the Zod literal and the JSON schema, and
+/// no toggle makes either one mean anything.
 fn collect_field_guard_errors(
     field: &Field,
     field_def: &FieldDef,
     raw_field_ident: &str,
-    pattern_rejection: Option<&syn::Error>,
+    prop_meta: &ModelSchemaPropMeta,
     serde_guard_errors: Vec<proc_macro2::TokenStream>,
 ) -> Vec<proc_macro2::TokenStream> {
     let label = field_label(raw_field_ident);
@@ -6078,7 +6091,18 @@ fn collect_field_guard_errors(
         .err()
         .map(|err| err.to_compile_error())
         .into_iter()
-        .chain(pattern_rejection.map(|rejection| pattern_guard_error(rejection, &label)))
+        .chain(
+            prop_meta
+                .attr_rejection
+                .as_ref()
+                .map(|rejection| prop_attr_guard_error(rejection, &label)),
+        )
+        .chain(
+            prop_meta
+                .pattern_rejection
+                .as_ref()
+                .map(|rejection| pattern_guard_error(rejection, &label)),
+        )
         .chain(serde_guard_errors)
         .collect()
 }
@@ -6198,7 +6222,7 @@ fn process_field(
         field,
         &field_def,
         &raw_field_ident,
-        model_schema_prop_meta.pattern_rejection.as_ref(),
+        &model_schema_prop_meta,
         serde_guard_errors,
     );
 
