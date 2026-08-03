@@ -5281,20 +5281,15 @@ fn build_sibling_type_field_schema(
         && is_sequence_wrapper(name)
     {
         build_field_type_schema(&fld.collection_element_field(element), field_name_str)
-    } else if (name == "HashMap" || name == "BTreeMap") && lst.len() == 2 {
-        log::trace!("HashMap => field_name: {field_name_str}, lst: {lst:?}");
-        quote! {
-            properties.insert(#field_name_str.to_string(), {
-                serde_json::json!({
-                    "type": "object",
-                    "additionalProperties": true
-                })
-            });
-        }
     } else {
-        // Covers both non-generic sibling types (lst.is_empty()) and generic branded wrappers
-        // like DocumentTypeId<String>: for a transparent newtype the JSON schema is defined on
-        // the wrapper type's own schema module, and type params don't affect it.
+        // Every remaining shape is carried by the named type's own schema module: the non-generic
+        // sibling (lst.is_empty()), and the generic branded wrapper like DocumentTypeId<String>,
+        // whose schema is defined on the wrapper and whose type params do not affect it. A map is
+        // not among them — the parser claims both 2-argument map idents before the sibling fallback
+        // is reached, so a map arrives as a `Map` and is rendered once, there. A name this arm
+        // cannot resolve is the compile error the reference raises at the type, which is what keeps
+        // a second rendering — free to widen or to drop the array the one rendering carries — from
+        // growing back here.
         generate_type_schema(
             fld,
             field_name_str,
