@@ -92,7 +92,7 @@ pub fn generate_struct_json_schema_method(
     let body = if flatten_json_schemas.is_empty() {
         closed_object_body(json_schema_fields)
     } else {
-        flattened_object_body(json_schema_fields, flatten_json_schemas)
+        flattened_object_body(json_schema_fields, flatten_json_schemas, def_name)
     };
     json_schema_methods(def_name, &body)
 }
@@ -122,9 +122,13 @@ fn closed_object_body(json_schema_fields: &[proc_macro2::TokenStream]) -> proc_m
 }
 
 /// The struct's own fields distributed into each branch of the flattened types' schemas.
+///
+/// A flatten edge that closes a cycle is rejected where it is read rather than merged: `def_name`
+/// is the frame that reads it, and names one end of the closing edge in the diagnostic.
 fn flattened_object_body(
     json_schema_fields: &[proc_macro2::TokenStream],
     flatten_json_schemas: &[proc_macro2::TokenStream],
+    def_name: &str,
 ) -> proc_macro2::TokenStream {
     let defs_prefix = DEFS_PREFIX;
     quote::quote! {
@@ -162,16 +166,9 @@ fn flattened_object_body(
             // A flattened base that names itself describes as a reference into the definitions
             // being hoisted, and a reference is the one thing with no properties to merge. The
             // body it points at is written by then — the frame that deferred the name fills the
-            // entry in before it returns — so the merge reads it back. The entry is still only
-            // reserved when the flatten is itself what came back around, and a base that holds
-            // itself has no closed object to contribute.
-            fn deferred_body<'doc>(
-                schema: &'doc serde_json::Value,
-                defs: &'doc serde_json::Map<String, serde_json::Value>,
-            ) -> Option<&'doc serde_json::Value> {
-                let pointer = schema.get("$ref")?.as_str()?;
-                let name = pointer.strip_prefix(#defs_prefix)?;
-                defs.get(name).filter(|body| body.is_object())
+            // entry in before it returns — so the merge reads it back.
+            fn deferred_name(schema: &serde_json::Value) -> Option<&str> {
+                schema.get("$ref")?.as_str()?.strip_prefix(#defs_prefix)
             }
 
             fn branches_of(
@@ -201,7 +198,20 @@ fn flattened_object_body(
 
             let mut branches: Vec<serde_json::Map<String, serde_json::Value>> = vec![schema_obj];
             for fs in &flattened {
-                let fs_body = deferred_body(fs, hoisted_defs).unwrap_or(fs);
+                // An entry still only reserved is this flatten coming back around to a name whose
+                // body is still being written: there is nothing to merge, and the type it would
+                // describe has no finite value to inhabit it.
+                let fs_body = match deferred_name(fs) {
+                    None => fs,
+                    Some(name) => match hoisted_defs.get(name) {
+                        Some(body) if body.is_object() => body,
+                        _ => panic!(
+                            "`{}`: `#[serde(flatten)]` of `{}` closes a flatten cycle — the flattened body does not exist to merge, and no finite value inhabits the type; write the field as a named member so the cycle defers through a reference",
+                            #def_name,
+                            name,
+                        ),
+                    },
+                };
                 let fs_branches = branches_of(fs_body);
                 if fs_branches.is_empty() {
                     continue;

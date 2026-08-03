@@ -34,6 +34,26 @@ enum DataElementSampleValueVariant {
     },
 }
 
+/// Two bases that flatten each other: neither body exists when the other's merge asks for it, and
+/// no finite value inhabits either type.
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct CycleFirst {
+    first_own: String,
+    #[serde(flatten)]
+    second: CycleSecond,
+}
+
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct CycleSecond {
+    #[serde(flatten)]
+    first: Box<CycleFirst>,
+    second_own: String,
+}
+
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct ExtraPart {
@@ -297,6 +317,28 @@ fn test_flatten_recursive_base_self_reference_resolves_from_the_container() {
     let resolved_props = resolved["properties"].as_object().unwrap();
     assert!(resolved_props.contains_key("children"));
     assert!(resolved_props.contains_key("val"));
+}
+
+/// A cycle closed through flatten edges has no body to merge at either end, so it is named rather
+/// than described as the closed object over whatever fields happened to be written first.
+#[test]
+#[cfg(feature = "jsonschema")]
+#[should_panic(
+    expected = "`CycleSecond`: `#[serde(flatten)]` of `CycleFirst` closes a flatten cycle"
+)]
+fn test_flatten_cycle_is_rejected_rather_than_described() {
+    assert!(CycleFirst::json_schema().is_object());
+}
+
+/// The rejection is the cycle's, not the entry point's: asking either end names the edge that
+/// closes it.
+#[test]
+#[cfg(feature = "jsonschema")]
+#[should_panic(
+    expected = "`CycleFirst`: `#[serde(flatten)]` of `CycleSecond` closes a flatten cycle"
+)]
+fn test_flatten_cycle_is_rejected_from_either_end() {
+    assert!(CycleSecond::json_schema().is_object());
 }
 
 /// Flattening a base that does not name itself writes the document it wrote before, byte for byte.
