@@ -191,3 +191,94 @@ fn test_the_parser_counts_one_array_level_per_wrapper_written() {
         );
     }
 }
+
+/// The covered list, stated once so it is a decision rather than a spelling that happened to work.
+/// The names on the false side are not uncovered by omission: each is a type the parser answers for
+/// in a way of its own.
+#[test]
+fn test_the_covered_transparent_wrappers_are_exactly_the_recorded_list() {
+    for name in ["Arc", "Box", "Cow", "Rc"] {
+        assert!(super::is_transparent_wrapper(name), "for: {name}");
+    }
+    for name in ["BTreeMap", "HashMap", "Option", "Vec"] {
+        assert!(!super::is_transparent_wrapper(name), "for: {name}");
+    }
+}
+
+/// A covered wrapper writes nothing of its own, so the field it wraps is the field the parser
+/// produces — name and docs included, both of which belong to where the field was written.
+#[test]
+fn test_a_transparent_wrapper_parses_as_the_field_it_wraps() {
+    for spelling in ["Arc<u32>", "Box<u32>", "Cow<'a, u32>", "Rc<u32>", "u32"] {
+        let ty: syn::Type = syn::parse_str(spelling).unwrap();
+        let parsed = super::get_field_def("items", &ty, " * items");
+        assert!(
+            matches!(parsed.field_type, FieldDefType::U32),
+            "for: {spelling}"
+        );
+        assert_eq!(parsed.name, "items", "for: {spelling}");
+        assert_eq!(parsed.docs, " * items", "for: {spelling}");
+        assert_eq!(parsed.array_depth, 0, "for: {spelling}");
+        assert!(!parsed.is_optional, "for: {spelling}");
+    }
+}
+
+/// What a `None` costs is the `Option`'s answer at either side of a wrapper that is not on the
+/// wire: the flag is lifted onto the field exactly as the bare spelling lifts it.
+#[test]
+fn test_a_transparent_wrapper_carries_the_optionality_of_what_it_wraps() {
+    for spelling in [
+        "Arc<Option<u32>>",
+        "Box<Option<u32>>",
+        "Cow<'a, Option<u32>>",
+        "Option<Box<u32>>",
+        "Option<u32>",
+        "Rc<Option<u32>>",
+    ] {
+        let ty: syn::Type = syn::parse_str(spelling).unwrap();
+        let parsed = super::get_field_def("items", &ty, "");
+        assert!(
+            matches!(parsed.field_type, FieldDefType::U32),
+            "for: {spelling}"
+        );
+        assert!(parsed.is_optional, "for: {spelling}");
+        assert_eq!(parsed.array_depth, 0, "for: {spelling}");
+    }
+}
+
+/// The array levels a field was written at are counted the same through a wrapper, whichever side
+/// of it the sequence was written on — a boxed slice included, being the sequence a `Box` holds.
+#[test]
+fn test_a_transparent_wrapper_keeps_the_array_levels_of_what_it_wraps() {
+    for spelling in [
+        "Arc<[u32]>",
+        "Box<Vec<u32>>",
+        "Box<[u32]>",
+        "Cow<'a, [u32]>",
+        "Rc<Vec<u32>>",
+        "Vec<Box<u32>>",
+        "Vec<u32>",
+    ] {
+        let ty: syn::Type = syn::parse_str(spelling).unwrap();
+        let parsed = super::get_field_def("items", &ty, "");
+        assert!(
+            matches!(parsed.field_type, FieldDefType::U32),
+            "for: {spelling}"
+        );
+        assert_eq!(parsed.array_depth, 1, "for: {spelling}");
+    }
+}
+
+/// The borrowed form of a mapped owned type writes what the owned form writes, and a wrapper is how
+/// a field reaches it at all.
+#[test]
+fn test_a_borrowed_string_parses_as_a_string() {
+    for spelling in ["Arc<str>", "Box<str>", "Cow<'a, str>", "Rc<str>", "String"] {
+        let ty: syn::Type = syn::parse_str(spelling).unwrap();
+        let parsed = super::get_field_def("label", &ty, "");
+        assert!(
+            matches!(parsed.field_type, FieldDefType::String),
+            "for: {spelling}"
+        );
+    }
+}

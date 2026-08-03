@@ -119,6 +119,26 @@ pub struct UserWithCollections {
 }
 ```
 
+### Pointers and Borrowed Values
+
+`Box<T>`, `Rc<T>`, `Arc<T>` and `Cow<'_, T>` describe as `T`. serde writes each of them as the value it holds, with nothing of its own around it, so a field written under one is the field its inner type is — on every surface, and wherever the wrapper was written: `Box<Option<T>>` is the `Option<T>` field, optional; `Vec<Rc<T>>` is the `Vec<T>` field; `Box<str>`, `Rc<str>` and `Cow<'_, str>` are `String` fields, `str` being what a `String` writes.
+
+This is what lets a type hold itself: `Option<Box<Self>>` is the self-reference, deferred in the generated schema the way any self-reference is. An `Rc` or `Arc` field needs serde's `rc` feature, which is where serde's impls for those two live.
+
+```rust
+use std::borrow::Cow;
+use std::sync::Arc;
+
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+pub struct TreeNode {
+    pub label: Cow<'static, str>,
+    pub shared_tags: Arc<[String]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<Box<TreeNode>>,
+}
+```
+
 ### Enums
 
 #### Plain Enums
