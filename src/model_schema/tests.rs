@@ -1409,6 +1409,38 @@ fn a_misspelled_name_argument_is_refused_by_the_name_as_written() {
     assert!(rejection.contains("name"), "got: {rejection}");
 }
 
+/// A name the item paths splice into `Ident::new` — the schema module every reference to the item
+/// resolves through — so one no identifier can be spelled from panicked the macro, reporting no
+/// span and naming no argument.
+#[test]
+fn a_name_no_identifier_can_be_spelled_from_is_refused() {
+    for value in [
+        "",
+        " ",
+        "Not Valid",
+        "9Leading",
+        "Foo$Bar",
+        "Foo::Bar",
+        "\u{dc}n\u{ef}code",
+    ] {
+        let rejection = args_rejection(quote::quote! { name = #value });
+        assert!(rejection.is_some(), "accepted `name = {value:?}`");
+    }
+}
+
+#[test]
+fn a_name_an_identifier_can_be_spelled_from_is_read() {
+    for value in ["Slug", "_Slug", "Slug2", "slug_case", "S"] {
+        let args = super::parse_model_schema_args(quote::quote! { name = #value });
+        assert_eq!(
+            args.arg_rejection.map(|e| e.to_string()),
+            None,
+            "for {value}"
+        );
+        assert_eq!(args.name_override.as_deref(), Some(value));
+    }
+}
+
 /// The refusal offers every argument the parser reads, and the probes below prove each offered
 /// name is one it actually reads — the list and the arms cannot drift apart while both hold.
 #[test]
