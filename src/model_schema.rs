@@ -7,7 +7,7 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::parse::Parser as _;
 use syn::punctuated::Punctuated;
-use syn::{Field, Item, ItemType, Meta, MetaNameValue, Token, parse_macro_input};
+use syn::{Field, Item, ItemType, Meta, Token, parse_macro_input};
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use quote::quote_spanned;
@@ -81,6 +81,13 @@ use crate::utils::register_alias_info;
 use crate::utils::to_snake_case;
 
 use crate::rename_rule::resolve_rename_rule;
+
+/// Every argument the `model_schema` parser reads, in the order it tries them, as the
+/// unknown-argument rejection names them.
+///
+/// An argument added to [`apply_arg`] belongs here too: `no_argument_the_parser_reads_is_rejected`
+/// walks this list back through the parser and fails on any name here it does not read.
+const KNOWN_ARGS: &[&str] = &["name", "pattern", "minLength", "maxLength", "no_display"];
 
 /// What every plain-enum flatten diagnostic says about its own reach, so an author who fixes the
 /// one declaration named there knows what was and was not checked around it.
@@ -283,6 +290,9 @@ enum TaggedContent {
 
 #[derive(Default, Clone)]
 struct ModelSchemaArgs {
+    /// The parser's refusal of the attribute's arguments — one it does not read, or a value it
+    /// cannot read — spanned on the tokens that earned it.
+    arg_rejection: Option<syn::Error>,
     max_length: Option<usize>,
     min_length: Option<usize>,
     name_override: Option<String>,
@@ -338,6 +348,12 @@ impl ModelSchemaArgs {
     }
 }
 
+/// Parses the arguments of a `model_schema` attribute.
+///
+/// What the parser cannot read is recorded as [`ModelSchemaArgs::arg_rejection`] rather than
+/// dropped: these arguments are read here and nowhere else, so one that stops at this parser
+/// reaches no emitter, and the item is expanded as though it had been left off — a misspelled
+/// `name` yields the unrenamed schema on every surface.
 fn parse_model_schema_args(args: proc_macro2::TokenStream) -> ModelSchemaArgs {
     let mut result = ModelSchemaArgs::default();
 
@@ -346,19 +362,120 @@ fn parse_model_schema_args(args: proc_macro2::TokenStream) -> ModelSchemaArgs {
     }
 
     let parser = Punctuated::<Meta, Token![,]>::parse_terminated;
-    if let Ok(parsed) = parser.parse2(args) {
-        for meta in parsed {
-            match &meta {
-                Meta::Path(path) if path.is_ident("no_display") => result.no_display = true,
-                Meta::NameValue(name_value) => apply_named_arg(&mut result, name_value),
-                Meta::Path(_) | Meta::List(_) => {
-                    // Ignore unknown model_schema args.
-                }
-            }
-        }
+    let read = parser.parse2(args).and_then(|parsed| {
+        parsed
+            .iter()
+            .try_for_each(|meta| apply_arg(&mut result, meta))
+    });
+    if let Err(rejection) = read {
+        result.arg_rejection = Some(rejection);
     }
 
     result
+}
+
+/// Applies one `model_schema` argument to `result`.
+///
+/// The name is read before the shape, so an argument this parser knows written the wrong way is
+/// answered with what it takes rather than reported as unknown.
+fn apply_arg(result: &mut ModelSchemaArgs, meta: &Meta) -> syn::Result<()> {
+    let path = meta.path();
+    if path.is_ident("name") {
+        result.name_override = Some(str_arg(meta, "name")?.value());
+    } else if path.is_ident("pattern") {
+        let lit_str = str_arg(meta, "pattern")?;
+        record_pattern_rejection(result, lit_str);
+        result.pattern = Some(lit_str.value());
+    } else if path.is_ident("minLength") {
+        result.min_length = Some(length_arg(meta, "minLength")?);
+    } else if path.is_ident("maxLength") {
+        result.max_length = Some(length_arg(meta, "maxLength")?);
+    } else if path.is_ident("no_display") {
+        result.no_display = flag_arg(meta, "no_display")?;
+    } else {
+        return Err(unknown_arg_rejection(meta));
+    }
+    Ok(())
+}
+
+/// The literal an argument's value was written as.
+///
+/// Every valued `model_schema` argument reaches a surface as a literal — a name, a regex, a bound
+/// — so a value written as anything else is one no argument can carry.
+fn arg_literal<'meta>(meta: &'meta Meta, name: &str, takes: &str) -> syn::Result<&'meta syn::Lit> {
+    let Meta::NameValue(name_value) = meta else {
+        return Err(arg_rejection(meta, name, takes));
+    };
+    if let syn::Expr::Lit(expr_lit) = &name_value.value {
+        Ok(&expr_lit.lit)
+    } else {
+        Err(arg_rejection(&name_value.value, name, takes))
+    }
+}
+
+/// The string literal a `name = "…"` argument was written as.
+fn str_arg<'meta>(meta: &'meta Meta, name: &str) -> syn::Result<&'meta syn::LitStr> {
+    let takes = format!("a string literal, written `{name} = \"…\"`");
+    let lit = arg_literal(meta, name, &takes)?;
+    if let syn::Lit::Str(lit_str) = lit {
+        Ok(lit_str)
+    } else {
+        Err(arg_rejection(lit, name, &takes))
+    }
+}
+
+/// The length a `minLength = N` argument was written as.
+///
+/// The bound is compared against a `usize` in the generated validator, so one the target type
+/// cannot hold is a bound no surface can enforce.
+fn length_arg(meta: &Meta, name: &str) -> syn::Result<usize> {
+    let takes = format!("an integer literal `usize` can hold, written `{name} = 3`");
+    let lit = arg_literal(meta, name, &takes)?;
+    if let syn::Lit::Int(lit_int) = lit {
+        lit_int.base10_parse()
+    } else {
+        Err(arg_rejection(lit, name, &takes))
+    }
+}
+
+/// Whether a flag argument is set: it stands alone, or takes the boolean literal that says which
+/// way to set it.
+fn flag_arg(meta: &Meta, name: &str) -> syn::Result<bool> {
+    if matches!(*meta, Meta::Path(_)) {
+        return Ok(true);
+    }
+    let takes =
+        format!("no value at all, or a boolean literal, written `{name}` or `{name} = false`");
+    let lit = arg_literal(meta, name, &takes)?;
+    if let syn::Lit::Bool(lit_bool) = lit {
+        Ok(lit_bool.value())
+    } else {
+        Err(arg_rejection(lit, name, &takes))
+    }
+}
+
+/// Names what an argument takes, spanned on what was written instead.
+fn arg_rejection(tokens: impl quote::ToTokens, name: &str, takes: &str) -> syn::Error {
+    syn::Error::new_spanned(
+        tokens,
+        format!("`model_schema` argument `{name}` takes {takes}"),
+    )
+}
+
+/// Rejects an argument the parser does not read, spanned on the name as written.
+fn unknown_arg_rejection(meta: &Meta) -> syn::Error {
+    let path = meta.path();
+    syn::Error::new_spanned(
+        path,
+        format!(
+            "unknown `model_schema` argument `{}`. This attribute is this crate's own, so an \
+             argument it does not read reaches no emitter: the type would be expanded as though \
+             the argument had been left off — a misspelled `name` yields the unrenamed schema on \
+             every surface. Valid arguments: {}",
+            quote!(#path),
+            KNOWN_ARGS.join(", ")
+        ),
+    )
 }
 
 /// Records the `regex` crate's verdict on a `pattern` argument, for the brand path that splices it.
@@ -370,45 +487,20 @@ fn record_pattern_rejection(result: &mut ModelSchemaArgs, lit_str: &syn::LitStr)
 #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
 const fn record_pattern_rejection(_result: &mut ModelSchemaArgs, _lit_str: &syn::LitStr) {}
 
-/// Applies one `key = value` argument to `result`, ignoring unknown keys and mistyped literals.
-fn apply_named_arg(result: &mut ModelSchemaArgs, meta: &MetaNameValue) {
-    if meta.path.is_ident("name")
-        && let syn::Expr::Lit(expr_lit) = &meta.value
-        && let syn::Lit::Str(lit_str) = &expr_lit.lit
-    {
-        result.name_override = Some(lit_str.value());
-    } else if meta.path.is_ident("pattern")
-        && let syn::Expr::Lit(expr_lit) = &meta.value
-        && let syn::Lit::Str(lit_str) = &expr_lit.lit
-    {
-        record_pattern_rejection(result, lit_str);
-        result.pattern = Some(lit_str.value());
-    } else if meta.path.is_ident("minLength")
-        && let syn::Expr::Lit(expr_lit) = &meta.value
-        && let syn::Lit::Int(lit_int) = &expr_lit.lit
-    {
-        result.min_length = Some(lit_int.base10_parse::<usize>().unwrap());
-    } else if meta.path.is_ident("maxLength")
-        && let syn::Expr::Lit(expr_lit) = &meta.value
-        && let syn::Lit::Int(lit_int) = &expr_lit.lit
-    {
-        result.max_length = Some(lit_int.base10_parse::<usize>().unwrap());
-    } else if meta.path.is_ident("no_display")
-        && let syn::Expr::Lit(expr_lit) = &meta.value
-        && let syn::Lit::Bool(lit_bool) = &expr_lit.lit
-    {
-        result.no_display = lit_bool.value();
-    } else {
-        // Ignore unknown model_schema args.
-    }
-}
-
 /// Executes the `model_schema` macro processing to generate TypeScript and Zod schema definitions.
 ///
 /// This function is the main entry point for the `model_schema` macro and handles both struct and enum types.
 pub fn exec_model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
     let parsed_args = parse_model_schema_args(args.into());
     let item = parse_macro_input!(input as Item);
+    // An argument the parser refused describes a surface no expansion below can honour, so the
+    // item is refused before it is dispatched to its shape.
+    if let Some(rejection) = parsed_args.arg_rejection.as_ref()
+        && let Some(output) =
+            guard_failure_output(&item, &[attr_guard_error(rejection, &item_label(&item))])
+    {
+        return output;
+    }
     if let Item::Struct(item_struct) = item {
         process_struct(item_struct, &parsed_args)
     } else if let Item::Enum(item_enum) = item {
@@ -874,14 +966,15 @@ fn pattern_guard_error(rejection: &syn::Error, subject: &str) -> proc_macro2::To
     .to_compile_error()
 }
 
-/// Turns the parser's refusal of a `model_schema_prop` attribute into `compile_error!` tokens
-/// naming what carries it, keeping the refusal's span so the diagnostic points at the key or value
-/// as written.
+/// Turns this crate's own attribute parser's refusal — of a `model_schema` argument or of a
+/// `model_schema_prop` key — into `compile_error!` tokens naming what carries it, keeping the
+/// refusal's span so the diagnostic points at the argument, key or value as written.
 ///
-/// Reading the attribute is the only thing that acts on it, so a key or value the parser stops at
-/// is one no emitter ever sees: without this the field is emitted as though the attribute had been
-/// left off, and the author gets a schema that enforces nothing.
-fn prop_attr_guard_error(rejection: &syn::Error, subject: &str) -> proc_macro2::TokenStream {
+/// Reading the attribute is the only thing that acts on it, so a name or value the parser stops at
+/// is one no emitter ever sees: without this the surface is emitted as though the attribute had
+/// been left off, and what it was written to say — a field's constraint, a type's name — goes
+/// unsaid.
+fn attr_guard_error(rejection: &syn::Error, subject: &str) -> proc_macro2::TokenStream {
     syn::Error::new(
         rejection.span(),
         format!("model_schema: {subject}: {rejection}"),
@@ -895,6 +988,20 @@ fn field_label(raw_field_ident: &str) -> String {
         "tuple field".to_owned()
     } else {
         format!("field `{raw_field_ident}`")
+    }
+}
+
+/// Names the item a type-level guard message is about; a shape this macro does not expand has no
+/// ident worth naming.
+fn item_label(item: &Item) -> String {
+    if let Item::Struct(item_struct) = item {
+        format!("type `{}`", item_struct.ident)
+    } else if let Item::Enum(item_enum) = item {
+        format!("type `{}`", item_enum.ident)
+    } else if let Item::Type(item_type) = item {
+        format!("type `{}`", item_type.ident)
+    } else {
+        "item".to_owned()
     }
 }
 
@@ -6335,7 +6442,7 @@ fn collect_field_guard_errors(
             prop_meta
                 .attr_rejection
                 .as_ref()
-                .map(|rejection| prop_attr_guard_error(rejection, &label)),
+                .map(|rejection| attr_guard_error(rejection, &label)),
         )
         .chain(
             prop_meta
