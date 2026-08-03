@@ -153,8 +153,10 @@ fn closed_object_body(json_schema_fields: &[proc_macro2::TokenStream]) -> proc_m
 /// `serde_json::Map` expression and every entry of `merged` a `serde_json::Value` one; the result
 /// is a `serde_json::Value`.
 ///
-/// A merged schema that is itself a `oneOf` multiplies out rather than collapsing, so each branch
-/// stays a closed object naming exactly the members that branch writes.
+/// A merged schema that is itself a union multiplies out rather than collapsing, so each branch
+/// stays a closed object naming exactly the members that branch writes. Both spellings of a union
+/// are read: a discriminated enum's `oneOf` and an untagged one's `anyOf` alike name what serde
+/// picked one of, and the merged schema is the union of the merges.
 ///
 /// Only a value serde writes as an object has members to contribute, and the expansion cannot
 /// always tell which types those are — a name reaches the merge without saying what it writes. The
@@ -212,13 +214,18 @@ fn merge_readers() -> proc_macro2::TokenStream {
             schema.get("type")?.as_str()
         }
 
-        fn branches_of(
-            schema: &serde_json::Value,
-        ) -> Vec<serde_json::Map<String, serde_json::Value>> {
-            if let Some(one_of) = schema.get("oneOf").and_then(serde_json::Value::as_array) {
-                one_of.iter().filter_map(|b| b.as_object().cloned()).collect()
-            } else if let Some(obj) = schema.as_object() {
-                vec![obj.clone()]
+        // What serde picked one of. A discriminated enum spells its union `oneOf` and an untagged
+        // one `anyOf`, and the merge owes both the same answer: the value that reached it wrote
+        // whichever branch matched, so the branch is what the base joins.
+        fn branches_of(schema: &serde_json::Value) -> Vec<&serde_json::Value> {
+            if let Some(union) = schema
+                .get("oneOf")
+                .or_else(|| schema.get("anyOf"))
+                .and_then(serde_json::Value::as_array)
+            {
+                union.iter().collect()
+            } else if schema.is_object() {
+                vec![schema]
             } else {
                 Vec::new()
             }
@@ -276,13 +283,33 @@ pub fn merged_object_value(
                         );
                     }
                 }
+                // A union names no type of its own, so the branch is where the same question is
+                // asked again — and serde cannot write a branch that is not an object into the
+                // object being written any more than it could write the whole value that way.
                 let fs_branches = branches_of(fs_body);
-                if fs_branches.is_empty() {
+                for (position, fb) in fs_branches.iter().enumerate() {
+                    if let Some(named) = described_type(fb) {
+                        if named != "object" {
+                            panic!(
+                                "`{}`: {} `{}` writes a union member that is not an object — its branch {} describes a `{}`, which has no members to merge, and what serde writes for that member does not join the object being written; {}",
+                                #subject,
+                                #edge,
+                                label,
+                                position + 1,
+                                named,
+                                #non_object_remedy,
+                            );
+                        }
+                    }
+                }
+                let fs_objects: Vec<&serde_json::Map<String, serde_json::Value>> =
+                    fs_branches.iter().filter_map(|fb| fb.as_object()).collect();
+                if fs_objects.is_empty() {
                     continue;
                 }
                 let mut next = Vec::new();
                 for base in &branches {
-                    for fb in &fs_branches {
+                    for fb in &fs_objects {
                         next.push(merge_object_schemas(base, fb));
                     }
                 }
