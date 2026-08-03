@@ -3567,9 +3567,12 @@ fn build_map_field_schema(
                 &value.field_type
                 && value_lst.is_empty()
             {
-                // For json_schema(), use the module pattern
-                let safe_value_name = safe_type_name(value_type_name);
-                let value_module_name = format!("{}_schema", to_snake_case(&safe_value_name));
+                // For json_schema(), use the module pattern. An alias's module is named after
+                // its registered export name, which the raw ident does not reproduce.
+                let value_module_name = match lookup_alias_info(value_type_name) {
+                    Some(alias) => alias.module_name,
+                    None => format!("{}_schema", to_snake_case(&safe_type_name(value_type_name))),
+                };
                 let value_module_ident = proc_macro2::Ident::new(
                     value_module_name.as_str(),
                     proc_macro2::Span::call_site(),
