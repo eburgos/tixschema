@@ -423,9 +423,88 @@ fn discriminated_enum_ts_definition_carries_no_cfg_attribute() {
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
-fn alias_json_schema_stub_carries_no_cfg_attribute() {
-    let tokens = super::generate_alias_json_schema_stub();
-    assert_no_cfg_attribute(&tokens, "generate_alias_json_schema_stub");
+fn alias_json_schema_method_carries_no_cfg_attribute() {
+    let alias: syn::ItemType = syn::parse_quote!(
+        pub type AliasIdent = String;
+    );
+    let field_def = super::get_field_def("AliasType", &alias.ty, "");
+    let tokens = super::generate_alias_json_schema_method(&alias, "AliasType", &field_def);
+    assert_no_cfg_attribute(&tokens, "generate_alias_json_schema_method");
+}
+
+/// An alias whose target the dispatch cannot render fails the way a field of that target does: one
+/// diagnostic, naming the alias and the reason, in place of the whole body. A schema left there
+/// would be carried by every slot the alias fills.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_alias_of_an_unrenderable_target_emits_only_the_compile_error() {
+    for alias_source in [
+        "pub type Rows = HashMap<String, (u32, u32)>;",
+        "pub type Rows = Vec<HashMap<String, (u32, u32)>>;",
+        "pub type Rows = (String, HashMap<String, (u32, u32)>);",
+    ] {
+        let alias: syn::ItemType = syn::parse_str(alias_source).unwrap();
+        let field_def = super::get_field_def("RowsType", &alias.ty, "");
+        let tokens =
+            super::generate_alias_json_schema_method(&alias, "RowsType", &field_def).to_string();
+        assert!(
+            tokens.contains("compile_error !"),
+            "for {alias_source}, got: {tokens}"
+        );
+        assert!(
+            tokens.contains("type alias `RowsType`"),
+            "for {alias_source}, got: {tokens}"
+        );
+        assert!(
+            tokens.contains("a tuple is not supported as a map value"),
+            "for {alias_source}, got: {tokens}"
+        );
+        assert!(
+            !tokens.contains("json !"),
+            "for {alias_source}, got: {tokens}"
+        );
+    }
+}
+
+/// A type parameter reaches the mapping as a named type, and a name is carried by a reference to
+/// the schema module it registered — a module no expansion emits for a parameter. So the parameter
+/// is erased wherever it can be written, or the alias names a module that does not exist.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_alias_type_parameter_is_erased_at_every_depth() {
+    for alias_source in [
+        "pub type Holder<V> = V;",
+        "pub type Holder<V> = Vec<V>;",
+        "pub type Holder<V> = Option<V>;",
+        "pub type Holder<V> = (String, V);",
+        "pub type Holder<V> = HashMap<String, V>;",
+        "pub type Holder<V> = HashMap<String, Vec<V>>;",
+    ] {
+        let alias: syn::ItemType = syn::parse_str(alias_source).unwrap();
+        let field_def = super::get_field_def("HolderType", &alias.ty, "");
+        let tokens =
+            super::generate_alias_json_schema_method(&alias, "HolderType", &field_def).to_string();
+        assert!(
+            !tokens.contains("Schema :: json_schema ()"),
+            "for {alias_source}, got: {tokens}"
+        );
+    }
+}
+
+/// The stub this replaced answered every alias with an object carrying a lone `warning` key, which
+/// under JSON Schema constrains nothing — every slot naming an alias accepted every payload. No
+/// emission may carry one again.
+#[test]
+fn no_json_schema_emission_carries_a_warning_key() {
+    for (file, source) in [
+        ("model_schema.rs", include_str!("../model_schema.rs")),
+        (
+            "features/jsonschema.rs",
+            include_str!("../features/jsonschema.rs"),
+        ),
+    ] {
+        assert!(!source.contains("\"warning\""), "in: {file}");
+    }
 }
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
