@@ -1,6 +1,19 @@
+use alloc::collections::{BTreeSet, BinaryHeap, VecDeque};
+use core::iter::once;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tixschema::model_schema;
+
+/// The covered wrappers by the name a generated surface could leak. `Vec` is covered too but
+/// never arrives under its own name: the parser collapses it onto its element long before.
+#[cfg(any(feature = "typescript", feature = "zod"))]
+const SEQUENCE_WRAPPERS: [&str; 5] = [
+    "BTreeSet",
+    "BinaryHeap",
+    "HashSet",
+    "LinkedList",
+    "VecDeque",
+];
 
 // Test comprehensive HashMap scenarios with various value types
 #[model_schema()]
@@ -126,7 +139,7 @@ struct UserWithCollections {
 }
 
 #[model_schema()]
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct MetricTag {
     label: String,
 }
@@ -136,9 +149,11 @@ struct MetricTag {
 #[model_schema()]
 type MetricTagRef = MetricTag;
 
-// A `HashSet<T>` and a `Vec<T>` both serialize as a JSON array of `T`, so the element decides what
-// the array holds on either one. The twin structs below carry the same element types under both
-// spellings; the tests hold every field of one against its twin.
+// Every std wrapper serde writes as a JSON array of `T` — the criterion for covering one — puts
+// the element in charge of what the array holds. The twin structs below carry the same element
+// types under each covered spelling; the tests hold every field of one against its `Vec` twin.
+// `LinkedList` has no twin here, the crate's own lints forbidding it a value of one; it is covered
+// by name at the dispatch and in the renderers' unit tests instead.
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct SetElementFields {
@@ -155,6 +170,49 @@ struct SetElementFields {
 
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct BTreeSetElementFields {
+    aliased_tags: BTreeSet<MetricTagRef>,
+    big_ids: BTreeSet<u64>,
+    #[model_schema_prop(minLength = 3)]
+    constrained_labels: BTreeSet<String>,
+    labels: BTreeSet<String>,
+    #[model_schema_prop(preprocess = ["trim"])]
+    preprocessed_labels: BTreeSet<String>,
+    sibling_tags: BTreeSet<MetricTag>,
+    small_ids: BTreeSet<u32>,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct VecDequeElementFields {
+    aliased_tags: VecDeque<MetricTagRef>,
+    big_ids: VecDeque<u64>,
+    #[model_schema_prop(minLength = 3)]
+    constrained_labels: VecDeque<String>,
+    labels: VecDeque<String>,
+    #[model_schema_prop(preprocess = ["trim"])]
+    preprocessed_labels: VecDeque<String>,
+    sibling_tags: VecDeque<MetricTag>,
+    small_ids: VecDeque<u32>,
+}
+
+// `BinaryHeap` is the one covered wrapper with no `PartialEq`, so this twin cannot derive it.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct BinaryHeapElementFields {
+    aliased_tags: BinaryHeap<MetricTagRef>,
+    big_ids: BinaryHeap<u64>,
+    #[model_schema_prop(minLength = 3)]
+    constrained_labels: BinaryHeap<String>,
+    labels: BinaryHeap<String>,
+    #[model_schema_prop(preprocess = ["trim"])]
+    preprocessed_labels: BinaryHeap<String>,
+    sibling_tags: BinaryHeap<MetricTag>,
+    small_ids: BinaryHeap<u32>,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct VecElementFields {
     aliased_tags: Vec<MetricTagRef>,
     big_ids: Vec<u64>,
@@ -165,6 +223,85 @@ struct VecElementFields {
     preprocessed_labels: Vec<String>,
     sibling_tags: Vec<MetricTag>,
     small_ids: Vec<u32>,
+}
+
+fn one<T, C>(item: T) -> C
+where
+    C: FromIterator<T>,
+{
+    once(item).collect()
+}
+
+/// The `name: Type;` lines of a generated TypeScript definition, the `JSDoc` blocks around them
+/// left out — a member line is indented and terminated, where every comment line carries a `*`.
+#[cfg(feature = "typescript")]
+fn ts_field_declarations(definition: &str) -> Vec<String> {
+    definition
+        .lines()
+        .filter(|line| line.starts_with("  ") && line.ends_with(';'))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// One populated instance of every wrapper twin the crate may hold, serialized.
+fn covered_wrapper_payloads() -> [(&'static str, serde_json::Value); 4] {
+    let tag = MetricTag {
+        label: "a".to_owned(),
+    };
+    [
+        (
+            "HashSet",
+            serde_json::to_value(SetElementFields {
+                aliased_tags: one(tag.clone()),
+                big_ids: one(9_u64),
+                constrained_labels: one("abc".to_owned()),
+                labels: one("t".to_owned()),
+                preprocessed_labels: one("t".to_owned()),
+                sibling_tags: one(tag.clone()),
+                small_ids: one(7_u32),
+            })
+            .unwrap(),
+        ),
+        (
+            "BTreeSet",
+            serde_json::to_value(BTreeSetElementFields {
+                aliased_tags: one(tag.clone()),
+                big_ids: one(9_u64),
+                constrained_labels: one("abc".to_owned()),
+                labels: one("t".to_owned()),
+                preprocessed_labels: one("t".to_owned()),
+                sibling_tags: one(tag.clone()),
+                small_ids: one(7_u32),
+            })
+            .unwrap(),
+        ),
+        (
+            "BinaryHeap",
+            serde_json::to_value(BinaryHeapElementFields {
+                aliased_tags: one(tag.clone()),
+                big_ids: one(9_u64),
+                constrained_labels: one("abc".to_owned()),
+                labels: one("t".to_owned()),
+                preprocessed_labels: one("t".to_owned()),
+                sibling_tags: one(tag.clone()),
+                small_ids: one(7_u32),
+            })
+            .unwrap(),
+        ),
+        (
+            "VecDeque",
+            serde_json::to_value(VecDequeElementFields {
+                aliased_tags: one(tag.clone()),
+                big_ids: one(9_u64),
+                constrained_labels: one("abc".to_owned()),
+                labels: one("t".to_owned()),
+                preprocessed_labels: one("t".to_owned()),
+                sibling_tags: one(tag),
+                small_ids: one(7_u32),
+            })
+            .unwrap(),
+        ),
+    ]
 }
 
 #[cfg(feature = "jsonschema")]
@@ -1139,16 +1276,18 @@ fn test_set_element_zod_generation() {
 
 /// Whatever a set field renders as, it is not the Rust wrapper's name: neither surface has any
 /// meaning for it, so the name surviving anywhere into the output is a syntax error in the output.
+/// The other covered wrappers name themselves in their own fixture's type name, so the equivalence
+/// with the `Vec` twin below is what says no wrapper name reached their output.
 #[test]
 #[cfg(any(feature = "typescript", feature = "zod"))]
-fn test_no_set_wrapper_name_survives_into_generated_output() {
+fn test_no_sequence_wrapper_name_survives_into_generated_output() {
     let mut generated = String::new();
     #[cfg(feature = "typescript")]
     generated.push_str(&SetElementFields::ts_definition());
     #[cfg(feature = "zod")]
     generated.push_str(&SetElementFields::zod_schema());
 
-    for wrapper in ["HashSet", "BTreeSet"] {
+    for wrapper in SEQUENCE_WRAPPERS {
         assert!(!generated.contains(wrapper), "Got: {generated}");
     }
 }
@@ -1162,4 +1301,98 @@ fn test_set_fields_validate_as_vec_fields() {
         SetElementFields::zod_schema().replace("SetElementFields", "VecElementFields"),
         VecElementFields::zod_schema()
     );
+}
+
+/// A wrapper is covered when serde writes it as a JSON array of its element — the whole criterion,
+/// and the reason the twins below may be held against the `Vec` spelling at all. Read off what
+/// serde actually produces, so the covered list answers to the wire rather than to a name.
+#[test]
+fn test_every_covered_wrapper_writes_a_json_array() {
+    for (wrapper, payload) in covered_wrapper_payloads() {
+        for (field, value) in payload.as_object().unwrap() {
+            assert!(value.is_array(), "{wrapper}::{field} wrote: {value}");
+        }
+    }
+}
+
+/// Writing the same array as the `Vec` spelling, every covered wrapper describes as it does —
+/// whole schema against whole schema, not one field at a time.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_every_covered_wrapper_describes_as_the_vec_spelling() {
+    let vec_schema = VecElementFields::json_schema();
+    for (wrapper, schema) in [
+        ("SetElementFields", SetElementFields::json_schema()),
+        (
+            "BTreeSetElementFields",
+            BTreeSetElementFields::json_schema(),
+        ),
+        (
+            "BinaryHeapElementFields",
+            BinaryHeapElementFields::json_schema(),
+        ),
+        (
+            "VecDequeElementFields",
+            VecDequeElementFields::json_schema(),
+        ),
+    ] {
+        assert_eq!(
+            schema["properties"], vec_schema["properties"],
+            "for: {wrapper}"
+        );
+        assert_eq!(schema["required"], vec_schema["required"], "for: {wrapper}");
+    }
+}
+
+/// The same holding on the TypeScript surface: with the fixture's own name set aside, a covered
+/// wrapper's field declarations are the `Vec` spelling's, so no wrapper name reached the output.
+/// Declarations rather than whole definitions, because the surrounding `JSDoc` differs for a reason
+/// of its own: a `Vec` field's doc comment is dropped where every other spelling keeps it.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_every_covered_wrapper_types_as_the_vec_spelling() {
+    let vec_definition = ts_field_declarations(&VecElementFields::ts_definition());
+    for (wrapper, definition) in [
+        ("SetElementFields", SetElementFields::ts_definition()),
+        (
+            "BTreeSetElementFields",
+            BTreeSetElementFields::ts_definition(),
+        ),
+        (
+            "BinaryHeapElementFields",
+            BinaryHeapElementFields::ts_definition(),
+        ),
+        (
+            "VecDequeElementFields",
+            VecDequeElementFields::ts_definition(),
+        ),
+    ] {
+        assert_eq!(
+            ts_field_declarations(&definition.replace(wrapper, "VecElementFields")),
+            vec_definition,
+            "for: {wrapper}"
+        );
+    }
+}
+
+/// And on the Zod surface, constraints and preprocess wraps included.
+#[test]
+#[cfg(feature = "zod")]
+fn test_every_covered_wrapper_validates_as_the_vec_spelling() {
+    let vec_schema = VecElementFields::zod_schema();
+    for (wrapper, schema) in [
+        ("SetElementFields", SetElementFields::zod_schema()),
+        ("BTreeSetElementFields", BTreeSetElementFields::zod_schema()),
+        (
+            "BinaryHeapElementFields",
+            BinaryHeapElementFields::zod_schema(),
+        ),
+        ("VecDequeElementFields", VecDequeElementFields::zod_schema()),
+    ] {
+        assert_eq!(
+            schema.replace(wrapper, "VecElementFields"),
+            vec_schema,
+            "for: {wrapper}"
+        );
+    }
 }

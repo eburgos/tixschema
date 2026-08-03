@@ -42,6 +42,9 @@ use crate::features::serde::{SerdeFieldMeta, SerdeTypeMeta};
 #[cfg(feature = "serde")]
 use crate::field_type::{parse_serde_field_attributes, parse_serde_type_attributes};
 
+#[cfg(feature = "jsonschema")]
+use crate::field_type::is_sequence_wrapper;
+
 use crate::features::model_schema_prop::parse_model_schema_prop_attributes;
 
 #[cfg(feature = "serde")]
@@ -3895,12 +3898,12 @@ fn build_sibling_type_field_schema(
     lst: &[FieldDef],
 ) -> proc_macro2::TokenStream {
     log::trace!("SiblingType => name: {name}, lst: {lst:?}");
-    // The element is dispatched as the arrayed field it stands for, so a set renders exactly as the
-    // `Vec` of the same element does — element by element, at every type. A parsed `Vec<T>` field
-    // never arrives here, the parser having already handed it over in that arrayed form; a `Vec`
-    // spelled at this position is the same wrapper, and takes the same path.
+    // The element is dispatched as the arrayed field it stands for, so a sequence wrapper renders
+    // exactly as the `Vec` of the same element does — element by element, at every type. Which
+    // wrappers those are is the surfaces' one shared answer, so no name reaches one surface as an
+    // array and another as a schema module of its own.
     if let [element] = lst
-        && (name == "Vec" || name == "HashSet")
+        && is_sequence_wrapper(name)
     {
         build_field_type_schema(&fld.collection_element_field(element), field_name_str)
     } else if (name == "HashMap" || name == "BTreeMap") && lst.len() == 2 {
