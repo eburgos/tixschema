@@ -5,11 +5,19 @@
 
 #[cfg(test)]
 use crate::rename_rule::resolve_rename_rule;
-use syn::{Attribute, LitStr};
+use proc_macro2::{Delimiter, TokenTree};
+use syn::{Attribute, Error, LitStr, Meta};
+
+/// Message of the rejection raised for a serde attribute hidden behind `cfg_attr`.
+const CFG_ATTR_SERDE_REJECTION: &str = "cfg_attr-wrapped serde attribute is invisible to \
+     model_schema and will be silently ignored by the generator; write #[serde(...)] \
+     unconditionally (serde attrs are inert without the serde derive)";
 
 /// Metadata for serde attributes applied to a struct or enum.
 #[derive(Clone, Debug, Default)]
 pub struct SerdeTypeMeta {
+    /// The rejection raised when the walk met a `cfg_attr`-wrapped serde attribute.
+    pub cfg_attr_rejection: Option<Error>,
     pub content: Option<String>, // e.g., "value" for adjacently tagged enums
     pub rename_all: Option<String>, // e.g., "camelCase"
     pub tag: Option<String>,     // e.g., "behaviorType"
@@ -19,6 +27,8 @@ pub struct SerdeTypeMeta {
 /// Metadata for serde attributes applied to a field.
 #[derive(Clone, Debug, Default)]
 pub struct SerdeFieldMeta {
+    /// The rejection raised when the walk met a `cfg_attr`-wrapped serde attribute.
+    pub cfg_attr_rejection: Option<Error>,
     pub flatten: bool, // Whether the field is `#[serde(flatten)]`
     /// Whether a `None` is left out of the serialized output entirely. `skip_deserializing`
     /// does not qualify: it still writes `null` on the way out.
@@ -27,12 +37,42 @@ pub struct SerdeFieldMeta {
     pub skip: bool,             // Whether to skip the field
 }
 
+/// The rejection for a `cfg_attr` carrying a `serde(...)` attribute, or `None` for every other
+/// `cfg_attr` — gated derives and gated docs stay legal.
+///
+/// A `cfg_attr` on a field or a variant is expanded only after the attribute proc-macro has been
+/// handed the item, so a serde attribute written inside one arrives here unexpanded and would
+/// otherwise be walked past in silence. (An item's own attribute list is resolved by rustc first,
+/// so those arrive already expanded or already stripped and never reach this check.) Reading the
+/// payload would mean applying it in builds where the consumer's cfg predicate is false, and that
+/// predicate cannot be evaluated from a proc macro, so the attribute is rejected, not guessed at.
+fn cfg_attr_serde_rejection(attr: &Attribute) -> Option<Error> {
+    let Meta::List(list) = &attr.meta else {
+        return None;
+    };
+    // Only the top level of the payload is scanned: a `serde` naming the cfg predicate
+    // (`cfg_attr(feature = "serde", ..)`) is a string literal, and one naming a nested predicate
+    // sits inside a group, so neither can be mistaken for the `serde(...)` attribute itself.
+    let mut previous_is_serde = false;
+    for token in list.tokens.clone() {
+        if previous_is_serde
+            && matches!(&token, TokenTree::Group(group) if group.delimiter() == Delimiter::Parenthesis)
+        {
+            return Some(Error::new_spanned(attr, CFG_ATTR_SERDE_REJECTION));
+        }
+        previous_is_serde = matches!(&token, TokenTree::Ident(ident) if ident == "serde");
+    }
+    None
+}
+
 /// Parses serde attributes from a struct or enum.
 pub fn parse_serde_type_attributes(attrs: &[Attribute]) -> SerdeTypeMeta {
     let mut meta = SerdeTypeMeta::default();
 
     for attr in attrs {
-        if attr.path().is_ident("serde") {
+        if attr.path().is_ident("cfg_attr") && meta.cfg_attr_rejection.is_none() {
+            meta.cfg_attr_rejection = cfg_attr_serde_rejection(attr);
+        } else if attr.path().is_ident("serde") {
             attr.parse_nested_meta(|nested| {
                 // Handle `tag = "value"`
                 if nested.path.is_ident("tag") {
@@ -63,6 +103,8 @@ pub fn parse_serde_type_attributes(attrs: &[Attribute]) -> SerdeTypeMeta {
             .unwrap_or_else(|e| {
                 log::trace!("Failed to parse serde type attribute: {e}");
             });
+        } else {
+            // Ignore attributes that are neither serde nor a cfg_attr wrapper.
         }
     }
 
@@ -74,7 +116,9 @@ pub fn parse_serde_field_attributes(attrs: &[Attribute]) -> SerdeFieldMeta {
     let mut meta = SerdeFieldMeta::default();
 
     for attr in attrs {
-        if attr.path().is_ident("serde") {
+        if attr.path().is_ident("cfg_attr") && meta.cfg_attr_rejection.is_none() {
+            meta.cfg_attr_rejection = cfg_attr_serde_rejection(attr);
+        } else if attr.path().is_ident("serde") {
             attr.parse_nested_meta(|nested| {
                 // Handle `rename = "value"`
                 if nested.path.is_ident("rename") {
@@ -106,6 +150,8 @@ pub fn parse_serde_field_attributes(attrs: &[Attribute]) -> SerdeFieldMeta {
             .unwrap_or_else(|e| {
                 log::trace!("Failed to parse serde field attribute: {e}");
             });
+        } else {
+            // Ignore attributes that are neither serde nor a cfg_attr wrapper.
         }
     }
 

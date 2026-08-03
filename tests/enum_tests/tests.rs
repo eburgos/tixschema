@@ -1,4 +1,12 @@
-#[cfg(all(test, feature = "serde"))]
+#[cfg(all(
+    test,
+    any(
+        feature = "typescript",
+        feature = "jsonschema",
+        feature = "zod",
+        feature = "serde"
+    )
+))]
 use serde::{Deserialize, Serialize};
 #[cfg(all(test, feature = "jsonschema", feature = "serde"))]
 use serde_json::Value;
@@ -16,13 +24,12 @@ use tixschema::model_schema;
 // Test single-value enum used as a field in a discriminated union.
 #[cfg(all(test, any(feature = "typescript", feature = "zod", feature = "serde")))]
 #[model_schema()]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", serde(tag = "source"))]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "source")]
 enum ActionWithLiteralEnum {
-    #[cfg_attr(feature = "serde", serde(rename = "generate"))]
+    #[serde(rename = "generate")]
     Generate { value: DocumentLiteralValue },
-    #[cfg_attr(feature = "serde", serde(rename = "upload"))]
+    #[serde(rename = "upload")]
     Upload { value: String },
 }
 
@@ -77,12 +84,8 @@ pub enum DistributionValidMimeType {
 
 #[cfg(all(test, any(feature = "typescript", feature = "zod", feature = "serde")))]
 #[model_schema()]
-#[cfg_attr(
-    feature = "serde",
-    derive(Serialize, Deserialize),
-    serde(rename_all = "lowercase")
-)]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "lowercase")]
 enum DocumentLiteralValue {
     Document,
 }
@@ -106,9 +109,8 @@ pub enum MimeType {
 ))]
 // Test discriminated union (tagged enum).
 #[model_schema()]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", serde(tag = "type", rename_all = "camelCase"))]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "type", rename_all = "camelCase")]
 enum PaymentMethod {
     BankTransfer {
         account_number: String,
@@ -126,12 +128,8 @@ enum PaymentMethod {
 
 #[cfg(all(test, any(feature = "typescript", feature = "zod", feature = "serde")))]
 #[model_schema()]
-#[cfg_attr(
-    feature = "serde",
-    derive(Serialize, Deserialize),
-    serde(rename_all = "lowercase")
-)]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "lowercase")]
 enum UserStatus {
     Active,
     Inactive,

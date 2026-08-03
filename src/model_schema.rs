@@ -31,7 +31,7 @@ use crate::utils::extract_example_from_docs;
 use crate::utils::lookup_alias_info;
 
 #[cfg(feature = "serde")]
-use crate::features::serde::SerdeFieldMeta;
+use crate::features::serde::{SerdeFieldMeta, SerdeTypeMeta};
 
 #[cfg(feature = "serde")]
 use crate::field_type::{parse_serde_field_attributes, parse_serde_type_attributes};
@@ -555,6 +555,54 @@ where
     Some(TokenStream::from(output))
 }
 
+/// Turns a `cfg_attr` rejection into `compile_error!` tokens naming the item it was found on,
+/// keeping the attribute's span so the diagnostic still points at the offending line.
+#[cfg(feature = "serde")]
+fn cfg_attr_guard_error(rejection: &syn::Error, item: &str) -> proc_macro2::TokenStream {
+    syn::Error::new(
+        rejection.span(),
+        format!("model_schema: {item}: {rejection}"),
+    )
+    .to_compile_error()
+}
+
+/// Names a field in a guard message; tuple slots have no ident to name.
+#[cfg(feature = "serde")]
+fn field_label(raw_field_ident: &str) -> String {
+    if raw_field_ident.is_empty() {
+        "tuple field".to_owned()
+    } else {
+        format!("field `{raw_field_ident}`")
+    }
+}
+
+/// The `compile_error!` tokens for every `cfg_attr`-wrapped serde attribute an enum carries: on the
+/// type (tagging, variant casing) and on each variant (`rename`).
+///
+/// Collected before the enum is dispatched to its shape, since all three shapes read those same
+/// attributes and each would otherwise render a contract the wrapper had quietly emptied.
+#[cfg(feature = "serde")]
+fn enum_cfg_attr_guard_errors(
+    item_enum: &syn::ItemEnum,
+    type_meta: &SerdeTypeMeta,
+) -> Vec<proc_macro2::TokenStream> {
+    let name = &item_enum.ident;
+    type_meta
+        .cfg_attr_rejection
+        .as_ref()
+        .map(|rejection| cfg_attr_guard_error(rejection, &format!("type `{name}`")))
+        .into_iter()
+        .chain(item_enum.variants.iter().filter_map(|variant| {
+            parse_serde_field_attributes(&variant.attrs)
+                .cfg_attr_rejection
+                .as_ref()
+                .map(|rejection| {
+                    cfg_attr_guard_error(rejection, &format!("variant `{}`", variant.ident))
+                })
+        }))
+        .collect()
+}
+
 /// Processes every field of a struct, returning the regular field defs, the `#[serde(flatten)]`
 /// field defs, the per-field serde validation functions and `validate()` body fragments, and the
 /// `compile_error!` tokens for any field-level guard violations.
@@ -659,7 +707,22 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
     let name = &item_struct.ident;
 
     #[cfg(feature = "serde")]
-    let rename_all = parse_serde_type_attributes(&item_struct.attrs).rename_all;
+    let serde_type_meta = parse_serde_type_attributes(&item_struct.attrs);
+
+    // A hidden `rename_all` reshapes every field name, so the item is rejected before a single
+    // field is processed.
+    #[cfg(feature = "serde")]
+    if let Some(rejection) = serde_type_meta.cfg_attr_rejection.as_ref()
+        && let Some(output) = guard_failure_output(
+            &item_struct,
+            &[cfg_attr_guard_error(rejection, &format!("type `{name}`"))],
+        )
+    {
+        return output;
+    }
+
+    #[cfg(feature = "serde")]
+    let rename_all = serde_type_meta.rename_all;
     #[cfg(not(feature = "serde"))]
     let rename_all: Option<String> = None;
 
@@ -1485,6 +1548,14 @@ fn process_enum(item_enum: syn::ItemEnum) -> TokenStream {
 
     #[cfg(feature = "serde")]
     let serde_type_meta = parse_serde_type_attributes(&item_enum.attrs);
+
+    #[cfg(feature = "serde")]
+    if let Some(output) = guard_failure_output(
+        &item_enum,
+        &enum_cfg_attr_guard_errors(&item_enum, &serde_type_meta),
+    ) {
+        return output;
+    }
 
     let item_name = safe_type_name(&name.to_string());
 
@@ -2363,10 +2434,14 @@ fn collect_untagged_members(item_enum: &mut syn::ItemEnum) -> UntaggedMemberData
                 .unwrap_or_default();
             let mut field_def = get_field_def(&field_name, &field.ty, "");
             let serde_field_meta = parse_serde_field_attributes(&field.attrs);
-            if let Err(err) =
+            if let Some(rejection) = serde_field_meta.cfg_attr_rejection.as_ref() {
+                guard_errors.push(cfg_attr_guard_error(rejection, &field_label(&field_name)));
+            } else if let Err(err) =
                 check_optional_field_serialization(field, field_def.is_optional, &serde_field_meta)
             {
                 guard_errors.push(err.to_compile_error());
+            } else {
+                // No guard violated by this field.
             }
             field_def.resolve_self_references(&enum_type_name);
             field_defs.push(field_def);
@@ -4236,11 +4311,22 @@ fn process_field(
     // Create the field definition and apply any model_schema_prop overrides
     let mut field_def = get_field_def(&final_name, field_type, &field_docs);
 
+    // A hidden serde attribute leaves every other field diagnostic unreliable — the Option-null
+    // guard included, since the wrapper is exactly what kept its evidence out of the meta.
     #[cfg(feature = "serde")]
-    let guard_error =
-        check_optional_field_serialization(field, field_def.is_optional, &serde_field_meta)
-            .err()
-            .map(|err| err.to_compile_error());
+    let guard_error = serde_field_meta.cfg_attr_rejection.as_ref().map_or_else(
+        || {
+            check_optional_field_serialization(field, field_def.is_optional, &serde_field_meta)
+                .err()
+                .map(|err| err.to_compile_error())
+        },
+        |rejection| {
+            Some(cfg_attr_guard_error(
+                rejection,
+                &field_label(&raw_field_ident),
+            ))
+        },
+    );
     #[cfg(not(feature = "serde"))]
     let guard_error: Option<proc_macro2::TokenStream> = None;
 

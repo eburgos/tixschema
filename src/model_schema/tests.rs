@@ -2,8 +2,9 @@ use super::{FieldDefType, validate_as_number_flag, validate_ts_optional_flag};
 
 #[cfg(feature = "serde")]
 use super::{
-    check_optional_field_serialization, collect_untagged_members, get_field_def,
-    parse_serde_field_attributes,
+    cfg_attr_guard_error, check_optional_field_serialization, collect_untagged_members,
+    enum_cfg_attr_guard_errors, field_label, get_field_def, parse_serde_field_attributes,
+    parse_serde_type_attributes,
 };
 
 #[test]
@@ -202,4 +203,100 @@ fn untagged_tuple_variant_option_is_exempt() {
         }
     });
     assert!(errors.is_empty(), "got: {errors:?}");
+}
+
+/// Collects an enum's `cfg_attr` guard failures as rendered `compile_error!` token strings.
+#[cfg(feature = "serde")]
+fn enum_cfg_attr_errors(item: &syn::ItemEnum) -> Vec<String> {
+    let type_meta = parse_serde_type_attributes(&item.attrs);
+    enum_cfg_attr_guard_errors(item, &type_meta)
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn cfg_attr_wrapped_serde_on_a_type_is_rejected() {
+    let errors = enum_cfg_attr_errors(&syn::parse_quote! {
+        #[cfg_attr(feature = "serde", serde(rename_all = "lowercase"))]
+        enum Status {
+            Active,
+        }
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(errors[0].contains("compile_error"), "got: {}", errors[0]);
+    assert!(errors[0].contains("type `Status`"), "got: {}", errors[0]);
+    assert!(errors[0].contains("cfg_attr"), "got: {}", errors[0]);
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn cfg_attr_wrapped_serde_on_a_variant_is_rejected() {
+    let errors = enum_cfg_attr_errors(&syn::parse_quote! {
+        enum Status {
+            #[cfg_attr(feature = "serde", serde(rename = "active"))]
+            Active,
+        }
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(errors[0].contains("compile_error"), "got: {}", errors[0]);
+    assert!(errors[0].contains("variant `Active`"), "got: {}", errors[0]);
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn cfg_attr_without_serde_leaves_an_enum_alone() {
+    let errors = enum_cfg_attr_errors(&syn::parse_quote! {
+        #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+        #[serde(rename_all = "lowercase")]
+        enum Status {
+            #[cfg_attr(feature = "serde", doc = "only documented in serde builds")]
+            Active,
+        }
+    });
+    assert!(errors.is_empty(), "got: {errors:?}");
+}
+
+/// Runs the field walk the way [`process_field`] does and renders the `cfg_attr` guard failure.
+#[cfg(feature = "serde")]
+fn field_cfg_attr_error(item: &syn::ItemStruct) -> Option<String> {
+    let field = item.fields.iter().next()?;
+    let name = field
+        .ident
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    parse_serde_field_attributes(&field.attrs)
+        .cfg_attr_rejection
+        .as_ref()
+        .map(|rejection| cfg_attr_guard_error(rejection, &field_label(&name)).to_string())
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn cfg_attr_wrapped_serde_on_a_field_is_rejected() {
+    let error = field_cfg_attr_error(&syn::parse_quote! {
+        struct Report {
+            #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+            note: Option<String>,
+        }
+    })
+    .unwrap();
+    assert!(error.contains("compile_error"), "got: {error}");
+    assert!(error.contains("field `note`"), "got: {error}");
+    assert!(error.contains("#[serde(...)]"), "got: {error}");
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn cfg_attr_without_serde_leaves_a_field_alone() {
+    let error = field_cfg_attr_error(&syn::parse_quote! {
+        struct Report {
+            #[cfg_attr(feature = "serde", doc = "only documented in serde builds")]
+            #[serde(skip_serializing_if = "Option::is_none")]
+            note: Option<String>,
+        }
+    });
+    assert!(error.is_none(), "got: {error:?}");
 }
