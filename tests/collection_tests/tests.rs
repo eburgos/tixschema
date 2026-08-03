@@ -225,11 +225,89 @@ struct VecElementFields {
     small_ids: Vec<u32>,
 }
 
+// A slot — a map member, a tuple element — cannot be dropped the way an object key can, so it
+// holds whatever the value writes, and a covered wrapper writes the array its element decides. The
+// twin below carries the `Vec` spelling of the same slots, which is what each set slot is held
+// against: the key path, the element type and the nesting are the same on both.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct SetSlotValues {
+    aliased_tags: HashMap<String, BTreeSet<MetricTagRef>>,
+    enum_keyed_ids: HashMap<MetricSlot, HashSet<u32>>,
+    enum_keyed_tags: HashMap<MetricSlot, BTreeSet<MetricTag>>,
+    labels: HashMap<String, BTreeSet<String>>,
+    optional_ids: HashMap<String, Option<HashSet<u32>>>,
+    sibling_tags: HashMap<String, HashSet<MetricTag>>,
+    small_ids: HashMap<String, HashSet<u32>>,
+    tuple_ids: (String, HashSet<u32>),
+    tuple_labels: (u32, BTreeSet<String>),
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct VecSlotValues {
+    aliased_tags: HashMap<String, Vec<MetricTagRef>>,
+    enum_keyed_ids: HashMap<MetricSlot, Vec<u32>>,
+    enum_keyed_tags: HashMap<MetricSlot, Vec<MetricTag>>,
+    labels: HashMap<String, Vec<String>>,
+    optional_ids: HashMap<String, Option<Vec<u32>>>,
+    sibling_tags: HashMap<String, Vec<MetricTag>>,
+    small_ids: HashMap<String, Vec<u32>>,
+    tuple_ids: (String, Vec<u32>),
+    tuple_labels: (u32, Vec<String>),
+}
+
+// A slot holding a value the mapping renders inline is untouched by the wrapper normalization: a
+// sibling in a tuple element still describes as the bare object it always has.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct SiblingSlotValues {
+    tuple_tag: (String, MetricTag),
+}
+
 fn one<T, C>(item: T) -> C
 where
     C: FromIterator<T>,
 {
     once(item).collect()
+}
+
+fn metric_tag() -> MetricTag {
+    MetricTag {
+        label: "a".to_owned(),
+    }
+}
+
+/// One populated `SetSlotValues`, with a single member in every slot the fixture opens — one
+/// member, so the wire it writes is a value the `Vec` twin's wire can be held against outright
+/// rather than a shape a set's iteration order could reorder.
+fn set_slot_values() -> SetSlotValues {
+    SetSlotValues {
+        aliased_tags: HashMap::from([("k".to_owned(), one(metric_tag()))]),
+        enum_keyed_ids: HashMap::from([(MetricSlot::Daily, one(7_u32))]),
+        enum_keyed_tags: HashMap::from([(MetricSlot::Daily, one(metric_tag()))]),
+        labels: HashMap::from([("k".to_owned(), one("t".to_owned()))]),
+        optional_ids: HashMap::from([("k".to_owned(), Some(one(7_u32)))]),
+        sibling_tags: HashMap::from([("k".to_owned(), one(metric_tag()))]),
+        small_ids: HashMap::from([("k".to_owned(), one(7_u32))]),
+        tuple_ids: ("t".to_owned(), one(7_u32)),
+        tuple_labels: (7, one("t".to_owned())),
+    }
+}
+
+/// The same members under the `Vec` spelling of every slot.
+fn vec_slot_values() -> VecSlotValues {
+    VecSlotValues {
+        aliased_tags: HashMap::from([("k".to_owned(), one(metric_tag()))]),
+        enum_keyed_ids: HashMap::from([(MetricSlot::Daily, one(7_u32))]),
+        enum_keyed_tags: HashMap::from([(MetricSlot::Daily, one(metric_tag()))]),
+        labels: HashMap::from([("k".to_owned(), one("t".to_owned()))]),
+        optional_ids: HashMap::from([("k".to_owned(), Some(one(7_u32)))]),
+        sibling_tags: HashMap::from([("k".to_owned(), one(metric_tag()))]),
+        small_ids: HashMap::from([("k".to_owned(), one(7_u32))]),
+        tuple_ids: ("t".to_owned(), one(7_u32)),
+        tuple_labels: (7, one("t".to_owned())),
+    }
 }
 
 /// The `name: Type;` lines of a generated TypeScript definition, the `JSDoc` blocks around them
@@ -1395,4 +1473,132 @@ fn test_every_covered_wrapper_validates_as_the_vec_spelling() {
             "for: {wrapper}"
         );
     }
+}
+
+/// A set in a slot writes the JSON array its element decides, exactly as the `Vec` spelling of the
+/// same slot writes it — the whole reason a set slot may be held against that twin below. Read off
+/// what serde produces: the two payloads are one value, arrays and all.
+#[test]
+fn test_a_set_slot_writes_what_the_vec_slot_writes() {
+    let payload = serde_json::to_value(set_slot_values()).unwrap();
+    assert_eq!(payload, serde_json::to_value(vec_slot_values()).unwrap());
+
+    for field in [
+        "aliased_tags",
+        "enum_keyed_ids",
+        "enum_keyed_tags",
+        "labels",
+        "optional_ids",
+        "sibling_tags",
+        "small_ids",
+    ] {
+        for (key, member) in payload[field].as_object().unwrap() {
+            assert!(member.is_array(), "{field}[{key}] wrote: {member}");
+        }
+    }
+    for field in ["tuple_ids", "tuple_labels"] {
+        let slots = payload[field].as_array().unwrap();
+        assert!(
+            slots.last().unwrap().is_array(),
+            "{field} wrote: {payload:?}"
+        );
+    }
+}
+
+/// A slot holding a value that is no sequence writes what that value writes — an object here — so
+/// its description is the one it always had, the normalization reaching only the wrappers.
+#[test]
+fn test_a_sibling_slot_writes_the_object_its_value_writes() {
+    let payload = serde_json::to_value(SiblingSlotValues {
+        tuple_tag: ("t".to_owned(), metric_tag()),
+    })
+    .unwrap();
+    assert!(payload["tuple_tag"][1].is_object(), "Got: {payload}");
+}
+
+/// Writing the same array as the `Vec` spelling of the same slot, a set describes as one — on both
+/// map key paths and in a tuple element, at every element type the twin carries.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_set_slots_describe_as_the_vec_slot_twin() {
+    let set_schema = SetSlotValues::json_schema();
+    let vec_schema = VecSlotValues::json_schema();
+    assert_eq!(set_schema["properties"], vec_schema["properties"]);
+    assert_eq!(set_schema["required"], vec_schema["required"]);
+}
+
+/// What that description is, spelled out: the array of the element, in the member schema a
+/// `String`-keyed map carries and in the tuple element the same fixture opens.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_set_slots_describe_as_arrays_of_their_element() {
+    let properties = SetSlotValues::json_schema()["properties"].clone();
+    let integer_array = serde_json::json!({ "type": "array", "items": { "type": "integer" } });
+    assert_eq!(
+        properties["small_ids"]["additionalProperties"],
+        integer_array
+    );
+    assert_eq!(properties["tuple_ids"]["prefixItems"][1], integer_array);
+    assert_eq!(
+        properties["labels"]["additionalProperties"],
+        serde_json::json!({ "type": "array", "items": { "type": "string" } })
+    );
+    // A slot cannot be dropped, so a `None` there is `null` rather than an absent key.
+    assert_eq!(
+        properties["optional_ids"]["additionalProperties"],
+        serde_json::json!({ "anyOf": [integer_array, { "type": "null" }] })
+    );
+}
+
+/// A value the mapping renders inline is left where it was: a sibling in a tuple element describes
+/// as the bare object it always has, the normalization reaching only the wrappers.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_a_sibling_tuple_slot_still_describes_as_a_bare_object() {
+    assert_eq!(
+        SiblingSlotValues::json_schema()["properties"]["tuple_tag"]["prefixItems"][1],
+        serde_json::json!({ "type": "object" })
+    );
+}
+
+/// The TypeScript surface, which types a set slot as the array of its element already: pinned here
+/// so the JSON schema above is held against a rendering that does not move under it.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_set_slots_type_as_the_vec_slot_twin() {
+    let ts_definition = SetSlotValues::ts_definition();
+    for spelling in [
+        "aliased_tags: Partial<Record<string, Array<MetricTagRefType>>>;",
+        "enum_keyed_ids: Partial<Record<MetricSlot, Array<number>>>;",
+        "optional_ids: Partial<Record<string, Array<number> | null>>;",
+        "sibling_tags: Partial<Record<string, Array<MetricTag>>>;",
+        "tuple_ids: [string, Array<number>];",
+        "tuple_labels: [number, Array<string>];",
+    ] {
+        assert!(ts_definition.contains(spelling), "Got: {ts_definition}");
+    }
+    assert_eq!(
+        ts_field_declarations(&ts_definition.replace("SetSlotValues", "VecSlotValues")),
+        ts_field_declarations(&VecSlotValues::ts_definition())
+    );
+}
+
+/// And the Zod surface, which validates a set slot as that array already.
+#[test]
+#[cfg(feature = "zod")]
+fn test_set_slots_validate_as_the_vec_slot_twin() {
+    let zod_schema = SetSlotValues::zod_schema();
+    for spelling in [
+        "aliased_tags: z.record(z.string(), z.array(MetricTagRefType$Schema)),",
+        "enum_keyed_tags: z.record(MetricSlot$Schema, z.array(MetricTag$Schema)),",
+        "optional_ids: z.record(z.string(), z.nullable(z.array(z.number().int()))),",
+        "tuple_ids: z.tuple([z.string(), z.array(z.number().int())]),",
+        "tuple_labels: z.tuple([z.number().int(), z.array(z.string())]),",
+    ] {
+        assert!(zod_schema.contains(spelling), "Got: {zod_schema}");
+    }
+    assert_eq!(
+        zod_schema.replace("SetSlotValues", "VecSlotValues"),
+        VecSlotValues::zod_schema()
+    );
 }
