@@ -3255,6 +3255,23 @@ fn write_tuple_multiple_variant_fields(
     let _: &_ = &&json_schema_variant_fields;
 }
 
+/// Arrays `item_schema` when the field is a `Vec`, and hands it back untouched otherwise.
+///
+/// Every value position that can hold a `Vec` — a field, a tuple element, an enum-keyed map member
+/// — carries the array-ness on the field itself rather than in its type, so the wrap belongs here
+/// once instead of in each renderer.
+#[cfg(feature = "jsonschema")]
+fn arrayed_json_schema_value(
+    fld: &FieldDef,
+    item_schema: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    if fld.is_array {
+        quote! { serde_json::json!({ "type": "array", "items": #item_schema }) }
+    } else {
+        item_schema
+    }
+}
+
 /// The JSON schema value expression for a field whose type renders inline as a scalar — arrayed
 /// when the field is a `Vec` — or `None` for the composite types (sibling references, maps,
 /// tuples, unknowns) that have no inline rendering.
@@ -3263,20 +3280,10 @@ fn write_tuple_multiple_variant_fields(
 /// value sits in, so each caller wraps this base itself.
 #[cfg(feature = "jsonschema")]
 fn scalar_field_json_schema_value(fld: &FieldDef) -> Option<proc_macro2::TokenStream> {
-    let schema = match &fld.field_type {
-        FieldDefType::String => {
-            if fld.is_array {
-                quote! { serde_json::json!({ "type": "array", "items": { "type": "string" } }) }
-            } else {
-                quote! { serde_json::json!({ "type": "string" }) }
-            }
-        }
+    let item_schema = match &fld.field_type {
+        FieldDefType::String => quote! { serde_json::json!({ "type": "string" }) },
         FieldDefType::StringLiteral(literal) => {
-            if fld.is_array {
-                quote! { serde_json::json!({ "type": "array", "items": { "type": "string", "const": #literal } }) }
-            } else {
-                quote! { serde_json::json!({ "type": "string", "const": #literal }) }
-            }
+            quote! { serde_json::json!({ "type": "string", "const": #literal }) }
         }
         FieldDefType::U8
         | FieldDefType::U16
@@ -3287,80 +3294,35 @@ fn scalar_field_json_schema_value(fld: &FieldDef) -> Option<proc_macro2::TokenSt
         | FieldDefType::I32
         | FieldDefType::I64
         | FieldDefType::Usize
-        | FieldDefType::Isize => {
-            if fld.is_array {
-                quote! { serde_json::json!({ "type": "array", "items": { "type": "integer" } }) }
-            } else {
-                quote! { serde_json::json!({ "type": "integer" }) }
-            }
-        }
-        FieldDefType::F32 | FieldDefType::F64 => {
-            if fld.is_array {
-                quote! { serde_json::json!({ "type": "array", "items": { "type": "number" } }) }
-            } else {
-                quote! { serde_json::json!({ "type": "number" }) }
-            }
-        }
-        FieldDefType::Boolean => {
-            if fld.is_array {
-                quote! { serde_json::json!({ "type": "array", "items": { "type": "boolean" } }) }
-            } else {
-                quote! { serde_json::json!({ "type": "boolean" }) }
-            }
-        }
+        | FieldDefType::Isize => quote! { serde_json::json!({ "type": "integer" }) },
+        FieldDefType::F32 | FieldDefType::F64 => quote! { serde_json::json!({ "type": "number" }) },
+        FieldDefType::Boolean => quote! { serde_json::json!({ "type": "boolean" }) },
         #[cfg(feature = "chrono")]
         FieldDefType::NaiveDate => {
-            if fld.is_array {
-                quote! { serde_json::json!({ "type": "array", "items": { "type": "string", "format": "date" } }) }
-            } else {
-                quote! { serde_json::json!({ "type": "string", "format": "date" }) }
-            }
+            quote! { serde_json::json!({ "type": "string", "format": "date" }) }
         }
         #[cfg(feature = "chrono")]
         FieldDefType::NaiveTime => {
-            if fld.is_array {
-                quote! { serde_json::json!({ "type": "array", "items": { "type": "string", "format": "time" } }) }
-            } else {
-                quote! { serde_json::json!({ "type": "string", "format": "time" }) }
-            }
+            quote! { serde_json::json!({ "type": "string", "format": "time" }) }
         }
         #[cfg(feature = "chrono")]
         FieldDefType::NaiveDateTime | FieldDefType::DateTime => {
-            if fld.is_array {
-                quote! { serde_json::json!({ "type": "array", "items": { "type": "string", "format": "date-time" } }) }
-            } else {
-                quote! { serde_json::json!({ "type": "string", "format": "date-time" }) }
-            }
+            quote! { serde_json::json!({ "type": "string", "format": "date-time" }) }
         }
         #[cfg(feature = "object_id")]
-        FieldDefType::ObjectId => {
-            if fld.is_array {
-                quote! { serde_json::json!({
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "$oid": { "type": "string", "pattern": "^[a-f\\d]{24}$" }
-                        },
-                        "required": ["$oid"]
-                    }
-                }) }
-            } else {
-                quote! { serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "$oid": { "type": "string", "pattern": "^[a-f\\d]{24}$" }
-                    },
-                    "required": ["$oid"]
-                }) }
-            }
-        }
+        FieldDefType::ObjectId => quote! { serde_json::json!({
+            "type": "object",
+            "properties": {
+                "$oid": { "type": "string", "pattern": "^[a-f\\d]{24}$" }
+            },
+            "required": ["$oid"]
+        }) },
         FieldDefType::Unknown
         | FieldDefType::SiblingType(..)
         | FieldDefType::Map(..)
         | FieldDefType::Tuple(..) => return None,
     };
-    Some(schema)
+    Some(arrayed_json_schema_value(fld, item_schema))
 }
 
 /// Builds the base JSON schema for a tuple element, ignoring `is_optional`.
@@ -3816,7 +3778,9 @@ fn build_enum_key_map_value_binding(value: &FieldDef) -> Option<proc_macro2::Tok
         };
         let value_module_ident =
             proc_macro2::Ident::new(value_module_name.as_str(), proc_macro2::Span::call_site());
-        return Some(quote! { let value_schema = #value_module_ident::Schema::json_schema(); });
+        let sibling_schema =
+            arrayed_json_schema_value(value, quote! { #value_module_ident::Schema::json_schema() });
+        return Some(quote! { let value_schema = #sibling_schema; });
     }
 
     let scalar_schema = scalar_field_json_schema_value(value)?;

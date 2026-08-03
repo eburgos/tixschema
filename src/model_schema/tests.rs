@@ -963,6 +963,27 @@ fn a_scalar_enum_keyed_map_value_expands_to_the_per_member_loop() {
     );
 }
 
+/// A `Vec` of siblings is the inner sibling with `is_array` set, so the member schema has to array
+/// the sibling's own schema — bound bare, it types the member as one sibling and turns away every
+/// payload serde produces.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_vec_sibling_enum_keyed_map_value_arrays_the_sibling_schema() {
+    let arrayed = map_field_schema("HashMap<Slot, Vec<Inner>>").to_string();
+    assert!(
+        arrayed.contains(
+            r#"let value_schema = serde_json :: json ! ({ "type" : "array" , "items" : inner_schema :: Schema :: json_schema () }) ;"#
+        ),
+        "got: {arrayed}"
+    );
+
+    let single = map_field_schema("HashMap<Slot, Inner>").to_string();
+    assert!(
+        single.contains("let value_schema = inner_schema :: Schema :: json_schema () ;"),
+        "got: {single}"
+    );
+}
+
 /// The kind an alias registers is its *target's* answer, because a type path resolves through the
 /// alias. `Vec<Slot>` is the collection, not the enum it holds; a target this expansion has not
 /// seen registered is `Unknown`, which is not a negative.
