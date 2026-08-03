@@ -136,6 +136,19 @@ struct FieldValidationCode {
     pub validate_body: proc_macro2::TokenStream,
 }
 
+/// A map member's rendering with the slot wraps still to apply: a `json!` literal fragment, which
+/// only a caller writing inside `serde_json::json!` can inline, or a standalone `serde_json::Value`
+/// expression, which either caller can take as it stands.
+///
+/// The form rides on the item because the two wrap differently, and a caller that needs a value can
+/// always lift a fragment into one — so one dispatcher serves both the `String`-key path, which
+/// inlines its member as `additionalProperties`, and the enum-key path, which binds it.
+#[cfg(feature = "jsonschema")]
+enum MapMemberItem {
+    Fragment(proc_macro2::TokenStream),
+    Value(proc_macro2::TokenStream),
+}
+
 #[derive(Default, Clone)]
 struct ModelSchemaArgs {
     max_length: Option<usize>,
@@ -155,6 +168,26 @@ struct VariantParts {
     optional_fields: Vec<String>,
     schema_code: String,
     type_code: String,
+}
+
+#[cfg(feature = "jsonschema")]
+impl MapMemberItem {
+    /// The item wrapped for its slot, kept in the form it arrived in.
+    fn into_member_schema(self, value: &FieldDef) -> proc_macro2::TokenStream {
+        match self {
+            Self::Fragment(fragment) => map_member_slot_schema(value, &fragment),
+            Self::Value(item_value) => map_member_slot_value(value, item_value),
+        }
+    }
+
+    /// The item wrapped for its slot as a standalone `serde_json::Value`.
+    fn into_member_value(self, value: &FieldDef) -> proc_macro2::TokenStream {
+        let item_value = match self {
+            Self::Fragment(fragment) => quote! { serde_json::json!(#fragment) },
+            Self::Value(item_value) => item_value,
+        };
+        map_member_slot_value(value, item_value)
+    }
 }
 
 impl ModelSchemaArgs {
@@ -3435,39 +3468,6 @@ fn build_map_nested_map_member_schema(
     Some(quote! { { "type": "object", "additionalProperties": #inner_member } })
 }
 
-/// The member schema for a `String`-keyed map whose value is a sibling/custom type.
-///
-/// The member is the sibling's own schema, as it is in field position and on the enum-key path.
-/// `is_array` and `is_optional` describe the slot rather than the type, so the array and nullable
-/// wraps are applied here over that one schema.
-#[cfg(feature = "jsonschema")]
-fn build_map_sibling_member_schema(
-    value: &FieldDef,
-    value_type_name: &str,
-    value_args: &[FieldDef],
-) -> Option<proc_macro2::TokenStream> {
-    log::trace!(
-        "Map Value SiblingType => value_type_name: {value_type_name}, value_args: {value_args:?}"
-    );
-
-    // The parser collapses `Vec<T>` to `T` with `is_array` set, so a `Vec` type name reaches here
-    // only on a value built by hand: move the array-ness onto the element and dispatch that, which
-    // is the same member schema the collapsed form renders.
-    if value_type_name == "Vec"
-        && let [element] = value_args
-    {
-        let mut arrayed = element.clone();
-        arrayed.is_array = true;
-        return build_map_member_schema(&arrayed);
-    }
-
-    let value_module_ident = sibling_schema_module_ident(value_type_name);
-    Some(nullable_slot_json_schema_value(
-        value,
-        arrayed_json_schema_value(value, quote! { #value_module_ident::Schema::json_schema() }),
-    ))
-}
-
 /// Wraps a member's base schema for the slot it sits in — arrayed when the value is a `Vec`,
 /// nullable when it is an `Option`.
 #[cfg(feature = "jsonschema")]
@@ -3488,8 +3488,38 @@ fn map_member_slot_schema(
     nullable_slot_json_schema(value, &arrayed).unwrap_or(arrayed)
 }
 
-/// The `additionalProperties` schema every member of a `String`-keyed map carries, or `None` when
-/// the value type has no rendering here.
+/// [`map_member_slot_schema`] for a member already materialized as a `serde_json::Value`: each wrap
+/// materializes a value of its own instead of nesting inside the one `serde_json::json!` a literal
+/// fragment sits in.
+#[cfg(feature = "jsonschema")]
+fn map_member_slot_value(
+    value: &FieldDef,
+    item_value: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    nullable_slot_json_schema_value(value, arrayed_json_schema_value(value, item_value))
+}
+
+/// The `FieldDef` a map value dispatches as.
+///
+/// The parser collapses `Vec<T>` to `T` with `is_array` set, so a `Vec` type name reaches a map
+/// value only on a value built by hand: moving the array-ness onto the element puts that value in
+/// the one form every parsed `Vec` value already arrives in, at whatever nesting it was written.
+#[cfg(feature = "jsonschema")]
+fn normalized_map_value(value: &FieldDef) -> FieldDef {
+    let mut normalized = value.clone();
+    while let FieldDefType::SiblingType(value_type_name, value_args) = &normalized.field_type
+        && value_type_name == "Vec"
+        && let [element] = value_args.as_slice()
+    {
+        let mut arrayed = element.clone();
+        arrayed.is_array = true;
+        normalized = arrayed;
+    }
+    normalized
+}
+
+/// The rendering every member of a map carries, with the slot wraps left to the caller, or `None`
+/// when the value type has no rendering here.
 ///
 /// A map value is dispatched through this same function, so the members of a nested map carry the
 /// inner value type's own rendering at every depth rather than an open object.
@@ -3497,30 +3527,32 @@ fn map_member_slot_schema(
 /// A tuple is the only value the mapping cannot render, at any depth: the callers turn that `None`
 /// into the single diagnostic naming the field.
 #[cfg(feature = "jsonschema")]
-fn build_map_member_schema(value: &FieldDef) -> Option<proc_macro2::TokenStream> {
-    match &value.field_type {
-        FieldDefType::Map(inner_key, inner_value) => Some(map_member_slot_schema(
-            value,
-            &build_map_nested_map_member_schema(inner_key, inner_value)?,
-        )),
+fn build_map_member_item(value: &FieldDef) -> Option<MapMemberItem> {
+    Some(match &value.field_type {
+        FieldDefType::Map(inner_key, inner_value) => {
+            MapMemberItem::Fragment(build_map_nested_map_member_schema(inner_key, inner_value)?)
+        }
+        // The member is the sibling's own schema, as it is in field position — an expression, not a
+        // literal, so it is already the value form.
         FieldDefType::SiblingType(value_type_name, value_args) => {
-            build_map_sibling_member_schema(value, value_type_name, value_args)
+            log::trace!(
+                "Map Value SiblingType => value_type_name: {value_type_name}, value_args: {value_args:?}"
+            );
+            let value_module_ident = sibling_schema_module_ident(value_type_name);
+            MapMemberItem::Value(quote! { #value_module_ident::Schema::json_schema() })
         }
         // A map member's `$oid` object is closed and unpatterned, where the shared mapping's
         // field-position rendering carries the hex pattern and leaves the object open.
         #[cfg(feature = "object_id")]
-        FieldDefType::ObjectId => Some(map_member_slot_schema(
-            value,
-            &quote! { {
-                "type": "object",
-                "properties": { "$oid": { "type": "string" } },
-                "required": ["$oid"],
-                "additionalProperties": false
-            } },
-        )),
+        FieldDefType::ObjectId => MapMemberItem::Fragment(quote! { {
+            "type": "object",
+            "properties": { "$oid": { "type": "string" } },
+            "required": ["$oid"],
+            "additionalProperties": false
+        } }),
         // An opaque value carries no type name to narrow with, so a member admits any value: the
         // permissive empty schema, as in field position.
-        FieldDefType::Unknown => Some(map_member_slot_schema(value, &quote! { {} })),
+        FieldDefType::Unknown => MapMemberItem::Fragment(quote! { {} }),
         // The shared mapping renders every type named here except a tuple, which is the lone
         // `None`. Named exhaustively rather than caught by a wildcard: a new variant must be given
         // a member schema, not silently widened into an open object.
@@ -3539,19 +3571,35 @@ fn build_map_member_schema(value: &FieldDef) -> Option<proc_macro2::TokenStream>
         | FieldDefType::U16
         | FieldDefType::U32
         | FieldDefType::U64
-        | FieldDefType::Usize => Some(map_member_slot_schema(
-            value,
-            &scalar_field_json_schema_item(value)?,
-        )),
+        | FieldDefType::Usize => MapMemberItem::Fragment(scalar_field_json_schema_item(value)?),
         #[cfg(feature = "chrono")]
         FieldDefType::DateTime
         | FieldDefType::NaiveDate
         | FieldDefType::NaiveDateTime
-        | FieldDefType::NaiveTime => Some(map_member_slot_schema(
-            value,
-            &scalar_field_json_schema_item(value)?,
-        )),
-    }
+        | FieldDefType::NaiveTime => MapMemberItem::Fragment(scalar_field_json_schema_item(value)?),
+    })
+}
+
+/// The `additionalProperties` schema every member of a `String`-keyed map carries, or `None` when
+/// the value type has no rendering here.
+#[cfg(feature = "jsonschema")]
+fn build_map_member_schema(value: &FieldDef) -> Option<proc_macro2::TokenStream> {
+    let normalized = normalized_map_value(value);
+    Some(build_map_member_item(&normalized)?.into_member_schema(&normalized))
+}
+
+/// The one diagnostic a map value the mapping cannot render produces, on either key path.
+///
+/// It replaces the branch's whole output rather than joining it: an emission left in place hands
+/// the author a schema the expansion has already rejected, and on the enum-key path a second error
+/// on the `value_schema` the failed binding never bound — macro-internal state the author cannot
+/// act on. The field and the type are what the author can act on, so the message names both.
+#[cfg(feature = "jsonschema")]
+fn unsupported_map_value_error(field_name_str: &str) -> proc_macro2::TokenStream {
+    let message = format!(
+        "field `{field_name_str}`: a tuple is not supported as a map value — give the value a `#[model_schema()]` struct instead"
+    );
+    quote! { compile_error!(#message); }
 }
 
 /// Builds the JSON schema for a map whose key type is `String`, dispatching on the value type.
@@ -3563,13 +3611,8 @@ fn build_string_key_map_value_schema(
     value: &FieldDef,
     field_name_str: &str,
 ) -> proc_macro2::TokenStream {
-    // Emitted instead of the property insertion, never alongside it: an insertion left in place
-    // hands the author a schema the expansion has already rejected.
     let Some(value_schema) = build_map_member_schema(value) else {
-        let message = format!(
-            "field `{field_name_str}`: a tuple is not supported as a map value — give the value a `#[model_schema()]` struct instead"
-        );
-        return quote! { compile_error!(#message); };
+        return unsupported_map_value_error(field_name_str);
     };
     quote! {
         properties.insert(#field_name_str.to_string(), {
@@ -3581,20 +3624,31 @@ fn build_string_key_map_value_schema(
     }
 }
 
+/// [`build_map_member_item`] for a member of an enum-keyed map, which differs for exactly one value
+/// type: an `ObjectId` member here carries the field-position `$oid` object — patterned, and open —
+/// where a `String`-keyed member carries the closed, unpatterned one. Which of the two a map member
+/// should carry is unsettled, so each key path keeps the rendering it has.
+#[cfg(feature = "jsonschema")]
+fn build_enum_key_map_member_item(value: &FieldDef) -> Option<MapMemberItem> {
+    #[cfg(feature = "object_id")]
+    if matches!(value.field_type, FieldDefType::ObjectId) {
+        return Some(MapMemberItem::Fragment(scalar_field_json_schema_item(
+            value,
+        )?));
+    }
+    build_map_member_item(value)
+}
+
 /// Binds `value_schema` — the JSON schema every member of an enum-keyed map carries — or `None`
 /// when the value type has no rendering here.
+///
+/// The member is the one the `String`-key path renders, materialized as a `serde_json::Value` for
+/// the insertion loop to clone per key, so which values a map may hold is the value type's answer
+/// rather than the key path's.
 #[cfg(feature = "jsonschema")]
 fn build_enum_key_map_value_binding(value: &FieldDef) -> Option<proc_macro2::TokenStream> {
-    let base = if let FieldDefType::SiblingType(value_type_name, value_lst) = &value.field_type
-        && value_lst.is_empty()
-    {
-        let value_module_ident = sibling_schema_module_ident(value_type_name);
-        arrayed_json_schema_value(value, quote! { #value_module_ident::Schema::json_schema() })
-    } else {
-        scalar_field_json_schema_value(value)?
-    };
-
-    let value_schema = nullable_slot_json_schema_value(value, base);
+    let normalized = normalized_map_value(value);
+    let value_schema = build_enum_key_map_member_item(&normalized)?.into_member_value(&normalized);
     Some(quote! { let value_schema = #value_schema; })
 }
 
@@ -3628,11 +3682,8 @@ fn build_map_field_schema(
             let key_type_name_ident =
                 proc_macro2::Ident::new(key_type_name.as_str(), proc_macro2::Span::call_site());
 
-            // The compile_error! replaces the branch's output rather than joining it: left in
-            // place, the insertion loop below reads a `value_schema` the failed binding never
-            // bound, and the author gets a second E0425 naming macro-internal state.
             let Some(value_schema_code) = build_enum_key_map_value_binding(value) else {
-                return quote! { compile_error!("Unsupported map value type"); };
+                return unsupported_map_value_error(field_name_str);
             };
 
             quote! {
