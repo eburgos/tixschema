@@ -3123,14 +3123,15 @@ fn write_tuple_multiple_variant_fields(
     let _: &_ = &&json_schema_variant_fields;
 }
 
-/// Builds the base JSON schema for a tuple element, ignoring `is_optional`.
+/// The JSON schema value expression for a field whose type renders inline as a scalar — arrayed
+/// when the field is a `Vec` — or `None` for the composite types (sibling references, maps,
+/// tuples, unknowns) that have no inline rendering.
 ///
-/// The nullable wrap is applied by `build_tuple_element_json_schema`.
+/// `is_optional` is not consulted: how an absent value is expressed depends on the position the
+/// value sits in, so each caller wraps this base itself.
 #[cfg(feature = "jsonschema")]
-fn build_tuple_element_base_json_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
-    let field_type = &fld.field_type;
-
-    match field_type {
+fn scalar_field_json_schema_value(fld: &FieldDef) -> Option<proc_macro2::TokenStream> {
+    let schema = match &fld.field_type {
         FieldDefType::String => {
             if fld.is_array {
                 quote! { serde_json::json!({ "type": "array", "items": { "type": "string" } }) }
@@ -3222,11 +3223,21 @@ fn build_tuple_element_base_json_schema(fld: &FieldDef) -> proc_macro2::TokenStr
                 }) }
             }
         }
-        _ => {
-            // For unknown/sibling types, use a generic object schema
-            quote! { serde_json::json!({ "type": "object" }) }
-        }
-    }
+        FieldDefType::Unknown
+        | FieldDefType::SiblingType(..)
+        | FieldDefType::Map(..)
+        | FieldDefType::Tuple(..) => return None,
+    };
+    Some(schema)
+}
+
+/// Builds the base JSON schema for a tuple element, ignoring `is_optional`.
+///
+/// The nullable wrap is applied by `build_tuple_element_json_schema`.
+#[cfg(feature = "jsonschema")]
+fn build_tuple_element_base_json_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
+    scalar_field_json_schema_value(fld)
+        .unwrap_or_else(|| quote! { serde_json::json!({ "type": "object" }) })
 }
 
 /// Builds JSON schema for a tuple element (used for single tuple and multi-tuple variants).
@@ -3658,6 +3669,28 @@ fn build_string_key_map_value_schema(
     }
 }
 
+/// Binds `value_schema` — the JSON schema every member of an enum-keyed map carries — or `None`
+/// when the value type has no rendering here.
+#[cfg(feature = "jsonschema")]
+fn build_enum_key_map_value_binding(value: &FieldDef) -> Option<proc_macro2::TokenStream> {
+    if let FieldDefType::SiblingType(value_type_name, value_lst) = &value.field_type
+        && value_lst.is_empty()
+    {
+        // For json_schema(), use the module pattern. An alias's module is named after
+        // its registered export name, which the raw ident does not reproduce.
+        let value_module_name = match lookup_alias_info(value_type_name) {
+            Some(alias) => alias.module_name,
+            None => format!("{}_schema", to_snake_case(&safe_type_name(value_type_name))),
+        };
+        let value_module_ident =
+            proc_macro2::Ident::new(value_module_name.as_str(), proc_macro2::Span::call_site());
+        return Some(quote! { let value_schema = #value_module_ident::Schema::json_schema(); });
+    }
+
+    let scalar_schema = scalar_field_json_schema_value(value)?;
+    Some(quote! { let value_schema = #scalar_schema; })
+}
+
 #[cfg(feature = "jsonschema")]
 fn build_map_field_schema(
     key: &FieldDef,
@@ -3673,23 +3706,11 @@ fn build_map_field_schema(
             let key_type_name_ident =
                 proc_macro2::Ident::new(key_type_name.as_str(), proc_macro2::Span::call_site());
 
-            let value_schema_code = if let FieldDefType::SiblingType(value_type_name, value_lst) =
-                &value.field_type
-                && value_lst.is_empty()
-            {
-                // For json_schema(), use the module pattern. An alias's module is named after
-                // its registered export name, which the raw ident does not reproduce.
-                let value_module_name = match lookup_alias_info(value_type_name) {
-                    Some(alias) => alias.module_name,
-                    None => format!("{}_schema", to_snake_case(&safe_type_name(value_type_name))),
-                };
-                let value_module_ident = proc_macro2::Ident::new(
-                    value_module_name.as_str(),
-                    proc_macro2::Span::call_site(),
-                );
-                quote! { let value_schema = #value_module_ident::Schema::json_schema(); }
-            } else {
-                quote! { compile_error!("Unsupported map value type"); }
+            // The compile_error! replaces the branch's output rather than joining it: left in
+            // place, the insertion loop below reads a `value_schema` the failed binding never
+            // bound, and the author gets a second E0425 naming macro-internal state.
+            let Some(value_schema_code) = build_enum_key_map_value_binding(value) else {
+                return quote! { compile_error!("Unsupported map value type"); };
             };
 
             quote! {

@@ -30,6 +30,26 @@ struct HashMapWith64Bit {
     u64_map: HashMap<String, u64>,
 }
 
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum MetricSlot {
+    Daily,
+    Weekly,
+}
+
+// An enum-keyed map enumerates its keys, so every member carries the value schema outright
+// instead of the open `additionalProperties` a String-keyed map uses.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct EnumKeyedScalarValueMaps {
+    bool_value: HashMap<MetricSlot, bool>,
+    f64_value: HashMap<MetricSlot, f64>,
+    i64_value: HashMap<MetricSlot, i64>,
+    string_array: HashMap<MetricSlot, Vec<String>>,
+    string_value: HashMap<MetricSlot, String>,
+    u64_value: HashMap<MetricSlot, u64>,
+}
+
 // Test struct with collections
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -68,6 +88,29 @@ fn assert_hashmap_array_type(
         properties[field_name]["additionalProperties"]["items"]["type"],
         expected_item_type
     );
+}
+
+#[cfg(feature = "jsonschema")]
+fn assert_enum_keyed_map_value(
+    properties: &serde_json::Map<String, serde_json::Value>,
+    field_name: &str,
+    expected_value_schema: &serde_json::Value,
+) {
+    let field = &properties[field_name];
+    assert_eq!(field["type"], "object", "in: {field}");
+    assert_eq!(field["additionalProperties"], false, "in: {field}");
+    let members = MetricSlot::enum_members();
+    assert_eq!(
+        field["properties"].as_object().unwrap().len(),
+        members.len(),
+        "in: {field}"
+    );
+    for member in members {
+        assert_eq!(
+            &field["properties"][&member], expected_value_schema,
+            "member {member} in: {field}"
+        );
+    }
 }
 
 #[test]
@@ -197,6 +240,108 @@ fn test_comprehensive_hashmap_typescript_generation() {
     assert!(zod_schema.contains("i64_array: z.record(z.string(), z.array(z.number().int()))"));
     assert!(zod_schema.contains("f64_array: z.record(z.string(), z.array(z.number()))"));
     assert!(zod_schema.contains("bool_array: z.record(z.string(), z.array(z.boolean()))"));
+}
+
+#[test]
+fn test_enum_keyed_scalar_value_maps_constructible() {
+    let maps = EnumKeyedScalarValueMaps {
+        bool_value: HashMap::new(),
+        f64_value: HashMap::new(),
+        i64_value: HashMap::new(),
+        string_array: HashMap::new(),
+        string_value: HashMap::from([
+            (MetricSlot::Daily, "d".to_owned()),
+            (MetricSlot::Weekly, "w".to_owned()),
+        ]),
+        u64_value: HashMap::new(),
+    };
+    assert_eq!(
+        maps.string_value.get(&MetricSlot::Daily),
+        Some(&"d".to_owned())
+    );
+    assert_eq!(
+        maps.string_value.get(&MetricSlot::Weekly),
+        Some(&"w".to_owned())
+    );
+}
+
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_enum_keyed_scalar_value_maps_json_schema() {
+    let schema = EnumKeyedScalarValueMaps::json_schema();
+    let properties = schema["properties"].as_object().unwrap();
+
+    assert_enum_keyed_map_value(
+        properties,
+        "string_value",
+        &serde_json::json!({ "type": "string" }),
+    );
+    assert_enum_keyed_map_value(
+        properties,
+        "u64_value",
+        &serde_json::json!({ "type": "integer" }),
+    );
+    assert_enum_keyed_map_value(
+        properties,
+        "i64_value",
+        &serde_json::json!({ "type": "integer" }),
+    );
+    assert_enum_keyed_map_value(
+        properties,
+        "f64_value",
+        &serde_json::json!({ "type": "number" }),
+    );
+    assert_enum_keyed_map_value(
+        properties,
+        "bool_value",
+        &serde_json::json!({ "type": "boolean" }),
+    );
+    assert_enum_keyed_map_value(
+        properties,
+        "string_array",
+        &serde_json::json!({ "type": "array", "items": { "type": "string" } }),
+    );
+}
+
+#[test]
+#[cfg(all(feature = "typescript", feature = "zod"))]
+fn test_enum_keyed_scalar_value_maps_typescript_generation() {
+    let ts_definition = EnumKeyedScalarValueMaps::ts_definition();
+
+    assert!(
+        ts_definition.contains("string_value: Partial<Record<MetricSlot, string>>;"),
+        "Got: {ts_definition}"
+    );
+    assert!(
+        ts_definition.contains("u64_value: Partial<Record<MetricSlot, number>>;"),
+        "Got: {ts_definition}"
+    );
+    assert!(
+        ts_definition.contains("bool_value: Partial<Record<MetricSlot, boolean>>;"),
+        "Got: {ts_definition}"
+    );
+    assert!(
+        ts_definition.contains("string_array: Partial<Record<MetricSlot, Array<string>>>;"),
+        "Got: {ts_definition}"
+    );
+
+    let zod_schema = EnumKeyedScalarValueMaps::zod_schema();
+    assert!(
+        zod_schema.contains("string_value: z.record(MetricSlot$Schema, z.string())"),
+        "Got: {zod_schema}"
+    );
+    assert!(
+        zod_schema.contains("u64_value: z.record(MetricSlot$Schema, z.number().int())"),
+        "Got: {zod_schema}"
+    );
+    assert!(
+        zod_schema.contains("bool_value: z.record(MetricSlot$Schema, z.boolean())"),
+        "Got: {zod_schema}"
+    );
+    assert!(
+        zod_schema.contains("string_array: z.record(MetricSlot$Schema, z.array(z.string()))"),
+        "Got: {zod_schema}"
+    );
 }
 
 #[test]

@@ -639,3 +639,48 @@ fn generic_display_impl_bounds_every_type_parameter() {
         "impl < IdType : std :: fmt :: Display > std :: fmt :: Display for DocumentId < IdType > { fn fmt (& self , f : & mut std :: fmt :: Formatter < '_ >) -> std :: fmt :: Result { self . 0 . fmt (f) } }"
     );
 }
+
+/// The JSON schema statements a map-typed field expands to, parsed from the map type's source.
+#[cfg(feature = "jsonschema")]
+fn map_field_schema(map_type: &str) -> proc_macro2::TokenStream {
+    let ty: syn::Type = syn::parse_str(map_type).unwrap();
+    let field = super::get_field_def("m", &ty, "");
+    let map_parts = if let FieldDefType::Map(key, value) = &field.field_type {
+        Some((key, value))
+    } else {
+        None
+    };
+    let (key, value) = map_parts.unwrap();
+    super::build_map_field_schema(key, value, "m")
+}
+
+/// A value type the enum-key branch cannot render must yield the `compile_error!` *instead of* the
+/// per-member insertion loop: leaving the loop in place adds an E0425 on the `value_schema` the
+/// failed arm never bound, and that second error names macro-internal state the author cannot act on.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_unsupported_enum_keyed_map_value_emits_only_the_compile_error() {
+    for map_type in [
+        "HashMap<Slot, HashMap<String, String>>",
+        "HashMap<Slot, Wrapper<String>>",
+        "HashMap<Slot, (String, u32)>",
+    ] {
+        assert_eq!(
+            map_field_schema(map_type).to_string(),
+            r#"compile_error ! ("Unsupported map value type") ;"#,
+            "for {map_type}"
+        );
+    }
+}
+
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_scalar_enum_keyed_map_value_expands_to_the_per_member_loop() {
+    let tokens = map_field_schema("HashMap<Slot, String>").to_string();
+    assert!(!tokens.contains("compile_error"), "got: {tokens}");
+    assert!(tokens.contains("Slot :: enum_members ()"), "got: {tokens}");
+    assert!(
+        tokens.contains(r#"serde_json :: json ! ({ "type" : "string" })"#),
+        "got: {tokens}"
+    );
+}
