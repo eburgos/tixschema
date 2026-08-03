@@ -7,7 +7,6 @@ mod utils;
 
 use model_schema::exec_model_schema;
 use proc_macro::TokenStream;
-use utils::safe_type_name;
 
 /// # `model_schema`
 ///

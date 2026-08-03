@@ -25,9 +25,14 @@ use crate::{
     field_type::{
         FieldDef, FieldDefType, VariantKind, classify_variant, get_field_def, is_plain_enum,
     },
-    safe_type_name,
     utils::{get_field_docs, get_variant_docs},
 };
+
+// The item paths take their exported name from `compute_item_export_name`, which applies this
+// itself; what is left is the naming a reference falls back to for a type this expansion never saw,
+// and the parameter list a generic alias writes.
+#[cfg(any(feature = "typescript", feature = "jsonschema"))]
+use crate::utils::safe_type_name;
 
 #[cfg(feature = "zod")]
 use crate::utils::{escape_js_regex_literal, extract_example_from_docs};
@@ -65,6 +70,8 @@ use crate::utils::{get_enum_docs, get_struct_docs, strip_examples_from_docs};
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::compute_alias_export_name;
+
+use crate::utils::compute_item_export_name;
 
 #[cfg(feature = "typescript")]
 use crate::utils::{format_docs_for_ts, get_item_docs};
@@ -381,7 +388,7 @@ fn parse_model_schema_args(args: proc_macro2::TokenStream) -> ModelSchemaArgs {
 fn apply_arg(result: &mut ModelSchemaArgs, meta: &Meta) -> syn::Result<()> {
     let path = meta.path();
     if path.is_ident("name") {
-        result.name_override = Some(str_arg(meta, "name")?.value());
+        result.name_override = Some(name_arg_value(str_arg(meta, "name")?)?);
     } else if path.is_ident("pattern") {
         let lit_str = str_arg(meta, "pattern")?;
         record_pattern_rejection(result, lit_str);
@@ -422,6 +429,31 @@ fn str_arg<'meta>(meta: &'meta Meta, name: &str) -> syn::Result<&'meta syn::LitS
     } else {
         Err(arg_rejection(lit, name, &takes))
     }
+}
+
+/// The name a `name = "…"` argument was written as, once it is one a name can be spelled from.
+///
+/// The value is the type's name on every surface and, snake-cased, the Rust module its schema is
+/// published from. `Ident::new` builds that module, and it panics on a string that is not an
+/// identifier — a panic reports no span and names no argument, so the check is here, where the
+/// literal the author wrote is still in hand.
+fn name_arg_value(lit: &syn::LitStr) -> syn::Result<String> {
+    let value = lit.value();
+    let mut chars = value.chars();
+    let opens = chars
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_');
+    if opens && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+        return Ok(value);
+    }
+    Err(arg_rejection(
+        lit,
+        "name",
+        "a string literal spelling an identifier: ASCII letters, digits and underscores, not \
+         opening with a digit. The value names the type on every surface and, snake-cased, the \
+         Rust module its schema is published from, so one an identifier cannot be spelled from is \
+         a name no surface can carry",
+    ))
 }
 
 /// The length a `minLength = N` argument was written as.
@@ -504,7 +536,7 @@ pub fn exec_model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
     if let Item::Struct(item_struct) = item {
         process_struct(item_struct, &parsed_args)
     } else if let Item::Enum(item_enum) = item {
-        process_enum(item_enum)
+        process_enum(item_enum, &parsed_args)
     } else if let Item::Type(item_type) = item {
         process_type_alias(item_type, &parsed_args)
     } else {
@@ -582,7 +614,7 @@ fn process_type_alias(item_type: ItemType, args: &ModelSchemaArgs) -> TokenStrea
 
     let rust_ident = alias.ident.clone();
     let rust_ident_str = rust_ident.to_string();
-    let export_name = compute_alias_export_name(&rust_ident_str, args.name_override.clone());
+    let export_name = compute_alias_export_name(&rust_ident_str, args.name_override.as_deref());
     let module_name = format!("{}_schema", to_snake_case(&export_name));
     let module_ident = Ident::new(&module_name, rust_ident.span());
 
@@ -1338,9 +1370,13 @@ fn is_branded_newtype(item_struct: &syn::ItemStruct) -> bool {
 
 /// Computes the TypeScript name, schema-module name, and module ident for a struct, and registers
 /// it in the alias registry so other types can resolve references to it.
+///
+/// The registration carries the exported name, so a `name = "…"` override reaches every reference
+/// to the struct as well as its own surfaces — a sibling names it in Rust and resolves to the name
+/// it is exported under.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-fn struct_module_idents(name: &syn::Ident) -> (String, String, Ident) {
-    let item_name = safe_type_name(&name.to_string());
+fn struct_module_idents(name: &syn::Ident, name_override: Option<&str>) -> (String, String, Ident) {
+    let item_name = compute_item_export_name(&name.to_string(), name_override);
     let module_name = format!("{}_schema", to_snake_case(&item_name));
     let module_ident = Ident::new(&module_name, name.span());
     register_alias_info(
@@ -1423,12 +1459,13 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
     // one of them under the empty ident it carries.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     if is_tuple_struct(&item_struct) {
-        return process_tuple_struct(item_struct, rename_all.as_deref());
+        return process_tuple_struct(item_struct, rename_all.as_deref(), args);
     }
 
     // Compute schema-module identifiers and register the struct in the alias registry.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    let (item_name, module_name, module_ident) = struct_module_idents(&name);
+    let (item_name, module_name, module_ident) =
+        struct_module_idents(&name, args.name_override.as_deref());
 
     // Extract docs early for example extraction
     #[cfg(any(feature = "typescript", feature = "zod"))]
@@ -1654,9 +1691,14 @@ fn build_tuple_struct_zod_schema_method(
 /// already read in, where a `None` reaches the wire as `null` rather than as an omitted key — so
 /// a tuple struct describes as the tuple of its slot types does wherever that tuple is written.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-fn process_tuple_struct(mut item_struct: syn::ItemStruct, rename_all: Option<&str>) -> TokenStream {
+fn process_tuple_struct(
+    mut item_struct: syn::ItemStruct,
+    rename_all: Option<&str>,
+    args: &ModelSchemaArgs,
+) -> TokenStream {
     let name = item_struct.ident.clone();
-    let (item_name, module_name, module_ident) = struct_module_idents(&name);
+    let (item_name, module_name, module_ident) =
+        struct_module_idents(&name, args.name_override.as_deref());
 
     let (slots, guard_errors) = collect_tuple_slots(
         &mut item_struct.fields,
@@ -2429,7 +2471,7 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
     }
 
     let name = item_struct.ident.clone();
-    let item_name = safe_type_name(&name.to_string());
+    let item_name = compute_item_export_name(&name.to_string(), args.name_override.as_deref());
     let module_name = format!("{}_schema", to_snake_case(&item_name));
     let module_ident = Ident::new(&module_name, name.span());
 
@@ -2589,7 +2631,7 @@ fn branded_impl_generics(
 }
 
 /// Processes an enum item and generates TypeScript and Zod schema definitions for it.
-fn process_enum(item_enum: syn::ItemEnum) -> TokenStream {
+fn process_enum(item_enum: syn::ItemEnum, args: &ModelSchemaArgs) -> TokenStream {
     let name = item_enum.ident.clone();
 
     #[cfg(feature = "serde")]
@@ -2603,7 +2645,9 @@ fn process_enum(item_enum: syn::ItemEnum) -> TokenStream {
         return output;
     }
 
-    let item_name = safe_type_name(&name.to_string());
+    // Every enum shape below is written under this one name, and `enum_module_idents` registers it,
+    // so the override reaches the shape's own surfaces and every reference to it alike.
+    let item_name = compute_item_export_name(&name.to_string(), args.name_override.as_deref());
 
     if is_plain_enum(&item_enum) {
         #[cfg(feature = "serde")]
@@ -7209,7 +7253,7 @@ fn generate_alias_ts_definition_method(
             .iter()
             .filter_map(|param| {
                 if let GenericParam::Type(tp) = param {
-                    Some(crate::safe_type_name(&tp.ident.to_string()))
+                    Some(safe_type_name(&tp.ident.to_string()))
                 } else {
                     None
                 }
