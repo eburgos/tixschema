@@ -776,6 +776,8 @@ Generated JSON Schema for `username`: `{ "type": "string", "minLength": 3, "maxL
 
 The TypeScript type is unchanged -- still just `string`.
 
+A `PathBuf` field carries the same three constraints, as does the `Path` borrow behind a wrapper (`Box<Path>`, `Cow<'_, Path>`, `Arc<Path>`, `Rc<Path>`): serde writes a path as a JSON string, which is what the three surfaces render a constrained string for. The checks measure that string -- the path's `to_string_lossy` rendering, which is the exact wire value for every path serde can write, a path that is not UTF-8 being one serde refuses to serialize at all.
+
 ### Numeric Constraints (minimum, maximum)
 
 ```rust
