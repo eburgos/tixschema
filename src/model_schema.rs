@@ -729,7 +729,6 @@ fn cfg_attr_guard_error(rejection: &syn::Error, item: &str) -> proc_macro2::Toke
 }
 
 /// Names a field in a guard message; tuple slots have no ident to name.
-#[cfg(feature = "serde")]
 fn field_label(raw_field_ident: &str) -> String {
     if raw_field_ident.is_empty() {
         "tuple field".to_owned()
@@ -2861,6 +2860,9 @@ fn collect_untagged_members(item_enum: &mut syn::ItemEnum) -> UntaggedMemberData
                 .map(ToString::to_string)
                 .unwrap_or_default();
             let mut field_def = get_field_def(&field_name, &field.ty, "");
+            if let Err(err) = check_os_string_field(field, &field_def, &field_label(&field_name)) {
+                guard_errors.push(err.to_compile_error());
+            }
             let serde_field_meta = parse_serde_field_attributes(&field.attrs);
             if let Some(rejection) = serde_field_meta.cfg_attr_rejection.as_ref() {
                 guard_errors.push(cfg_attr_guard_error(rejection, &field_label(&field_name)));
@@ -4790,7 +4792,7 @@ fn check_optional_field_serialization(
     ))
 }
 
-/// The `compile_error!` tokens for every guard the field violates.
+/// The serde-read guard errors the field violates.
 ///
 /// A hidden serde attribute leaves every serde-read diagnostic unreliable — the `Option`-null guard
 /// included, since the wrapper is exactly what kept its evidence out of the meta. The
@@ -4819,6 +4821,46 @@ fn field_guard_errors(
             },
         ))
         .collect()
+}
+
+/// Every guard error the field violates: the `OsString` guard first — it reads the written type,
+/// which no attribute can hide — then the serde-side guards when any fired.
+fn collect_field_guard_errors(
+    field: &Field,
+    field_def: &FieldDef,
+    raw_field_ident: &str,
+    serde_guard_errors: Vec<proc_macro2::TokenStream>,
+) -> Vec<proc_macro2::TokenStream> {
+    check_os_string_field(field, field_def, &field_label(raw_field_ident))
+        .err()
+        .map(|err| err.to_compile_error())
+        .into_iter()
+        .chain(serde_guard_errors)
+        .collect()
+}
+
+/// Rejects a field that reaches an `OsString`/`OsStr`, at any depth.
+///
+/// serde writes both as an externally tagged enum naming the target platform — `{"Unix":[u8, …]}`
+/// or `{"Windows":[u16, …]}` — so one Rust field has two wire forms and no schema describes both.
+/// Their owned string counterparts are what a portable field is written as instead.
+fn check_os_string_field(
+    field: &Field,
+    field_def: &FieldDef,
+    label: &str,
+) -> Result<(), syn::Error> {
+    let Some(name) = field_def.os_string_name() else {
+        return Ok(());
+    };
+    Err(syn::Error::new_spanned(
+        field,
+        format!(
+            "model_schema: {label} reaches `{name}`, which serde writes as an externally tagged \
+             enum naming the target platform (`{{\"Unix\":[u8, ...]}}` or \
+             `{{\"Windows\":[u16, ...]}}`), not a string, so no schema can describe it portably. \
+             Use `String`, or `PathBuf` for a filesystem path."
+        ),
+    ))
 }
 
 /// Processes a field and returns its definition, optional module items (validators/deserializers),
@@ -4898,7 +4940,7 @@ fn process_field(
     let mut field_def = get_field_def(&final_name, field_type, &field_docs);
 
     #[cfg(feature = "serde")]
-    let guard_errors = field_guard_errors(
+    let serde_guard_errors = field_guard_errors(
         field,
         &raw_field_ident,
         field_def.is_optional(),
@@ -4906,7 +4948,10 @@ fn process_field(
         positional_constraint_error,
     );
     #[cfg(not(feature = "serde"))]
-    let guard_errors: Vec<proc_macro2::TokenStream> = Vec::new();
+    let serde_guard_errors: Vec<proc_macro2::TokenStream> = Vec::new();
+
+    let guard_errors =
+        collect_field_guard_errors(field, &field_def, &raw_field_ident, serde_guard_errors);
 
     // Resolve `Self` references to the concrete type name so recursive fields
     // (e.g. `Vec<Self>`) are treated exactly like `Vec<EnclosingType>`.
