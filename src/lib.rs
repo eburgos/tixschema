@@ -173,6 +173,37 @@ pub struct Document {
 /// `ObjectId` fields are serialized using `MongoDB`'s standard format: `{ "$oid": "hex_string" }`
 /// and include proper validation for 24-character hexadecimal `ObjectId` strings.
 ///
+/// ## Branded Newtypes and `no_display`
+///
+/// A `#[serde(transparent)]` single-field tuple struct becomes a branded type, and the macro gives
+/// it a `Display` impl that delegates to the inner value. **The inner type must implement
+/// `Display`.** An inner type that does not is reported at the inner field, naming the trait.
+///
+/// Pass `no_display` for brands whose inner type is a container (or anything else without
+/// `Display`): the brand then gets no `Display` impl and no such requirement, while the generated
+/// schema is unchanged. String constraints are a separate matter -- `pattern`, `minLength`, and
+/// `maxLength` validate through `to_string()`, so a constrained brand needs a `Display` inner
+/// whether or not it passes `no_display`.
+///
+/// ```rust
+/// use tixschema::model_schema;
+/// use serde::{Deserialize, Serialize};
+///
+/// #[model_schema()]
+/// #[derive(Serialize, Deserialize)]
+/// #[serde(transparent)]
+/// pub struct UserId(pub String);
+///
+/// // `Vec<String>` has no `Display`, so this brand opts out of the impl.
+/// #[model_schema(no_display)]
+/// #[derive(Serialize, Deserialize)]
+/// #[serde(transparent)]
+/// pub struct Tags(pub Vec<String>);
+/// ```
+///
+/// A generic brand carries the requirement as a `Display` bound on each type parameter, so a
+/// non-`Display` type argument is rejected where the brand is used, not where it is declared.
+///
 #[proc_macro_attribute]
 pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
     exec_model_schema(args, input)
