@@ -53,11 +53,8 @@ use crate::features::model_schema_prop::ModelSchemaPropMeta;
 use crate::features::jsonschema::{
     generate_plain_enum_json_schema_method as generate_plain_enum_json_schema_method_impl,
     generate_struct_json_schema_method as generate_struct_json_schema_method_impl,
-    recursive_document, self_reference_value,
+    json_schema_methods,
 };
-
-#[cfg(feature = "jsonschema")]
-use crate::utils::{begin_expansion, emitted_self_reference, self_reference_def_name};
 
 #[cfg(any(feature = "typescript", feature = "zod"))]
 use crate::utils::{get_enum_docs, get_struct_docs, strip_examples_from_docs};
@@ -305,16 +302,10 @@ pub fn exec_model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
     let parsed_args = parse_model_schema_args(args.into());
     let item = parse_macro_input!(input as Item);
     if let Item::Struct(item_struct) = item {
-        #[cfg(feature = "jsonschema")]
-        begin_expansion(&item_struct.ident.to_string());
         process_struct(item_struct, &parsed_args)
     } else if let Item::Enum(item_enum) = item {
-        #[cfg(feature = "jsonschema")]
-        begin_expansion(&item_enum.ident.to_string());
         process_enum(item_enum)
     } else if let Item::Type(item_type) = item {
-        #[cfg(feature = "jsonschema")]
-        begin_expansion(&item_type.ident.to_string());
         process_type_alias(item_type, &parsed_args)
     } else {
         syn::Error::new_spanned(item, "Unsupported target for model_schema")
@@ -1087,7 +1078,7 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
         let flatten = compute_flatten_outputs(&collected.1);
         vec![
             #[cfg(feature = "jsonschema")]
-            generate_json_schema_method(&bodies.2, &flatten.2),
+            generate_json_schema_method(&bodies.2, &flatten.2, &item_name),
             #[cfg(feature = "typescript")]
             generate_ts_definition_method(&docs, &item_name, &bodies.0, bodies.3, &flatten.0),
             #[cfg(feature = "zod")]
@@ -1263,6 +1254,7 @@ fn build_branded_validation(
 fn build_branded_json_schema_method(
     args: &ModelSchemaArgs,
     json_inner_type: &str,
+    def_name: &str,
 ) -> proc_macro2::TokenStream {
     let mut constraint_inserts: Vec<proc_macro2::TokenStream> = Vec::new();
 
@@ -1282,14 +1274,15 @@ fn build_branded_json_schema_method(
         });
     }
 
-    quote! {
-        pub fn json_schema() -> serde_json::Value {
+    let body = quote! {
+        {
             let mut schema_obj = serde_json::Map::new();
             schema_obj.insert("type".to_string(), serde_json::Value::String(#json_inner_type.to_string()));
             #(#constraint_inserts)*
             serde_json::Value::Object(schema_obj)
         }
-    }
+    };
+    json_schema_methods(def_name, &body)
 }
 
 /// Extracts the generic type parameter names from a branded newtype's generics.
@@ -1875,7 +1868,7 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
 
     // --- Build schema module impl items ---
     #[cfg(feature = "jsonschema")]
-    let json_schema_method = build_branded_json_schema_method(args, &json_inner_type);
+    let json_schema_method = build_branded_json_schema_method(args, &json_inner_type, &item_name);
 
     let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![
         #[cfg(feature = "jsonschema")]
@@ -2186,7 +2179,7 @@ fn process_plain_enum(
 
     // Generate schema module methods
     #[cfg(feature = "jsonschema")]
-    let json_schema_method = generate_plain_enum_json_schema_method(&enumerated);
+    let json_schema_method = generate_plain_enum_json_schema_method(&enumerated, item_name);
 
     #[cfg(feature = "typescript")]
     let ts_definition_method =
@@ -2456,7 +2449,8 @@ fn process_discriminated_enum(
 
     // Generate schema module methods
     #[cfg(feature = "jsonschema")]
-    let json_schema_method = generate_discriminated_enum_json_schema_method(&main_schema_code);
+    let json_schema_method =
+        generate_discriminated_enum_json_schema_method(&main_schema_code, item_name);
 
     #[cfg(feature = "typescript")]
     let ts_definition_method =
@@ -2905,7 +2899,8 @@ fn process_untagged_enum(
 
     // Generate schema module methods
     #[cfg(feature = "jsonschema")]
-    let json_schema_method = generate_discriminated_enum_json_schema_method(&main_schema_code);
+    let json_schema_method =
+        generate_discriminated_enum_json_schema_method(&main_schema_code, item_name);
 
     #[cfg(feature = "typescript")]
     let ts_definition_method =
@@ -3489,16 +3484,14 @@ fn sibling_schema_module_ident(name: &str) -> Ident {
 /// flattened base — emits this one call, so a type cannot describe as itself in one position and as
 /// an open object in another.
 ///
-/// The type being expanded is the one name that cannot be asked: its schema is what is being
-/// written, so inlining it would have nothing to stop it. It is described by reference instead,
-/// which is what makes a self-naming type describable at all.
+/// It is the guarded form that is asked for, not the standalone document: the sibling is being
+/// written into a document already in progress, and it is the run that knows whether asking has
+/// come back around to a name still being written. So the names in flight and the definitions the
+/// root will carry travel into the call.
 #[cfg(feature = "jsonschema")]
 fn sibling_json_schema_value(name: &str) -> proc_macro2::TokenStream {
-    if let Some(def_name) = self_reference_def_name(name) {
-        return self_reference_value(&def_name);
-    }
     let module_ident = sibling_schema_module_ident(name);
-    quote! { #module_ident::Schema::json_schema() }
+    quote! { #module_ident::Schema::json_schema_within(in_flight, hoisted_defs) }
 }
 
 /// Builds JSON schema for a tuple element (used for tuple fields and for tuple variants), or the
@@ -4769,12 +4762,9 @@ fn get_final_variant_name(
 fn generate_json_schema_method(
     json_schema_fields: &[proc_macro2::TokenStream],
     flatten_json_schemas: &[proc_macro2::TokenStream],
+    def_name: &str,
 ) -> proc_macro2::TokenStream {
-    generate_struct_json_schema_method_impl(
-        json_schema_fields,
-        flatten_json_schemas,
-        emitted_self_reference().as_deref(),
-    )
+    generate_struct_json_schema_method_impl(json_schema_fields, flatten_json_schemas, def_name)
 }
 
 #[cfg(feature = "jsonschema")]
@@ -4931,15 +4921,16 @@ fn generate_enum_json_docs_part(docs: &str) -> proc_macro2::TokenStream {
 /// Generates the JSON schema method for plain enums conditionally.
 fn generate_plain_enum_json_schema_method(
     enumerated: &[proc_macro2::TokenStream],
+    def_name: &str,
 ) -> proc_macro2::TokenStream {
     #[cfg(feature = "jsonschema")]
     {
-        generate_plain_enum_json_schema_method_impl(enumerated)
+        generate_plain_enum_json_schema_method_impl(enumerated, def_name)
     }
 
     #[cfg(not(feature = "jsonschema"))]
     {
-        let _: &_ = &enumerated; // Suppress unused variable warning
+        let _: &_ = &(enumerated, def_name); // Suppress unused variable warning
         quote::quote! {
             // JSON schema method not available - jsonschema feature disabled
             // To enable: add "jsonschema" to your features
@@ -5028,15 +5019,9 @@ fn generate_plain_enum_zod_schema_method(
 /// Generates the JSON schema method for discriminated enums conditionally.
 fn generate_discriminated_enum_json_schema_method(
     main_schema_code: &proc_macro2::TokenStream,
+    def_name: &str,
 ) -> proc_macro2::TokenStream {
-    let body = quote::quote! { { #main_schema_code } };
-    let value = emitted_self_reference()
-        .map_or_else(|| body.clone(), |name| recursive_document(&name, &body));
-    quote::quote! {
-        pub fn json_schema() -> serde_json::Value {
-            #value
-        }
-    }
+    json_schema_methods(def_name, &quote::quote! { { #main_schema_code } })
 }
 
 #[cfg(feature = "typescript")]
@@ -5235,11 +5220,7 @@ fn generate_alias_json_schema_method(
     {
         let body = build_tuple_element_json_schema(&alias_json_schema_field_def(alias, field_def))
             .unwrap_or_else(|rejection| alias_json_schema_rejection(export_name, &rejection));
-        quote! {
-            pub fn json_schema() -> serde_json::Value {
-                #body
-            }
-        }
+        json_schema_methods(export_name, &body)
     }
     #[cfg(not(feature = "jsonschema"))]
     {
