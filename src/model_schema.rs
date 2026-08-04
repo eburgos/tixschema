@@ -2429,42 +2429,50 @@ fn branded_generic_params(generics: &syn::Generics) -> Vec<String> {
 }
 
 /// Resolves the TypeScript inner type name and generic parameter list for a branded newtype.
+///
+/// The inner is read the same way whether or not the brand declares parameters: what the brand
+/// publishes is what `#[serde(transparent)]` puts on the wire, and a parameter appearing inside the
+/// inner leaves that wire the inner's own — a `Vec<T>` writes its array however `T` is filled in.
+/// A parameter reached on its own renders as the name it was written with, which is what
+/// `typescript_base` gives every unresolvable name and what a generic alias's target already
+/// publishes for one.
+///
+/// The parameter list is the struct's, because it is the exported type's own list and has to name
+/// every parameter the type carries — not just the ones the inner happens to reach.
 #[cfg(feature = "typescript")]
 fn branded_ts_type_and_generics(
-    is_generic: bool,
     generic_params: &[String],
     inner_ty: &syn::Type,
 ) -> (String, String) {
-    let ts_inner_type = if is_generic {
-        generic_params[0].clone()
-    } else {
-        get_field_def("_inner", inner_ty, "").typescript_typename()
-    };
-    let ts_generics = if is_generic {
-        format!("<{}>", generic_params.join(", "))
-    } else {
+    let ts_inner_type = get_field_def("_inner", inner_ty, "").typescript_typename();
+    let ts_generics = if generic_params.is_empty() {
         String::new()
+    } else {
+        format!("<{}>", generic_params.join(", "))
     };
     (ts_inner_type, ts_generics)
 }
 
 /// Resolves the JSON schema shape for a branded newtype's inner field.
 ///
-/// For generic newtypes this is always `"string"` (mirrors the Zod logic). An `ObjectId`, a
-/// composite and a named type are read off their own `FieldDef`, because none of them writes a
-/// value one `"type"` keyword describes; a chrono type writes a string one keyword names but not
-/// the only one it carries. Every remaining non-generic inner maps from the resolved TypeScript
+/// The brand's own type parameters are replaced by the opaque type before the inner is classified,
+/// exactly as [`alias_json_schema_field_def`] replaces an alias's: a parameter names no type until
+/// the brand is instantiated, and the schema is written once for every instantiation. So the
+/// parameter admits any value while the shape it sits in — an array, a map's keys, a tuple's arity
+/// — is still described, which is what `#[serde(transparent)]` puts on the wire.
+///
+/// An `ObjectId`, a composite and a named type are then read off their own `FieldDef`, because none
+/// of them writes a value one `"type"` keyword describes; a chrono type writes a string one keyword
+/// names but not the only one it carries. Every remaining inner maps from the resolved TypeScript
 /// type name.
 ///
 /// The composite question is asked before the other two, so an inner written under array levels
 /// answers for the array around whatever it holds — which is what `#[serde(transparent)]` puts on
 /// the wire — rather than for the item.
 #[cfg(feature = "jsonschema")]
-fn branded_json_inner(is_generic: bool, inner_ty: &syn::Type) -> BrandedJsonInner {
-    if is_generic {
-        return BrandedJsonInner::Scalar("string".to_owned());
-    }
-    let inner = get_field_def("_inner", inner_ty, "");
+fn branded_json_inner(generic_params: &[String], inner_ty: &syn::Type) -> BrandedJsonInner {
+    let mut inner = get_field_def("_inner", inner_ty, "");
+    inner.erase_type_parameters(generic_params);
     #[cfg(feature = "object_id")]
     if branded_inner_is_object_id(&inner) {
         return BrandedJsonInner::ObjectId;
@@ -2574,12 +2582,13 @@ fn branded_inner_composite(inner: &FieldDef) -> Option<BrandedComposite> {
 /// The constraints measure the inner's `Display` rendering, which for every inner but an
 /// `ObjectId` is the value the schema itself describes. An `ObjectId` writes `{"$oid": hex}`, so
 /// its `Display` is the `$oid` member and the checks land there.
+///
+/// A brand's own type parameters are rendered here as they are anywhere else the value expression
+/// reaches one: through the `Name$Schema` binding `zod_array_base` names every unresolved type
+/// after, which is what a generic alias's value already publishes for a parameter.
 #[cfg(feature = "zod")]
-fn branded_zod_inner(args: &ModelSchemaArgs, is_generic: bool, inner_ty: &syn::Type) -> String {
+fn branded_zod_inner(args: &ModelSchemaArgs, inner_ty: &syn::Type) -> String {
     let checks = branded_zod_string_checks(args);
-    if is_generic {
-        return format!("z.string(){checks}");
-    }
     let inner = get_field_def("_inner", inner_ty, "");
     #[cfg(feature = "object_id")]
     if branded_inner_is_object_id(&inner) {
@@ -2603,11 +2612,12 @@ fn branded_zod_inner(args: &ModelSchemaArgs, is_generic: bool, inner_ty: &syn::T
 /// composed from, read back off that same rendering. A check the brand adds returns the schema it
 /// was called on, so the binding's type is the base schema's type whether or not the brand
 /// constrains it.
+///
+/// A type parameter is a name like any other, so it is annotated through that same named-inner arm
+/// — the type of the binding the value was composed from — and the two surfaces cannot disagree
+/// about what the brand wraps.
 #[cfg(all(feature = "zod", feature = "typescript"))]
-fn branded_zod_type_name(is_generic: bool, inner_ty: &syn::Type) -> String {
-    if is_generic {
-        return "ZodString".to_owned();
-    }
+fn branded_zod_type_name(inner_ty: &syn::Type) -> String {
     let inner = get_field_def("_inner", inner_ty, "");
     #[cfg(feature = "object_id")]
     if branded_inner_is_object_id(&inner) {
@@ -2672,7 +2682,6 @@ fn build_branded_ts_definition_method(
 fn build_branded_zod_schema_method(
     item_name: &str,
     rust_ident: &str,
-    is_generic: bool,
     inner_ty: &syn::Type,
     zod_inner: &str,
     plain_description: &str,
@@ -2680,7 +2689,7 @@ fn build_branded_zod_schema_method(
     let reexport = ident_reexport_zod(rust_ident, item_name);
     #[cfg(feature = "typescript")]
     {
-        let zod_type_name = branded_zod_type_name(is_generic, inner_ty);
+        let zod_type_name = branded_zod_type_name(inner_ty);
         let zod_type_annotation = format!("$ZodBranded<{zod_type_name}, \"{item_name}\">");
         quote! {
             pub fn zod_schema() -> String {
@@ -2693,7 +2702,7 @@ fn build_branded_zod_schema_method(
     }
     #[cfg(not(feature = "typescript"))]
     {
-        let _: &_ = &(is_generic, inner_ty);
+        let _: &_ = &inner_ty;
         quote! {
             pub fn zod_schema() -> String {
                 format!(
@@ -2897,8 +2906,9 @@ fn build_branded_schema_example(
     };
     let code_tokens: proc_macro2::TokenStream = code.parse().unwrap();
     if is_generic {
-        // For generic newtypes, the example constructs a concrete type (e.g., DocumentId<String>).
-        // We use String as the concrete type since the Zod schema always uses z.string().
+        // The example is Rust the expansion has to compile, and a parameter names no type to
+        // compile it at, so it is instantiated at `String` (e.g. `DocumentId<String>`) — the one
+        // concrete type every brand's example can be written against.
         quote! {
             pub fn schema_example() -> serde_json::Value {
                 let value: #name<String> = {
@@ -3092,16 +3102,16 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
 
     // `ts_pair`: (ts_inner_type, ts_generics).
     #[cfg(feature = "typescript")]
-    let ts_pair = branded_ts_type_and_generics(is_generic, &generic_params, inner_ty);
+    let ts_pair = branded_ts_type_and_generics(&generic_params, inner_ty);
 
     #[cfg(not(any(feature = "typescript", feature = "zod")))]
     let _: &_ = &inner_ty;
 
     #[cfg(feature = "jsonschema")]
-    let json_inner = branded_json_inner(is_generic, inner_ty);
+    let json_inner = branded_json_inner(&generic_params, inner_ty);
 
     #[cfg(feature = "zod")]
-    let zod_inner = branded_zod_inner(args, is_generic, inner_ty);
+    let zod_inner = branded_zod_inner(args, inner_ty);
 
     // --- Generate ts_definition method ---
     #[cfg(feature = "typescript")]
@@ -3113,7 +3123,6 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
     let zod_schema_method = build_branded_zod_schema_method(
         &item_name,
         &rust_ident,
-        is_generic,
         inner_ty,
         &zod_inner,
         &plain_description,
