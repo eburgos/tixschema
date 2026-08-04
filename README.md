@@ -777,13 +777,19 @@ pub struct CorrelationId(pub String);
 Generated TypeScript (with `zod` feature):
 
 ```typescript
-export type UserId<ID_TYPE> = ID_TYPE & z.$brand<"UserId">;
-const UserId$RawSchema = ID_TYPE$Schema.brand<"UserId">();
+export type UserId<ID_TYPE> = ID_TYPE & $brand<"UserId">;
+const UserId$RawSchema = ID_TYPE$Schema.brand<"UserId">().meta({
+  description: "UserId",
+});
+
 export const UserId$Schema: $ZodBranded<typeof ID_TYPE$Schema, "UserId"> = UserId$RawSchema;
 
-export type CorrelationId = string & z.$brand<"CorrelationId">;
-const CorrelationId$RawSchema = z.string().brand<"CorrelationId">();
-export const CorrelationId$Schema: ZodType<CorrelationId> = CorrelationId$RawSchema;
+export type CorrelationId = string & $brand<"CorrelationId">;
+const CorrelationId$RawSchema = z.string().brand<"CorrelationId">().meta({
+  description: "CorrelationId",
+});
+
+export const CorrelationId$Schema: $ZodBranded<ZodString, "CorrelationId"> = CorrelationId$RawSchema;
 ```
 
 Generated TypeScript (without `zod` feature):
@@ -791,11 +797,9 @@ Generated TypeScript (without `zod` feature):
 ```typescript
 declare const __brand_UserId: unique symbol;
 export type UserId<ID_TYPE> = ID_TYPE & { readonly [__brand_UserId]: true };
-export function assertUserId<ID_TYPE>(value: ID_TYPE): asserts value is UserId<ID_TYPE> {}
 
 declare const __brand_CorrelationId: unique symbol;
 export type CorrelationId = string & { readonly [__brand_CorrelationId]: true };
-export function assertCorrelationId(value: string): asserts value is CorrelationId {}
 ```
 
 Notes:
@@ -891,14 +895,9 @@ pub struct SlugId(pub String);
 Generated Zod:
 
 ```typescript
-const SlugId$RawSchema = z.string()
-  .min(3)
-  .max(50)
-  .check(z.regex(/^[a-z0-9_]+$/))
-  .brand<"SlugId">()
-  .meta({
-    description: "SlugId",
-  });
+const SlugId$RawSchema = z.string().min(3).max(50).check(z.regex(/^[a-z0-9_]+$/)).brand<"SlugId">().meta({
+  description: "SlugId",
+});
 
 export const SlugId$Schema: $ZodBranded<ZodString, "SlugId"> = SlugId$RawSchema;
 ```
@@ -1013,12 +1012,12 @@ pub struct DocumentId<ID_TYPE>(pub ID_TYPE);
 Generated Zod:
 
 ```typescript
-const DocumentId$RawSchema = z.string().brand<"DocumentId">().meta({
-  description: "Generic document identifier.\n...",
+const DocumentId$RawSchema = ID_TYPE$Schema.brand<"DocumentId">().meta({
+  description: "Generic document identifier.\n- `DocumentId<String>` for API/HTTP layer\n- `DocumentId<ObjectId>` for MongoDB layer",
   example: "64de3d95ff45b119e5b53a7e",
 });
 
-export const DocumentId$Schema: $ZodBranded<ZodString, "DocumentId"> = DocumentId$RawSchema;
+export const DocumentId$Schema: $ZodBranded<typeof ID_TYPE$Schema, "DocumentId"> = DocumentId$RawSchema;
 ```
 
 ## Field Validation (`model_schema_prop`)

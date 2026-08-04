@@ -1486,6 +1486,47 @@ mod branded_generic_inner_tests {
     }
 }
 
+/// A brand's doc example is Rust the expansion has to compile, so it is instantiated at as many
+/// concrete types as the brand declares parameters — one per parameter, not one overall.
+#[cfg(feature = "zod")]
+mod branded_example_arity_tests {
+    use super::*;
+
+    /// One parameter per side of the pair.
+    ///
+    /// ```rust example
+    /// PairId(("a".to_string(), "b".to_string()))
+    /// ```
+    #[model_schema(no_display)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct PairId<A, B>(pub (A, B));
+
+    /// The one parameter the example is written against.
+    ///
+    /// ```rust example
+    /// SoloId("a".to_string())
+    /// ```
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct SoloId<T>(pub T);
+
+    #[test]
+    fn a_two_parameter_brand_renders_the_example_its_inner_writes() {
+        assert_eq!(
+            PairId::<String, String>::schema_example(),
+            serde_json::json!(["a", "b"])
+        );
+    }
+
+    /// A single parameter is instantiated exactly as it was before arity was counted.
+    #[test]
+    fn a_one_parameter_brand_renders_the_example_it_always_did() {
+        assert_eq!(SoloId::<String>::schema_example(), serde_json::json!("a"));
+    }
+}
+
 /// The four surfaces of a brand whose inner names another type, pinned against what serde writes
 /// for it.
 ///
