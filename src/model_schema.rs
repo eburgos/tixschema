@@ -108,6 +108,18 @@ const KNOWN_ARGS: &[&str] = &["name", "pattern", "minLength", "maxLength", "no_d
 const FLATTENED_PLAIN_ENUM_SCOPE: &str = "Only a type the registry has already classified reaches this guard; one it has not keeps its \
      TypeScript and Zod intersection, and is refused by the JSON surface when the merge runs.";
 
+/// The two shapes a map key can write that `serde_json` will not use as an object key, as
+/// [`MapKeyRejection::Unwritable`] names them.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+const WRITTEN_AS_ARRAY: &str = "a JSON array";
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+const WRITTEN_AS_OBJECT: &str = "a JSON object";
+
+/// The 24-character hex an `ObjectId`'s `$oid` member holds, as a JSON-schema `pattern`. Written
+/// once so no position can describe the same string a different way.
+#[cfg(all(feature = "jsonschema", feature = "object_id"))]
+const OBJECT_ID_HEX_PATTERN: &str = r"^[a-f\d]{24}$";
+
 /// One variant of a discriminated enum, carrying everything its union member is rendered from.
 struct DiscriminatedVariant {
     discriminator_value: String,
@@ -299,10 +311,10 @@ enum MapMemberItem {
 #[cfg(feature = "jsonschema")]
 #[derive(Debug)]
 enum MapMemberRejection {
-    /// A map key the registry proves carries no `enum_members()`, named so the author can act on it.
-    NonEnumKey(String),
-    /// A map key written under a sequence wrapper, named by the element it holds.
-    SequencedKey(String),
+    /// A map key with no rendering, whatever reason it has and at whatever depth the value walk
+    /// reached it. The reason is the same value the field guard refuses on, so a key is worded
+    /// once however the expansion arrives at it.
+    Key(MapKeyRejection),
     Tuple,
 }
 
@@ -315,24 +327,41 @@ enum MapMemberRejection {
 enum MapKeyPath<'key> {
     /// A key named by a type path, whose `enum_members()` become the object's keys.
     Enumerated(&'key str),
-    /// A `String` key, which enumerates nothing — one schema stands for every member.
+    /// A key serde writes as a bare string, which enumerates nothing — one schema stands for every
+    /// member. `String` is one, and so is a brand the registry proves serde writes as a string.
     Open,
-    /// A key written under a sequence wrapper, which serde writes as a JSON array. A JSON object
-    /// key is a string, so serde refuses such a map outright rather than writing an object — there
-    /// is no wire form here for any surface to describe.
-    Sequenced,
+    /// A key with no object for any surface to describe, carrying the reason.
+    Refused(MapKeyRejection),
     /// A key this expansion cannot narrow, leaving the members unconstrained.
     Unnarrowed,
 }
 
-/// Why a map key a field reaches has no rendering. Both reasons carry the name the author can act
-/// on, and both stand on every surface, the key being read off the field all three render from.
+/// Why a map key a field reaches has no rendering. Every reason carries the name the author can act
+/// on, and every one stands on every surface, the key being read off the field all three render
+/// from.
+///
+/// Below the first, they are all one fact wearing different spellings: a JSON object key is a
+/// string, and serde raises `key must be a string` — refusing the whole map at serialization rather
+/// than falling back to any other form — for every key whose own wire form is not one. So the
+/// spelling is refused rather than described: there is no wire here to describe badly.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[derive(Debug)]
 enum MapKeyRejection {
     /// The registry proves the key type carries no `enum_members()`.
     NoEnumMembers(String),
+    /// The key is written as an `Option`, named by the inner it holds. A `Some` writes what the
+    /// inner writes; a `None` writes nothing a key can be.
+    Optional(String),
     /// The key is written under a sequence wrapper, named by the element it holds.
     Sequenced(String),
+    /// The key's own type is one serde writes as neither a string nor anything it will stringify.
+    Unwritable {
+        /// The key as it was written, by its own name where it has one and by its shape where it
+        /// has none.
+        key_name: String,
+        /// What serde writes for it instead, as the message names it.
+        written_as: &'static str,
+    },
 }
 
 /// What a newtype variant's inner value is when the tag is written beside it rather than around
@@ -1300,9 +1329,48 @@ fn branded_pattern_error(name: &Ident, args: &ModelSchemaArgs) -> Option<proc_ma
         .map(|rejection| pattern_guard_error(rejection, &format!("type `{name}`")))
 }
 
+/// What the registry records for a brand.
+///
+/// A brand is `#[serde(transparent)]`, so its wire form is its inner's: a brand over a string is
+/// written as that bare string, which is exactly what a JSON object key is, and so it keys a map the
+/// way `String` does — under its own name on the nominal surfaces, and as the open object on the
+/// structural one, which has no brand to say. The inner is asked through the very dispatch a map key
+/// is read by, so only an inner that opens a map opens the brand: a brand over a number, a chrono
+/// value, an `ObjectId`, or a container answers `NoEnumMembers` and stays refused as a key, which is
+/// what it was before this question was asked at all.
+///
+/// It is never `EnumMembers`: the brand publishes no `enum_members()` of its own, whatever it wraps.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn branded_alias_kind(inner_field: &Field) -> AliasKind {
+    let inner = get_field_def("", &inner_field.ty, "");
+    if matches!(map_key_path(&inner), MapKeyPath::Open) {
+        AliasKind::StringWire
+    } else {
+        AliasKind::NoEnumMembers
+    }
+}
+
+/// The `compile_error!` tokens for a branded newtype whose inner reaches a map key no surface can
+/// write, or `None` when it reaches none.
+///
+/// The brand renders its inner straight into the brand rather than walking it as a field, so the
+/// guard every field position runs never sees it — leaving a brand over a map with an unwritable key
+/// to emit a `Record` keyed by a type that supplies no keys, on every feature set that builds no
+/// JSON schema to catch it. The key is the same value read through the same walk, so the brand earns
+/// the diagnostic a field of that map type earns, spanned on the inner type, which is where the map
+/// was written.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn branded_map_key_error(name: &Ident, inner_field: &Field) -> Option<proc_macro2::TokenStream> {
+    let inner = get_field_def("", &inner_field.ty, "");
+    let rejection = map_key_rejection(&inner)?;
+    let message = map_key_rejection_message(&format!("type `{name}`"), &rejection);
+    Some(syn::Error::new_spanned(&inner_field.ty, message).to_compile_error())
+}
+
 /// The `compile_error!` tokens for every guard a branded newtype violates: a `cfg_attr`-wrapped
 /// serde attribute on the type or on its inner slot, an `Option` inner type, string constraints
-/// over an inner type that cannot carry them, and a `pattern` that is not a regex.
+/// over an inner type that cannot carry them, a `pattern` that is not a regex, and a map key the
+/// inner reaches that no surface can write.
 ///
 /// The branded path renders the inner type straight into the brand instead of walking fields, so
 /// it has to collect these itself; the ordinary struct walk never sees a transparent newtype.
@@ -1321,6 +1389,7 @@ fn branded_guard_errors(
             args,
         ))
         .chain(branded_pattern_error(&item_struct.ident, args))
+        .chain(branded_map_key_error(&item_struct.ident, inner_field))
         .collect()
 }
 
@@ -1983,12 +2052,14 @@ fn branded_checked_value(
     }
 }
 
-/// Builds the string schema a branded newtype's constraints are written into: `type_name` as the
-/// `"type"`, then one insert per constraint the brand declares.
+/// Builds the schema a branded newtype's constraints are written into: `base_inserts` first — what
+/// the inner type describes as before the brand narrows it — then one insert per constraint the
+/// brand declares. A keyword the base already states is written over rather than beside it, one
+/// string carrying one `pattern`.
 #[cfg(feature = "jsonschema")]
-fn branded_constrained_schema_obj(
+fn branded_schema_obj_over(
     args: &ModelSchemaArgs,
-    type_name: &str,
+    base_inserts: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
     let mut constraint_inserts: Vec<proc_macro2::TokenStream> = Vec::new();
 
@@ -2011,11 +2082,40 @@ fn branded_constrained_schema_obj(
     quote! {
         {
             let mut schema_obj = serde_json::Map::new();
-            schema_obj.insert("type".to_string(), serde_json::Value::String(#type_name.to_string()));
+            #base_inserts
             #(#constraint_inserts)*
             serde_json::Value::Object(schema_obj)
         }
     }
+}
+
+/// Builds the string schema a branded newtype's constraints are written into: `type_name` as the
+/// `"type"`, then one insert per constraint the brand declares.
+#[cfg(feature = "jsonschema")]
+fn branded_constrained_schema_obj(
+    args: &ModelSchemaArgs,
+    type_name: &str,
+) -> proc_macro2::TokenStream {
+    branded_schema_obj_over(
+        args,
+        &quote! {
+            schema_obj.insert("type".to_string(), serde_json::Value::String(#type_name.to_string()));
+        },
+    )
+}
+
+/// The `$oid` member an `ObjectId` brand carries: the hex string the type always holds, narrowed by
+/// the brand's own constraints, so a brand that declares none still describes the hex the type it
+/// wraps describes wherever else it is written.
+#[cfg(all(feature = "jsonschema", feature = "object_id"))]
+fn branded_object_id_hex_schema(args: &ModelSchemaArgs) -> proc_macro2::TokenStream {
+    branded_schema_obj_over(
+        args,
+        &quote! {
+            schema_obj.insert("type".to_string(), serde_json::Value::String("string".to_string()));
+            schema_obj.insert("pattern".to_string(), serde_json::Value::String(#OBJECT_ID_HEX_PATTERN.to_string()));
+        },
+    )
 }
 
 /// The description a brand carries for an inner no `"type"` keyword names: the one the slot
@@ -2050,7 +2150,7 @@ fn build_branded_json_schema_method(
         BrandedJsonInner::Scalar(type_name) => branded_constrained_schema_obj(args, type_name),
         #[cfg(feature = "object_id")]
         BrandedJsonInner::ObjectId => {
-            object_id_json_schema_value(&branded_constrained_schema_obj(args, "string"))
+            object_id_json_schema_value(&branded_object_id_hex_schema(args))
         }
         BrandedJsonInner::Slot(inner) => branded_slot_json_schema(inner, def_name),
     };
@@ -2669,7 +2769,7 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
         &name.to_string(),
         &item_name,
         &module_name,
-        AliasKind::NoEnumMembers,
+        branded_alias_kind(item_struct.fields.iter().next().unwrap()),
     );
 
     // Extract docs and example
@@ -4466,15 +4566,7 @@ fn field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
         }
         FieldDefType::Boolean => quote! { serde_json::json!({ "type": "boolean" }) },
         #[cfg(feature = "object_id")]
-        FieldDefType::ObjectId => quote! {
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "$oid": { "type": "string", "pattern": "^[a-f\\d]{24}$" }
-                },
-                "required": ["$oid"]
-            })
-        },
+        FieldDefType::ObjectId => object_id_json_schema_value(&object_id_hex_json_schema()),
         #[cfg(feature = "chrono")]
         FieldDefType::NaiveDate => {
             quote! { serde_json::json!({ "type": "string", "format": "date" }) }
@@ -5168,13 +5260,7 @@ fn scalar_field_json_schema_item(fld: &FieldDef) -> Option<proc_macro2::TokenStr
             quote! { { "type": "string", "format": "date-time" } }
         }
         #[cfg(feature = "object_id")]
-        FieldDefType::ObjectId => quote! { {
-            "type": "object",
-            "properties": {
-                "$oid": { "type": "string", "pattern": "^[a-f\\d]{24}$" }
-            },
-            "required": ["$oid"]
-        } },
+        FieldDefType::ObjectId => object_id_json_schema_item(&object_id_hex_json_schema()),
         FieldDefType::Unknown
         | FieldDefType::SiblingType(..)
         | FieldDefType::Map(..)
@@ -5183,23 +5269,15 @@ fn scalar_field_json_schema_item(fld: &FieldDef) -> Option<proc_macro2::TokenStr
     Some(item_schema)
 }
 
-/// [`build_map_member_item`] for a tuple element, which differs for exactly two value types.
-///
-/// An `ObjectId` here carries the field-position `$oid` object — patterned, and open — where a
-/// `String`-keyed map member carries the closed, unpatterned one; which of the two a slot should
-/// carry is unsettled, so this position keeps the rendering it has. A tuple renders as the
-/// fixed-arity array its own field position renders, which is the one value the map path has no
-/// renderer for: an element is dispatched by the tuple builder itself, so the nesting costs
-/// nothing but the recursion.
+/// [`build_map_member_item`] for a tuple element, which differs for exactly one value type: a tuple
+/// renders as the fixed-arity array its own field position renders, which is the one value the map
+/// path has no renderer for. An element is dispatched by the tuple builder itself, so the nesting
+/// costs nothing but the recursion.
 ///
 /// Every other value is the member the map path renders, at every depth, so a type describes the
 /// same in either slot.
 #[cfg(feature = "jsonschema")]
 fn build_tuple_element_item(value: &FieldDef) -> Result<MapMemberItem, MapMemberRejection> {
-    #[cfg(feature = "object_id")]
-    if matches!(value.field_type, FieldDefType::ObjectId) {
-        return Ok(MapMemberItem::Fragment(scalar_slot_item(value)?));
-    }
     if let FieldDefType::Tuple(elements) = &value.field_type {
         return Ok(MapMemberItem::Value(tuple_json_schema_value(elements)?));
     }
@@ -5360,26 +5438,43 @@ fn sequence_wrapper_element(fld: &FieldDef) -> Option<&FieldDef> {
 
 /// The classification every position reads a map key through.
 ///
-/// The sequence spellings come first: they are the key as written, and what they write is a JSON
-/// array, which serde never puts in an object key. Reading past one would answer for the element
-/// instead — enumerating an enum's members as keys the map cannot hold.
+/// The rule it applies is serde's own: a JSON object key is a string, so a key serde writes as a
+/// string keys a map and a key it writes as anything else refuses the map outright at serialization
+/// (`key must be a string`, with no fallback form). What the expansion refuses is therefore what
+/// serde refuses — never what merely is not a `String`. The keys serde stringifies for the author,
+/// the numbers and the `bool` and the chrono renderings, keep the open object they have always
+/// described as.
 ///
-/// Below them, only a bare type path can name an enum: a generic spelling is a type this expansion
-/// has no `enum_members()` for, and every other type names keys the schema cannot enumerate.
+/// The wrapper spellings come first, in the order they were written: they are the key as written,
+/// and reading past one would answer for the inner instead — enumerating an enum's members as keys
+/// the map cannot hold. A sequence writes an array; an `Option` writes its inner or nothing at all.
+///
+/// Below them, only a bare type path can name an enum or a brand, and the registry says which: a
+/// generic spelling is a type this expansion has no `enum_members()` for, and every other type
+/// names keys the schema cannot enumerate.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn map_key_path(key: &FieldDef) -> MapKeyPath<'_> {
     if key.array_depth > 0 || sequence_wrapper_element(key).is_some() {
-        return MapKeyPath::Sequenced;
+        return MapKeyPath::Refused(MapKeyRejection::Sequenced(map_key_element_name(key)));
+    }
+    if key.is_optional() {
+        return MapKeyPath::Refused(MapKeyRejection::Optional(map_key_element_name(key)));
     }
     match &key.field_type {
         FieldDefType::String => MapKeyPath::Open,
         FieldDefType::SiblingType(key_type_name, args) if args.is_empty() => {
-            MapKeyPath::Enumerated(key_type_name.as_str())
+            if writes_string_wire(key_type_name) {
+                MapKeyPath::Open
+            } else {
+                MapKeyPath::Enumerated(key_type_name.as_str())
+            }
         }
+        FieldDefType::Tuple(..) => MapKeyPath::Refused(unwritable_key(key, WRITTEN_AS_ARRAY)),
+        FieldDefType::Map(..) => MapKeyPath::Refused(unwritable_key(key, WRITTEN_AS_OBJECT)),
+        #[cfg(feature = "object_id")]
+        FieldDefType::ObjectId => MapKeyPath::Refused(unwritable_key(key, WRITTEN_AS_OBJECT)),
         FieldDefType::SiblingType(..)
         | FieldDefType::Unknown
-        | FieldDefType::Map(..)
-        | FieldDefType::Tuple(..)
         | FieldDefType::Boolean
         | FieldDefType::StringLiteral(_)
         | FieldDefType::U8
@@ -5394,8 +5489,6 @@ fn map_key_path(key: &FieldDef) -> MapKeyPath<'_> {
         | FieldDefType::Isize
         | FieldDefType::F32
         | FieldDefType::F64 => MapKeyPath::Unnarrowed,
-        #[cfg(feature = "object_id")]
-        FieldDefType::ObjectId => MapKeyPath::Unnarrowed,
         #[cfg(feature = "chrono")]
         FieldDefType::DateTime
         | FieldDefType::NaiveDate
@@ -5404,16 +5497,26 @@ fn map_key_path(key: &FieldDef) -> MapKeyPath<'_> {
     }
 }
 
+/// The rejection a key earns for its own wire form, naming the key as written and what serde writes
+/// for it instead.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn unwritable_key(key: &FieldDef, written_as: &'static str) -> MapKeyRejection {
+    MapKeyRejection::Unwritable {
+        key_name: map_key_element_name(key),
+        written_as,
+    }
+}
+
 /// Why this key has no rendering, and `None` for every key that may still have one.
 ///
-/// A sequence-wrapped key is ruled out by its own spelling: serde writes it as a JSON array, which
-/// is no object key at all. Below that, only a target the registry positively rules out is named —
-/// an unregistered name, a foreign type or one expanded after the type that writes the map, cannot
-/// be ruled out at this expansion and is left alone.
+/// A key the dispatch already refuses is ruled out by its own spelling. Below that, only a target
+/// the registry positively rules out is named — an unregistered name, a foreign type or one
+/// expanded after the type that writes the map, cannot be ruled out at this expansion and is left
+/// alone.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn key_rejection(key: &FieldDef) -> Option<MapKeyRejection> {
     match map_key_path(key) {
-        MapKeyPath::Sequenced => Some(MapKeyRejection::Sequenced(map_key_element_name(key))),
+        MapKeyPath::Refused(rejection) => Some(rejection),
         MapKeyPath::Enumerated(key_type_name) => proves_no_enum_members(key_type_name)
             .then(|| MapKeyRejection::NoEnumMembers(key_type_name.to_owned())),
         MapKeyPath::Open | MapKeyPath::Unnarrowed => None,
@@ -5468,8 +5571,24 @@ fn map_key_element_name(key: &FieldDef) -> String {
 /// both the plain enums that have them and the names this expansion never saw registered.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn proves_no_enum_members(key_type_name: &str) -> bool {
+    lookup_alias_info(key_type_name).is_some_and(|key_alias| {
+        matches!(
+            key_alias.kind,
+            AliasKind::NoEnumMembers | AliasKind::StringWire
+        )
+    })
+}
+
+/// Whether the registry proves serde writes the named type as a bare string — the wire form a JSON
+/// object key has, so such a key opens the map the way a `String` key does, under its own name.
+///
+/// Only a `#[serde(transparent)]` brand over a string-shaped inner earns this, and an alias chain
+/// ending in one inherits it. An unregistered name earns nothing: the expansion cannot tell it from
+/// a plain enum declared later.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn writes_string_wire(key_type_name: &str) -> bool {
     lookup_alias_info(key_type_name)
-        .is_some_and(|key_alias| key_alias.kind == AliasKind::NoEnumMembers)
+        .is_some_and(|key_alias| key_alias.kind == AliasKind::StringWire)
 }
 
 /// Why the first map key this field reaches, at any depth, has no rendering.
@@ -5539,6 +5658,37 @@ fn sequenced_map_key_message(subject: &str, element_name: &str) -> String {
     )
 }
 
+/// What an `Option`-wrapped key is reported as, worded like its siblings above and carrying the same
+/// `subject`.
+///
+/// The `Some` half writes exactly what the inner writes — a transparent wrapper on the wire — so the
+/// schema the expansion would emit is the bare-keyed map's, byte for byte. It is the `None` half
+/// that has no wire form: serde raises `key must be a string` for it and refuses the whole map, so a
+/// schema describing only the `Some` half would validate documents the type cannot produce and stay
+/// silent about the ones it errors on. The inner is named because it is also the remedy.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn optional_map_key_message(subject: &str, inner_name: &str) -> String {
+    format!(
+        "{subject}: a map key must be a value serde writes as a string, which is what a JSON object key is — this key is an `Option<{inner_name}>`, whose `Some` serde writes as the bare `{inner_name}` while a `None` has no string form at all and makes serde refuse the whole map; key it by `{inner_name}`"
+    )
+}
+
+/// What a key serde writes as neither a string nor anything it stringifies for the author is
+/// reported as, worded like its siblings above and carrying the same `subject`.
+///
+/// This is the same refusal the sequence spelling earns, reached by the key's own type rather than
+/// by a wrapper around it: a tuple writes a JSON array, a nested map and an `ObjectId` write JSON
+/// objects, and serde will not use any of them as an object key. What is written is named beside
+/// the key so the diagnostic says why, and the numbers, the `bool` and the chrono renderings are
+/// deliberately absent — serde stringifies those into keys, so they describe as the open object
+/// they always have.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn unwritable_map_key_message(subject: &str, key_name: &str, written_as: &str) -> String {
+    format!(
+        "{subject}: a map key must be a value serde writes as a string, which is what a JSON object key is — serde writes `{key_name}` as {written_as}, and refuses to serialize a map keyed by one at all"
+    )
+}
+
 /// What a map key with no rendering is reported as, whichever reason it has.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn map_key_rejection_message(subject: &str, rejection: &MapKeyRejection) -> String {
@@ -5549,6 +5699,11 @@ fn map_key_rejection_message(subject: &str, rejection: &MapKeyRejection) -> Stri
         MapKeyRejection::Sequenced(element_name) => {
             sequenced_map_key_message(subject, element_name)
         }
+        MapKeyRejection::Optional(inner_name) => optional_map_key_message(subject, inner_name),
+        MapKeyRejection::Unwritable {
+            key_name,
+            written_as,
+        } => unwritable_map_key_message(subject, key_name, written_as),
     }
 }
 
@@ -5612,11 +5767,7 @@ fn build_nested_map_member_item(
             )
         }
         MapKeyPath::Unnarrowed => MapMemberItem::Fragment(unnarrowed_key_map_json_schema_item()),
-        MapKeyPath::Sequenced => {
-            return Err(MapMemberRejection::SequencedKey(map_key_element_name(
-                inner_key,
-            )));
-        }
+        MapKeyPath::Refused(rejection) => return Err(MapMemberRejection::Key(rejection)),
     })
 }
 
@@ -5692,15 +5843,11 @@ fn build_map_member_item(value: &FieldDef) -> Result<MapMemberItem, MapMemberRej
             );
             MapMemberItem::Value(sibling_json_schema_value(value_type_name, value.type_span))
         }
-        // A map member's `$oid` object is closed and unpatterned, where the shared mapping's
-        // field-position rendering carries the hex pattern and leaves the object open.
+        // The one `$oid` object every position spells, which a member carries as written.
         #[cfg(feature = "object_id")]
-        FieldDefType::ObjectId => MapMemberItem::Fragment(quote! { {
-            "type": "object",
-            "properties": { "$oid": { "type": "string" } },
-            "required": ["$oid"],
-            "additionalProperties": false
-        } }),
+        FieldDefType::ObjectId => {
+            MapMemberItem::Fragment(object_id_json_schema_item(&object_id_hex_json_schema()))
+        }
         // An opaque value carries no type name to narrow with, so a member admits any value: the
         // permissive empty schema, as in field position.
         FieldDefType::Unknown => MapMemberItem::Fragment(quote! { {} }),
@@ -5754,12 +5901,7 @@ fn build_map_member_schema(
 #[cfg(feature = "jsonschema")]
 fn map_member_rejection_message(subject: &str, rejection: &MapMemberRejection) -> String {
     match rejection {
-        MapMemberRejection::NonEnumKey(key_type_name) => {
-            non_enum_map_key_message(subject, key_type_name)
-        }
-        MapMemberRejection::SequencedKey(element_name) => {
-            sequenced_map_key_message(subject, element_name)
-        }
+        MapMemberRejection::Key(key_rejection) => map_key_rejection_message(subject, key_rejection),
         MapMemberRejection::Tuple => format!(
             "{subject}: a tuple is not supported as a map value — give the value a `#[model_schema()]` struct instead"
         ),
@@ -5800,19 +5942,6 @@ fn string_key_map_json_schema_value(
     })
 }
 
-/// [`build_map_member_item`] for a member of an enum-keyed map, which differs for exactly one value
-/// type: an `ObjectId` member here carries the field-position `$oid` object — patterned, and open —
-/// where a `String`-keyed member carries the closed, unpatterned one. Which of the two a map member
-/// should carry is unsettled, so each key path keeps the rendering it has.
-#[cfg(feature = "jsonschema")]
-fn build_enum_key_map_member_item(value: &FieldDef) -> Result<MapMemberItem, MapMemberRejection> {
-    #[cfg(feature = "object_id")]
-    if matches!(value.field_type, FieldDefType::ObjectId) {
-        return Ok(MapMemberItem::Fragment(scalar_slot_item(value)?));
-    }
-    build_map_member_item(value)
-}
-
 /// The object an enum-keyed map describes as, as a standalone `serde_json::Value` expression: one
 /// property per member the key enumerates, each carrying the value type's own rendering, and closed
 /// to every other key. `Err` when the value has no rendering here, or when the registry proves the
@@ -5843,11 +5972,13 @@ fn enum_key_map_json_schema_value(
     value: &FieldDef,
 ) -> Result<proc_macro2::TokenStream, MapMemberRejection> {
     if proves_no_enum_members(key_type_name) {
-        return Err(MapMemberRejection::NonEnumKey(key_type_name.to_owned()));
+        return Err(MapMemberRejection::Key(MapKeyRejection::NoEnumMembers(
+            key_type_name.to_owned(),
+        )));
     }
 
     let normalized = normalized_slot_value(value);
-    let member_value = build_enum_key_map_member_item(&normalized)?.into_member_value(&normalized);
+    let member_value = build_map_member_item(&normalized)?.into_member_value(&normalized);
     let key_type_name_ident = Ident::new(key_type_name, key_span);
     let key_members = quote_spanned! {key_span=> #key_type_name_ident::enum_members() };
     Ok(quote! {
@@ -5889,7 +6020,7 @@ fn build_map_field_schema(
         }
         MapKeyPath::Open => string_key_map_json_schema_value(value),
         MapKeyPath::Unnarrowed => Ok(unnarrowed_key_map_json_schema_value(key)),
-        MapKeyPath::Sequenced => Err(MapMemberRejection::SequencedKey(map_key_element_name(key))),
+        MapKeyPath::Refused(rejection) => Err(MapMemberRejection::Key(rejection)),
     };
     match rendered {
         Ok(map_schema) => {
@@ -6031,23 +6162,41 @@ fn build_sibling_type_field_schema(
     }
 }
 
-/// The JSON schema an `ObjectId` describes — the closed `$oid` object serde writes — with
+/// The `json!` literal an `ObjectId` describes as — the closed `$oid` object serde writes — with
 /// `hex_schema` as the schema of the hex string it holds.
 ///
-/// Field position and the branded path read this one spelling, so the transparent brand and the
-/// inner it wraps cannot drift apart. The map-member positions still carry their own renderings.
+/// Every position reads this one spelling: a field, a slot (a tuple element, a tuple struct, a
+/// brand over a container), a member of a map on either key path, and an untagged member. So the
+/// same `ObjectId` cannot describe two ways depending on where it is written, and a brand cannot
+/// drift from the inner it wraps.
+///
+/// The object is closed because serde writes that one member and every other object this crate
+/// emits is closed, and the hex member is patterned because that is what the string always holds —
+/// both are true of every payload serde writes, so neither turns one away.
+#[cfg(all(feature = "jsonschema", feature = "object_id"))]
+fn object_id_json_schema_item(hex_schema: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    quote! { {
+        "type": "object",
+        "properties": {
+            "$oid": (#hex_schema)
+        },
+        "required": ["$oid"],
+        "additionalProperties": false
+    } }
+}
+
+/// [`object_id_json_schema_item`] as a standalone `serde_json::Value` expression, for the positions
+/// that hold the `$oid` object as a value rather than writing it into a literal.
 #[cfg(all(feature = "jsonschema", feature = "object_id"))]
 fn object_id_json_schema_value(hex_schema: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
-    quote! {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "$oid": (#hex_schema)
-            },
-            "required": ["$oid"],
-            "additionalProperties": false
-        })
-    }
+    let item = object_id_json_schema_item(hex_schema);
+    quote! { serde_json::json!(#item) }
+}
+
+/// The hex string an `ObjectId`'s `$oid` member holds, where no brand narrows it further.
+#[cfg(all(feature = "jsonschema", feature = "object_id"))]
+fn object_id_hex_json_schema() -> proc_macro2::TokenStream {
+    quote! { serde_json::json!({ "type": "string", "pattern": #OBJECT_ID_HEX_PATTERN }) }
 }
 
 /// Builds the JSON schema for a `MongoDB` `ObjectId` field (`{ "$oid": string }`).
@@ -6055,7 +6204,7 @@ fn object_id_json_schema_value(hex_schema: &proc_macro2::TokenStream) -> proc_ma
 fn build_object_id_field_schema(fld: &FieldDef, field_name_str: &str) -> proc_macro2::TokenStream {
     let schema = arrayed_json_schema_value(
         fld,
-        object_id_json_schema_value(&quote! { serde_json::json!({ "type": "string" }) }),
+        object_id_json_schema_value(&object_id_hex_json_schema()),
     );
     quote! {
         properties.insert(#field_name_str.to_string(), { #schema });

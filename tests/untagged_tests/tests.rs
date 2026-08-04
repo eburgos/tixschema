@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tixschema::model_schema;
 
+#[cfg(all(feature = "jsonschema", feature = "object_id"))]
+use mongodb::bson::oid::ObjectId;
+
 // ISO-8601 date string. Branded newtype carries the regex pattern.
 #[model_schema(pattern = r"^\d{4}-\d{2}-\d{2}$")]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,6 +110,16 @@ enum ConstrainedTagged {
         #[model_schema_prop(minLength = 2, pattern = "^[a-z]+$")]
         slug: String,
     },
+}
+
+// An untagged member is written by a dispatch of its own, so it is a position an `ObjectId` can be
+// spelled in.
+#[cfg(all(feature = "jsonschema", feature = "object_id"))]
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum OidUnion {
+    One { one: ObjectId },
 }
 
 #[test]
@@ -471,5 +484,23 @@ fn test_untagged_member_constraint_json_schema() {
     assert_eq!(
         tagged["oneOf"][0]["properties"]["slug"], *member,
         "the tagged twin must render the same member"
+    );
+}
+
+/// An untagged member spells the `$oid` object the way every other position spells it — a member is
+/// written by its own dispatch, which is one more place the object could have drifted.
+#[test]
+#[cfg(all(feature = "jsonschema", feature = "object_id"))]
+fn test_untagged_objectid_member_spells_the_one_oid_object() {
+    let schema = OidUnion::json_schema();
+    assert_eq!(
+        schema["anyOf"][0]["properties"]["one"],
+        serde_json::json!({
+            "type": "object",
+            "properties": { "$oid": { "type": "string", "pattern": r"^[a-f\d]{24}$" } },
+            "required": ["$oid"],
+            "additionalProperties": false
+        }),
+        "Got:\n{schema}"
     );
 }
