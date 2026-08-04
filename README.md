@@ -1053,7 +1053,7 @@ export const UserId$SchemaFactory = <IdType extends ZodType>(
   return schema;
 };
 
-export const UserId$SchemaDefault: ZodType<UserId<string>> = UserId$SchemaFactory(z.string());
+export const UserId$SchemaDefault: $ZodBranded<ZodString, "UserId"> = UserId$SchemaFactory(z.string());
 
 export type CorrelationId = string & $brand<"CorrelationId">;
 const CorrelationId$RawSchema = z.string().brand<"CorrelationId">().meta({
@@ -1370,7 +1370,7 @@ export const DocumentId$SchemaFactory = <IdType extends ZodType>(
   return schema;
 };
 
-export const DocumentId$SchemaDefault: ZodType<DocumentId<string>> = DocumentId$SchemaFactory(z.string());
+export const DocumentId$SchemaDefault: $ZodBranded<ZodString, "DocumentId"> = DocumentId$SchemaFactory(z.string());
 ```
 
 ## Field Validation (`model_schema_prop`)

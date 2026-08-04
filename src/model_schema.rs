@@ -698,10 +698,35 @@ struct BrandedDefaultChecks {
 ///
 /// `constrained` is `None` for every item but a branded newtype's own — see
 /// [`zod_default_block`]'s doc comment for what it names.
+///
+/// `brand` is `None` for every item but a branded newtype's own, exactly like `constrained` —
+/// but unlike `constrained`, it is `Some` whether or not the brand carries any check at all: a
+/// `.brand()` call is in the factory's chain either way, so the annotation question it answers
+/// (see [`branded_default_annotation`]) applies whether or not there is a check to route.
 #[cfg(feature = "zod")]
 struct ZodDefaultInputs<'defaults> {
+    #[cfg(feature = "typescript")]
+    brand: Option<BrandedAnnotation<'defaults>>,
     constrained: Option<(&'defaults str, &'defaults BrandedDefaultChecks)>,
     default_types: &'defaults [(syn::Ident, syn::Type)],
+}
+
+/// What a branded newtype's `$SchemaDefault` is annotated with, read off the shape of the
+/// brand's own inner rather than off any one parameter's filling — see
+/// [`branded_default_annotation`]. Only [`branded_default_annotation`] reads it, and that
+/// function is itself `typescript`-gated (the annotation it writes is a TypeScript-surface
+/// concern), so the enum carries the same gate rather than existing unread in a zod-without-
+/// typescript build.
+#[cfg(all(feature = "zod", feature = "typescript"))]
+enum BrandedAnnotation<'defaults> {
+    /// The inner is exactly one bare type parameter (`pub struct Name<T>(pub T)`) — the erased
+    /// inner itself carries no concrete class to name, so the annotation is read off that one
+    /// parameter's own declared default instead.
+    BareParameter(&'defaults str),
+    /// Every other inner shape — a tuple, an array, a concrete sibling — annotated with the bare
+    /// class [`branded_zod_type_name`] already reads off it for the non-generic const, widened
+    /// the same way regardless of what fills the brand's parameters.
+    Widened(String),
 }
 
 /// What [`default_zod_rendering`] found: a self-contained expression left eager, or a name
@@ -5154,9 +5179,21 @@ fn build_branded_zod_schema_method(
             }
             _ => None,
         };
+        #[cfg(feature = "typescript")]
+        let brand = Some(
+            if let FieldDefType::TypeParam(parameter) = &inner.field_type
+                && !inner.is_array()
+            {
+                BrandedAnnotation::BareParameter(parameter.as_str())
+            } else {
+                BrandedAnnotation::Widened(branded_zod_type_name(inner))
+            },
+        );
         let defaults = ZodDefaultInputs {
-            default_types: &args.default_types,
+            #[cfg(feature = "typescript")]
+            brand,
             constrained: constrained_default,
+            default_types: &args.default_types,
         };
         zod_factory_block(
             item_name,
@@ -12459,41 +12496,98 @@ fn zod_default_block(
         .collect();
     let fold_keys: Vec<String> = fields.iter().map(FieldDef::zod_type).collect();
     record_zod_default_arguments(rust_ident, fold_keys);
-    let arguments: Vec<String> = parameters
-        .iter()
-        .zip(&fields)
-        .map(|(parameter, field)| {
-            let rendering = default_zod_rendering(field);
-            match defaults.constrained {
-                Some((target, checks)) if target == parameter.as_str() => match rendering {
-                    DefaultZodRendering::Eager(schema) => {
-                        format!("{schema}{}", checks.chained)
-                    }
-                    DefaultZodRendering::Deferred(schema) => {
-                        deferred_zod_operand(&format!("{schema}{}", checks.base))
-                    }
-                },
-                _ => rendering.into_argument(),
-            }
-        })
-        .collect();
+    let renderings: Vec<DefaultZodRendering> = fields.iter().map(default_zod_rendering).collect();
 
     #[cfg(feature = "typescript")]
-    let annotation = format!(
-        ": ZodType<{item_name}<{}>>",
-        fields
-            .iter()
-            .map(FieldDef::typescript_typename)
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
+    let annotation =
+        branded_default_annotation(item_name, defaults, parameters, &fields, &renderings);
     #[cfg(not(feature = "typescript"))]
     let annotation = String::new();
+
+    let arguments: Vec<String> = parameters
+        .iter()
+        .zip(renderings)
+        .map(|(parameter, rendering)| match defaults.constrained {
+            Some((target, checks)) if target == parameter.as_str() => match rendering {
+                DefaultZodRendering::Eager(schema) => {
+                    format!("{schema}{}", checks.chained)
+                }
+                DefaultZodRendering::Deferred(schema) => {
+                    deferred_zod_operand(&format!("{schema}{}", checks.base))
+                }
+            },
+            _ => rendering.into_argument(),
+        })
+        .collect();
 
     format!(
         "\n\nexport const {item_name}$SchemaDefault{annotation} = {item_name}$SchemaFactory({});",
         arguments.join(", ")
     )
+}
+
+/// The `$SchemaDefault` annotation [`zod_default_block`] writes: the plain `ZodType<Name<...>>`
+/// spelling for an ordinary generic item, exactly as before this fix — tsc already accepts a
+/// factory's return type there, since nothing in the chain calls `.brand()`, so nothing narrows
+/// the classic `ZodType` interface's own deprecated `_output` field out from under it. A branded
+/// newtype's factory always ends its chain in `.brand()` (see [`branded_zod_expression`]), so its
+/// return type is always some `$ZodBranded<Argument, Name>` — never the plain `Name<...>`
+/// instantiation `ZodType` names — and the annotation has to read the same way, exactly as
+/// [`branded_zod_const_block`] already annotates the non-generic case. See txsch-bpnj.
+#[cfg(all(feature = "zod", feature = "typescript"))]
+fn branded_default_annotation(
+    item_name: &str,
+    defaults: &ZodDefaultInputs<'_>,
+    parameters: &[String],
+    fields: &[FieldDef],
+    renderings: &[DefaultZodRendering],
+) -> String {
+    let plain_annotation = || {
+        format!(
+            ": ZodType<{item_name}<{}>>",
+            fields
+                .iter()
+                .map(FieldDef::typescript_typename)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let Some(brand) = &defaults.brand else {
+        return plain_annotation();
+    };
+    let argument_type = match brand {
+        BrandedAnnotation::Widened(class) => class.clone(),
+        BrandedAnnotation::BareParameter(target) => {
+            // Structurally always found: `target` is read off this same brand's own inner, which
+            // names one of its own declared parameters. Falling back to the plain annotation
+            // rather than panicking if that ever stopped holding costs nothing real — a branded
+            // `$SchemaDefault` is never reached without a parameter list to search.
+            let Some(index) = parameters.iter().position(|parameter| parameter == target) else {
+                return plain_annotation();
+            };
+            branded_default_argument_class(&fields[index], &renderings[index])
+        }
+    };
+    format!(": $ZodBranded<{argument_type}, \"{item_name}\">")
+}
+
+/// The class a bare-parameter brand's own declared-default argument is annotated with, for
+/// [`branded_default_annotation`]: the eager expression's own class from [`branded_zod_type_name`]
+/// bare, or that same class wrapped in `ZodLazy<...>` for a deferred one — `typeof {schema}` when
+/// the deferred target is a plain binding name, which is every deferred shape
+/// [`default_zod_rendering`] folds or defers to a sibling's own `$Schema`/`$SchemaDefault`; the
+/// widened class otherwise, for the one shape it is not — a declared default naming a generic
+/// sibling at some filling other than that sibling's own, whose un-folded reference is a factory
+/// call rather than a name `typeof` can read.
+#[cfg(all(feature = "zod", feature = "typescript"))]
+fn branded_default_argument_class(field: &FieldDef, rendering: &DefaultZodRendering) -> String {
+    match rendering {
+        DefaultZodRendering::Eager(_) => branded_zod_type_name(field),
+        DefaultZodRendering::Deferred(schema) if !schema.contains('(') => {
+            format!("ZodLazy<typeof {schema}>")
+        }
+        DefaultZodRendering::Deferred(_) => format!("ZodLazy<{}>", branded_zod_type_name(field)),
+    }
 }
 
 /// What a generic type's Zod surface is written as: the builder holding the schema its arguments
@@ -12605,8 +12699,10 @@ fn zod_published_binding(
         zod_const_block(item_name, preamble, expression, reexport)
     } else {
         let defaults = ZodDefaultInputs {
-            default_types,
+            #[cfg(feature = "typescript")]
+            brand: None,
             constrained: None,
+            default_types,
         };
         zod_factory_block(
             item_name, rust_ident, parameters, &defaults, preamble, expression, reexport,

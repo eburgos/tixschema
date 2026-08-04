@@ -53,6 +53,12 @@ mod zod_ts_tests {
     /// the enclosing factory binds for it — so the brand lands on the schema the caller supplied
     /// rather than on a value that admits anything whatever it was filled with. The TypeScript
     /// type beside it keeps `IdType`, its own declaration binding it for real.
+    ///
+    /// The builder itself carries no `$ZodBranded` — its own bound is the plain `IdType extends
+    /// ZodType`, unlike the non-generic const's own base schema, which names it directly. Only
+    /// `$SchemaDefault`, called at the declared default, has a concrete filling to annotate with
+    /// one (txsch-bpnj) — the shape `an_unconstrained_generic_brands_default_is_still_branded`
+    /// below pins.
     #[test]
     fn test_branded_newtype_zod_schema() {
         let zod = RoleId::<String>::zod_schema();
@@ -63,7 +69,25 @@ mod zod_ts_tests {
         assert!(zod.contains("idType.meta({"), "Got: {zod}");
         assert!(zod.contains("}).brand<\"RoleId\">();"), "Got: {zod}");
         assert!(!zod.contains("z.unknown()"), "Got: {zod}");
-        assert!(!zod.contains("$ZodBranded"), "Got: {zod}");
+        let builder_end = zod.find("RoleId$SchemaDefault").unwrap();
+        assert!(!zod[..builder_end].contains("$ZodBranded"), "Got: {zod}");
+    }
+
+    /// Shape (b) from txsch-bpnj's capture: an *unconstrained* generic brand — no
+    /// `minLength`/`maxLength`/`pattern` at all — still has its `$SchemaDefault` annotated
+    /// `$ZodBranded<ZodString, "RoleId">` rather than `ZodType<RoleId<string>>`: the factory's
+    /// chain ends in `.brand()` whether or not there is a check to route, so the same `_output`
+    /// mismatch applies with or without one.
+    #[test]
+    fn an_unconstrained_generic_brands_default_is_still_branded() {
+        let zod = RoleId::<String>::zod_schema();
+        assert!(
+            zod.contains(
+                "export const RoleId$SchemaDefault: $ZodBranded<ZodString, \"RoleId\"> = \
+                 RoleId$SchemaFactory(z.string());"
+            ),
+            "Got:\n{zod}"
+        );
     }
 
     #[test]
@@ -947,12 +971,20 @@ mod constrained_generic_branded_tests {
 
     /// `$SchemaDefault` is the factory called at the declared default argument, with the checks
     /// composed onto that argument — exactly the shape the design settled on.
+    ///
+    /// Annotated `$ZodBranded<ZodString, "StrictDocumentId">` rather than
+    /// `ZodType<StrictDocumentId<string>>`: the factory's own chain always ends in `.brand()`, and
+    /// strict tsc rejects the plain `ZodType<...>` spelling there — the classic interface's
+    /// deprecated `_output` field is computed at the pre-brand type and a brand intersection does
+    /// not refresh it (txsch-bpnj). `$ZodBranded` matches the spelling the non-generic const
+    /// already carries for the identical reason.
     #[test]
     fn the_default_composes_the_factory_with_the_constrained_argument() {
         let zod = StrictDocumentId::<String>::zod_schema();
         assert!(
             zod.contains(
-                "export const StrictDocumentId$SchemaDefault: ZodType<StrictDocumentId<string>> = \
+                "export const StrictDocumentId$SchemaDefault: $ZodBranded<ZodString, \
+                 \"StrictDocumentId\"> = \
                  StrictDocumentId$SchemaFactory(z.string().min(24).max(24).check(z.regex(/^[a-f0-9]{24}$/)));"
             ),
             "Got:\n{zod}"
@@ -994,13 +1026,19 @@ mod constrained_generic_branded_tests {
     /// carry `ZodString`'s own chain methods, only the `.check(...)` every schema exposes. Before
     /// the fix, this same check was appended after the thunk closed, landing on `ZodLazy`, which
     /// has neither.
+    ///
+    /// Annotated `$ZodBranded<ZodLazy<typeof StrictDocumentId$SchemaDefault>, "OuterId">` rather
+    /// than `ZodType<OuterId<StrictDocumentId<string>>>` — the same `.brand()`-vs-`ZodType`
+    /// mismatch `the_default_composes_the_factory_with_the_constrained_argument` documents, with
+    /// the deferred target's own type spelled through `typeof` (txsch-bpnj).
     #[test]
     fn a_constrained_brands_default_naming_another_constrained_brands_default_composes_the_checks_inside_the_thunk()
      {
         let zod = OuterId::<String>::zod_schema();
         assert!(
             zod.contains(
-                "export const OuterId$SchemaDefault: ZodType<OuterId<StrictDocumentId<string>>> = \
+                "export const OuterId$SchemaDefault: $ZodBranded<ZodLazy<typeof \
+                 StrictDocumentId$SchemaDefault>, \"OuterId\"> = \
                  OuterId$SchemaFactory(z.lazy(() => \
                  StrictDocumentId$SchemaDefault.check(z.minLength(10))));"
             ),
@@ -1054,13 +1092,19 @@ mod constrained_default_names_a_sibling_tests {
     /// Before the fix: `OuterBrand$SchemaFactory(z.lazy(() => InnerString$Schema).min(3))` —
     /// `.min` landing on `ZodLazy`, which does not have it. After: the check composes inside the
     /// thunk, over `InnerString$Schema`'s own base `.check(...)` surface.
+    ///
+    /// Annotated `$ZodBranded<ZodLazy<typeof InnerString$Schema>, "OuterBrand">` rather than
+    /// `ZodType<OuterBrand<InnerString>>` — the same `.brand()`-vs-`ZodType` mismatch
+    /// `constrained_generic_branded_tests` documents for the primitive-default case, with the
+    /// deferred target's own type spelled through `typeof` (txsch-bpnj).
     #[test]
     fn a_constrained_brands_default_naming_a_non_generic_sibling_composes_the_check_inside_the_thunk()
      {
         let zod = OuterBrand::<String>::zod_schema();
         assert!(
             zod.contains(
-                "export const OuterBrand$SchemaDefault: ZodType<OuterBrand<InnerString>> = \
+                "export const OuterBrand$SchemaDefault: $ZodBranded<ZodLazy<typeof \
+                 InnerString$Schema>, \"OuterBrand\"> = \
                  OuterBrand$SchemaFactory(z.lazy(() => InnerString$Schema.check(z.minLength(3))));"
             ),
             "Got:\n{zod}"
