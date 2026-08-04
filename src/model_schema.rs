@@ -5585,6 +5585,21 @@ fn member_rejection_value(
     quote! { compile_error!(#message) }
 }
 
+/// One untagged member's field def in the two readings the guards need: as the surfaces will
+/// render it, every reference to one of the enclosing item's own parameters already the opaque
+/// value, and as the author spelled it. [`process_field`] reads the same pair off the same erase.
+#[cfg(feature = "serde")]
+fn untagged_member_field_defs(
+    field: &Field,
+    field_name: &str,
+    type_parameters: &[String],
+) -> (FieldDef, FieldDef) {
+    let written = get_field_def(field_name, &field.ty, "");
+    let mut rendered = written.clone();
+    rendered.erase_type_parameters(type_parameters);
+    (rendered, written)
+}
+
 /// The guard verdicts one untagged member earns, serde's and this crate's own combined — the
 /// checks [`process_field`] runs through its own channels, asked here by the walk that builds its
 /// field defs directly.
@@ -5592,6 +5607,7 @@ fn member_rejection_value(
 fn untagged_member_guard_errors(
     field: &Field,
     field_def: &FieldDef,
+    written_def: &FieldDef,
     field_name: &str,
     prop_meta: &ModelSchemaPropMeta,
     serde_field_meta: &SerdeFieldMeta,
@@ -5604,7 +5620,43 @@ fn untagged_member_guard_errors(
         serde_field_meta,
         positional_constraint_error,
     );
-    collect_field_guard_errors(field, field_def, field_name, prop_meta, serde_guard_errors)
+    collect_field_guard_errors(
+        field,
+        field_def,
+        written_def,
+        field_name,
+        prop_meta,
+        serde_guard_errors,
+    )
+}
+/// One untagged member's finished def, beside the guard verdicts it earned: built next to its
+/// written twin, stamped, guarded, resolved, and carrying its meta — the whole of what the
+/// collector's loop needs back for the field.
+#[cfg(feature = "serde")]
+fn untagged_member_field_def(
+    field: &Field,
+    field_name: &str,
+    type_parameters: &[String],
+    enum_type_name: &str,
+    prop_meta: ModelSchemaPropMeta,
+    serde_field_meta: &SerdeFieldMeta,
+    positional_constraint_error: Option<proc_macro2::TokenStream>,
+) -> (FieldDef, Vec<proc_macro2::TokenStream>) {
+    let (mut field_def, written_def) =
+        untagged_member_field_defs(field, field_name, type_parameters);
+    apply_serde_key_omission(&mut field_def, field, serde_field_meta);
+    let member_guard_errors = untagged_member_guard_errors(
+        field,
+        &field_def,
+        &written_def,
+        field_name,
+        &prop_meta,
+        serde_field_meta,
+        positional_constraint_error,
+    );
+    field_def.resolve_self_references(enum_type_name);
+    apply_model_schema_prop_meta(&mut field_def, prop_meta, field_name);
+    (field_def, member_guard_errors)
 }
 
 /// Collects each untagged variant's union-member parts: the TypeScript member type, the Zod member
@@ -5688,22 +5740,17 @@ fn collect_untagged_members(
                 checks.push(body);
             }
 
-            let mut field_def = get_field_def(&field_name, &field.ty, "");
-            apply_serde_key_omission(&mut field_def, field, &serde_field_meta);
-            guard_errors.extend(untagged_member_guard_errors(
+            let (member_def, member_guard_errors) = untagged_member_field_def(
                 field,
-                &field_def,
                 &field_name,
-                &prop_meta,
+                &type_parameters,
+                &enum_type_name,
+                prop_meta,
                 &serde_field_meta,
                 positional_constraint_error,
-            ));
-
-            field_def.resolve_self_references(&enum_type_name);
-            apply_model_schema_prop_meta(&mut field_def, prop_meta, &field_name);
-            // Applied where `process_field` applies it: after every guard has read the field.
-            field_def.erase_type_parameters(&type_parameters);
-            field_defs.push(field_def);
+            );
+            guard_errors.extend(member_guard_errors);
+            field_defs.push(member_def);
         }
 
         per_variant_checks.push((
@@ -6757,7 +6804,11 @@ fn map_key_path(key: &FieldDef) -> MapKeyPath<'_> {
         return MapKeyPath::Refused(MapKeyRejection::Optional(map_key_element_name(key)));
     }
     match &key.field_type {
-        FieldDefType::String => MapKeyPath::Open,
+        // A parameter names no type here, so nothing about the key can be enumerated or narrowed —
+        // but serde has already said the one thing an object key needs: every instantiation this
+        // map has either writes its keys as strings or refuses the whole map at serialization, so
+        // the open member set is true of every instantiation that serializes at all.
+        FieldDefType::String | FieldDefType::TypeParam(_) => MapKeyPath::Open,
         FieldDefType::SiblingType(key_type_name, args) if args.is_empty() => {
             match registered_key_kind(key_type_name) {
                 Some(AliasKind::StringWire) => MapKeyPath::Open,
@@ -6770,7 +6821,6 @@ fn map_key_path(key: &FieldDef) -> MapKeyPath<'_> {
         #[cfg(feature = "object_id")]
         FieldDefType::ObjectId => MapKeyPath::Refused(unwritable_key(key, WRITTEN_AS_OBJECT)),
         FieldDefType::SiblingType(..)
-        | FieldDefType::TypeParam(_)
         | FieldDefType::Unknown
         | FieldDefType::Boolean
         | FieldDefType::StringLiteral(_)
@@ -8387,15 +8437,22 @@ fn field_guard_errors(
         .collect()
 }
 
-/// Every guard error the field violates: the two the written type earns — the `OsString` guard and
-/// the map-key guard, neither of which any attribute can hide — then everything the
+/// Every guard error the field violates: the two the type earns — the `OsString` guard and the
+/// map-key guard, neither of which any attribute can hide — then everything the
 /// `model_schema_prop` attribute earned, then the serde-side guards when any fired.
+///
+/// `field_def` is the field as the surfaces will render it, every reference to one of the enclosing
+/// item's own parameters already the opaque value: a guard and the renderer standing behind it read
+/// one def, so neither can answer for a parameter the other has not. `written_def` is the same
+/// field as the author spelled it, which only [`check_as_type_override`] reads — `as` names a type,
+/// and a parameter is one of the names it may name.
 ///
 /// The map-key guard stands under every subset that emits a schema at all, which is the same set
 /// the registry it reads is populated under.
 fn collect_field_guard_errors(
     field: &Field,
     field_def: &FieldDef,
+    written_def: &FieldDef,
     raw_field_ident: &str,
     prop_meta: &ModelSchemaPropMeta,
     serde_guard_errors: Vec<proc_macro2::TokenStream>,
@@ -8415,7 +8472,11 @@ fn collect_field_guard_errors(
         .into_iter()
         .chain(map_key_error)
         .chain(model_schema_prop_guard_errors(
-            field, field_def, &label, prop_meta,
+            field,
+            field_def,
+            written_def,
+            &label,
+            prop_meta,
         ))
         .chain(serde_guard_errors)
         .collect()
@@ -8432,12 +8493,13 @@ fn collect_field_guard_errors(
 fn model_schema_prop_guard_errors(
     field: &Field,
     field_def: &FieldDef,
+    written_def: &FieldDef,
     label: &str,
     prop_meta: &ModelSchemaPropMeta,
 ) -> Vec<proc_macro2::TokenStream> {
     let refusals = [
         check_fixed_shape_constraints(field, field_def, prop_meta, label).err(),
-        check_as_type_override(field, field_def, prop_meta, label).err(),
+        check_as_type_override(field, written_def, prop_meta, label).err(),
         check_as_preprocess_conflict(field, prop_meta, label).err(),
         flag_guard_error(
             field,
@@ -8500,12 +8562,13 @@ fn written_constraint_keys(prop_meta: &ModelSchemaPropMeta) -> Vec<&'static str>
 
 /// Rejects a length, pattern or range written on a field no surface reads one beside.
 ///
-/// Two shapes earn it. The types [`FieldDef::fixed_shape_name`] answers for render a shape fixed in
-/// this crate rather than the plain string or number a bound is spelled against; the ones
+/// Three shapes earn it. The types [`FieldDef::fixed_shape_name`] answers for render a shape fixed
+/// in this crate rather than the plain string or number a bound is spelled against; the ones
 /// [`FieldDef::composite_shape_name`] answers for render their members, which are built from inner
-/// field defs that carry no meta. Either way every surface writes the field without ever reading the
-/// bound — so it is accepted at expansion and reaches nothing, which leaves the author holding a
-/// contract that says the value is checked when nothing checks it.
+/// field defs that carry no meta; and the one [`FieldDef::parameter_shape_name`] answers for
+/// renders a value whose type no instantiation has yet supplied. Every one of them writes the field
+/// without ever reading the bound — so it is accepted at expansion and reaches nothing, which
+/// leaves the author holding a contract that says the value is checked when nothing checks it.
 fn check_fixed_shape_constraints(
     field: &Field,
     field_def: &FieldDef,
@@ -8529,17 +8592,31 @@ fn check_fixed_shape_constraints(
             ),
         ));
     }
-    let Some(shape) = field_def.composite_shape_name() else {
+    if let Some(shape) = field_def.composite_shape_name() {
+        return Err(syn::Error::new_spanned(
+            field,
+            format!(
+                "model_schema: {label}: `{keys}` cannot apply to {shape} — a map renders its keys \
+                 and its values, a tuple renders each of its elements, and every surface builds \
+                 those from the members: the bound names no value here, and `model_schema_prop` \
+                 has no way to say which member it meant, so the constraint would reach neither \
+                 Zod, nor the JSON schema, nor the generated validator. Constrain the member \
+                 instead — declare its type as a branded newtype carrying the bound — or drop it."
+            ),
+        ));
+    }
+    let Some(parameter) = field_def.parameter_shape_name() else {
         return Ok(());
     };
     Err(syn::Error::new_spanned(
         field,
         format!(
-            "model_schema: {label}: `{keys}` cannot apply to {shape} — a map renders its keys and \
-             its values, a tuple renders each of its elements, and every surface builds those from \
-             the members: the bound names no value here, and `model_schema_prop` has no way to say \
-             which member it meant, so the constraint would reach neither Zod, nor the JSON schema, \
-             nor the generated validator. Constrain the member instead — declare its type as a \
+            "model_schema: {label}: `{keys}` cannot apply to the type parameter `{parameter}` — \
+             the value's type is whatever the instantiation supplies, and one schema is written \
+             for every instantiation: Zod and the JSON schema describe the value as the opaque one \
+             a bound cannot be spelled against, and neither the generated validator nor serde \
+             holds it to anything written here, so the constraint would reach none of them. \
+             Constrain the argument instead — declare the type the instantiation supplies as a \
              branded newtype carrying the bound — or drop it."
         ),
     ))
@@ -8716,6 +8793,16 @@ fn process_field(
     // read the field so each one asks its question of the type the surfaces will render.
     field_def.resolve_self_references(type_name);
 
+    // The field as the author spelled it, kept for the one guard that reads a written *name*: an
+    // `as = Type` may name one of the item's own parameters, and the target it is compared against
+    // is built from the written type too.
+    let written_def = field_def.clone();
+
+    // Every other guard, and the constraint docs below, ask what the surfaces will render — where
+    // one of the item's own parameters is the opaque value rather than a reference to a type of
+    // that name. Erased here so a guard and the renderer standing behind it read one def.
+    field_def.erase_type_parameters(type_parameters);
+
     #[cfg(feature = "serde")]
     apply_serde_key_omission(&mut field_def, field, &serde_field_meta);
 
@@ -8733,16 +8820,13 @@ fn process_field(
     let guard_errors = collect_field_guard_errors(
         field,
         &field_def,
+        &written_def,
         &raw_field_ident,
         &model_schema_prop_meta,
         serde_guard_errors,
     );
 
     apply_model_schema_prop_meta(&mut field_def, model_schema_prop_meta, &final_name);
-
-    // Last, so every guard above asked its question of the type the author wrote, and so an
-    // `as = Type` override is read for a parameter too.
-    field_def.erase_type_parameters(type_parameters);
 
     (field_def, validation_fn, validate_body, guard_errors)
 }

@@ -1736,19 +1736,29 @@ fn a_container_short_of_its_wire_arity_still_falls_through_as_a_sibling() {
 /// Runs the field walk the way [`super::process_field`] does and renders the guard failures its
 /// `model_schema_prop` attributes earn, so a refused key and an unparseable `pattern` are read off
 /// the same channel that carries them to the emitted item.
-fn field_prop_guard_errors(item: &syn::ItemStruct) -> Vec<String> {
+///
+/// `parameters` names what the enclosing item declares, which is what decides whether a name the
+/// field is written with is a reference to another type or one of the item's own parameters — the
+/// same list [`super::process_field`] hands the walk.
+fn field_prop_guard_errors_in_scope(item: &syn::ItemStruct, parameters: &[String]) -> Vec<String> {
     let field = item.fields.iter().next().unwrap();
     let name = field
         .ident
         .as_ref()
         .map(ToString::to_string)
         .unwrap_or_default();
-    let field_def = get_field_def(&name, &field.ty, "");
+    let written = get_field_def(&name, &field.ty, "");
+    let mut rendered = written.clone();
+    rendered.erase_type_parameters(parameters);
     let meta = super::parse_model_schema_prop_attributes(&field.attrs);
-    super::collect_field_guard_errors(field, &field_def, &name, &meta, Vec::new())
+    super::collect_field_guard_errors(field, &rendered, &written, &name, &meta, Vec::new())
         .iter()
         .map(ToString::to_string)
         .collect()
+}
+
+fn field_prop_guard_errors(item: &syn::ItemStruct) -> Vec<String> {
+    field_prop_guard_errors_in_scope(item, &[])
 }
 
 /// The guard's verdict is the `regex` crate's verdict: the parse the generated validator's
@@ -2087,8 +2097,91 @@ fn a_map_or_tuple_field_without_a_bound_is_left_alone() {
     }
 }
 
-/// The docs a field's meta earns, read off the walk that writes them.
-fn field_docs_after_meta(item: &syn::ItemStruct) -> String {
+/// A parameter names no type until the item is instantiated, so a bound written on a field typed
+/// with one is held by nothing at all: the two validating surfaces describe the value as opaque,
+/// which takes no length, no pattern and no range, and the generated validator and serde read
+/// whatever type the instantiation supplied. That is the map's and the tuple's loss under another
+/// spelling, and it is refused where it is written for the same reason — at every depth the
+/// parameter can be reached through, the wrappers collapsing onto the value a bound would measure.
+#[test]
+fn a_bound_on_a_parameter_typed_field_is_refused() {
+    for (constraint, key) in [
+        (quote::quote! { minLength = 30 }, "minLength"),
+        (quote::quote! { maxLength = 30 }, "maxLength"),
+        (quote::quote! { pattern = "^[a-z]+$" }, "pattern"),
+        (quote::quote! { minimum = 5 }, "minimum"),
+        (quote::quote! { maximum = 5 }, "maximum"),
+    ] {
+        for field_type in [
+            quote::quote! { IdType },
+            quote::quote! { Option<IdType> },
+            quote::quote! { Vec<IdType> },
+            quote::quote! { Option<Vec<IdType>> },
+        ] {
+            let errors = field_prop_guard_errors_in_scope(
+                &syn::parse_quote! {
+                    struct Report {
+                        #[model_schema_prop(#constraint)]
+                        labels: #field_type,
+                    }
+                },
+                &["IdType".to_owned()],
+            );
+            assert_eq!(errors.len(), 1, "for {key} on {field_type}: {errors:?}");
+            for needle in [
+                "compile_error",
+                "field `labels`",
+                key,
+                "type parameter",
+                "IdType",
+                "brand",
+            ] {
+                assert!(
+                    errors[0].contains(needle),
+                    "{needle} missing for {key} on {field_type}: {}",
+                    errors[0]
+                );
+            }
+        }
+    }
+}
+
+/// The refusal turns on the bound and on the name being the item's own, so a parameter-typed field
+/// carrying none clears it — and so does the same bound on a concrete field standing beside the
+/// parameter, which every surface still reads it for. A name the item does not declare is a
+/// reference to another type and keeps whatever that type's own rendering earns.
+#[test]
+fn a_parameter_in_scope_only_refuses_the_field_that_carries_a_bound() {
+    for (field, parameters) in [
+        (quote::quote! { labels: IdType }, &["IdType".to_owned()][..]),
+        (
+            quote::quote! { #[model_schema_prop(preprocess = ["trim"])] labels: IdType },
+            &["IdType".to_owned()][..],
+        ),
+        (
+            quote::quote! { #[model_schema_prop(minLength = 30)] labels: String },
+            &["IdType".to_owned()][..],
+        ),
+        (
+            quote::quote! { #[model_schema_prop(minLength = 30)] labels: IdType },
+            &[][..],
+        ),
+    ] {
+        let errors = field_prop_guard_errors_in_scope(
+            &syn::parse_quote! {
+                struct Report {
+                    #field
+                }
+            },
+            parameters,
+        );
+        assert!(errors.is_empty(), "for {field}: {errors:?}");
+    }
+}
+
+/// The docs a field's meta earns, read off the walk that writes them, inside an item declaring
+/// `parameters`.
+fn field_docs_after_meta_in_scope(item: &syn::ItemStruct, parameters: &[String]) -> String {
     let field = item.fields.iter().next().unwrap();
     let name = field
         .ident
@@ -2096,9 +2189,14 @@ fn field_docs_after_meta(item: &syn::ItemStruct) -> String {
         .map(ToString::to_string)
         .unwrap_or_default();
     let mut field_def = get_field_def(&name, &field.ty, "");
+    field_def.erase_type_parameters(parameters);
     let meta = super::parse_model_schema_prop_attributes(&field.attrs);
     super::apply_model_schema_prop_meta(&mut field_def, meta, &name);
     field_def.docs
+}
+
+fn field_docs_after_meta(item: &syn::ItemStruct) -> String {
+    field_docs_after_meta_in_scope(item, &[])
 }
 
 /// The `JSDoc` states the bound as a rule the value is held to, so it is written only where
@@ -2127,6 +2225,43 @@ fn the_constraint_docs_are_written_only_where_the_bound_is_kept() {
         });
         assert!(docs.is_empty(), "for {field}, got: {docs}");
     }
+}
+
+/// The `JSDoc` was the one place a bound on a parameter-typed field appeared at all — every gate it
+/// named was silent — so the sentence goes where the refusal does, off the same question both are
+/// written from. A concrete field standing in the same generic item keeps its own.
+#[test]
+fn the_constraint_docs_are_silent_for_a_parameter_typed_field() {
+    let parameters = ["IdType".to_owned()];
+    for field in [
+        quote::quote! { #[model_schema_prop(minLength = 30)] id: IdType },
+        quote::quote! { #[model_schema_prop(maximum = 5)] id: Option<IdType> },
+        quote::quote! { #[model_schema_prop(minimum = 5)] id: Vec<IdType> },
+    ] {
+        let docs = field_docs_after_meta_in_scope(
+            &syn::parse_quote! {
+                struct Report {
+                    #field
+                }
+            },
+            &parameters,
+        );
+        assert!(docs.is_empty(), "for {field}, got: {docs}");
+    }
+
+    assert!(
+        field_docs_after_meta_in_scope(
+            &syn::parse_quote! {
+                struct Report {
+                    #[model_schema_prop(minLength = 30)]
+                    id: String,
+                }
+            },
+            &parameters,
+        )
+        .contains("Minimum length: 30"),
+        "a bound the surfaces render says so in the docs, parameters in scope or not"
+    );
 }
 
 /// `as` names the type the field already renders or it names nothing the expansion can honor: the
