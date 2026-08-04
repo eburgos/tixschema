@@ -4478,7 +4478,7 @@ fn a_sibling_slot_carries_the_schema_module_reference() {
 fn brand_json_schema_over(inner_ty: &syn::Type) -> String {
     super::build_branded_json_schema_method(
         &super::ModelSchemaArgs::default(),
-        &super::branded_json_inner(false, inner_ty),
+        &super::branded_json_inner(&[], inner_ty),
         "Wrapped",
     )
     .to_string()
