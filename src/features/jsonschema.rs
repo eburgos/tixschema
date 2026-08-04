@@ -26,6 +26,11 @@ pub struct MergeDiagnostic<'msg> {
 /// the author at.
 pub struct MergedSource {
     pub label: String,
+    /// Whether the value was reached through an `Option`. serde writes the members of a `Some` into
+    /// the object being written and writes nothing at all for a `None`, so an optional source is two
+    /// key sets rather than one — a choice the merge multiplies the base out over, the same way a
+    /// union is.
+    pub optional: bool,
     pub value: proc_macro2::TokenStream,
 }
 
@@ -251,6 +256,9 @@ fn merge_readers() -> proc_macro2::TokenStream {
 fn merged_tree() -> proc_macro2::TokenStream {
     quote::quote! {
         enum Branches<'defs> {
+            // What a source reached through an `Option` contributes when it is not there: no
+            // members, so the branch names exactly the keys the object writes on its own.
+            Absent,
             Object(&'defs serde_json::Map<String, serde_json::Value>),
             Union(&'static str, Vec<Branches<'defs>>),
         }
@@ -266,6 +274,12 @@ fn merged_tree() -> proc_macro2::TokenStream {
             // that offered it was written with.
             fn merged_into(&self, base: &serde_json::Map<String, serde_json::Value>) -> Merged {
                 match *self {
+                    // Merged rather than copied: an absent source contributes no members, and the
+                    // branch is still a branch of a document whose others were written by the
+                    // merge — the same keys in the same order, holding what the base already held.
+                    Self::Absent => {
+                        Merged::Object(merge_object_schemas(base, &serde_json::Map::new()))
+                    }
                     Self::Object(members) => Merged::Object(merge_object_schemas(base, members)),
                     Self::Union(spelling, ref branches) => {
                         let mut merged: Vec<Merged> = branches
@@ -281,6 +295,20 @@ fn merged_tree() -> proc_macro2::TokenStream {
                         }
                     }
                 }
+            }
+
+            // The same source with its own absence offered beside it — what an `Option` makes of
+            // whatever it wraps. One object cannot say that a group of keys is written together or
+            // not at all: required of every payload rejects the absent one, and required of none
+            // admits a base written in part, which is a payload the source never writes. A choice
+            // between two key sets is exactly what the two forms are, so it is written as one.
+            //
+            // `anyOf` is the rule that choice was written under. A source whose own members are all
+            // optional writes nothing for some of its values, and that payload is the one its
+            // absence writes too — two branches admitting it is the ordinary case rather than the
+            // ambiguity `oneOf` would call it.
+            fn or_absent(self) -> Self {
+                Self::Union("anyOf", vec![self, Self::Absent])
             }
         }
 
@@ -475,6 +503,7 @@ pub fn merged_object_value(
     let refusals = expansion_refusals(diagnostic);
     let expansion = branch_expansion();
     let labels = merged.iter().map(|source| source.label.as_str());
+    let optionals = merged.iter().map(|source| source.optional);
     let values = merged.iter().map(|source| &source.value);
     let readers = merge_readers();
     let tree = merged_tree();
@@ -485,16 +514,21 @@ pub fn merged_object_value(
             #refusals
             #expansion
 
-            let flattened: Vec<(&'static str, serde_json::Value)> = vec![ #((#labels, #values)),* ];
+            let flattened: Vec<(&'static str, bool, serde_json::Value)> =
+                vec![ #((#labels, #optionals, #values)),* ];
 
             let mut described = Merged::Object(#base);
-            for (label, fs) in &flattened {
+            for (label, optional, fs) in &flattened {
                 let mut expanding: Vec<&str> = Vec::new();
                 let mut position: Vec<usize> = Vec::new();
                 if let Some(source) =
                     expanded_branches(fs, hoisted_defs, &mut expanding, &mut position, label)
                 {
-                    described = described.multiplied(&source);
+                    // The absence is offered around whatever the source described as, so a union
+                    // reached through an `Option` keeps its own spelling and gains the choice
+                    // outside it rather than one more member inside it.
+                    let offered = if *optional { source.or_absent() } else { source };
+                    described = described.multiplied(&offered);
                 }
             }
 

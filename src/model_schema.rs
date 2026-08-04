@@ -6892,16 +6892,22 @@ fn flatten_merged_sources(flattened_fields: &[FieldDef]) -> Vec<MergedSource> {
 /// What a value whose members join the object being written contributes to it, labelled with the
 /// name the author gave it: the type for a named one, the field otherwise — a shape with no name of
 /// its own is only ever pointed at through where it was written.
+///
+/// An `Option` around it travels too. What it wraps says which members the value contributes, and
+/// the `Option` says whether it contributes them at all — the merge owes the object both answers,
+/// and nothing below this point can still see the wrapper.
 #[cfg(feature = "jsonschema")]
 fn flatten_merged_source(fld: &FieldDef) -> MergedSource {
     if let FieldDefType::SiblingType(name, _) = &fld.field_type {
         MergedSource {
             label: name.clone(),
+            optional: fld.is_optional(),
             value: sibling_json_schema_value(name, fld.type_span),
         }
     } else {
         MergedSource {
             label: fld.name.clone(),
+            optional: fld.is_optional(),
             value: quote! { serde_json::json!({ "type": "object" }) },
         }
     }

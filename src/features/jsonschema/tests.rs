@@ -25,6 +25,7 @@ fn test_json_schema_method_flatten_emits_merge() {
         &fields,
         &[MergedSource {
             label: "Base".to_owned(),
+            optional: false,
             value: quote::quote! { serde_json::json!({ "type": "object" }) },
         }],
         "Node",
@@ -45,6 +46,7 @@ fn test_the_merge_wraps_branches_in_the_spelling_its_source_used() {
         &[],
         &[MergedSource {
             label: "Base".to_owned(),
+            optional: false,
             value: quote::quote! { serde_json::json!({ "type": "object" }) },
         }],
         "Node",
@@ -66,6 +68,40 @@ fn test_the_merge_wraps_branches_in_the_spelling_its_source_used() {
     assert!(merge.contains("\"anyOf\""), "{merge}");
 }
 
+/// Whether a source was reached through an `Option` is knowable only where the field was read, and
+/// the merge that answers for it runs where the document is written. So the answer is carried into
+/// the merge beside the label and the schema, as the constant it is, and the merge offers the
+/// source's absence beside the source wherever it is set.
+#[test]
+fn test_an_optional_merged_source_carries_its_absence_into_the_merge() {
+    let merge_of = |optional| {
+        generate_struct_json_schema_method(
+            &[],
+            &[MergedSource {
+                label: "Base".to_owned(),
+                optional,
+                value: quote::quote! { serde_json::json!({ "type": "object" }) },
+            }],
+            "Node",
+        )
+        .to_string()
+    };
+
+    let optional = merge_of(true);
+    assert!(optional.contains("(\"Base\" , true ,"), "{optional}");
+    assert!(
+        optional.contains("if * optional { source . or_absent () } else { source }"),
+        "{optional}"
+    );
+    assert!(
+        optional.contains("Self :: Union (\"anyOf\" , vec ! [self , Self :: Absent])"),
+        "{optional}"
+    );
+
+    let required = merge_of(false);
+    assert!(required.contains("(\"Base\" , false ,"), "{required}");
+}
+
 /// A branch that is itself a union carries no members either, so the questions the whole merged body
 /// was asked are asked of it too rather than once. The descent is bounded by the names it resolved
 /// on the way down: a name reached twice on one path names a type no finite value inhabits.
@@ -75,6 +111,7 @@ fn test_the_merge_expands_branches_to_a_fixed_point_under_a_path_terminator() {
         &[],
         &[MergedSource {
             label: "Base".to_owned(),
+            optional: false,
             value: quote::quote! { serde_json::json!({ "type": "object" }) },
         }],
         "Node",
