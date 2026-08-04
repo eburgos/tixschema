@@ -251,6 +251,21 @@ enum OidUnion {
     One { one: ObjectId },
 }
 
+/// The untagged lone-slot collapse, declared without a schema because the union refuses it — the
+/// wire captured below is the one that refusal has to fit.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum UntaggedLoneSlotWire {
+    Lone(#[serde(skip)] String),
+}
+
+/// The same variant declared as the unit it is written as, sharing that one wire.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum UntaggedUnitWire {
+    Lone,
+}
+
 #[test]
 fn test_untagged_entry_constructible() {
     let entry = DataElementSampleValueEntry {
@@ -1148,5 +1163,37 @@ fn test_untagged_validate_runs_only_the_held_variants_checks() {
         .validate()
         .is_ok(),
         "the bare member is held to no bound"
+    );
+}
+
+/// The wire the untagged collapse writes and reads: the slot is off the wire in both directions, so
+/// serde writes `null` and reads `null` back, and neither the slot's own value nor an array matches.
+#[test]
+fn test_serde_writes_and_reads_null_for_an_untagged_variant_whose_lone_slot_is_dropped() {
+    let written = serde_json::to_value(UntaggedLoneSlotWire::Lone("s".to_owned())).unwrap();
+    assert_eq!(written, serde_json::Value::Null);
+    assert_eq!(
+        serde_json::from_value::<UntaggedLoneSlotWire>(written).unwrap(),
+        UntaggedLoneSlotWire::Lone(String::new())
+    );
+    assert!(
+        serde_json::from_str::<UntaggedLoneSlotWire>(r#""s""#).is_err(),
+        "the slot's own value must not read back"
+    );
+    assert!(
+        serde_json::from_str::<UntaggedLoneSlotWire>("[]").is_err(),
+        "no array spelling reads back"
+    );
+}
+
+/// The control: a variant declared as a unit writes and reads the same `null`, so the two
+/// declarations share one wire in both directions.
+#[test]
+fn test_serde_writes_and_reads_the_same_null_for_a_declared_untagged_unit_variant() {
+    let written = serde_json::to_value(UntaggedUnitWire::Lone).unwrap();
+    assert_eq!(written, serde_json::Value::Null);
+    assert_eq!(
+        serde_json::from_value::<UntaggedUnitWire>(written).unwrap(),
+        UntaggedUnitWire::Lone
     );
 }

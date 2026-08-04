@@ -542,9 +542,9 @@ fn test_nested_alias_json_schema() {
     );
 }
 
-/// A type parameter names no type until the alias is instantiated, and every position that
-/// references an alias references it uninstantiated — so the parameter admits any value, while the
-/// shape around it is still described.
+/// A type parameter names no type until the alias is instantiated, and JSON Schema has no
+/// parameters for a document to carry — so the document a generic alias publishes on its own is
+/// written at the types it declared for them, while the shape around each is still described.
 #[test]
 #[cfg(all(feature = "jsonschema", feature = "typescript"))]
 fn test_generic_alias_json_schema() {
@@ -552,7 +552,7 @@ fn test_generic_alias_json_schema() {
         pair_schema::Schema::json_schema(),
         serde_json::json!({
             "type": "array",
-            "prefixItems": [{}, {}],
+            "prefixItems": [{ "type": "string" }, { "type": "integer" }],
             "items": false,
             "minItems": 2_u64,
             "maxItems": 2_u64
@@ -560,7 +560,7 @@ fn test_generic_alias_json_schema() {
     );
     assert_eq!(
         wrapper_schema::Schema::json_schema(),
-        serde_json::json!({ "anyOf": [{}, { "type": "null" }] })
+        serde_json::json!({ "anyOf": [{ "type": "string" }, { "type": "null" }] })
     );
 }
 

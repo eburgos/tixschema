@@ -250,6 +250,31 @@ pub enum PublishedShape {
     Parameter(usize),
 }
 
+/// A constrained brand's consult the registry had no record to answer with, kept until the named
+/// item registers and can answer it.
+///
+/// At the brand's own expansion a name declared below it and a name this crate never expands are
+/// one absence, and the argument the reference wrote proves nothing on its own — a publisher may
+/// write a string whatever its parameter is handed. So the admission stands at that moment, and
+/// what is recorded here is the question rather than a verdict. The registry is a compile-local
+/// recording the later expansion also writes to, so the item that finally registers under the name
+/// reads the questions naming it and answers them in its own output.
+///
+/// The arguments are kept as the shapes they resolve to rather than as the types they were written
+/// as, because the brand's expansion is the only one still holding those tokens.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[derive(Clone)]
+pub struct ShapeQuestion {
+    /// What each argument the reference wrote resolves to, in the order it wrote them — the filling
+    /// a recorded parameter position takes, and `None` where that argument is one a string check
+    /// lands on.
+    pub argument_shapes: Vec<Option<&'static str>>,
+    /// The brand that wrote the checks, named so the refusal says which declaration to fix.
+    pub brand: String,
+    /// The name it asked about, which is the entry an answer arrives on.
+    pub inner: String,
+}
+
 #[derive(Clone)]
 pub struct AliasInfo {
     pub export_name: String,
@@ -640,6 +665,38 @@ thread_local! {
 }
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+thread_local! {
+    static SHAPE_QUESTIONS: RefCell<Vec<ShapeQuestion>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Keeps a constrained brand's unanswered consult for whichever expansion registers the name it
+/// asked about.
+///
+/// Recorded once the brand has passed its own guards, so a brand that publishes nothing leaves no
+/// question behind for a later item to refuse it over.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+pub fn record_shape_question(question: ShapeQuestion) {
+    SHAPE_QUESTIONS.with(|questions| questions.borrow_mut().push(question));
+}
+
+/// Every question asked about a name, in the order the brands asking them expanded.
+///
+/// The questions are left in place rather than taken: a name is registered by one expansion, and
+/// leaving them makes reading them an observation rather than a move — nothing downstream has to
+/// know whether something else read first.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+pub fn shape_questions_for(rust_ident: &str) -> Vec<ShapeQuestion> {
+    SHAPE_QUESTIONS.with(|questions| {
+        questions
+            .borrow()
+            .iter()
+            .filter(|question| question.inner == rust_ident)
+            .cloned()
+            .collect()
+    })
+}
+
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 pub fn register_alias_info(
     rust_ident: &str,
     export_name: &str,
@@ -1005,6 +1062,19 @@ pub fn zod_factory_argument(parameter: &str) -> String {
     characters.next().map_or_else(String::new, |first| {
         format!("{}{}", first.to_lowercase(), characters.as_str())
     })
+}
+
+/// The local a JSON document binds one type parameter's argument document to — `_arg_id_type` for
+/// `IdType`.
+///
+/// The counterpart of [`zod_factory_argument`] on the surface that writes Rust rather than
+/// JavaScript, and named off the parameter for the same reason: the argument reads as the parameter
+/// it fills while staying a name of its own beside it. Snake case because that is what a Rust local
+/// is spelled in, and underscore-led because a declared parameter need not reach the document at
+/// all — the item is not owed a warning for one the wire does not carry.
+#[cfg(feature = "jsonschema")]
+pub fn json_argument_binding(parameter: &str) -> String {
+    format!("_arg_{}", to_snake_case(parameter))
 }
 
 /// [`compute_alias_export_name`] for a declared item — a struct, an enum, a tuple struct, a branded

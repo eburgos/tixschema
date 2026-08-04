@@ -40,6 +40,18 @@ pub const fn should_generate_json_schema() -> bool {
     true // Always true when this module is compiled (feature is enabled)
 }
 
+/// One type parameter of a generic item, as that item's own schema module reads it.
+///
+/// JSON Schema has no type parameters, so every document is written at one filling. The two members
+/// are the two ends of that: `binding` is the local the item's body reaches this parameter's
+/// argument document through — every position that renders the parameter names it — and `default`
+/// is the document the standalone form fills the slot with, the item's own declared filling
+/// rendered through the dispatch every other type position is rendered through.
+pub struct SchemaParameter {
+    pub binding: proc_macro2::Ident,
+    pub default: proc_macro2::TokenStream,
+}
+
 /// Where a document holds the definition of `def_name`.
 ///
 /// The crate writes draft 2020-12 (`prefixItems` with `"items": false` is that draft's fixed-arity
@@ -49,7 +61,7 @@ fn defs_pointer(def_name: &str) -> String {
     format!("{DEFS_PREFIX}{def_name}")
 }
 
-/// The pair of JSON-schema methods every schema module publishes.
+/// The JSON-schema methods a schema module publishes.
 ///
 /// `json_schema` is the document a caller asks for. `json_schema_within` is that same description
 /// written into a document already being built, and carries the two things that have to travel
@@ -61,50 +73,140 @@ fn defs_pointer(def_name: &str) -> String {
 /// cannot be revisited. So the name is recognized while the description runs: a name re-entered
 /// while still in flight describes as a `$ref` into `$defs`, and the frame that put it in flight
 /// hoists its body to the root that pointer resolves against.
+///
+/// An item declaring type parameters publishes each of those two at a filling as well: JSON Schema
+/// has no parameters, so a document exists only once each of them names a type, and which types
+/// those are is the reference site's to say. So `json_schema_with` and `json_schema_within_with`
+/// take the fillings positionally, in the order the item declares its parameters, and the two
+/// argumentless forms are those same two applied to what the item declared for itself. An item
+/// declaring none publishes the pair alone: there is no slot to fill, and nothing to pass.
 pub fn json_schema_methods(
     def_name: &str,
     body: &proc_macro2::TokenStream,
+    parameters: &[SchemaParameter],
 ) -> proc_macro2::TokenStream {
-    let pointer = defs_pointer(def_name);
+    let described = guarded_description(def_name, body);
+    if parameters.is_empty() {
+        let rooted = rooted_document(
+            &quote::quote! { Self::json_schema_within(&mut in_flight, &mut hoisted_defs) },
+        );
+        return quote::quote! {
+            pub fn json_schema() -> serde_json::Value {
+                #rooted
+            }
+
+            pub fn json_schema_within(
+                in_flight: &mut Vec<&'static str>,
+                hoisted_defs: &mut serde_json::Map<String, serde_json::Value>,
+            ) -> serde_json::Value {
+                #described
+            }
+        };
+    }
+    let rooted = rooted_document(
+        &quote::quote! { Self::json_schema_within_with(&mut in_flight, &mut hoisted_defs, args) },
+    );
+    let declared = declared_arguments(parameters);
+    let bindings = argument_bindings(parameters);
     quote::quote! {
         pub fn json_schema() -> serde_json::Value {
-            let mut in_flight: Vec<&'static str> = Vec::new();
-            let mut hoisted_defs = serde_json::Map::new();
-            let described = Self::json_schema_within(&mut in_flight, &mut hoisted_defs);
-            if hoisted_defs.is_empty() {
-                return described;
-            }
-            // The pointers into them are from the root, so the definitions join it — ahead of the
-            // description, which is the rest of the document. Every description the crate writes
-            // is an object, which is what can take them as a member.
-            let mut rooted = serde_json::Map::new();
-            rooted.insert("$defs".to_string(), serde_json::Value::Object(hoisted_defs));
-            if let serde_json::Value::Object(members) = described {
-                rooted.extend(members);
-            }
-            serde_json::Value::Object(rooted)
+            Self::json_schema_with(#declared)
+        }
+
+        pub fn json_schema_with(args: &[serde_json::Value]) -> serde_json::Value {
+            #rooted
         }
 
         pub fn json_schema_within(
             in_flight: &mut Vec<&'static str>,
             hoisted_defs: &mut serde_json::Map<String, serde_json::Value>,
         ) -> serde_json::Value {
-            if in_flight.contains(&#def_name) {
-                // Reserved rather than written: the frame that put this name in flight is still
-                // writing the body, and fills the entry in once it has one.
-                hoisted_defs.entry(#def_name).or_insert(serde_json::Value::Null);
-                return serde_json::json!({ "$ref": #pointer });
-            }
-            in_flight.push(#def_name);
-            let described = #body;
-            in_flight.pop();
-            if hoisted_defs.contains_key(#def_name) {
-                hoisted_defs.insert(#def_name.to_string(), described);
-                return serde_json::json!({ "$ref": #pointer });
-            }
-            described
+            Self::json_schema_within_with(in_flight, hoisted_defs, #declared)
+        }
+
+        pub fn json_schema_within_with(
+            in_flight: &mut Vec<&'static str>,
+            hoisted_defs: &mut serde_json::Map<String, serde_json::Value>,
+            args: &[serde_json::Value],
+        ) -> serde_json::Value {
+            #bindings
+            #described
         }
     }
+}
+
+/// The description guarded against re-entering a name still being written, as the tokens the
+/// `within` form's body is.
+fn guarded_description(
+    def_name: &str,
+    body: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let pointer = defs_pointer(def_name);
+    quote::quote! {
+        if in_flight.contains(&#def_name) {
+            // Reserved rather than written: the frame that put this name in flight is still
+            // writing the body, and fills the entry in once it has one.
+            hoisted_defs.entry(#def_name).or_insert(serde_json::Value::Null);
+            return serde_json::json!({ "$ref": #pointer });
+        }
+        in_flight.push(#def_name);
+        let described = #body;
+        in_flight.pop();
+        if hoisted_defs.contains_key(#def_name) {
+            hoisted_defs.insert(#def_name.to_string(), described);
+            return serde_json::json!({ "$ref": #pointer });
+        }
+        described
+    }
+}
+
+/// A document standing on its own: `within` run against a fresh document, with whatever it hoisted
+/// joined to the root.
+fn rooted_document(described: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    quote::quote! {
+        let mut in_flight: Vec<&'static str> = Vec::new();
+        let mut hoisted_defs = serde_json::Map::new();
+        let described = #described;
+        if hoisted_defs.is_empty() {
+            return described;
+        }
+        // The pointers into them are from the root, so the definitions join it — ahead of the
+        // description, which is the rest of the document. Every description the crate writes
+        // is an object, which is what can take them as a member.
+        let mut rooted = serde_json::Map::new();
+        rooted.insert("$defs".to_string(), serde_json::Value::Object(hoisted_defs));
+        if let serde_json::Value::Object(members) = described {
+            rooted.extend(members);
+        }
+        serde_json::Value::Object(rooted)
+    }
+}
+
+/// The filling an item declared for itself, as the argument list its argumentless forms pass on.
+fn declared_arguments(parameters: &[SchemaParameter]) -> proc_macro2::TokenStream {
+    let declared = parameters.iter().map(|parameter| &parameter.default);
+    quote::quote! { &[#(#declared),*] }
+}
+
+/// The locals the body reads its parameters through, bound off the argument list positionally.
+///
+/// A caller supplying fewer arguments than the item declares parameters leaves the rest at the
+/// permissive empty schema, which is what a parameter with nothing said about it always described
+/// as. The names are underscore-led because a parameter the declaration binds need not reach the
+/// document at all — one written only in a bound, or behind a key serde writes as a string
+/// whatever fills it — and an item is not owed a warning for a parameter it declares and the wire
+/// does not carry.
+fn argument_bindings(parameters: &[SchemaParameter]) -> proc_macro2::TokenStream {
+    let bound = parameters.iter().enumerate().map(|(position, parameter)| {
+        let binding = &parameter.binding;
+        quote::quote! {
+            let #binding: serde_json::Value = args
+                .get(#position)
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+        }
+    });
+    quote::quote! { #(#bound)* }
 }
 
 /// Generates the JSON schema method implementation for structs.
@@ -117,13 +219,14 @@ pub fn generate_struct_json_schema_method(
     json_schema_fields: &[proc_macro2::TokenStream],
     flatten_json_schemas: &[MergedSource],
     def_name: &str,
+    parameters: &[SchemaParameter],
 ) -> proc_macro2::TokenStream {
     let body = if flatten_json_schemas.is_empty() {
         closed_object_body(json_schema_fields)
     } else {
         flattened_object_body(json_schema_fields, flatten_json_schemas, def_name)
     };
-    json_schema_methods(def_name, &body)
+    json_schema_methods(def_name, &body, parameters)
 }
 
 /// The struct's own fields as one closed object.
@@ -642,6 +745,7 @@ fn flattened_object_body(
 pub fn generate_plain_enum_json_schema_method(
     enumerated: &[proc_macro2::TokenStream],
     def_name: &str,
+    parameters: &[SchemaParameter],
 ) -> proc_macro2::TokenStream {
     let body = quote::quote! {
         {
@@ -654,7 +758,7 @@ pub fn generate_plain_enum_json_schema_method(
             serde_json::Value::Object(schema_obj)
         }
     };
-    json_schema_methods(def_name, &body)
+    json_schema_methods(def_name, &body, parameters)
 }
 
 #[cfg(test)]
