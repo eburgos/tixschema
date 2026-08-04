@@ -404,8 +404,10 @@ mod objectid_branded_surface_tests {
 
     /// A brand whose pattern is wider than the hex the type holds — the shape that tells layering
     /// from replacement, since a surface holding only the brand's admits strings no `ObjectId` can
-    /// ever be.
-    #[model_schema(pattern = "^.{24}$")]
+    /// ever be. Spelled as a class rather than with `.`, which the pattern guard refuses for its
+    /// cross-engine divergence; `[a-z0-9]` still admits every lowercase letter, so the `zzz…` probe
+    /// passes the brand's pattern and only the hex turns it away.
+    #[model_schema(pattern = "^[a-z0-9]{24}$")]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct WideObjectId(pub ObjectId);
@@ -526,7 +528,10 @@ mod objectid_branded_surface_tests {
     fn a_brand_pattern_wider_than_the_hex_still_narrows_to_the_hex_on_both_surfaces() {
         let zod = WideObjectId::zod_schema();
         assert!(zod.contains(OID_ZOD_BASE), "Got:\n{zod}");
-        assert!(zod.contains(".check(z.regex(/^.{24}$/))"), "Got:\n{zod}");
+        assert!(
+            zod.contains(".check(z.regex(/^[a-z0-9]{24}$/))"),
+            "Got:\n{zod}"
+        );
 
         let schema = WideObjectId::json_schema();
         for (hex, admitted) in [
@@ -827,7 +832,10 @@ mod branded_constrained_json_schema_tests {
         assert_eq!(schema["type"], "string", "Got: {schema}");
         assert_eq!(schema["minLength"], 24_i64, "Got: {schema}");
         assert_eq!(schema["maxLength"], 24_i64, "Got: {schema}");
-        assert_eq!(schema["pattern"], "^[a-f\\d]{24}$", "Got: {schema}");
+        // The `\d` the brand is declared with reaches the schema as the members it stands for: a
+        // JSON Schema `pattern` is an ECMA-262 regex, which reads `\d` as ASCII, while the Rust
+        // validator beside it reads the Unicode class. Written out, both read the one set.
+        assert_eq!(schema["pattern"], "^[a-f0-9]{24}$", "Got: {schema}");
     }
 
     #[test]
@@ -1496,7 +1504,8 @@ mod branded_chrono_inner_tests {
     }
 
     /// The wire is a string, so the brand's own constraints stay legal — and sit beside `type` and
-    /// `format` the way they sit beside `type` alone.
+    /// `format` the way they sit beside `type` alone. The `\d` the brand was declared with reaches
+    /// the schema as the members it stands for, per the pattern guard's cross-engine translation.
     #[test]
     fn a_constrained_chrono_brand_carries_its_constraints_beside_the_format() {
         assert_eq!(
@@ -1506,7 +1515,7 @@ mod branded_chrono_inner_tests {
                 "format": "date",
                 "minLength": 10_u32,
                 "maxLength": 10_u32,
-                "pattern": r"^\d{4}-\d{2}-\d{2}$"
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
             })
         );
     }
