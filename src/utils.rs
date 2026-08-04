@@ -362,12 +362,23 @@ pub fn compute_item_export_name(rust_ident: &str, override_name: Option<&str>) -
     override_name.map_or_else(|| safe_type_name(rust_ident), ToOwned::to_owned)
 }
 
+/// Builds the `JSDoc` comment body an alias's `export type` is emitted under, which is what
+/// `build_item_jsdoc` builds for a declared item. Between them they are every `JSDoc` body an
+/// exported type carries, so the rule below holds wherever one is written rather than at the call
+/// sites that reach for one.
+///
+/// An alias's ` ```rust example ` block is dropped before its lines reach the body, the way every
+/// item shape drops it: the block is Rust source, and nothing reads it as such once it is sitting in
+/// a `TypeScript` comment. An alias documented with nothing but an example is left naming itself,
+/// as an undocumented one is.
 #[cfg(feature = "typescript")]
 pub fn format_docs_for_ts(docs: &[String], fallback_name: &str) -> String {
-    if docs.is_empty() {
+    let described = strip_examples_from_docs(docs);
+    if described.is_empty() {
         format!(" * {fallback_name}\n * ")
     } else {
-        docs.iter()
+        described
+            .iter()
             .map(|line| format!(" * {line}"))
             .chain(iter::once(" * ".to_owned()))
             .collect::<Vec<_>>()

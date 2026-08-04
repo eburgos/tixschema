@@ -1222,7 +1222,7 @@ Key points:
 - Use the exact syntax: ` ```rust example` (note the space and `example` keyword).
 - If multiple examples are present, only the **first one** is used.
 - Examples respect Serde attributes (field renaming, etc.).
-- On a struct or an enum, the example block reaches the Zod `example` field only. Being Rust source, it is dropped from the JSDoc comment above the generated `export type`.
+- Being Rust source, the example block is dropped from the JSDoc comment above the generated `export type`, whatever the type is declared as. On a struct or an enum it reaches the Zod `example` field; on a type alias, which publishes no `example` field, it reaches no generated surface at all.
 - The example code is executed at compile time and serialized to JSON.
 - Wrong types produce compile errors, ensuring examples stay in sync with your types.
 
