@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tixschema::model_schema;
 
-#[cfg(feature = "object_id")]
+#[cfg(all(feature = "jsonschema", feature = "object_id"))]
 use mongodb::bson::oid::ObjectId;
 
 // ISO-8601 date string. Branded newtype carries the regex pattern.
@@ -92,7 +92,7 @@ enum KeyedUnion {
 
 // An untagged member is written by a dispatch of its own, so it is a position an `ObjectId` can be
 // spelled in.
-#[cfg(feature = "object_id")]
+#[cfg(all(feature = "jsonschema", feature = "object_id"))]
 #[model_schema()]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
