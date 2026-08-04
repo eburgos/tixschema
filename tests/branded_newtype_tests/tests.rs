@@ -49,19 +49,21 @@ mod zod_ts_tests {
         );
     }
 
-    /// The parameter is what the brand wraps, and on a value surface that is the opaque value:
-    /// a `const` cannot be parameterised, so a binding named after the parameter would be one
-    /// nothing declares. The annotation follows the value, as it does for every other inner. The
-    /// TypeScript type beside it keeps `IdType`, its own declaration binding it for real.
+    /// The parameter is what the brand wraps, and a value surface reaches it through the argument
+    /// the enclosing factory binds for it — so the brand lands on the schema the caller supplied
+    /// rather than on a value that admits anything whatever it was filled with. The TypeScript
+    /// type beside it keeps `IdType`, its own declaration binding it for real.
     #[test]
     fn test_branded_newtype_zod_schema() {
         let zod = RoleId::<String>::zod_schema();
-        assert!(zod.contains("z.unknown().brand"), "Got: {zod}");
         assert!(
-            zod.contains("$ZodBranded<ZodUnknown, \"RoleId\">"),
+            zod.contains("export const RoleId$SchemaFactory = <IdType extends ZodType>("),
             "Got: {zod}"
         );
-        assert!(!zod.contains("IdType"), "Got: {zod}");
+        assert!(zod.contains("idType.meta({"), "Got: {zod}");
+        assert!(zod.contains("}).brand<\"RoleId\">();"), "Got: {zod}");
+        assert!(!zod.contains("z.unknown()"), "Got: {zod}");
+        assert!(!zod.contains("$ZodBranded"), "Got: {zod}");
     }
 
     #[test]
@@ -162,10 +164,15 @@ mod zod_ts_tests {
             zod.contains("example:"),
             "Should contain example from doc comment. Got:\n{zod}"
         );
-        // Must still have $Schema line
+        // The example lands inside the one `.meta({` the brand writes, and the binding the item
+        // publishes still stands after it.
         assert!(
-            zod.contains("export const DocumentId$Schema:"),
-            "Should have $Schema after example injection. Got:\n{zod}"
+            zod.contains("  example: \"64de3d95ff45b119e5b53a7e\",\n}).brand<\"DocumentId\">();"),
+            "Should have the example inside the described block. Got:\n{zod}"
+        );
+        assert!(
+            zod.contains("export const DocumentId$SchemaFactory = "),
+            "Should have the factory after example injection. Got:\n{zod}"
         );
     }
 
@@ -913,7 +920,7 @@ mod branded_no_display_tests {
     #[test]
     fn test_no_display_brand_still_generates_zod() {
         let zod = Tags::zod_schema();
-        assert!(zod.contains("brand<\"Tags\">"), "Got: {zod}");
+        assert!(zod.contains(&brand_marker("Tags")), "Got: {zod}");
     }
 }
 
@@ -1242,9 +1249,10 @@ mod branded_composite_inner_tests {
 /// carry the same rendering it does.
 ///
 /// The parameter itself carries what an uninstantiated parameter carries in every other position:
-/// its own name in TypeScript, where the declaration binds it for real, and the opaque value on
-/// both validating surfaces — `z.unknown()` in Zod and the permissive empty schema in JSON — where
-/// a parameter names no type to describe and nothing declares a binding for it.
+/// its own name in TypeScript, where the declaration binds it for real; the argument the enclosing
+/// factory binds in Zod, where a schema is a value the caller has to fill before anything can
+/// validate; and the permissive empty schema in JSON, where the one document written covers every
+/// filling and so can describe none of them.
 #[cfg(all(
     feature = "jsonschema",
     feature = "serde",
@@ -1318,12 +1326,10 @@ mod branded_generic_inner_tests {
             r#"export type TagList<T> = Array<T> & $brand<"TagList">;"#
         );
         let zod = TagList::<String>::zod_schema();
+        assert!(zod.contains("  z.array(t).meta({"), "Got:\n{zod}");
+        assert!(zod.contains(r#"}).brand<"TagList">();"#), "Got:\n{zod}");
         assert!(
-            zod.contains(r#"const TagList$RawSchema = z.array(z.unknown()).brand<"TagList">()"#),
-            "Got:\n{zod}"
-        );
-        assert!(
-            zod.contains(r#"TagList$Schema: $ZodBranded<ZodArray, "TagList">"#),
+            zod.contains("export const TagList$SchemaFactory = <T extends ZodType>("),
             "Got:\n{zod}"
         );
         assert_eq!(
@@ -1340,13 +1346,12 @@ mod branded_generic_inner_tests {
         );
         let zod = WeightIndex::<u32>::zod_schema();
         assert!(
-            zod.contains(
-                r#"const WeightIndex$RawSchema = z.record(z.string(), z.unknown()).brand<"WeightIndex">()"#
-            ),
+            zod.contains("  z.record(z.string(), t).meta({"),
             "Got:\n{zod}"
         );
+        assert!(zod.contains(r#"}).brand<"WeightIndex">();"#), "Got:\n{zod}");
         assert!(
-            zod.contains(r#"WeightIndex$Schema: $ZodBranded<ZodRecord, "WeightIndex">"#),
+            zod.contains("export const WeightIndex$SchemaFactory = <T extends ZodType>("),
             "Got:\n{zod}"
         );
         assert_eq!(
@@ -1364,12 +1369,10 @@ mod branded_generic_inner_tests {
             r#"export type BareTag<T> = T & $brand<"BareTag">;"#
         );
         let zod = BareTag::<String>::zod_schema();
+        assert!(zod.contains("  t.meta({"), "Got:\n{zod}");
+        assert!(zod.contains(r#"}).brand<"BareTag">();"#), "Got:\n{zod}");
         assert!(
-            zod.contains(r#"const BareTag$RawSchema = z.unknown().brand<"BareTag">()"#),
-            "Got:\n{zod}"
-        );
-        assert!(
-            zod.contains(r#"BareTag$Schema: $ZodBranded<ZodUnknown, "BareTag">"#),
+            zod.contains("export const BareTag$SchemaFactory = <T extends ZodType>("),
             "Got:\n{zod}"
         );
         assert_eq!(BareTag::<String>::json_schema(), serde_json::json!({}));
@@ -1402,7 +1405,7 @@ mod branded_generic_inner_tests {
             (
                 TagList::<String>::zod_schema(),
                 tag_seq_schema::Schema::zod_schema(),
-                "z.array(z.unknown())",
+                "z.array(t)",
             ),
             (
                 WeightIndex::<u32>::ts_definition(),
@@ -1412,7 +1415,7 @@ mod branded_generic_inner_tests {
             (
                 WeightIndex::<u32>::zod_schema(),
                 weight_seq_schema::Schema::zod_schema(),
-                "z.record(z.string(), z.unknown())",
+                "z.record(z.string(), t)",
             ),
             (
                 BareTag::<String>::ts_definition(),
@@ -1422,7 +1425,7 @@ mod branded_generic_inner_tests {
             (
                 BareTag::<String>::zod_schema(),
                 bare_seq_schema::Schema::zod_schema(),
-                "= z.unknown()",
+                "\n  t",
             ),
         ] {
             assert!(brand.contains(shared), "brand got:\n{brand}");
@@ -1451,29 +1454,28 @@ mod branded_generic_inner_tests {
         }
     }
 
-    /// The exported binding's annotation is read off the value it annotates, so the alias's
-    /// erasure has to reach it too: `ZodType<TagSeqType>` names a type TypeScript refuses without
-    /// its argument, and the argument the value was composed with is the opaque one.
+    /// A generic alias publishes a factory exactly as the brand beside it does, so neither has an
+    /// annotation left to erase an argument out of — the `const` each used to publish claimed
+    /// `ZodType<Name<unknown>>` while the declaration beside it kept the argument, which is a type
+    /// error at any field naming either.
     #[test]
-    fn a_generic_alias_annotation_carries_the_argument_its_value_was_composed_with() {
-        for (zod, annotation) in [
+    fn a_generic_alias_publishes_the_factory_the_brand_beside_it_publishes() {
+        for (zod, factory) in [
             (
                 tag_seq_schema::Schema::zod_schema(),
-                "export const TagSeqType$Schema: ZodType<TagSeqType<unknown>> = \
-                 TagSeqType$RawSchema;",
+                "export const TagSeqType$SchemaFactory = <T extends ZodType>(",
             ),
             (
                 weight_seq_schema::Schema::zod_schema(),
-                "export const WeightSeqType$Schema: ZodType<WeightSeqType<unknown>> = \
-                 WeightSeqType$RawSchema;",
+                "export const WeightSeqType$SchemaFactory = <T extends ZodType>(",
             ),
             (
                 bare_seq_schema::Schema::zod_schema(),
-                "export const BareSeqType$Schema: ZodType<BareSeqType<unknown>> = \
-                 BareSeqType$RawSchema;",
+                "export const BareSeqType$SchemaFactory = <T extends ZodType>(",
             ),
         ] {
-            assert!(zod.contains(annotation), "Got:\n{zod}");
+            assert!(zod.contains(factory), "Got:\n{zod}");
+            assert!(!zod.contains("<unknown>"), "Got:\n{zod}");
         }
     }
 }
@@ -1516,6 +1518,44 @@ mod branded_example_arity_tests {
     #[test]
     fn a_one_parameter_brand_renders_the_example_it_always_did() {
         assert_eq!(SoloId::<String>::schema_example(), serde_json::json!("a"));
+    }
+}
+
+/// What a build emitting no TypeScript writes for a brand.
+///
+/// The name a brand carries is a *type* argument to `.brand`, and the binding's annotation is a
+/// type — neither of which a JavaScript parser reads, and a module carrying either stops at load
+/// rather than at a payload. Zod's runtime brand takes no argument at all, so the bare call is the
+/// same value under a spelling JavaScript does read.
+#[cfg(all(feature = "zod", not(feature = "typescript")))]
+mod branded_javascript_flavour_tests {
+    use super::*;
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct PlainMark(pub String);
+
+    #[model_schema(default_types(T = String))]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct HeldMark<T>(pub T);
+
+    #[test]
+    fn a_brand_writes_the_marker_with_no_type_argument() {
+        for zod in [PlainMark::zod_schema(), HeldMark::<String>::zod_schema()] {
+            assert!(zod.contains(".brand()"), "Got:\n{zod}");
+            assert!(!zod.contains(".brand<"), "Got:\n{zod}");
+        }
+    }
+
+    #[test]
+    fn a_brand_binding_carries_no_annotation() {
+        for zod in [PlainMark::zod_schema(), HeldMark::<String>::zod_schema()] {
+            assert!(!zod.contains("ZodType"), "Got:\n{zod}");
+            assert!(!zod.contains("$ZodBranded"), "Got:\n{zod}");
+            assert!(!zod.contains("$Schema:"), "Got:\n{zod}");
+        }
     }
 }
 
@@ -1923,7 +1963,7 @@ mod constrained_path_brand_tests {
     fn test_the_zod_bound_on_a_path_brand_is_the_bound_the_wire_enforces() {
         let zod = AssetPath::zod_schema();
         assert!(zod.contains("z.string().min(3)"), "Got:\n{zod}");
-        assert!(zod.contains("brand<\"AssetPath\">"), "Got:\n{zod}");
+        assert!(zod.contains(&brand_marker("AssetPath")), "Got:\n{zod}");
         assert!(
             serde_json::from_str::<AssetPath>("\"/a\"").is_err(),
             "the rendered minimum admits no shorter value on the wire"
@@ -2317,3 +2357,18 @@ use serde::{Deserialize, Serialize};
     feature = "jsonschema"
 ))]
 use tixschema::model_schema;
+
+/// The marker a brand carries, as this build spells it: the name is a *type* argument, which only
+/// a build emitting TypeScript writes at all.
+#[cfg(feature = "zod")]
+fn brand_marker(item_name: &str) -> String {
+    #[cfg(feature = "typescript")]
+    {
+        format!(".brand<\"{item_name}\">()")
+    }
+    #[cfg(not(feature = "typescript"))]
+    {
+        let _: &str = item_name;
+        ".brand()".to_owned()
+    }
+}

@@ -3369,24 +3369,6 @@ fn value_surface_field_def(generics: &syn::Generics, written: &FieldDef) -> Fiel
     erased
 }
 
-/// The TypeScript argument list a generic item's own name takes where a Zod binding's annotation
-/// names it: one `unknown` per parameter, and nothing at all for an item that declares none.
-///
-/// The annotation states the type of the value beside it, and that value was composed with every
-/// parameter erased — so the name it is written under has to be filled in the same way. Naming the
-/// generic bare instead is a TypeScript error in its own right, the type requiring its arguments.
-///
-/// Only an alias reaches this with parameters now: every other generic item publishes a factory,
-/// whose return type is read off the arguments the caller supplied rather than declared ahead of
-/// them.
-#[cfg(feature = "zod")]
-fn erased_type_arguments(parameters: &[String]) -> String {
-    if parameters.is_empty() {
-        return String::new();
-    }
-    format!("<{}>", vec!["unknown"; parameters.len()].join(", "))
-}
-
 /// The one def both validating surfaces read a branded newtype's inner off, so neither can render
 /// a type parameter the other has erased — see [`value_surface_field_def`].
 #[cfg(any(feature = "zod", feature = "jsonschema"))]
@@ -3641,49 +3623,110 @@ fn build_branded_ts_definition_method(
     }
 }
 
+/// The brand marker a build's flavour spells, appended to whatever schema the inner rendered.
+///
+/// The name is a *type* argument, which only TypeScript reads. Zod's runtime brand takes none — it
+/// hands the schema back and the marker exists in the type alone — so a build emitting no
+/// TypeScript writes the bare call, which is the same value under a spelling JavaScript parses.
+#[cfg(feature = "zod")]
+fn zod_brand_call(item_name: &str) -> String {
+    #[cfg(feature = "typescript")]
+    {
+        format!(".brand<\"{item_name}\">()")
+    }
+    #[cfg(not(feature = "typescript"))]
+    {
+        let _: &str = item_name;
+        ".brand()".to_owned()
+    }
+}
+
+/// The value a branded newtype's binding holds: the inner's own schema, the brand, and the
+/// description, in the order the receiver's type admits.
+///
+/// A brand that declares no parameter brands a schema this expansion wrote and describes the
+/// result. Inside a factory the receiver is the parameter the caller filled, and `.meta()` is
+/// declared to return `this` — which TypeScript resolves back to that bare parameter, dropping the
+/// marker `.brand<"Name">()` had just added and handing the caller an unbranded schema. Describing
+/// first and branding last is the same schema at runtime, and it is the order that keeps the brand
+/// in the type the factory hands back.
+#[cfg(feature = "zod")]
+fn branded_zod_expression(
+    args: &ModelSchemaArgs,
+    item_name: &str,
+    parameters: &[String],
+    inner: &FieldDef,
+    plain_description: &str,
+) -> String {
+    let value = branded_zod_inner(args, inner);
+    let brand = zod_brand_call(item_name);
+    let described = format!(".meta({{\n  description: \"{plain_description}\",\n}})");
+    if parameters.is_empty() {
+        format!("{value}{brand}{described}")
+    } else {
+        format!("{value}{described}{brand}")
+    }
+}
+
 /// Builds the `zod_schema()` method for a branded newtype's schema module.
 ///
-/// The value and the annotation are both read off the one erased inner, so the type the binding
-/// claims and the schema it holds cannot describe different things.
+/// A brand is a generic publisher like any other: it declares parameters or it does not, and the
+/// binding follows through [`zod_published_binding`]. So a parameter inside its inner composes the
+/// argument the factory binds for it and the brand lands on the caller's own filling, where before
+/// it landed on a value pinned to whatever the first instantiation happened to be.
 ///
-/// A brand publishes a `const` rather than a factory, so a parameter inside its inner has no
-/// argument to name and is opaqued before either is rendered — see
-/// [`FieldDef::with_opaque_type_parameters`].
+/// The `const` a brand that declares no parameter still publishes is annotated with the branded
+/// class read off its inner, rather than with the `ZodType<Name>` every other `const` carries: the
+/// brand is what the annotation has to state, and only the value it wraps says which class it is.
+/// A factory needs no such annotation — its return type is read back off the builder.
 #[cfg(feature = "zod")]
 fn build_branded_zod_schema_method(
     args: &ModelSchemaArgs,
     item_name: &str,
     rust_ident: &str,
+    parameters: &[String],
     inner: &FieldDef,
     plain_description: &str,
 ) -> proc_macro2::TokenStream {
-    let opaque_inner = &inner.clone().with_opaque_type_parameters();
-    let zod_inner = branded_zod_inner(args, opaque_inner);
-    let reexport = ident_reexport_zod(rust_ident, item_name, "$Schema");
+    let expression = branded_zod_expression(args, item_name, parameters, inner, plain_description);
+    let reexport = ident_reexport_zod(
+        rust_ident,
+        item_name,
+        zod_binding_suffix(rust_ident, parameters),
+    );
+    let body = if parameters.is_empty() {
+        branded_zod_const_block(item_name, inner, &expression, &reexport)
+    } else {
+        zod_factory_block(item_name, parameters, "", &expression, &reexport)
+    };
+    quote! {
+        pub fn zod_schema() -> String {
+            #body.to_owned()
+        }
+    }
+}
+
+/// The binding a brand that declares no parameter publishes: the raw schema, then the exported
+/// `const` annotated with the branded class the inner's own rendering produces.
+#[cfg(feature = "zod")]
+fn branded_zod_const_block(
+    item_name: &str,
+    inner: &FieldDef,
+    expression: &str,
+    reexport: &str,
+) -> String {
     #[cfg(feature = "typescript")]
     {
-        let zod_type_name = branded_zod_type_name(opaque_inner);
-        let zod_type_annotation = format!("$ZodBranded<{zod_type_name}, \"{item_name}\">");
-        quote! {
-            pub fn zod_schema() -> String {
-                format!(
-                    "const {0}$RawSchema = {1}.brand<\"{0}\">().meta({{\n  description: \"{3}\",\n}});\n\nexport const {0}$Schema: {2} = {0}$RawSchema;{4}",
-                    #item_name, #zod_inner, #zod_type_annotation, #plain_description, #reexport
-                )
-            }
-        }
+        format!(
+            "const {item_name}$RawSchema = {expression};\n\nexport const {item_name}$Schema: \
+             $ZodBranded<{}, \"{item_name}\"> = {item_name}$RawSchema;{reexport}",
+            branded_zod_type_name(inner)
+        )
     }
     #[cfg(not(feature = "typescript"))]
     {
-        let _: &_ = &inner;
-        quote! {
-            pub fn zod_schema() -> String {
-                format!(
-                    "export const {0}$Schema = {1}.brand<\"{0}\">().meta({{\n  description: \"{2}\",\n}});{3}",
-                    #item_name, #zod_inner, #plain_description, #reexport
-                )
-            }
-        }
+        let _: &FieldDef = inner;
+        format!("export const {item_name}$Schema = {expression};{reexport}")
     }
 }
 
@@ -3709,8 +3752,10 @@ fn build_branded_delegate_items(
             pub fn zod_schema() -> String {
                 let base_schema = #module_ident::Schema::zod_schema();
                 let example_json = serde_json::to_string(&Self::schema_example()).unwrap();
-                // Insert example into .meta() before the first closing \n});
-                if let Some(pos) = base_schema.find("\n});") {
+                // The one `.meta({` a brand writes closes on its own line, and it is the only
+                // place a newline precedes a `})` in what the module emitted — so the close is
+                // the anchor whether the brand or the description was written last.
+                if let Some(pos) = base_schema.find("\n})") {
                     let mut result = base_schema[..pos].to_string();
                     result.push_str(&format!("\n  example: {},", example_json));
                     result.push_str(&base_schema[pos..]);
@@ -4122,6 +4167,7 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
         args,
         &item_name,
         &rust_ident,
+        &generic_params,
         &value_inner,
         &plain_description,
     );
@@ -10131,24 +10177,16 @@ fn zod_factory_block(
 /// The annotation is the only place a TypeScript type is named, so a build without `typescript`
 /// writes the same value under a bare `const`.
 #[cfg(feature = "zod")]
-fn zod_const_block(
-    item_name: &str,
-    ts_type_args: &str,
-    preamble: &str,
-    expression: &str,
-    reexport: &str,
-) -> String {
+fn zod_const_block(item_name: &str, preamble: &str, expression: &str, reexport: &str) -> String {
     #[cfg(feature = "typescript")]
     {
         format!(
             "{preamble}const {item_name}$RawSchema = {expression};\n\nexport const \
-             {item_name}$Schema: ZodType<{item_name}{ts_type_args}> = \
-             {item_name}$RawSchema;{reexport}"
+             {item_name}$Schema: ZodType<{item_name}> = {item_name}$RawSchema;{reexport}"
         )
     }
     #[cfg(not(feature = "typescript"))]
     {
-        let _: &str = ts_type_args;
         format!("{preamble}export const {item_name}$Schema = {expression};{reexport}")
     }
 }
@@ -10156,8 +10194,9 @@ fn zod_const_block(
 /// The whole of what a type publishes on the Zod surface: a factory when it declares parameters,
 /// and the annotated `const` when it declares none.
 ///
-/// The one seam every declared item takes that decision at, so a struct, a tuple struct and an
-/// enum cannot come to answer it differently.
+/// The one seam every item takes that decision at, so a struct, a tuple struct, an enum and an
+/// alias cannot come to answer it differently. A branded newtype takes the same decision beside
+/// this one, because only its `const` half differs — see [`branded_zod_const_block`].
 #[cfg(feature = "zod")]
 fn zod_published_binding(
     item_name: &str,
@@ -10167,13 +10206,7 @@ fn zod_published_binding(
     reexport: &str,
 ) -> String {
     if parameters.is_empty() {
-        zod_const_block(
-            item_name,
-            &erased_type_arguments(parameters),
-            preamble,
-            expression,
-            reexport,
-        )
+        zod_const_block(item_name, preamble, expression, reexport)
     } else {
         zod_factory_block(item_name, parameters, preamble, expression, reexport)
     }
@@ -10671,12 +10704,16 @@ fn generate_alias_json_schema_method(
 
 /// Builds the alias module's `zod_schema()`, or nothing when `zod` is off.
 ///
-/// The value is rendered from the target read through [`value_surface_field_def`], for the reason
-/// [`FieldDef::erase_type_parameters`] records: a `const` cannot be parameterised, so a parameter
-/// left as the `Name$Schema` binding an unresolved type is named after would reference a binding
-/// no emitted module declares. The exported binding's annotation then follows the value, taking
-/// the same opaque argument the value was composed with — a generic alias named bare in it would
-/// be a TypeScript error of its own.
+/// The value is rendered from the target read through [`value_surface_field_def`], so a parameter
+/// is the argument the alias's own factory binds for it rather than the `Name$Schema` binding an
+/// unresolved type is named after — a binding no emitted module declares.
+///
+/// Which binding carries that value is [`zod_published_binding`]'s, the seam every declared item
+/// already takes the decision at: an alias that declares parameters publishes a factory, exactly
+/// as a struct of the same parameters does. The alternative is the `const` an alias used to
+/// publish whatever it was declared with, whose annotation had to erase every argument the
+/// declaration beside it keeps — and a field naming such an alias then fails to type-check against
+/// the very declaration it renders from.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn generate_alias_zod_method(
     alias: &ItemType,
@@ -10688,22 +10725,18 @@ fn generate_alias_zod_method(
     {
         // The alias's rendered Zod is its FieldDef expression (a tuple alias yields
         // the null-flavored `z.tuple([...])`, a scalar yields `z.string()`, a sibling
-        // yields `Name$Schema`). Bind it to `$RawSchema` and re-export the annotated
-        // `$Schema`, mirroring how struct/enum schemas expose their const.
-        let schema_code = value_surface_field_def(&alias.generics, field_def)
-            .with_opaque_type_parameters()
-            .zod_type();
-        let annotated_name = format!(
-            "{export_name}{}",
-            erased_type_arguments(&type_parameters_in_scope(&alias.generics))
+        // yields `Name$Schema`).
+        let schema_code = value_surface_field_def(&alias.generics, field_def).zod_type();
+        let parameters = type_parameters_in_scope(&alias.generics);
+        let reexport = ident_reexport_zod(
+            rust_ident,
+            export_name,
+            zod_binding_suffix(rust_ident, &parameters),
         );
-        let reexport = ident_reexport_zod(rust_ident, export_name, "$Schema");
+        let body = zod_published_binding(export_name, &parameters, "", &schema_code, &reexport);
         quote! {
             pub fn zod_schema() -> String {
-                format!(
-                    "const {}$RawSchema = {};\n\nexport const {}$Schema: ZodType<{}> = {}$RawSchema;{}",
-                    #export_name, #schema_code, #export_name, #annotated_name, #export_name, #reexport
-                )
+                #body.to_owned()
             }
         }
     }

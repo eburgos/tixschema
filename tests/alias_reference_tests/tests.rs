@@ -465,3 +465,20 @@ fn a_renamed_alias_publishes_its_zod_schema_from_the_module_named_for_its_ident(
         "got: {zod}"
     );
 }
+
+/// A build emitting no TypeScript writes an alias's binding as a bare `const`: the annotation
+/// naming the type it validates is a type, and a JavaScript parser reading one stops at the `:`
+/// with no initializer to read.
+#[cfg(all(feature = "zod", not(feature = "typescript")))]
+#[test]
+fn a_javascript_build_writes_an_alias_binding_with_no_annotation() {
+    for zod in [
+        referenced_document_id_schema::Schema::zod_schema(),
+        referenced_document_ids_schema::Schema::zod_schema(),
+        document_ids_by_name_schema::Schema::zod_schema(),
+    ] {
+        assert!(zod.contains("export const "), "got: {zod}");
+        assert!(!zod.contains("ZodType"), "got: {zod}");
+        assert!(!zod.contains("$Schema:"), "got: {zod}");
+    }
+}
