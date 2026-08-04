@@ -208,6 +208,20 @@ enum TsOptionalVariant {
     },
 }
 
+/// The member spelling an `Option` field written with a `skip_serializing_if` renders as.
+///
+/// serde drops the key for a `None`, so the payload has no such key and the member is written with
+/// an optional one. Only a build that reads the attribute knows that: without the `serde` feature
+/// none is read, and the key stays written with an `undefined` value.
+#[cfg(feature = "typescript")]
+fn omitted_member(name: &str, ts_type: &str) -> String {
+    if cfg!(feature = "serde") {
+        format!("{name}?: {ts_type};")
+    } else {
+        format!("{name}: {ts_type} | undefined;")
+    }
+}
+
 #[cfg(all(
     test,
     any(
@@ -388,7 +402,7 @@ fn test_optional_literal_typescript() {
     let ts_definition = OptionalLiteral::ts_definition();
 
     // Check that optional literal works correctly
-    assert!(ts_definition.contains("optional_type: \"optional_literal\" | undefined;"));
+    assert!(ts_definition.contains(&omitted_member("optional_type", "\"optional_literal\"")));
     assert!(ts_definition.contains("id: string;"));
 }
 
@@ -448,7 +462,7 @@ fn test_min_length_typescript() {
     assert!(ts_definition.contains("username: string;"));
     assert!(ts_definition.contains("password: string;"));
     assert!(ts_definition.contains("description: string;"));
-    assert!(ts_definition.contains("nickname: string | undefined;"));
+    assert!(ts_definition.contains(&omitted_member("nickname", "string")));
     assert!(ts_definition.contains("tags: Array<string>;"));
 
     // Check that minLength documentation is present
@@ -565,10 +579,9 @@ fn test_ts_optional_struct_typescript() {
         "did not expect required-key form for `f` in:\n{ts}"
     );
 
-    assert!(
-        ts.contains("g: Inner | undefined;"),
-        "expected control `g: Inner | undefined;` in:\n{ts}"
-    );
+    // `g` carries no `ts_optional`, so its key is optional only where the serde omission says so.
+    let g = omitted_member("g", "Inner");
+    assert!(ts.contains(&g), "expected control `{g}` in:\n{ts}");
 
     assert!(ts.contains("h?: Inner;"), "expected `h?: Inner;` in:\n{ts}");
 }

@@ -212,8 +212,8 @@ fn test_serde_with_optional_fields_typescript() {
     let ts = OptionalFields::ts_definition();
 
     assert!(ts.contains("requiredField: string;"));
-    assert!(ts.contains("optionalField: string | undefined;"));
-    assert!(ts.contains("customOptional: number | undefined;"));
+    assert!(ts.contains("optionalField?: string;"));
+    assert!(ts.contains("customOptional?: number;"));
 }
 
 #[test]
@@ -306,13 +306,19 @@ fn test_discriminated_union_with_serde_zod() {
 fn test_compliant_optionals_typescript() {
     let ts = CompliantOptionals::ts_definition();
 
+    // The `skip_serializing_if` is what makes the key optional; `ts_optional` on `tag` asks for the
+    // same spelling and so adds nothing on top of it.
     assert!(
         ts.contains("tag?: string;"),
         "expected `tag?: string;`:\n{ts}"
     );
     assert!(
-        ts.contains("note: string | undefined;"),
-        "expected `note: string | undefined;`:\n{ts}"
+        ts.contains("note?: string;"),
+        "expected `note?: string;`:\n{ts}"
+    );
+    assert!(
+        !ts.contains(" | undefined"),
+        "no member of this type keeps a key serde may drop:\n{ts}"
     );
 }
 

@@ -12,7 +12,7 @@ use crate::features::model_schema_prop::ModelSchemaPropMeta;
 use crate::utils::{lookup_alias_info, safe_type_name};
 
 #[cfg(feature = "zod")]
-use crate::utils::{ZodUnionMember, escape_js_regex_literal};
+use crate::utils::{ZodUnionMember, escape_js_regex_literal, zod_factory_argument};
 
 #[cfg(feature = "chrono")]
 use crate::features::chrono;
@@ -155,9 +155,10 @@ pub enum FieldDefType {
 ///   records level 0 and `Option<Vec<T>>` records level 1 — two different values on the wire
 ///   (`[null]` against `null`) that a single flag could not tell apart. `is_optional` asks it for
 ///   the outermost level, the only one whose `None` is not written inside an array and so the only
-///   one whose flavor depends on where the field sits: `| undefined` /
-///   `z.union([type, z.undefined()])` in struct-field position, `| null` / `z.nullable(type)` in a
-///   tuple element or map value, neither of which can be dropped the way an object key can.
+///   one whose flavor depends on where the field sits: a dropped or `| undefined`-valued key /
+///   `z.union([type, z.undefined()])` in struct-field position — `omits_none` deciding which of the
+///   two the key gets — and `| null` / `z.nullable(type)` in a tuple element or map value, neither
+///   of which can be dropped the way an object key can.
 /// - name: Safe field name (uses serde rename if feature enabled)
 /// - docs: Doc comments from Rust - included in generated TS as `JSDoc`
 /// - `field_type`: The core type classification (see `FieldDefType`)
@@ -175,6 +176,13 @@ pub enum FieldDefType {
 /// - `model_schema_prop_meta`: Optional metadata from #[`model_schema_prop`] attribute
 ///   - Used for overrides like literals, minLength, etc.
 ///   - See Phase 5 in `notes/20250707_field_features.md` for minLength details
+/// - `omits_none`: whether the serde attributes on a *named* field leave a `None` out of the
+///   serialized output entirely rather than writing it. Set only where the attribute was read —
+///   an unnamed field has no key to drop, and without the `serde` feature no attribute is read at
+///   all — so a field carrying it is one whose key serde may never write. Together with
+///   `is_optional` it is what the object surfaces ask before choosing between the two spellings of
+///   an optional member: the key-optional `field?: T` for a key that may be absent, `field: T |
+///   undefined` for one that is always written.
 /// - `type_span`: where the type this field carries was written — the name segment of a path, the
 ///   whole type otherwise, and the innermost name under a wrapper, so `Vec<Inner>` points at
 ///   `Inner`. The JSON schema is the one surface that emits a Rust path built from a type name, so
@@ -197,6 +205,7 @@ pub struct FieldDef {
     pub model_schema_prop_meta: Option<ModelSchemaPropMeta>,
     pub name: String,
     pub nullable_levels: Vec<u8>,
+    pub omits_none: bool,
     #[cfg(feature = "jsonschema")]
     pub type_span: Span,
 }
@@ -244,6 +253,7 @@ impl FieldDef {
         arrayed
             .model_schema_prop_meta
             .clone_from(&self.model_schema_prop_meta);
+        arrayed.omits_none = self.omits_none;
         arrayed
     }
 
@@ -290,8 +300,10 @@ impl FieldDef {
     /// Whether a length, a pattern or a range written on this field reaches no surface at all —
     /// the one question both the refusal and the docs are written from, so neither can come to
     /// answer it differently from the other.
-    pub const fn constraints_reach_nothing(&self) -> bool {
-        self.fixed_shape_name().is_some() || self.composite_shape_name().is_some()
+    pub fn constraints_reach_nothing(&self) -> bool {
+        self.fixed_shape_name().is_some()
+            || self.composite_shape_name().is_some()
+            || self.parameter_shape_name().is_some()
     }
 
     #[cfg(feature = "zod")]
@@ -390,46 +402,8 @@ impl FieldDef {
             self.field_type = FieldDefType::TypeParam(name.clone());
             return;
         }
-        match &mut self.field_type {
-            FieldDefType::SiblingType(_, generics) => {
-                for generic in generics.iter_mut() {
-                    generic.erase_type_parameters(parameters);
-                }
-            }
-            FieldDefType::Map(key, value) => {
-                key.erase_type_parameters(parameters);
-                value.erase_type_parameters(parameters);
-            }
-            FieldDefType::Tuple(elements) => {
-                for element in elements.iter_mut() {
-                    element.erase_type_parameters(parameters);
-                }
-            }
-            // Leaf types name no parameter.
-            FieldDefType::TypeParam(_)
-            | FieldDefType::Unknown
-            | FieldDefType::StringLiteral(_)
-            | FieldDefType::Boolean
-            | FieldDefType::String
-            | FieldDefType::U8
-            | FieldDefType::U16
-            | FieldDefType::U32
-            | FieldDefType::U64
-            | FieldDefType::I8
-            | FieldDefType::I16
-            | FieldDefType::I32
-            | FieldDefType::I64
-            | FieldDefType::Usize
-            | FieldDefType::Isize
-            | FieldDefType::F32
-            | FieldDefType::F64 => {}
-            #[cfg(feature = "object_id")]
-            FieldDefType::ObjectId => {}
-            #[cfg(feature = "chrono")]
-            FieldDefType::NaiveDate
-            | FieldDefType::NaiveTime
-            | FieldDefType::NaiveDateTime
-            | FieldDefType::DateTime => {}
+        for nested in self.nested_type_positions() {
+            nested.erase_type_parameters(parameters);
         }
     }
 
@@ -498,14 +472,6 @@ impl FieldDef {
             .is_some_and(|m| m.as_number)
     }
 
-    fn has_ts_optional(&self) -> bool {
-        self.is_optional()
-            && self
-                .model_schema_prop_meta
-                .as_ref()
-                .is_some_and(|m| m.ts_optional)
-    }
-
     /// Whether the field describes an array at all — the question every surface asked of the
     /// boolean this depth replaced. Asked only where a schema is generated.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -529,6 +495,23 @@ impl FieldDef {
         self.is_nullable_at(self.array_depth)
     }
 
+    /// Whether the object key this field writes may be absent, which is the question the two
+    /// spellings of an optional member answer differently — `field?: T` admits the payload with no
+    /// such key, `field: T | undefined` demands the key and lets its value be `undefined`.
+    ///
+    /// Two things say it, and either alone is enough. `ts_optional` says it for the TypeScript
+    /// surface on the author's word. A serde attribute that omits a `None` says it off the wire:
+    /// the payload serde writes for that field simply has no key, which is the same fact the JSON
+    /// surface spends when it leaves the field out of `required`.
+    fn key_may_be_absent(&self) -> bool {
+        self.is_optional()
+            && (self.omits_none
+                || self
+                    .model_schema_prop_meta
+                    .as_ref()
+                    .is_some_and(|m| m.ts_optional))
+    }
+
     fn mark_fixed_length_at(&mut self, level: u8, length: usize) {
         if !self.array_lengths.iter().any(|&(at, _)| at == level) {
             self.array_lengths.push((level, length));
@@ -539,6 +522,62 @@ impl FieldDef {
         if !self.nullable_levels.contains(&level) {
             self.nullable_levels.push(level);
         }
+    }
+
+    /// The defs written inside this one, which is every position a type parameter can be reached
+    /// at below the top: a `SiblingType`'s generic arguments, a `Map`'s key and value, a `Tuple`'s
+    /// elements. Every other variant names a type outright and holds no def.
+    ///
+    /// Listed exhaustively and in one place, so a variant that grows a nested position has to be
+    /// classified here rather than silently escaping every walk that reads a parameter.
+    fn nested_type_positions(&mut self) -> Vec<&mut Self> {
+        match &mut self.field_type {
+            FieldDefType::SiblingType(_, generics) => generics.iter_mut().collect(),
+            FieldDefType::Map(key, value) => vec![key, value],
+            FieldDefType::Tuple(elements) => elements.iter_mut().collect(),
+            // Leaf types hold no def.
+            FieldDefType::TypeParam(_)
+            | FieldDefType::Unknown
+            | FieldDefType::StringLiteral(_)
+            | FieldDefType::Boolean
+            | FieldDefType::String
+            | FieldDefType::U8
+            | FieldDefType::U16
+            | FieldDefType::U32
+            | FieldDefType::U64
+            | FieldDefType::I8
+            | FieldDefType::I16
+            | FieldDefType::I32
+            | FieldDefType::I64
+            | FieldDefType::Usize
+            | FieldDefType::Isize
+            | FieldDefType::F32
+            | FieldDefType::F64 => Vec::new(),
+            #[cfg(feature = "object_id")]
+            FieldDefType::ObjectId => Vec::new(),
+            #[cfg(feature = "chrono")]
+            FieldDefType::NaiveDate
+            | FieldDefType::NaiveTime
+            | FieldDefType::NaiveDateTime
+            | FieldDefType::DateTime => Vec::new(),
+        }
+    }
+
+    #[cfg(feature = "zod")]
+    fn opaque_type_parameters(&mut self) {
+        if matches!(self.field_type, FieldDefType::TypeParam(_)) {
+            self.field_type = FieldDefType::Unknown;
+            return;
+        }
+        for nested in self.nested_type_positions() {
+            nested.opaque_type_parameters();
+        }
+    }
+
+    /// The `?` a member written with an absent-able key carries, and nothing for one whose key is
+    /// always written.
+    pub fn optional_key_marker(&self) -> &'static str {
+        if self.key_may_be_absent() { "?" } else { "" }
     }
 
     /// The name of the first `OsString`/`OsStr` this field reaches, at any depth.
@@ -564,6 +603,51 @@ impl FieldDef {
             }
             FieldDefType::Tuple(elements) => elements.iter().find_map(Self::os_string_name),
             FieldDefType::TypeParam(_)
+            | FieldDefType::Unknown
+            | FieldDefType::StringLiteral(_)
+            | FieldDefType::Boolean
+            | FieldDefType::String
+            | FieldDefType::U8
+            | FieldDefType::U16
+            | FieldDefType::U32
+            | FieldDefType::U64
+            | FieldDefType::I8
+            | FieldDefType::I16
+            | FieldDefType::I32
+            | FieldDefType::I64
+            | FieldDefType::Usize
+            | FieldDefType::Isize
+            | FieldDefType::F32
+            | FieldDefType::F64 => None,
+            #[cfg(feature = "object_id")]
+            FieldDefType::ObjectId => None,
+            #[cfg(feature = "chrono")]
+            FieldDefType::NaiveDate
+            | FieldDefType::NaiveTime
+            | FieldDefType::NaiveDateTime
+            | FieldDefType::DateTime => None,
+        }
+    }
+
+    /// The enclosing item's own type parameter this field renders as, when a bound spelled against
+    /// it names a value whose type the expansion never sees.
+    ///
+    /// A parameter names no type at expansion — the instantiation names one, and one schema is
+    /// written for every instantiation. So the two validating surfaces describe the value as the
+    /// opaque one, which takes no length, no pattern and no range, while the generated validator
+    /// and serde read whatever type the instantiation supplied and hold it to nothing written here.
+    /// A bound therefore reaches nothing on any surface, exactly as one written beside a map's
+    /// members does; the caller turns that into a guard error naming the parameter.
+    ///
+    /// Only a field already read through [`Self::erase_type_parameters`] answers here: which of
+    /// the two a written name is — the item's own parameter or a reference to another type — is
+    /// that rewrite's question, and asking it twice is how the two answers come to differ.
+    pub fn parameter_shape_name(&self) -> Option<&str> {
+        match &self.field_type {
+            FieldDefType::TypeParam(name) => Some(name),
+            FieldDefType::SiblingType(_, _)
+            | FieldDefType::Map(_, _)
+            | FieldDefType::Tuple(_)
             | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
             | FieldDefType::Boolean
@@ -645,10 +729,6 @@ impl FieldDef {
             | FieldDefType::NaiveDateTime
             | FieldDefType::DateTime => {}
         }
-    }
-
-    pub fn ts_optional_key_marker(&self) -> &'static str {
-        if self.has_ts_optional() { "?" } else { "" }
     }
 
     /// Builds the TypeScript type before the outermost optional wrap: the type match plus one
@@ -787,8 +867,10 @@ impl FieldDef {
     /// 2. Wrap in Array<...> once per `array_depth` level, adding `| null` inside the wrap at each
     ///    level written as an `Option` — the array is always written, so the `None` is an item
     /// 3. If `is_optional`, which is that question asked of the outermost level: struct-field
-    ///    position adds `| undefined`; tuple-element and map-value positions add `| null` (neither
-    ///    can be omitted like an object key, so a `None` there serializes as `null`)
+    ///    position adds `| undefined`, or nothing at all where the key itself may be absent and
+    ///    [`Self::optional_key_marker`] writes the `?` that says so; tuple-element and map-value
+    ///    positions add `| null` (neither can be omitted like an object key, so a `None` there
+    ///    serializes as `null`)
     ///
     /// Feature notes:
     /// - "`object_id"`: Uses special `ObjectId` type
@@ -801,8 +883,10 @@ impl FieldDef {
     pub fn typescript_typename(&self) -> String {
         let pre_result = self.typescript_base();
         if self.is_optional() {
-            // `ts_optional` renders the key as `field?: T`, so the `| undefined` is redundant.
-            if self.has_ts_optional() {
+            // An absent-able key renders as `field?: T`, so the `| undefined` is redundant — and
+            // under `exactOptionalPropertyTypes` it would claim an explicit `undefined` the key's
+            // omission is exactly what serde writes instead.
+            if self.key_may_be_absent() {
                 pre_result
             } else {
                 format!("{pre_result} | undefined")
@@ -826,6 +910,20 @@ impl FieldDef {
         value
     }
 
+    /// The same def with every [`FieldDefType::TypeParam`] written back as the opaque value.
+    ///
+    /// Zod names a parameter through the argument the enclosing factory binds for it, which only a
+    /// type that publishes a factory has. An alias and a branded newtype publish a plain `const`,
+    /// so there is no argument for a parameter inside either to name and the opaque value is still
+    /// all either can write — the answer [`Self::erase_type_parameters`] describes, kept for the
+    /// two surfaces that have not moved off it.
+    #[cfg(feature = "zod")]
+    #[must_use]
+    pub fn with_opaque_type_parameters(mut self) -> Self {
+        self.opaque_type_parameters();
+        self
+    }
+
     /// The type match plus one `z.array(…)` per array level, each carrying the `z.nullable(…)` of
     /// the level it wraps and the `.length(N)` of a level written as a fixed-size `[T; N]`, before
     /// the preprocess wrap.
@@ -840,9 +938,12 @@ impl FieldDef {
     #[cfg(feature = "zod")]
     fn zod_array_base(&self) -> String {
         let result = match &self.field_type {
-            // A `const` cannot be parameterised, so the value a parameter composes into is the
-            // opaque one — see [`FieldDef::erase_type_parameters`].
-            FieldDefType::TypeParam(_) | FieldDefType::Unknown => "z.unknown()".to_owned(),
+            FieldDefType::Unknown => "z.unknown()".to_owned(),
+            // A `const` cannot be parameterised, so a generic type publishes a factory and a
+            // parameter composes the argument that factory binds for it — see
+            // [`zod_factory_argument`]. A surface with no factory to bind one opaques the
+            // parameter first, through [`FieldDef::with_opaque_type_parameters`].
+            FieldDefType::TypeParam(name) => zod_factory_argument(name),
             FieldDefType::Tuple(lst) => {
                 let elements = lst
                     .iter()
@@ -875,7 +976,7 @@ impl FieldDef {
                 }
             }
             FieldDefType::Map(k, v) => {
-                format!("z.record({}, {})", k.zod_type(), v.zod_slot_type())
+                format!("z.record({}, {})", k.zod_map_key_type(), v.zod_slot_type())
             }
             FieldDefType::Boolean => "z.boolean()".to_owned(),
             FieldDefType::String => self.zod_string_type(),
@@ -940,6 +1041,27 @@ impl FieldDef {
         } else {
             array_result
         }
+    }
+
+    /// The key schema a `z.record(…)` is written with: the key's own, except where the key is one
+    /// of the enclosing item's type parameters.
+    ///
+    /// A record key has to produce string keys, and the opaque value a parameter describes as
+    /// everywhere else declines to say anything at all about them — the one position where saying
+    /// nothing says less than the wire already guarantees. serde is what guarantees it: an
+    /// instantiation either writes this map's object keys as strings or refuses the whole map at
+    /// serialization with `key must be a string`, with no fallback form, so `z.string()` holds for
+    /// every instantiation that serializes at all. It is also the answer the JSON surface reads off
+    /// the same key through its own classification, which is what keeps the two saying one thing.
+    ///
+    /// Only a bare key reaches the parameter arm: a key written under a sequence or an `Option`
+    /// wrapper is refused before any surface renders the map.
+    #[cfg(feature = "zod")]
+    fn zod_map_key_type(&self) -> String {
+        if self.parameter_shape_name().is_some() {
+            return "z.string()".to_owned();
+        }
+        self.zod_type()
     }
 
     /// The same value on the Zod surface, for the same reason: what a merged source validates, with
@@ -1178,6 +1300,7 @@ fn get_field_def_from_type_path(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            omits_none: false,
             #[cfg(feature = "jsonschema")]
             type_span: type_path.span(),
         };
@@ -1192,6 +1315,7 @@ fn get_field_def_from_type_path(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            omits_none: false,
             // The name segment, not the whole path: it is what a generated module is named after,
             // so a reference the module cannot resolve is blamed on the name it was built from.
             #[cfg(feature = "jsonschema")]
@@ -1209,6 +1333,7 @@ fn get_field_def_from_type_path(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            omits_none: false,
             #[cfg(feature = "jsonschema")]
             type_span: segment.ident.span(),
         },
@@ -1258,6 +1383,7 @@ fn get_field_def_from_generic_type(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            omits_none: false,
             #[cfg(feature = "jsonschema")]
             type_span: type_ident.span(),
         }
@@ -1305,6 +1431,7 @@ fn get_field_def_from_generic_type(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            omits_none: false,
             #[cfg(feature = "jsonschema")]
             type_span: type_ident.span(),
         }
@@ -1318,6 +1445,7 @@ fn get_field_def_from_generic_type(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            omits_none: false,
             #[cfg(feature = "jsonschema")]
             type_span: type_ident.span(),
         }
@@ -1331,6 +1459,7 @@ fn get_field_def_from_generic_type(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            omits_none: false,
             #[cfg(feature = "jsonschema")]
             type_span: type_ident.span(),
         }
@@ -1394,6 +1523,7 @@ pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            omits_none: false,
             #[cfg(feature = "jsonschema")]
             type_span: ty.span(),
         }
@@ -1407,6 +1537,7 @@ pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            omits_none: false,
             #[cfg(feature = "jsonschema")]
             type_span: ty.span(),
         }

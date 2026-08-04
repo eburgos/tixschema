@@ -739,11 +739,45 @@ fn a_ts_reexport_is_written_only_where_the_export_moved_off_the_ident() {
 #[test]
 fn a_zod_reexport_is_written_only_where_the_export_moved_off_the_ident() {
     assert_eq!(
-        ident_reexport_zod("LaterAlias", "LaterAliasType"),
+        ident_reexport_zod("LaterAlias", "LaterAliasType", "$Schema"),
         "\n\nexport const LaterAlias$Schema = LaterAliasType$Schema;"
     );
     for (ident, export) in [("PlainItem", "PlainItem"), ("PlainItemJson", "PlainItem")] {
-        assert_eq!(ident_reexport_zod(ident, export), "", "for: {ident}");
+        assert_eq!(
+            ident_reexport_zod(ident, export, "$Schema"),
+            "",
+            "for: {ident}"
+        );
+    }
+}
+
+/// A generic type publishes a factory, so both names it is reached by have to name that factory:
+/// a re-export written to `$Schema` would bind a name no emitted module declares.
+#[cfg(feature = "zod")]
+#[test]
+fn a_zod_reexport_carries_the_suffix_the_item_published_under() {
+    assert_eq!(
+        ident_reexport_zod("Holder", "RenamedHolder", "$SchemaFactory"),
+        "\n\nexport const Holder$SchemaFactory = RenamedHolder$SchemaFactory;"
+    );
+}
+
+/// The argument a factory binds for a parameter reads as the parameter it fills while staying a
+/// name of its own beside it.
+#[cfg(feature = "zod")]
+#[test]
+fn a_factory_argument_is_the_lower_camel_of_its_parameter() {
+    for (parameter, argument) in [
+        ("IdType", "idType"),
+        ("T", "t"),
+        ("DateType", "dateType"),
+        ("", ""),
+    ] {
+        assert_eq!(
+            zod_factory_argument(parameter),
+            argument,
+            "for: {parameter}"
+        );
     }
 }
 
