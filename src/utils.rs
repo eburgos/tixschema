@@ -252,6 +252,31 @@ pub enum PublishedShape {
     Parameter(usize),
 }
 
+/// A constrained brand's consult the registry had no record to answer with, kept until the named
+/// item registers and can answer it.
+///
+/// At the brand's own expansion a name declared below it and a name this crate never expands are
+/// one absence, and the argument the reference wrote proves nothing on its own — a publisher may
+/// write a string whatever its parameter is handed. So the admission stands at that moment, and
+/// what is recorded here is the question rather than a verdict. The registry is a compile-local
+/// recording the later expansion also writes to, so the item that finally registers under the name
+/// reads the questions naming it and answers them in its own output.
+///
+/// The arguments are kept as the shapes they resolve to rather than as the types they were written
+/// as, because the brand's expansion is the only one still holding those tokens.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[derive(Clone)]
+pub struct ShapeQuestion {
+    /// What each argument the reference wrote resolves to, in the order it wrote them — the filling
+    /// a recorded parameter position takes, and `None` where that argument is one a string check
+    /// lands on.
+    pub argument_shapes: Vec<Option<&'static str>>,
+    /// The brand that wrote the checks, named so the refusal says which declaration to fix.
+    pub brand: String,
+    /// The name it asked about, which is the entry an answer arrives on.
+    pub inner: String,
+}
+
 #[derive(Clone)]
 pub struct AliasInfo {
     pub export_name: String,
@@ -264,6 +289,12 @@ pub struct AliasInfo {
     pub kind: AliasKind,
     #[cfg(feature = "jsonschema")]
     pub module_name: String,
+    /// What an untagged enum's members are spelled as where an object flattens the enum itself, one
+    /// per member in the order the union writes them — and empty both for every other item and
+    /// wherever spelling the members says nothing the enum's own name does not already say. Filled
+    /// by [`record_ts_union_members`] once that enum's own expansion has rendered them.
+    #[cfg(all(feature = "serde", feature = "typescript"))]
+    pub ts_union_members: Vec<String>,
     /// What the value surface written under this name is, in the vocabulary a constrained brand's
     /// refusal names shapes by — and [`PublishedShape::Flat(None)`] both when that surface is one
     /// string checks land on and when nothing has been recorded at all. Filled by
@@ -638,6 +669,38 @@ thread_local! {
 }
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+thread_local! {
+    static SHAPE_QUESTIONS: RefCell<Vec<ShapeQuestion>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Keeps a constrained brand's unanswered consult for whichever expansion registers the name it
+/// asked about.
+///
+/// Recorded once the brand has passed its own guards, so a brand that publishes nothing leaves no
+/// question behind for a later item to refuse it over.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+pub fn record_shape_question(question: ShapeQuestion) {
+    SHAPE_QUESTIONS.with(|questions| questions.borrow_mut().push(question));
+}
+
+/// Every question asked about a name, in the order the brands asking them expanded.
+///
+/// The questions are left in place rather than taken: a name is registered by one expansion, and
+/// leaving them makes reading them an observation rather than a move — nothing downstream has to
+/// know whether something else read first.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+pub fn shape_questions_for(rust_ident: &str) -> Vec<ShapeQuestion> {
+    SHAPE_QUESTIONS.with(|questions| {
+        questions
+            .borrow()
+            .iter()
+            .filter(|question| question.inner == rust_ident)
+            .cloned()
+            .collect()
+    })
+}
+
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 pub fn register_alias_info(
     rust_ident: &str,
     export_name: &str,
@@ -656,6 +719,8 @@ pub fn register_alias_info(
                 kind,
                 #[cfg(feature = "jsonschema")]
                 module_name: module_name.to_owned(),
+                #[cfg(all(feature = "serde", feature = "typescript"))]
+                ts_union_members: Vec::new(),
                 value_shape: PublishedShape::Flat(None),
                 #[cfg(all(feature = "serde", any(feature = "zod", feature = "typescript")))]
                 wire: Vec::new(),
@@ -748,6 +813,26 @@ pub fn record_zod_union_members(rust_ident: &str, members: &[ZodUnionMember]) {
     });
 }
 
+/// Records what an untagged enum's members are spelled as where an object flattens the enum itself,
+/// on the entry that enum has already registered.
+///
+/// The two spellings of one union part where an object is joined to it. Standing alone the union
+/// describes one member at a time, and the enum's own name is the whole of what it publishes;
+/// intersected with an open object each member is left satisfied by a payload carrying the other
+/// members' keys as well, which serde writes for no value. The members recorded here carry the
+/// exclusions that close them against one another, so the merge can spell them in the name's place.
+///
+/// Nothing is recorded where those exclusions come to nothing — a union of names proves no key an
+/// object could be told to leave out — and the merge then names the union as it always did.
+#[cfg(all(feature = "serde", feature = "typescript"))]
+pub fn record_ts_union_members(rust_ident: &str, members: &[String]) {
+    ALIAS_INFO.with(|map| {
+        if let Some(info) = map.borrow_mut().get_mut(rust_ident) {
+            info.ts_union_members = members.to_vec();
+        }
+    });
+}
+
 /// Records what an externally tagged enum's variants are spelled as where an object flattens the
 /// enum itself, on the entry that enum has already registered.
 ///
@@ -758,10 +843,11 @@ pub fn record_zod_union_members(rust_ident: &str, members: &[ZodUnionMember]) {
 /// where the union publishes a bare string no object joins. So the flatten-edge spelling is recorded
 /// beside the union's rather than read back off it.
 ///
-/// Recorded for every externally tagged enum, and read by each surface under the bound that
-/// surface's own merge has: Zod joins one operand per variant wherever the enum is flattened
-/// directly, TypeScript only where a variant is proved to be no object, an intersection distributing
-/// over a union of objects on its own.
+/// Recorded for every externally tagged enum, and read by each surface wherever the enum is
+/// flattened directly. A Zod intersection recognizes exactly the keys its operands name, so it takes
+/// one operand per variant; TypeScript distributes over a union of objects on its own and takes the
+/// variants for what the union alone cannot say — the key set serde writes for a unit variant, and
+/// each variant's silence about the keys its siblings tag.
 #[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod")))]
 pub fn record_flatten_variants(rust_ident: &str, variants: &[FlattenVariant]) {
     ALIAS_INFO.with(|map| {

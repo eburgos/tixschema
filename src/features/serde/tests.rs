@@ -220,3 +220,96 @@ fn test_attributes_after_an_unread_value_are_still_read() {
         "rename is written last of all"
     );
 }
+
+/// The type walk carries the same obligation as the field walk, and a heavier consequence: a tag
+/// left unread describes a discriminated union as something else on every surface at once, while
+/// serde goes on writing the tag.
+#[test]
+fn test_type_attributes_after_an_unread_value_are_still_read() {
+    let item: syn::ItemEnum = syn::parse_quote! {
+        #[serde(expecting = "an action", tag = "kind", content = "payload", rename_all = "camelCase")]
+        enum E {
+            FirstOne(String),
+        }
+    };
+    let meta = parse_serde_type_attributes(&item.attrs);
+    assert_eq!(
+        meta.tag.as_deref(),
+        Some("kind"),
+        "tag is written after an unread value"
+    );
+    assert_eq!(meta.content.as_deref(), Some("payload"));
+    assert_eq!(meta.rename_all.as_deref(), Some("camelCase"));
+}
+
+#[test]
+fn test_untagged_after_an_unread_value_is_still_read() {
+    let item: syn::ItemEnum = syn::parse_quote! {
+        #[serde(bound = "T: Clone", untagged)]
+        enum E<T> {
+            FirstOne(T),
+        }
+    };
+    assert!(parse_serde_type_attributes(&item.attrs).untagged);
+}
+
+/// Every value-carrying key the type walk ignores has to be survivable, not only the one that was
+/// measured — otherwise which of them a type may be written with is a matter of luck.
+#[test]
+fn test_every_ignored_value_carrying_type_key_is_survived() {
+    let expecting: syn::ItemEnum = syn::parse_quote! {
+        #[serde(expecting = "an action", tag = "kind")]
+        enum E { FirstOne(String) }
+    };
+    let bound: syn::ItemEnum = syn::parse_quote! {
+        #[serde(bound = "T: Clone", tag = "kind")]
+        enum E<T> { FirstOne(T) }
+    };
+    let serde_crate: syn::ItemEnum = syn::parse_quote! {
+        #[serde(crate = "serde", tag = "kind")]
+        enum E { FirstOne(String) }
+    };
+    let from: syn::ItemEnum = syn::parse_quote! {
+        #[serde(from = "Other", tag = "kind")]
+        enum E { FirstOne(String) }
+    };
+    let try_from: syn::ItemEnum = syn::parse_quote! {
+        #[serde(try_from = "Other", tag = "kind")]
+        enum E { FirstOne(String) }
+    };
+    let into: syn::ItemEnum = syn::parse_quote! {
+        #[serde(into = "Other", tag = "kind")]
+        enum E { FirstOne(String) }
+    };
+    for (key, item) in [
+        ("expecting", &expecting),
+        ("bound", &bound),
+        ("crate", &serde_crate),
+        ("from", &from),
+        ("try_from", &try_from),
+        ("into", &into),
+    ] {
+        assert_eq!(
+            parse_serde_type_attributes(&item.attrs).tag.as_deref(),
+            Some("kind"),
+            "tag written after `{key} = ...` should still be read"
+        );
+    }
+}
+
+/// A list with nothing to step over is read exactly as it was, key for key.
+#[test]
+fn test_type_attributes_without_unread_values_are_unchanged() {
+    let item: syn::ItemEnum = syn::parse_quote! {
+        #[serde(tag = "type", content = "data", rename_all = "camelCase")]
+        enum E {
+            FirstOne(String),
+        }
+    };
+    let meta = parse_serde_type_attributes(&item.attrs);
+    assert_eq!(meta.tag.as_deref(), Some("type"));
+    assert_eq!(meta.content.as_deref(), Some("data"));
+    assert_eq!(meta.rename_all.as_deref(), Some("camelCase"));
+    assert!(!meta.untagged);
+    assert!(meta.cfg_attr_rejection.is_none());
+}

@@ -763,11 +763,80 @@ mod zod {
 
 #[cfg(feature = "jsonschema")]
 mod jsonschema {
+    /// `#[serde(flatten)]` is read only where `serde` is, so the merge these pin is only written
+    /// there.
+    #[cfg(feature = "serde")]
+    mod flattened_parameter {
+        use super::super::{Carried, FlatCarrier, FlatReferrer};
+
+        /// A flattened parameter is a flattened value like any other: the object its filling
+        /// describes contributes its members to the one being written, beside the ones that object
+        /// writes itself. The filling reaches the merge through the one binding every other
+        /// position reads the parameter through, so the merge never sees which end filled it.
+        #[test]
+        fn a_flattened_parameter_merges_the_members_the_reference_site_filled_it_with() {
+            assert_eq!(
+                FlatReferrer::json_schema()["properties"]["held"],
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "tag": { "type": "string" },
+                        "value": { "type": "integer" }
+                    },
+                    "required": ["tag", "value"],
+                    "additionalProperties": false
+                })
+            );
+        }
+
+        /// A filling that is not an object has no members to merge, and what serde writes for it
+        /// never joins the object being written. The declaration cannot say so — which type fills
+        /// the parameter is the reference site's to name — so the merge answers where the filling
+        /// is finally known, in the words it answers for every other source in.
+        #[test]
+        #[should_panic(
+            expected = "`FlatCarrier`: `#[serde(flatten)]` of `held` is not written as \
+                        an object — its schema describes a `string`, which has no \
+                        members to merge"
+        )]
+        fn a_flattened_parameter_filled_by_a_scalar_is_refused_where_the_filling_is_known() {
+            let _: serde_json::Value = FlatCarrier::<String>::json_schema();
+        }
+
+        /// The declared filling reaches the merge exactly as a reference-site one does: the
+        /// standalone document is built at the default the declaration names, so an
+        /// object-writing sibling's members multiply into the base with no reference site
+        /// involved.
+        #[test]
+        fn a_flattened_parameter_merges_the_members_its_declared_default_names() {
+            assert_eq!(
+                serde_json::to_string(
+                    &super::super::FlatDefaulted::<super::super::Envelope>::json_schema()
+                )
+                .unwrap(),
+                "{\"type\":\"object\",\"properties\":{\"tag\":{\"type\":\"string\"},\
+                 \"trace\":{\"type\":\"string\"}},\"required\":[\"tag\",\"trace\"],\
+                 \"additionalProperties\":false}"
+            );
+        }
+
+        /// A flatten source naming a type rather than a parameter is untouched by any of this.
+        #[test]
+        fn a_named_flatten_source_beside_a_parameter_describes_as_it_always_has() {
+            assert_eq!(
+                serde_json::to_string(&Carried::<String>::json_schema()).unwrap(),
+                "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},\
+                 \"trace\":{\"type\":\"string\"}},\"required\":[\"id\",\"trace\"],\
+                 \"additionalProperties\":false}"
+            );
+        }
+    }
+
     #[cfg(all(feature = "chrono", feature = "object_id"))]
     use super::StoredFolder;
     use super::{
-        CountedFolder, EcmDocument, KeyedByParameter, Pair, Tagged, WireFolder, Wrapper,
-        ecm_document_schema,
+        Branch, CountedFolder, EcmDocument, Envelope, Grove, KeyedByParameter, Pair, Perch, Roost,
+        Sealed, Tagged, WireFolder, Wrapper, ecm_document_schema,
     };
 
     /// A key every instantiation writes as a string leaves the value side describable, so the
@@ -970,6 +1039,100 @@ mod jsonschema {
             properties["nested"]["properties"]["held"]["properties"]["value"],
             serde_json::json!({ "type": "string" })
         );
+    }
+
+    /// A filling naming another item is not a literal document but a request made of that item,
+    /// and only the frame carrying the run's two values can make it. Made there, the standalone
+    /// document holds at the parameter position exactly what the named item publishes — the same
+    /// document a reference site supplying that type as an argument would have embedded.
+    #[test]
+    fn a_filling_naming_another_item_embeds_the_document_that_item_publishes() {
+        let schema = Sealed::<Envelope>::json_schema();
+        assert_eq!(schema["properties"]["body"], Envelope::json_schema());
+        assert_eq!(
+            schema["properties"]["seal"],
+            serde_json::json!({ "type": "string" })
+        );
+    }
+
+    /// A name is one name however it was reached. Reached once as a declared filling and once as a
+    /// plain field, it is still the single definition the root carries, and both arrivals are
+    /// pointers into it rather than two copies of a body.
+    #[test]
+    fn a_name_reached_as_a_filling_and_as_a_field_is_defined_once() {
+        let schema = Grove::<Branch>::json_schema();
+        let pointer = serde_json::json!({ "$ref": "#/$defs/Branch" });
+        assert_eq!(schema["properties"]["filled"], pointer);
+        assert_eq!(schema["properties"]["named"], pointer);
+
+        let defs = schema["$defs"].as_object().unwrap().clone();
+        assert_eq!(defs.len(), 1, "Got: {defs:?}");
+        assert_eq!(
+            defs["Branch"]["properties"]["children"],
+            serde_json::json!({ "type": "array", "items": pointer })
+        );
+    }
+
+    /// A cycle closing through a declared filling is the cycle every other edge closes: the name is
+    /// recognized while its own description is still running, so the filling describes as the
+    /// pointer and the frame that put the name in flight hoists the body that pointer resolves
+    /// against.
+    #[test]
+    fn a_cycle_closing_through_a_declared_filling_defers_the_same_way() {
+        let schema = Roost::<Perch>::json_schema();
+        assert_eq!(
+            schema["properties"]["host"],
+            serde_json::json!({ "$ref": "#/$defs/Perch" })
+        );
+        assert_eq!(
+            schema["$defs"]["Perch"]["properties"]["roosts"]["items"]["properties"]["host"],
+            serde_json::json!({ "$ref": "#/$defs/Perch" })
+        );
+        assert_eq!(
+            schema["$defs"]["Perch"]["properties"]["tag"],
+            serde_json::json!({ "type": "string" })
+        );
+    }
+
+    /// A cycle written at the filling it was entered at is the one a document holding a single
+    /// definition per name can describe, and it describes exactly as it always has: the definition
+    /// at that filling, and a reference into it wherever the name comes back around.
+    #[test]
+    fn a_cycle_that_keeps_its_filling_defers_through_the_one_definition() {
+        assert_eq!(
+            serde_json::to_string(&super::Recurring::<String>::json_schema()).unwrap(),
+            "{\"$defs\":{\"Recurring\":{\"type\":\"object\",\"additionalProperties\":false,\
+             \"properties\":{\"next\":{\"$ref\":\"#/$defs/Recurring\"},\
+             \"value\":{\"type\":\"string\"}},\"required\":[\"value\"]}},\
+             \"$ref\":\"#/$defs/Recurring\"}"
+        );
+    }
+
+    /// A reference that comes back around to a name at a filling the document is not being written
+    /// at has nowhere to put its own definition, and the pointer it would write resolves to the
+    /// other filling's body. Both fillings are named, because which one is wrong is the author's to
+    /// decide.
+    #[test]
+    #[should_panic(
+        expected = "`Refilled`: a reference closes a cycle at a filling the document is \
+                    not being written at — in flight at [{\"type\":\"string\"}], and \
+                    this reference names [{\"type\":\"boolean\"}]"
+    )]
+    fn a_cycle_that_changes_filling_is_refused_naming_both_fillings() {
+        let _: serde_json::Value = super::Refilled::<String>::json_schema();
+    }
+
+    /// The refusal states what stands in the way and what would move it, so an author meeting it
+    /// reads why one definition cannot hold two fillings and what would let it.
+    #[test]
+    #[should_panic(
+        expected = "a document holds one definition per name, so a cycle cannot change \
+                    filling partway through it; write the reference at the filling \
+                    already in flight, or key the definitions by name and filling so \
+                    each filling gets a definition of its own"
+    )]
+    fn the_refused_cycle_states_the_limitation_and_the_way_past_it() {
+        let _: serde_json::Value = super::Refilled::<String>::json_schema();
     }
 }
 
@@ -1283,6 +1446,58 @@ pub struct Referrer {
     pub tagged: Tagged<String>,
 }
 
+/// A declared filling that names another item rather than a primitive. Such a filling is not a
+/// literal document: it is written by asking the named item for its own, which reads the names in
+/// flight and the definitions being hoisted — so which frame the argumentless forms evaluate the
+/// filling in is the whole of what makes this fixture expand. Read by the JSON surface alone,
+/// which is the only one that fills a parameter with a document.
+#[cfg(feature = "jsonschema")]
+#[model_schema(default_types(BodyType = Envelope))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Sealed<BodyType> {
+    pub body: BodyType,
+    pub seal: String,
+}
+
+/// A self-referential item: what puts a name in `$defs` at all.
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Branch {
+    pub children: Vec<Self>,
+    pub name: String,
+}
+
+/// The same name reached twice over, once as a declared filling and once as a plain field — the two
+/// arrivals a single hoisted definition has to answer for both of.
+#[cfg(feature = "jsonschema")]
+#[model_schema(default_types(BranchType = Branch))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Grove<BranchType> {
+    pub filled: BranchType,
+    pub named: Branch,
+}
+
+/// A cycle that closes through a declared filling: the item the filling names holds the generic
+/// item back, reaching it without arguments — which is writable only because the parameter carries
+/// a Rust-level default too. That is the one shape reaching this cycle. A cycle running through two
+/// declared fillings is a cycle in the parameter defaults themselves, which rustc refuses while
+/// computing them, before the attribute is read at all.
+#[cfg(feature = "jsonschema")]
+#[model_schema(default_types(HostType = Perch))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Roost<HostType = Perch> {
+    pub host: HostType,
+}
+
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Perch {
+    pub roosts: Vec<Roost>,
+    pub tag: String,
+}
+
 /// The same two, named from a field that forwards the referrer's own parameter into each. Read by
 /// the Zod surface alone, where an argument is a value that has to be passed on, so it exists only
 /// where that surface compiles.
@@ -1292,6 +1507,65 @@ pub struct Referrer {
 pub struct Summarised<ValueType> {
     pub boxed: Boxed<ValueType>,
     pub tagged: Tagged<ValueType>,
+}
+
+/// A generic type that names itself, at the filling it was entered at — the cycle a document
+/// holding one definition per name describes as a definition and a reference into it. Read only
+/// where a JSON document is built.
+#[cfg(feature = "jsonschema")]
+#[model_schema(default_types(ValueType = String))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Recurring<ValueType> {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<Box<Self>>,
+    pub value: ValueType,
+}
+
+/// The same cycle, closed at a filling the outer frame was not written at: the position holds a
+/// `bool` where the document is being written at a `String`, and one definition cannot describe
+/// both.
+#[cfg(feature = "jsonschema")]
+#[model_schema(default_types(ValueType = String))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Refilled<ValueType> {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<Box<Refilled<bool>>>,
+    pub value: ValueType,
+}
+
+/// A struct whose flattened source is one of its own type parameters. `#[serde(flatten)]` is read
+/// only where `serde` is, and the document is built only where `jsonschema` is, so the fixture
+/// exists where both do.
+///
+/// The declared filling is a scalar, which is the filling the merge has to answer for; the object
+/// filling reaches it from the reference site below.
+#[cfg(all(feature = "serde", feature = "jsonschema"))]
+#[model_schema(default_types(HeldType = String))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlatCarrier<HeldType> {
+    #[serde(flatten)]
+    pub held: HeldType,
+    pub tag: String,
+}
+
+/// The same struct reached from a field that fills its parameter with an object, which is the
+/// other end a filling can arrive from.
+#[cfg(all(feature = "serde", feature = "jsonschema"))]
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlatReferrer {
+    pub held: FlatCarrier<Inner<u32>>,
+}
+
+/// The same seam with the object filling written in the declaration instead: the default names a
+/// sibling item, so the standalone document is the one place the merge and a declared filling meet.
+#[cfg(all(feature = "serde", feature = "jsonschema"))]
+#[model_schema(default_types(HeldType = Envelope))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlatDefaulted<HeldType> {
+    #[serde(flatten)]
+    pub held: HeldType,
+    pub tag: String,
 }
 
 #[cfg(not(feature = "jsonschema"))]

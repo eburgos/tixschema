@@ -667,17 +667,52 @@ struct FlatOverMemberExtObjUntagged {
     own: String,
 }
 
-/// And that enum flattened directly, where the two merged surfaces part. TypeScript distributes an
-/// intersection over a union on its own and every branch here is an object, so the name is already
-/// the whole answer and stays the one operand it always was. A Zod intersection recognizes exactly
-/// the keys its operands name and a `z.union` names none, so joining the object to the name admits
-/// nothing at all and the object is multiplied over the variants there.
+/// And that enum flattened directly, where the two merged surfaces multiply for different reasons. A
+/// Zod intersection recognizes exactly the keys its operands name and a `z.union` names none, so
+/// joining the object to the name admits nothing at all. TypeScript reaches every branch by
+/// distributing and needs the variants for what no branch says on its own: that it does not carry
+/// the tag its sibling carries.
 #[cfg(any(feature = "jsonschema", feature = "zod", feature = "typescript"))]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct ExtObjDirectHolder {
     #[serde(flatten)]
     ext: MemberExtObjects,
+    own: String,
+}
+
+/// The same enum reached through an `Option`, where the absence branch reads its keys off the
+/// operand beside it. `keyof` a union is the keys its branches share, which for two variants tagging
+/// different names was none at all — an empty mapped type, and one every object passes through.
+/// Closing each variant against the other is what gives that branch the keys to leave out.
+#[cfg(feature = "typescript")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct OptExtObjHolder {
+    #[serde(flatten, skip_serializing_if = "Option::is_none", default)]
+    ext: Option<MemberExtObjects>,
+    own: String,
+}
+
+/// An untagged union written over the objects its members are rather than over names, and the struct
+/// that flattens it. serde matches a member on its shape and writes one member's keys at a time, and
+/// the members here are the only ones whose keys the declaration itself spells — a member written as
+/// a name is what it is written as, and the merge is told nothing it could close the others against.
+#[cfg(any(feature = "jsonschema", feature = "zod", feature = "typescript"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum InlineUntagEither {
+    Left { left: String },
+    Right { right: bool },
+}
+
+#[cfg(any(feature = "jsonschema", feature = "zod", feature = "typescript"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct InlineUntagDirectHolder {
+    #[serde(flatten)]
+    either: InlineUntagEither,
     own: String,
 }
 
@@ -3149,18 +3184,23 @@ fn test_the_direct_tagged_flatten_schema_multiplies_the_object_over_the_variants
 /// bare string a unit variant publishes standing alone intersects the object to `never`, and the
 /// payload serde writes for that variant belongs to no branch of the result.
 ///
+/// Each key set also says it does not carry the other's tag, which is what keeps the type on the one
+/// variant at a time serde writes. Without it the excess-property check reads the union of both key
+/// sets and either branch is satisfied by a payload carrying both.
+///
 /// Read off tsc 7.0.2 under `--strict`, the emitted declarations compiled as written: this type
 /// accepts `{ own: "o", Bare: null }` and `{ own: "o", Wrapped: { b: true } }`, and rejects
-/// `{ own: "o" }`, `{ own: "o", Bare: "Bare" }` and `{ Bare: null }`. Named as the enum's own union,
-/// the first of those was `TS2353: 'Bare' does not exist in type '{ own: string; } & { Wrapped:
-/// FlatSecond; }'`.
+/// `{ own: "o" }`, `{ own: "o", Bare: "Bare" }`, `{ Bare: null }` and
+/// `{ own: "o", Bare: null, Wrapped: { b: true } }`. Named as the enum's own union, the first of
+/// those was `TS2353: 'Bare' does not exist in type '{ own: string; } & { Wrapped: FlatSecond; }'`;
+/// without the exclusions the last one was accepted.
 #[test]
 #[cfg(feature = "typescript")]
 fn test_the_direct_tagged_flatten_type_spells_the_key_set_serde_writes() {
     let ts = ExtBareDirectHolder::ts_definition();
     assert!(
         ts.contains(
-            "} & ({\n  /**\n   * Bare\n   * \n   */\n  \"Bare\": null;\n} | {\n  /**\n   * Wrapped\n   * \n   */\n  \"Wrapped\": FlatSecond;\n});"
+            "} & ({\n  /**\n   * Bare\n   * \n   */\n  \"Bare\": null;\n  \"Wrapped\"?: never;\n} | {\n  /**\n   * Wrapped\n   * \n   */\n  \"Wrapped\": FlatSecond;\n  \"Bare\"?: never;\n});"
         ),
         "expected one key set per variant, got: {ts}"
     );
@@ -3222,17 +3262,25 @@ fn test_the_all_object_tagged_direct_flatten_schema_multiplies_the_object_over_t
     );
 }
 
-/// TypeScript distributes an intersection over a union of objects on its own, so the same enum stays
-/// the one operand it always was there — byte for byte, and payload for payload what the
-/// multiplication describes.
+/// TypeScript distributes an intersection over a union of objects on its own, so the branches are
+/// ones the enum's own name already reaches. What the name does not reach is what each branch says
+/// about the other: the excess-property check reads the union of both key sets, so a payload
+/// carrying both tags satisfies either branch structurally — a payload serde writes for no value and
+/// the other three surfaces refuse. Spelling the variants is what carries that.
+///
+/// Read off tsc 7.0.2 under `--strict`, the emitted declarations compiled as written: this type
+/// accepts `{ own: "o", One: { a: "x" } }` and `{ own: "o", Two: { b: true } }`, and rejects
+/// `{ own: "o" }`, `{ One: { a: "x" } }` and
+/// `{ own: "o", One: { a: "x" }, Two: { b: true } }`. Named as the enum's own union, that last one
+/// was accepted.
 #[test]
 #[cfg(feature = "typescript")]
-fn test_an_all_object_tagged_direct_flatten_type_is_byte_identical() {
+fn test_an_all_object_tagged_direct_flatten_type_closes_each_variant_against_the_other() {
     let ts = ExtObjDirectHolder::ts_definition();
     let declared = &ts[ts.find("export type").unwrap()..];
     assert_eq!(
         declared,
-        "export type ExtObjDirectHolder = {\n  /**\n   * own\n   * \n   */\n  own: string;\n} & MemberExtObjects;"
+        "export type ExtObjDirectHolder = {\n  /**\n   * own\n   * \n   */\n  own: string;\n} & ({\n  /**\n   * One\n   * \n   */\n  \"One\": FlatFirst;\n  \"Two\"?: never;\n} | {\n  /**\n   * Two\n   * \n   */\n  \"Two\": FlatSecond;\n  \"One\"?: never;\n});"
     );
 }
 
@@ -3242,5 +3290,126 @@ fn test_an_all_object_tagged_direct_flatten_document_is_byte_identical() {
     assert_eq!(
         serde_json::to_string(&ExtObjDirectHolder::json_schema()).unwrap(),
         r#"{"type":"object","oneOf":[{"type":"object","properties":{"own":{"type":"string"},"One":{"type":"object","additionalProperties":false,"properties":{"a":{"type":"string"}},"required":["a"]}},"required":["own","One"],"additionalProperties":false},{"type":"object","properties":{"own":{"type":"string"},"Two":{"type":"object","additionalProperties":false,"properties":{"b":{"type":"boolean"}},"required":["b"]}},"required":["own","Two"],"additionalProperties":false}]}"#
+    );
+}
+
+/// And the absence branch beside the same enum reads the closed variants' keys, where it had none to
+/// read: `keyof` a union is the keys its branches share, so before the exclusions the branch was an
+/// empty mapped type — `{}`, which every object passes through, including one carrying part of a
+/// variant's key set.
+///
+/// Read off tsc 7.0.2 under `--strict`, the emitted declarations compiled as written: this type
+/// accepts `{ own: "o" }`, `{ own: "o", One: { a: "x" } }` and `{ own: "o", Two: { b: true } }`, and
+/// rejects `{ own: "o", One: { a: "x" }, Two: { b: true } }`.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_the_optional_all_object_tagged_flatten_type_names_the_keys_its_absence_leaves_out() {
+    let ts = OptExtObjHolder::ts_definition();
+    let declared = &ts[ts.find("export type").unwrap()..];
+    assert_eq!(
+        declared,
+        "export type OptExtObjHolder = {\n  /**\n   * own\n   * \n   */\n  own: string;\n} & (({\n  /**\n   * One\n   * \n   */\n  \"One\": FlatFirst;\n  \"Two\"?: never;\n} | {\n  /**\n   * Two\n   * \n   */\n  \"Two\": FlatSecond;\n  \"One\"?: never;\n}) | { [K in keyof ({\n  /**\n   * One\n   * \n   */\n  \"One\": FlatFirst;\n  \"Two\"?: never;\n} | {\n  /**\n   * Two\n   * \n   */\n  \"Two\": FlatSecond;\n  \"One\"?: never;\n})]?: never });"
+    );
+}
+
+/// Standing on their own the two tagged enums are written exactly as they were on TypeScript too.
+/// The exclusions answer what an intersection with an open object does to the choice, and a name
+/// publishing the choice alone is joined to nothing: it describes one variant at a time already.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_the_tagged_enums_are_byte_identical_standing_alone_on_typescript() {
+    let bare = MemberExtBare::ts_definition();
+    let objects = MemberExtObjects::ts_definition();
+    assert_eq!(
+        [
+            &bare[bare.find("export type").unwrap()..],
+            &objects[objects.find("export type").unwrap()..],
+        ],
+        [
+            "export type MemberExtBare =   /**\n   * Bare\n   * \n   */\n  \"Bare\" | {\n  /**\n   * Wrapped\n   * \n   */\n  \"Wrapped\": FlatSecond;\n};",
+            "export type MemberExtObjects = {\n  /**\n   * One\n   * \n   */\n  \"One\": FlatFirst;\n} | {\n  /**\n   * Two\n   * \n   */\n  \"Two\": FlatSecond;\n};",
+        ]
+    );
+}
+
+/// The untagged footing answers the same way, on the members whose keys the declaration spells. What
+/// serde writes is one member's keys at a time — it matches a member on its shape — and the merged
+/// type said otherwise for the reason the tagged one did.
+#[test]
+#[cfg(any(feature = "jsonschema", feature = "zod", feature = "typescript"))]
+fn test_a_directly_flattened_inline_untagged_union_round_trips_every_member() {
+    let forms = [
+        (
+            InlineUntagEither::Left {
+                left: "l".to_owned(),
+            },
+            serde_json::json!({ "left": "l", "own": "o" }),
+        ),
+        (
+            InlineUntagEither::Right { right: true },
+            serde_json::json!({ "right": true, "own": "o" }),
+        ),
+    ];
+    for (either, expected) in forms {
+        let holder = InlineUntagDirectHolder {
+            either,
+            own: "o".to_owned(),
+        };
+        let written = serde_json::to_value(&holder).unwrap();
+        assert_eq!(written, expected);
+        let back: InlineUntagDirectHolder = serde_json::from_value(written).unwrap();
+        assert_eq!(back, holder);
+    }
+}
+
+/// So the merged type spells the members in the union's name's place, each closed against the keys
+/// the other names.
+///
+/// Read off tsc 7.0.2 under `--strict`, the emitted declarations compiled as written: this type
+/// accepts `{ own: "o", left: "l" }` and `{ own: "o", right: true }`, and rejects `{ own: "o" }`,
+/// `{ left: "l" }` and `{ own: "o", left: "l", right: true }`. Named as the enum's own union, that
+/// last one was accepted.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_an_inline_untagged_direct_flatten_type_closes_each_member_against_the_other() {
+    let ts = InlineUntagDirectHolder::ts_definition();
+    let declared = &ts[ts.find("export type").unwrap()..];
+    assert_eq!(
+        declared,
+        "export type InlineUntagDirectHolder = {\n  /**\n   * own\n   * \n   */\n  own: string;\n} & ({ left: string; right?: never } | { right: boolean; left?: never });"
+    );
+}
+
+/// And the union standing alone is written exactly as it was, on every surface: the exclusions are
+/// what an intersection with an open object needs, and nothing joins the name here.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_the_inline_untagged_union_is_byte_identical_standing_alone() {
+    let ts = InlineUntagEither::ts_definition();
+    let declared = &ts[ts.find("export type").unwrap()..];
+    assert_eq!(
+        declared,
+        "export type InlineUntagEither = { left: string } | { right: boolean };"
+    );
+}
+
+#[test]
+#[cfg(feature = "zod")]
+fn test_the_inline_untagged_direct_flatten_schema_is_unchanged() {
+    let zod = InlineUntagDirectHolder::zod_schema();
+    assert!(
+        zod.contains(
+            "z.union([\n  InlineUntagDirectHolder$OwnSchema.and(z.lazy(() => z.strictObject({ left: z.string(), }))),\n  InlineUntagDirectHolder$OwnSchema.and(z.lazy(() => z.strictObject({ right: z.boolean(), }))),\n])"
+        ),
+        "expected one operand per member, got: {zod}"
+    );
+}
+
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_the_inline_untagged_direct_flatten_document_is_unchanged() {
+    assert_eq!(
+        serde_json::to_string(&InlineUntagDirectHolder::json_schema()).unwrap(),
+        r#"{"type":"object","anyOf":[{"type":"object","properties":{"own":{"type":"string"},"left":{"type":"string"}},"required":["own","left"],"additionalProperties":false},{"type":"object","properties":{"own":{"type":"string"},"right":{"type":"boolean"}},"required":["own","right"],"additionalProperties":false}]}"#
     );
 }
