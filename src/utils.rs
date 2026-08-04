@@ -662,7 +662,7 @@ thread_local! {
     /// The names whose items publish a Zod factory. Kept out of [`ALIAS_INFO`] so the answer
     /// survives the item's own registration — see [`record_zod_factory`].
     static ZOD_FACTORY_PUBLISHERS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
-    /// Each generic item's own `$SchemaDefault` argument list, one rendered Zod expression per
+    /// Each generic item's own `$SchemaDefault` fold-comparison keys, one plain rendering per
     /// parameter in declaration order — see [`record_zod_default_arguments`].
     static ZOD_DEFAULT_ARGUMENTS: RefCell<HashMap<String, Vec<String>>> = RefCell::new(HashMap::new());
 }
@@ -895,14 +895,17 @@ pub fn publishes_zod_factory(rust_ident: &str) -> bool {
     ZOD_FACTORY_PUBLISHERS.with(|names| names.borrow().contains(rust_ident))
 }
 
-/// Records the Zod argument list `rust_ident`'s own `$SchemaDefault` calls its factory with, one
-/// rendered expression per parameter in declaration order.
+/// Records `rust_ident`'s own `$SchemaDefault` fold-comparison keys — the plain [`FieldDef::zod_type`]
+/// rendering of each declared-default field, one per parameter in declaration order, computed
+/// before deferral and before a constrained brand's `.min`/`.max`/`.check` chain is appended.
 ///
-/// Recorded once as the item's `$SchemaDefault` is built, so a later item whose own declared
-/// default names this one at the identical arguments can read them back and fold onto this
-/// binding instead of composing a second call the memo cache does not share with it — two
-/// separately written `z.string()` calls are two different objects, and the cache keys on argument
-/// identity, not on what the argument says.
+/// This is a comparison key, not the text `$SchemaDefault` emits: the fold in
+/// [`default_zod_argument`] renders a downstream reference's own arguments the same plain way, so
+/// the two must agree in form for the comparison to ever succeed. Recorded once as the item's
+/// `$SchemaDefault` is built, so a later item whose own declared default names this one at the
+/// identical arguments can read them back and fold onto this binding instead of composing a second
+/// call the memo cache does not share with it — two separately written `z.string()` calls are two
+/// different objects, and the cache keys on argument identity, not on what the argument says.
 #[cfg(feature = "zod")]
 pub fn record_zod_default_arguments(rust_ident: &str, arguments: Vec<String>) {
     ZOD_DEFAULT_ARGUMENTS.with(|map| {

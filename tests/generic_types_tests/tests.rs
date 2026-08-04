@@ -243,6 +243,8 @@ mod zod {
         OverriddenDefault, Pair, PlainConst, Positional, Quintet, Referrer, Summarised, Tagged,
         Untagged, WireFolder, Wrapper, keyed_alias_schema,
     };
+    #[cfg(all(feature = "typescript", feature = "serde"))]
+    use super::{ConstrainedEchoedDefault, ConstrainedId, DeepEchoedDefault};
 
     /// Two generic items whose declared defaults name each other: `CycleLeader`'s names
     /// `CycleFollower` and `CycleFollower`'s names `CycleLeader` back, at arguments neither can have
@@ -539,6 +541,55 @@ mod zod {
             zod.contains(
                 "= OverriddenDefault$SchemaFactory(z.lazy(() => \
                  Tagged$SchemaFactory(z.number().int())));"
+            ),
+            "Got: {zod}"
+        );
+    }
+
+    /// Nothing else in this crate constructs `ConstrainedId` directly — every other use names it
+    /// only as a bare type argument — so this pins the same bounds-through-serde behavior
+    /// `constrained_generic_branded_tests::StrictDocumentId` in `branded_newtype_tests` covers for
+    /// the identical shape.
+    #[cfg(all(feature = "typescript", feature = "serde"))]
+    #[test]
+    fn a_constrained_ids_declared_default_enforces_the_bounds_through_serde() {
+        let valid: ConstrainedId<String> =
+            serde_json::from_str("\"64de3d95ff45b119e5b53a7e\"").unwrap();
+        valid.validate().unwrap();
+
+        let too_short: Result<ConstrainedId<String>, _> = serde_json::from_str("\"abc\"");
+        assert!(too_short.is_err(), "Should reject a too-short id via serde");
+    }
+
+    /// The fold fires for a *constrained* generic brand exactly as it does for `Tagged`: the
+    /// recorded comparison key is the plain rendering, not the `.min`/`.max`/`.check` chain
+    /// `$SchemaDefault` emits, so the two forms agree and the bounds are carried in by reference
+    /// instead of silently dropped.
+    #[cfg(all(feature = "typescript", feature = "serde"))]
+    #[test]
+    fn a_default_naming_a_constrained_brands_own_default_folds_onto_its_binding() {
+        let zod = ConstrainedEchoedDefault::<String>::zod_schema();
+        assert!(
+            zod.contains(
+                "= ConstrainedEchoedDefault$SchemaFactory(z.lazy(() => \
+                 ConstrainedId$SchemaDefault));"
+            ),
+            "Got: {zod}"
+        );
+    }
+
+    /// A downstream default naming a sibling whose own recorded fold key itself names a further
+    /// sibling at matching arguments — the fold chains two levels deep, reading
+    /// `ConstrainedEchoedDefault`'s comparison key back rather than the deferred, checks-carrying
+    /// text its own `$SchemaDefault` emits.
+    #[cfg(all(feature = "typescript", feature = "serde"))]
+    #[test]
+    fn a_default_naming_a_siblings_default_that_itself_folds_chains_two_levels_deep() {
+        let zod = DeepEchoedDefault::<String>::zod_schema();
+        assert!(
+            zod.contains(
+                "= DeepEchoedDefault$SchemaFactory(z.lazy(() => \
+                 ConstrainedEchoedDefault$SchemaDefault));"
             ),
             "Got: {zod}"
         );
@@ -1653,6 +1704,44 @@ pub struct EchoedDefault<HolderType> {
 #[model_schema(default_types(HolderType = Tagged<u32>))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OverriddenDefault<HolderType> {
+    pub held: HolderType,
+}
+
+/// A generic branded newtype whose inner is a bare type parameter, carrying string constraints —
+/// held here rather than reused from `branded_newtype_tests` because each integration test file
+/// compiles as its own crate. `$SchemaDefault` composes the checks onto the declared-default
+/// argument, exactly as `constrained_generic_branded_tests::StrictDocumentId` does there.
+#[cfg(all(feature = "zod", feature = "typescript", feature = "serde"))]
+#[model_schema(
+    minLength = 24,
+    maxLength = 24,
+    pattern = "^[a-f\\d]{24}$",
+    default_types(IdType = String)
+)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ConstrainedId<IdType>(pub IdType);
+
+/// A declared default naming a *constrained* generic brand at exactly the arguments that brand
+/// calls its own. The emitted `$SchemaDefault` text carries a `.min`/`.max`/`.check` chain the
+/// plain rendering a downstream reference computes never spells, so the fold comparison has to key
+/// on the plain form or a constrained brand can never fold — the checks would be silently dropped
+/// from every reference naming it at its own default.
+#[cfg(all(feature = "zod", feature = "typescript", feature = "serde"))]
+#[model_schema(default_types(HolderType = ConstrainedId<String>))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConstrainedEchoedDefault<HolderType> {
+    pub held: HolderType,
+}
+
+/// A declared default naming a sibling — `ConstrainedEchoedDefault` — whose own recorded fold key
+/// itself names a further sibling (`ConstrainedId`) at matching arguments. The fold has to chain
+/// two levels deep, reading `ConstrainedEchoedDefault`'s comparison key back rather than the
+/// deferred, checks-carrying text its own `$SchemaDefault` emits.
+#[cfg(all(feature = "zod", feature = "typescript", feature = "serde"))]
+#[model_schema(default_types(HolderType = ConstrainedEchoedDefault<ConstrainedId<String>>))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeepEchoedDefault<HolderType> {
     pub held: HolderType,
 }
 

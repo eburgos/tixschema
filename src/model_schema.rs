@@ -12381,6 +12381,8 @@ fn zod_default_block(
         .iter()
         .map(|parameter| declared_default_field(parameter, defaults.default_types))
         .collect();
+    let fold_keys: Vec<String> = fields.iter().map(FieldDef::zod_type).collect();
+    record_zod_default_arguments(rust_ident, fold_keys);
     let arguments: Vec<String> = parameters
         .iter()
         .zip(&fields)
@@ -12394,7 +12396,6 @@ fn zod_default_block(
             }
         })
         .collect();
-    record_zod_default_arguments(rust_ident, arguments.clone());
 
     #[cfg(feature = "typescript")]
     let annotation = format!(
