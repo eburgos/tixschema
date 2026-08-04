@@ -282,6 +282,97 @@ struct FlatOverMixed {
     tagged: MixedTagged,
 }
 
+/// A union one member of which is itself a union, and the struct that flattens the outer one. serde
+/// writes whichever leaf member matched into the object the struct is writing, so the nesting
+/// contributes no key of its own and what the struct writes is one key set per leaf.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct NestPlain {
+    plain: String,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "kind")]
+enum NestTagged {
+    Left { left: String },
+    Right { right: bool },
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum NestEither {
+    Plain(NestPlain),
+    Tagged(NestTagged),
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct NestHolder {
+    #[serde(flatten)]
+    either: NestEither,
+    own: String,
+}
+
+/// The same nesting with one member at every level: a choice of one is no choice, so no wrapper is
+/// written and the holder describes as the one key set it writes.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct NestOnly {
+    a: String,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum NestOnlyInner {
+    A(NestOnly),
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum NestOnlyOuter {
+    Inner(NestOnlyInner),
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct NestOnlyHolder {
+    #[serde(flatten)]
+    either: NestOnlyOuter,
+    own: String,
+}
+
+/// Two unions that name each other. The outer one is deferred by the frame that reads it and its
+/// body is written by the time the merge asks for it, so the cycle carries no missing body — it is
+/// visible only as a name the expansion reaches twice on one path.
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct NestCycleHolder {
+    #[serde(flatten)]
+    either: NestCycleOuter,
+    own: String,
+}
+
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum NestCycleOuter {
+    Inner(Box<NestCycleInner>),
+}
+
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum NestCycleInner {
+    Back(Box<NestCycleOuter>),
+}
+
 /// Whether `payload` is accepted by a document every leaf of which is an object closed by
 /// `additionalProperties: false`: a leaf accepts when it names every key the payload carries and
 /// requires no key it does not.
@@ -971,4 +1062,121 @@ fn test_the_mixed_merge_schema_accepts_every_payload_serde_writes() {
             "{payload} is rejected by {schema}"
         );
     }
+}
+
+/// What serde writes for a struct that flattens a union one member of which is itself a union: the
+/// struct's own keys, and beside them the keys of whichever leaf member matched. The inner union is
+/// a choice, not a value, so it writes no key of its own.
+#[test]
+fn test_flattening_a_nested_union_writes_the_leaf_members_keys() {
+    let nested: [(NestEither, serde_json::Value); 3] = [
+        (
+            NestEither::Plain(NestPlain {
+                plain: "p".to_owned(),
+            }),
+            serde_json::json!({ "own": "o", "plain": "p" }),
+        ),
+        (
+            NestEither::Tagged(NestTagged::Left {
+                left: "l".to_owned(),
+            }),
+            serde_json::json!({ "own": "o", "kind": "Left", "left": "l" }),
+        ),
+        (
+            NestEither::Tagged(NestTagged::Right { right: true }),
+            serde_json::json!({ "own": "o", "kind": "Right", "right": true }),
+        ),
+    ];
+    for (either, expected) in nested {
+        let holder = NestHolder {
+            own: "o".to_owned(),
+            either,
+        };
+        let written = serde_json::to_value(&holder).unwrap();
+        assert_eq!(written, expected);
+        let back: NestHolder = serde_json::from_value(written).unwrap();
+        assert_eq!(back, holder);
+    }
+}
+
+/// So the merged schema multiplies the base out over the leaves rather than over the inner union,
+/// which carries no members to merge: before the branches expanded, the document named none of the
+/// leaves' keys and closed around `own` alone.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_the_nested_union_schema_accepts_every_payload_serde_writes() {
+    let schema = NestHolder::json_schema();
+    for payload in [
+        serde_json::json!({ "own": "o", "plain": "p" }),
+        serde_json::json!({ "own": "o", "kind": "Left", "left": "l" }),
+        serde_json::json!({ "own": "o", "kind": "Right", "right": true }),
+    ] {
+        assert!(
+            closed_document_accepts(&schema, &payload),
+            "{payload} is rejected by {schema}"
+        );
+    }
+}
+
+/// And each union keeps the spelling its own source used, however deep it sits: the untagged outer
+/// one is first-match-wins under `anyOf`, and the discriminated inner one exclusive under `oneOf`.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_a_nested_union_branch_expands_under_its_own_spelling() {
+    assert_eq!(
+        serde_json::to_string(&NestHolder::json_schema()).unwrap(),
+        r#"{"type":"object","anyOf":[{"type":"object","properties":{"own":{"type":"string"},"plain":{"type":"string"}},"required":["own","plain"],"additionalProperties":false},{"type":"object","oneOf":[{"type":"object","properties":{"own":{"type":"string"},"kind":{"type":"string","const":"Left"},"left":{"type":"string"}},"required":["own","kind","left"],"additionalProperties":false},{"type":"object","properties":{"own":{"type":"string"},"kind":{"type":"string","const":"Right"},"right":{"type":"boolean"}},"required":["own","kind","right"],"additionalProperties":false}]}]}"#
+    );
+}
+
+/// What serde writes when every level of the nesting holds one member: the same one key set the
+/// single leaf writes.
+#[test]
+fn test_flattening_a_single_member_nested_union_writes_the_leafs_keys() {
+    let holder = NestOnlyHolder {
+        own: "o".to_owned(),
+        either: NestOnlyOuter::Inner(NestOnlyInner::A(NestOnly { a: "x".to_owned() })),
+    };
+    let written = serde_json::to_value(&holder).unwrap();
+    assert_eq!(written, serde_json::json!({ "own": "o", "a": "x" }));
+    let back: NestOnlyHolder = serde_json::from_value(written).unwrap();
+    assert_eq!(back, holder);
+}
+
+/// So the document is that one object, wrapped in nothing: a choice of one is no choice at any
+/// depth. Before the branches expanded, it closed around `own` and rejected the only payload the
+/// type has.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_a_single_member_nested_union_collapses_to_the_leafs_object() {
+    assert_eq!(
+        serde_json::to_string(&NestOnlyHolder::json_schema()).unwrap(),
+        r#"{"type":"object","properties":{"own":{"type":"string"},"a":{"type":"string"}},"required":["own","a"],"additionalProperties":false}"#
+    );
+    assert!(closed_document_accepts(
+        &NestOnlyHolder::json_schema(),
+        &serde_json::json!({ "own": "o", "a": "x" })
+    ));
+}
+
+/// A cycle closed through two unions that name each other has a body at every step — the deferred
+/// one is filled in before the merge reads it — so it is the expansion path that names it, and the
+/// merge names that path rather than descending it forever.
+#[test]
+#[cfg(feature = "jsonschema")]
+#[should_panic(
+    expected = "`NestCycleHolder`: `#[serde(flatten)]` of `NestCycleOuter` closes a flatten cycle through nested unions — its branch 1.1 names `NestCycleOuter`, already expanding on the path `NestCycleOuter`"
+)]
+fn test_a_cycle_through_nested_unions_names_the_path_it_closes() {
+    assert!(NestCycleHolder::json_schema().is_object());
+}
+
+/// The remedy is the one every flatten cycle names.
+#[test]
+#[cfg(feature = "jsonschema")]
+#[should_panic(
+    expected = "write the field as a named member so the cycle defers through a reference"
+)]
+fn test_the_nested_union_cycle_refusal_names_the_remedy() {
+    assert!(NestCycleHolder::json_schema().is_object());
 }
