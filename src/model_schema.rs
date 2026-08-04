@@ -2543,7 +2543,7 @@ fn collect_struct_fields(
         if let Some(vb) = validate_body {
             validate_bodies.push(vb);
         }
-        field_defs.push(f_def);
+        push_described_field(&mut field_defs, f_def);
     }
 
     if guard_errors.is_empty() {
@@ -4739,7 +4739,7 @@ fn collect_discriminated_variants(
                 checks.push(body);
             }
             guard_errors.extend(field_guard_errors);
-            field_defs.push(f_def);
+            push_described_field(&mut field_defs, f_def);
         }
         per_variant_checks.push((
             variant_check_pattern(&item.ident, &variant_kind, total_fields, &bound),
@@ -6257,7 +6257,7 @@ fn collect_untagged_members(
                 positional_constraint_error,
             );
             guard_errors.extend(member_guard_errors);
-            field_defs.push(member_def);
+            push_described_field(&mut field_defs, member_def);
         }
 
         per_variant_checks.push((
@@ -8983,19 +8983,47 @@ fn field_ident_string(field: &Field) -> String {
         .unwrap_or_default()
 }
 
-/// Hands the field def the one serde fact the object surfaces spend: whether the field's value
-/// leaves the key out of the serialized object rather than writing it.
+/// Hands the field def the two serde facts the object surfaces spend: whether the field's value
+/// leaves the key out of the serialized object rather than writing it, and whether the key is out
+/// of both directions at once.
 ///
 /// Only a named field has a key to leave out. A positional one is written by its place in a tuple,
 /// where nothing can be dropped and a `None` reaches the wire as a `null`, so the omission the
 /// attribute names never happens there and the slot spellings stand as written.
 ///
+/// The second fact is the first one plus serde declining to read the field: the key is written into
+/// no payload and kept out of every payload that supplies one, which leaves the surfaces with
+/// nothing to describe. It is the conjunction that is read rather than the word `skip`, because
+/// `skip_serializing` and `skip_deserializing` side by side are that same wire written out.
+///
 /// Not gated on the `serde` feature. The attribute is on the field in every build and the surfaces
 /// claim to describe the payload serde writes in every build, so a toggle that changed the answer
 /// would make one declaration describe two different wires.
 fn apply_serde_key_omission(field_def: &mut FieldDef, field: &Field) {
-    field_def.omits_value =
-        field.ident.is_some() && parse_serde_key_omission(&field.attrs).omits_key;
+    let omission = parse_serde_key_omission(&field.attrs);
+    field_def.omits_value = field.ident.is_some() && omission.omits_key;
+    field_def.absent_from_wire = field_def.omits_value && omission.skips_deserializing;
+}
+
+/// Adds the field to the list every surface is built from, unless the wire carries its key in
+/// neither direction.
+///
+/// A field serde writes into no payload and reads out of none leaves all three surfaces with
+/// nothing to describe, so it is dropped once here rather than at each of the renderers — one list
+/// of described members, and no way for the three to disagree about who is on it.
+///
+/// Dropping it is stricter than serde on the read side: a `z.strictObject` and an
+/// `additionalProperties: false` both reject a payload carrying the key, while serde accepts that
+/// payload and throws the value away. That is the price of describing the payload serde *writes*,
+/// where the key never appears at all — the alternative spelling, a member under an optional key,
+/// would instead claim the key is sometimes written and would describe a value nothing reads.
+///
+/// The field is still the Rust type's, so whatever validation it earned still runs; what it is not
+/// is part of the wire.
+fn push_described_field(field_defs: &mut Vec<FieldDef>, field_def: FieldDef) {
+    if !field_def.absent_from_wire {
+        field_defs.push(field_def);
+    }
 }
 
 /// Rejects a named `Option` field whose serde attributes let a `None` reach the wire as `null`.

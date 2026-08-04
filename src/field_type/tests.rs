@@ -19,6 +19,7 @@ fn field(field_type: FieldDefType) -> FieldDef {
         model_schema_prop_meta: None,
         nullable_levels: Vec::new(),
         name: "items".to_owned(),
+        absent_from_wire: false,
         omits_value: false,
         #[cfg(feature = "jsonschema")]
         type_span: proc_macro2::Span::call_site(),
