@@ -50,7 +50,8 @@ use crate::features::object_id::OBJECT_ID_HEX_PATTERN;
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::{
-    AliasKind, constraining_pattern, lookup_alias_info, portable_pattern, record_value_shape,
+    AliasKind, PublishedShape, constraining_pattern, lookup_alias_info, portable_pattern,
+    record_value_shape,
 };
 
 #[cfg(feature = "serde")]
@@ -598,7 +599,7 @@ impl SourceAbsence {
 /// name rather than at it.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 struct Surface {
-    shape: Option<&'static str>,
+    shape: PublishedShape,
     #[cfg(all(feature = "serde", any(feature = "zod", feature = "typescript")))]
     wire: RecordedWire,
 }
@@ -745,7 +746,7 @@ impl Surface {
         #[cfg(not(all(feature = "serde", any(feature = "zod", feature = "typescript"))))]
         let _: Option<&'static str> = wire;
         Self {
-            shape,
+            shape: PublishedShape::Flat(shape),
             #[cfg(all(feature = "serde", any(feature = "zod", feature = "typescript")))]
             wire: RecordedWire::Named(wire),
         }
@@ -779,9 +780,13 @@ impl Surface {
     }
 
     /// The surface a written type publishes, both answers read off the one def.
-    fn written(written: &FieldDef) -> Self {
+    ///
+    /// `parameters` is the item's own type-parameter list, in the order it declares them: a target
+    /// that *is* one of them publishes a family rather than a shape, and the position is what the
+    /// shape answer records for it — see [`PublishedShape`].
+    fn written(written: &FieldDef, parameters: &[String]) -> Self {
         Self {
-            shape: published_value_shape(written),
+            shape: published_value_shape(written, parameters),
             #[cfg(all(feature = "serde", any(feature = "zod", feature = "typescript")))]
             wire: RecordedWire::Leaves(published_wire_leaves(written)),
         }
@@ -1188,7 +1193,8 @@ fn process_type_alias(item_type: ItemType, args: &ModelSchemaArgs) -> TokenStrea
     let kind = alias_target_kind(&alias_field_def);
     register_alias_info(&rust_ident_str, &export_name, &module_name, kind);
     // An alias's schema *is* its target's, so it publishes whatever the target publishes.
-    Surface::written(&alias_field_def).record(&rust_ident_str);
+    Surface::written(&alias_field_def, &type_parameters_in_scope(&alias.generics))
+        .record(&rust_ident_str);
     // An alias *is* the type it names, so a merge that flattens it multiplies over exactly the
     // members the target's own name would have given it.
     #[cfg(feature = "zod")]
@@ -2510,16 +2516,21 @@ fn branded_option_inner_error(
 /// measures `Display`. Three surfaces, three answers — the disagreement this guard exists to stop.
 ///
 /// A name written *over* one of those parameters is the same answer reached one module out, and is
-/// the one absence the registry's silence must not be read as consent for. `Later<T>` names a type
-/// whose schema the brand composes from the argument the caller supplies, so the checks land on
-/// whatever that argument turns out to be: Zod appends them to a shape the call site decides, the
-/// one JSON document written for every instantiation still holds the `{}` a parameter describes as,
-/// and `validate()` still measures `Display` — a numeric filling being rejected for its digit count
-/// rather than for its value. Refusing it is what keeps the guard's answer a fact about the
-/// declaration: the same two items written in the other order already refuse, the registry having
-/// classified the inner by then, and an author cannot act on a diagnostic that fires on where a
-/// type is written. What stays admitted is the unresolved *concrete* name, whose instantiation the
-/// declaration has already fixed.
+/// refused ahead of the registry entirely. `Later<T>` names a type whose schema the brand composes
+/// from the argument the caller supplies, so the checks land on whatever that argument turns out to
+/// be: Zod appends them to a shape the call site decides, the one JSON document written for every
+/// instantiation still holds the `{}` a parameter describes as, and `validate()` still measures
+/// `Display` — a numeric filling being rejected for its digit count rather than for its value.
+/// Asking it first is what makes the refusal a fact about the declaration rather than about what
+/// the named item happened to record: the argument is what a recorded position would be filled
+/// with, and a parameter fills it with nothing any surface can name.
+///
+/// A concrete argument is the opposite case, and it is where the registry earns its consult. The
+/// checks compose onto the schema the *argument* resolves to, because that is what the emission
+/// hands the named item's factory — so a name recorded as publishing its own parameter answers
+/// with that argument's shape, and `Later<String>` carries the checks where `Later<u32>` cannot.
+/// One recorded word could not say either: it would have to stand for every instantiation, and the
+/// only word that does is the opaque one, which would refuse the working declaration outright.
 ///
 /// Resolved through the same `get_field_def` call the renderers make, so the guard and the
 /// contract cannot disagree about what a shape is.
@@ -2534,6 +2545,21 @@ fn branded_constraint_inner_error(
         return None;
     }
     let inner = branded_inner_value_surface(generics, inner_field);
+    if let FieldDefType::SiblingType(inner_name, _) = &inner.field_type
+        && let Some(parameter) = inner.argument_parameter_name()
+    {
+        let message = format!(
+            "model_schema: branded newtype `{name}` applies string constraints (pattern, \
+             minLength, maxLength) to `{inner_name}`, whose schema this crate builds from the \
+             type parameter `{parameter}` — so the checks land on whatever the instantiation \
+             supplies for it, and one declaration covers every instantiation: Zod appends \
+             `.min`/`.max` to a schema the call site decides the shape of, JSON Schema writes \
+             them beside the `{{}}` a parameter describes as, where they go inert, and \
+             `validate()` measures the inner's `Display` rendering — three surfaces, three \
+             answers. Brand a string-typed inner, or drop the constraints."
+        );
+        return Some(syn::Error::new_spanned(inner_field, message).to_compile_error());
+    }
     let message = match (&inner.field_type, non_string_inner_shape(&inner)) {
         (FieldDefType::SiblingType(inner_name, _), Some(shape)) => format!(
             "model_schema: branded newtype `{name}` applies string constraints (pattern, \
@@ -2545,19 +2571,6 @@ fn branded_constraint_inner_error(
              rendering — three surfaces, three answers. Brand a string-typed inner, or drop the \
              constraints."
         ),
-        (FieldDefType::SiblingType(inner_name, _), None) => {
-            let parameter = inner.argument_parameter_name()?;
-            format!(
-                "model_schema: branded newtype `{name}` applies string constraints (pattern, \
-                 minLength, maxLength) to `{inner_name}`, whose schema this crate builds from the \
-                 type parameter `{parameter}` — so the checks land on whatever the instantiation \
-                 supplies for it, and one declaration covers every instantiation: Zod appends \
-                 `.min`/`.max` to a schema the call site decides the shape of, JSON Schema writes \
-                 them beside the `{{}}` a parameter describes as, where they go inert, and \
-                 `validate()` measures the inner's `Display` rendering — three surfaces, three \
-                 answers. Brand a string-typed inner, or drop the constraints."
-            )
-        }
         (_, Some(shape)) => format!(
             "model_schema: branded newtype `{name}` applies string constraints (pattern, \
              minLength, maxLength) to a {shape} inner type, which cannot carry them: Zod reads \
@@ -2594,7 +2607,9 @@ fn non_string_inner_shape(inner: &FieldDef) -> Option<&'static str> {
         return Some("container");
     }
     match &inner.field_type {
-        FieldDefType::SiblingType(inner_name, _) => registered_value_shape(inner_name),
+        FieldDefType::SiblingType(inner_name, arguments) => {
+            instantiated_value_shape(inner_name, arguments)
+        }
         FieldDefType::Map(..) | FieldDefType::Tuple(..) => Some("container"),
         FieldDefType::Boolean => Some("boolean"),
         FieldDefType::U8
@@ -2621,17 +2636,26 @@ fn non_string_inner_shape(inner: &FieldDef) -> Option<&'static str> {
     }
 }
 
-/// What a registered name's own value surface is, and `None` for a name the registry has no answer
-/// for — one declared below the type reading it, or one this crate never expands at all.
+/// What a registered name filled with `arguments` publishes as a value, and `None` for a name the
+/// registry has no answer for — one declared below the type reading it, or one this crate never
+/// expands at all.
 ///
 /// Those two are the same absence and take the same answer, which is the emission the name has
 /// always had. Refusing on absence would refuse the unresolved user type the guard admits on
 /// purpose, and would make a diagnostic out of declaration order: moving a declaration would turn a
 /// compiling program into a refused one without changing what it means, and an author cannot act on
 /// a guard that fires on where a type is written rather than on what it is.
+///
+/// A name that recorded a parameter position publishes a family, and the argument written at that
+/// position is the member of it this reference names — the same argument the emission composes the
+/// checks onto, so the guard's answer and the emitted schema cannot disagree. The recursion walks
+/// one written argument in per step and so cannot cycle, however the arguments nest.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-fn registered_value_shape(rust_ident: &str) -> Option<&'static str> {
-    lookup_alias_info(rust_ident)?.value_shape
+fn instantiated_value_shape(rust_ident: &str, arguments: &[FieldDef]) -> Option<&'static str> {
+    match lookup_alias_info(rust_ident)?.value_shape {
+        PublishedShape::Flat(shape) => shape,
+        PublishedShape::Parameter(position) => non_string_inner_shape(arguments.get(position)?),
+    }
 }
 
 /// The JSON type keyword a registered name's wire describes as, when the registry proves that wire
@@ -2710,12 +2734,43 @@ const fn scalar_json_type_keyword(field_type: &FieldDefType) -> Option<&'static 
 /// and neither carries the string checks the schema beneath it would have. The brand path never
 /// reaches this arm — an `Option` inner has its own refusal, which says the representable thing to
 /// say — but an item registering a name can be written over one.
+///
+/// A target that *is* one of the item's own parameters records that parameter's position rather
+/// than a word. Every word available at the declaration would be a word about the declaration, and
+/// the only one true of every instantiation is the opaque one a parameter describes as on both
+/// validating surfaces — which is a fact about what the item writes for itself, not about what a
+/// reference to it composes. A reference fills the position, and only then is there a shape to
+/// name.
+///
+/// The target is read through the same erasure every surface reads it through, so which of the two
+/// a written name is — the item's own parameter or a reference to another type — is settled once.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-fn published_value_shape(written: &FieldDef) -> Option<&'static str> {
-    if written.is_optional() {
-        return Some("nullable");
+fn published_value_shape(written: &FieldDef, parameters: &[String]) -> PublishedShape {
+    let mut target = written.clone();
+    target.erase_type_parameters(parameters);
+    if target.is_optional() {
+        return PublishedShape::Flat(Some("nullable"));
     }
-    non_string_inner_shape(written)
+    published_parameter_position(&target, parameters).map_or_else(
+        || PublishedShape::Flat(non_string_inner_shape(&target)),
+        PublishedShape::Parameter,
+    )
+}
+
+/// The position of the item's own parameter a written target *is*, and `None` for every target that
+/// fixes a shape of its own around one.
+///
+/// The sequence spellings are turned away first, through the same pair [`non_string_inner_shape`]
+/// reads them as: the parser collapses a `Vec<T>` onto array levels over the `T` itself, so the
+/// parameter is reached at the leaf there exactly as it is when written bare. An array is an array
+/// however the instantiation fills it — a shape the record keeps, rather than the family it defers.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn published_parameter_position(target: &FieldDef, parameters: &[String]) -> Option<usize> {
+    if target.is_array() || sequence_wrapper_element(target).is_some() {
+        return None;
+    }
+    let name = target.parameter_shape_name()?;
+    parameters.iter().position(|declared| declared == name)
 }
 
 /// The `compile_error!` tokens for every `cfg_attr`-wrapped serde attribute a branded newtype
@@ -3560,10 +3615,10 @@ fn build_tuple_struct_zod_schema_method(
 /// *is* the slot's schema and carries exactly what it carries; every other arity is the fixed array
 /// `z.tuple` writes, which takes no string check and which no object can be merged with.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-fn tuple_struct_surface(fields: &syn::Fields) -> Surface {
+fn tuple_struct_surface(fields: &syn::Fields, parameters: &[String]) -> Surface {
     let mut slots = fields.iter();
     match (slots.next(), slots.next()) {
-        (Some(slot), None) => Surface::written(&get_field_def("_slot", &slot.ty, "")),
+        (Some(slot), None) => Surface::written(&get_field_def("_slot", &slot.ty, ""), parameters),
         _ => Surface::array(),
     }
 }
@@ -3585,7 +3640,10 @@ fn process_tuple_struct(
     let (item_name, module_name, module_ident) = struct_module_idents(
         &name,
         args.name_override.as_deref(),
-        tuple_struct_surface(&item_struct.fields),
+        tuple_struct_surface(
+            &item_struct.fields,
+            &type_parameters_in_scope(&item_struct.generics),
+        ),
     );
 
     let (shape, guard_errors) = collect_tuple_slots(
@@ -4721,10 +4779,10 @@ fn register_branded_newtype(
     );
     // A brand is written straight onto its inner's schema — `.brand()` hands back that same
     // instance — so it publishes whatever its inner publishes.
-    Surface::written(&branded_inner_value_surface(
-        &item_struct.generics,
-        inner_field,
-    ))
+    Surface::written(
+        &branded_inner_value_surface(&item_struct.generics, inner_field),
+        &type_parameters_in_scope(&item_struct.generics),
+    )
     .record(rust_ident);
 }
 
