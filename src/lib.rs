@@ -225,6 +225,13 @@ pub struct Document {
 /// A generic brand carries the requirement as a `Display` bound on each type parameter, so a
 /// non-`Display` type argument is rejected where the brand is used, not where it is declared.
 ///
+/// String constraints stop at the brand's own type parameters. TypeScript binds a parameter for
+/// real, but the two validating surfaces read it as the opaque value — one schema is written for
+/// every instantiation — and an opaque value takes no string checks: Zod 4's `z.unknown()` carries
+/// no `.min`/`.max`, and `.brand()` returns that same schema rather than a wrapper that could. So
+/// `#[model_schema(minLength = 3)] struct Slug<T>(pub T);` is refused at the inner field. Constrain
+/// a string-typed inner instead.
+///
 #[proc_macro_attribute]
 pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
     exec_model_schema(args, input)
@@ -273,6 +280,11 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 /// and inline flag directives (`(?i)`). `(?P<name>...)` is accepted and emitted as the
 /// `(?<name>...)` both grammars read.
 ///
+/// It also has to turn some value away. A pattern every string satisfies — `""`, `^`, `$`, `|`,
+/// `a*` — constrains nothing, and is refused at expansion rather than published as a check that
+/// checks nothing. `^$` is not one of them: it pins both ends of the value to one position, which
+/// only the empty string has.
+///
 /// A `PathBuf` field carries these too, as does the `Path` borrow behind a wrapper: serde writes a
 /// path as a JSON string, and the checks measure that string — the path's `to_string_lossy`
 /// rendering, which is the exact wire value for every path serde can write.
@@ -299,8 +311,10 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 ///
 /// ### The `validate()` Method
 ///
-/// When any field has constraints, the macro also generates a `validate(&self) -> Result<(), Vec<String>>`
-/// method for validating instances constructed in code. Serde deserialization validates automatically.
+/// With `serde` and a schema output feature (`zod`, `typescript`, or `jsonschema`) both active, a
+/// type carrying at least one constrained field also gets a
+/// `validate(&self) -> Result<(), Vec<String>>` method for validating instances constructed in
+/// code. Serde deserialization validates automatically.
 ///
 /// ```rust
 /// use tixschema::{model_schema, model_schema_prop};
@@ -317,8 +331,8 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 /// }
 /// ```
 ///
-/// When a schema output feature is active (`zod`, `typescript`, or `jsonschema`), the macro also
-/// generates a `validate(&self) -> Result<(), Vec<String>>` method:
+/// Every constrained field that fails contributes its own message, each naming the field it came
+/// from:
 ///
 /// ```text
 /// let reg = RegistrationJson { username: "ab".to_string(), age: 150 };
@@ -328,8 +342,8 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 ///         for e in &errors {
 ///             println!("Error: {e}");
 ///         }
-///         // "username: too short (minimum length 3, got 2)"
-///         // "age: too large (maximum 120, got 150)"
+///         // "'username' is too short: minimum length is 3, got 2"
+///         // "'age' is too large: maximum is 120, got 150"
 ///     }
 /// }
 /// ```
