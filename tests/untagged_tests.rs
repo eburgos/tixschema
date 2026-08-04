@@ -1,5 +1,7 @@
 //! Tests for `#[serde(untagged)]` enum support (TypeScript union / Zod `z.union` / JSON `anyOf`).
 
+extern crate alloc;
+
 // `#[serde(untagged)]` parsing requires the `serde` feature, and the branded `DateString`
 // newtype is only emitted when a generation feature (typescript/zod/jsonschema) is enabled.
 #[cfg(test)]

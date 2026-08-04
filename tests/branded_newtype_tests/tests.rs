@@ -49,12 +49,15 @@ mod zod_ts_tests {
         );
     }
 
+    /// The parameter is what the brand wraps, so the value is composed from the binding named
+    /// after it and the annotation is that binding's own type — the pair a named inner publishes,
+    /// and the same `$Schema` reference a generic alias's value publishes for a parameter.
     #[test]
     fn test_branded_newtype_zod_schema() {
         let zod = RoleId::<String>::zod_schema();
-        assert!(zod.contains("z.string().brand"), "Got: {zod}");
+        assert!(zod.contains("IdType$Schema.brand"), "Got: {zod}");
         assert!(
-            zod.contains("$ZodBranded<ZodString, \"RoleId\">"),
+            zod.contains("$ZodBranded<typeof IdType$Schema, \"RoleId\">"),
             "Got: {zod}"
         );
     }
@@ -197,6 +200,14 @@ mod constrained_branded_tests {
     #[serde(transparent)]
     pub struct SlugId(pub String);
 
+    /// A pattern simple enough that a regex engine is avoidable work — the brand-side spelling of
+    /// what a consumer denying `clippy::nursery` cannot compile if the validator builds a regex
+    /// for it anyway.
+    #[model_schema(pattern = "^/")]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct MountPath(pub String);
+
     #[test]
     fn test_constrained_branded_zod_has_constraints() {
         let zod = SlugId::zod_schema();
@@ -270,6 +281,35 @@ mod constrained_branded_tests {
         let result: Result<SlugId, _> = serde_json::from_str("\"hello_world\"");
         assert!(result.is_ok(), "Should accept valid value via serde");
         assert_eq!(result.unwrap(), SlugId("hello_world".to_owned()));
+    }
+
+    /// The brand's simple pattern turns away the same values the regex would have, with the same
+    /// words, and still reaches every surface as written.
+    #[test]
+    fn test_anchored_single_character_prefix_branded() {
+        let zod = MountPath::zod_schema();
+        assert!(
+            zod.contains(".check(z.regex(/^\\//))"),
+            "Should contain pattern. Got:\n{zod}"
+        );
+
+        MountPath("/var/log".to_owned()).validate().unwrap();
+
+        let result = MountPath("var/log".to_owned()).validate();
+        assert_eq!(
+            result.unwrap_err()[0],
+            "value does not match pattern '^/'",
+            "Rejection should read exactly as the regex path words it"
+        );
+
+        assert!(
+            serde_json::from_str::<MountPath>("\"/etc\"").is_ok(),
+            "Should accept a rooted path via serde"
+        );
+        assert!(
+            serde_json::from_str::<MountPath>("\"etc\"").is_err(),
+            "Should reject an unrooted path via serde"
+        );
     }
 
     #[test]
@@ -390,7 +430,7 @@ mod objectid_branded_surface_tests {
     use mongodb::bson::oid::ObjectId;
 
     const OID_ZOD_BASE: &str =
-        r#"z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/i, { message: "Invalid ObjectId" })"#;
+        r#"z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" })"#;
 
     #[model_schema()]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -659,13 +699,12 @@ mod branded_in_struct_all_features_tests {
         );
     }
 
+    /// A brand whose inner is a bare parameter names no type to describe — one schema is written
+    /// for every instantiation — so it admits any value, as an uninstantiated parameter does
+    /// wherever else it is written.
     #[test]
     fn test_generic_branded_newtype_own_json_schema() {
-        let schema = TaskTypeId::<String>::json_schema();
-        assert_eq!(
-            schema["type"], "string",
-            "Generic branded type should have type 'string'. Got: {schema}"
-        );
+        assert_eq!(TaskTypeId::<String>::json_schema(), serde_json::json!({}));
     }
 }
 
@@ -765,8 +804,7 @@ mod branded_in_struct_jsonschema_only_tests {
 
     #[test]
     fn test_generic_branded_own_json_schema_only() {
-        let schema = TaskTypeIdJO::<String>::json_schema();
-        assert_eq!(schema["type"], "string", "Got: {schema}");
+        assert_eq!(TaskTypeIdJO::<String>::json_schema(), serde_json::json!({}));
     }
 }
 
@@ -826,16 +864,27 @@ mod branded_constrained_json_schema_tests {
     #[serde(transparent)]
     pub struct ShortId(pub String);
 
+    /// A bare parameter names no type to describe, so the brand's own constraints narrow it from
+    /// inside the `allOf` every inner without a `"type"` of its own is layered under, rather than
+    /// asserting a `"string"` the parameter was never held to.
     #[test]
     fn test_constrained_branded_json_schema() {
-        let schema = ConstrainedId::<String>::json_schema();
-        assert_eq!(schema["type"], "string", "Got: {schema}");
-        assert_eq!(schema["minLength"], 24_i64, "Got: {schema}");
-        assert_eq!(schema["maxLength"], 24_i64, "Got: {schema}");
         // The `\d` the brand is declared with reaches the schema as the members it stands for: a
         // JSON Schema `pattern` is an ECMA-262 regex, which reads `\d` as ASCII, while the Rust
         // validator beside it reads the Unicode class. Written out, both read the one set.
-        assert_eq!(schema["pattern"], "^[a-f0-9]{24}$", "Got: {schema}");
+        assert_eq!(
+            ConstrainedId::<String>::json_schema(),
+            serde_json::json!({
+                "allOf": [
+                    {},
+                    {
+                        "minLength": 24_u32,
+                        "maxLength": 24_u32,
+                        "pattern": "^[a-f0-9]{24}$"
+                    }
+                ]
+            })
+        );
     }
 
     #[test]
@@ -1236,6 +1285,245 @@ mod branded_composite_inner_tests {
         assert_eq!(LabelList::json_schema(), holder["properties"]["labels"]);
         assert_eq!(LabelPair::json_schema(), holder["properties"]["pair"]);
         assert_eq!(WeightMap::json_schema(), holder["properties"]["weights"]);
+    }
+}
+
+/// The four surfaces of a brand whose inner is written out of the brand's own type parameters,
+/// pinned against what serde writes for it.
+///
+/// A parameter changes nothing about what `#[serde(transparent)]` puts on the wire: a `Vec` inner
+/// writes its array whether the elements are `String` or a parameter. So the shape around the
+/// parameter is described here exactly as the same shape is described where it is written without
+/// a brand — the generic alias beside each brand is that shape, and every surface is asserted to
+/// carry the same rendering it does.
+///
+/// The parameter itself carries what an uninstantiated parameter carries in every other position:
+/// its own name in TypeScript, the `$Schema` binding named after it in Zod, and the permissive
+/// empty schema in JSON, where a parameter names no type to describe.
+#[cfg(all(
+    feature = "jsonschema",
+    feature = "serde",
+    feature = "typescript",
+    feature = "zod"
+))]
+mod branded_generic_inner_tests {
+    use super::branded_no_display_tests::TagList;
+    use super::*;
+    use std::collections::HashMap;
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct BareTag<T>(pub T);
+
+    #[model_schema(no_display)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct WeightIndex<T>(pub HashMap<String, T>);
+
+    #[model_schema()]
+    pub type BareSeq<T> = T;
+
+    #[model_schema()]
+    pub type TagSeq<T> = Vec<T>;
+
+    #[model_schema()]
+    pub type WeightSeq<T> = HashMap<String, T>;
+
+    #[test]
+    fn a_generic_container_brand_writes_the_container_its_inner_writes() {
+        let tags = TagList(vec!["a".to_owned()]);
+        assert_eq!(serde_json::to_string(&tags).unwrap(), r#"["a"]"#);
+        assert_eq!(
+            serde_json::from_str::<TagList<String>>(&serde_json::to_string(&tags).unwrap())
+                .unwrap(),
+            tags
+        );
+
+        let weights = WeightIndex(HashMap::from([("a".to_owned(), 1_u32)]));
+        assert_eq!(serde_json::to_string(&weights).unwrap(), r#"{"a":1}"#);
+        assert_eq!(
+            serde_json::from_str::<WeightIndex<u32>>(&serde_json::to_string(&weights).unwrap())
+                .unwrap(),
+            weights
+        );
+
+        let bare = BareTag("a".to_owned());
+        assert_eq!(serde_json::to_string(&bare).unwrap(), r#""a""#);
+        assert_eq!(
+            serde_json::from_str::<BareTag<String>>(&serde_json::to_string(&bare).unwrap())
+                .unwrap(),
+            bare
+        );
+
+        // The alias beside each brand is the same shape with nothing branding it, and the wire is
+        // the same — which is what makes the surfaces asserted equal below comparable at all.
+        let tag_seq: TagSeq<String> = vec!["a".to_owned()];
+        assert_eq!(serde_json::to_string(&tag_seq).unwrap(), r#"["a"]"#);
+        let weight_seq: WeightSeq<u32> = HashMap::from([("a".to_owned(), 1_u32)]);
+        assert_eq!(serde_json::to_string(&weight_seq).unwrap(), r#"{"a":1}"#);
+        let bare_seq: BareSeq<String> = "a".to_owned();
+        assert_eq!(serde_json::to_string(&bare_seq).unwrap(), r#""a""#);
+    }
+
+    #[test]
+    fn an_arrayed_parameter_brand_describes_the_array_on_every_surface() {
+        assert_eq!(
+            TagList::<String>::ts_definition(),
+            r#"export type TagList<T> = Array<T> & $brand<"TagList">;"#
+        );
+        let zod = TagList::<String>::zod_schema();
+        assert!(
+            zod.contains(r#"const TagList$RawSchema = z.array(T$Schema).brand<"TagList">()"#),
+            "Got:\n{zod}"
+        );
+        assert!(
+            zod.contains(r#"TagList$Schema: $ZodBranded<ZodArray, "TagList">"#),
+            "Got:\n{zod}"
+        );
+        assert_eq!(
+            TagList::<String>::json_schema(),
+            serde_json::json!({ "type": "array", "items": {} })
+        );
+    }
+
+    #[test]
+    fn a_mapped_parameter_brand_describes_the_object_on_every_surface() {
+        assert_eq!(
+            WeightIndex::<u32>::ts_definition(),
+            r#"export type WeightIndex<T> = Partial<Record<string, T>> & $brand<"WeightIndex">;"#
+        );
+        let zod = WeightIndex::<u32>::zod_schema();
+        assert!(
+            zod.contains(
+                r#"const WeightIndex$RawSchema = z.record(z.string(), T$Schema).brand<"WeightIndex">()"#
+            ),
+            "Got:\n{zod}"
+        );
+        assert!(
+            zod.contains(r#"WeightIndex$Schema: $ZodBranded<ZodRecord, "WeightIndex">"#),
+            "Got:\n{zod}"
+        );
+        assert_eq!(
+            WeightIndex::<u32>::json_schema(),
+            serde_json::json!({ "type": "object", "additionalProperties": {} })
+        );
+    }
+
+    /// A parameter on its own carries no shape of its own, so each surface writes for it what it
+    /// writes for a bare generic field — which is the alias asserted beside it.
+    #[test]
+    fn a_bare_parameter_brand_matches_the_generic_field_convention() {
+        assert_eq!(
+            BareTag::<String>::ts_definition(),
+            r#"export type BareTag<T> = T & $brand<"BareTag">;"#
+        );
+        let zod = BareTag::<String>::zod_schema();
+        assert!(
+            zod.contains(r#"const BareTag$RawSchema = T$Schema.brand<"BareTag">()"#),
+            "Got:\n{zod}"
+        );
+        assert!(
+            zod.contains(r#"BareTag$Schema: $ZodBranded<typeof T$Schema, "BareTag">"#),
+            "Got:\n{zod}"
+        );
+        assert_eq!(BareTag::<String>::json_schema(), serde_json::json!({}));
+    }
+
+    /// The rendering each surface gives the brand is the one it gives the same shape written
+    /// without a brand: the JSON schemas are equal outright, and the TypeScript type and the Zod
+    /// value each carry the fragment the alias carries, under the brand's own wrapping.
+    #[test]
+    fn a_generic_brand_renders_what_the_same_generic_alias_renders() {
+        assert_eq!(
+            TagList::<String>::json_schema(),
+            tag_seq_schema::Schema::json_schema()
+        );
+        assert_eq!(
+            WeightIndex::<u32>::json_schema(),
+            weight_seq_schema::Schema::json_schema()
+        );
+        assert_eq!(
+            BareTag::<String>::json_schema(),
+            bare_seq_schema::Schema::json_schema()
+        );
+
+        for (brand, alias, shared) in [
+            (
+                TagList::<String>::ts_definition(),
+                tag_seq_schema::Schema::ts_definition(),
+                "Array<T>",
+            ),
+            (
+                TagList::<String>::zod_schema(),
+                tag_seq_schema::Schema::zod_schema(),
+                "z.array(T$Schema)",
+            ),
+            (
+                WeightIndex::<u32>::ts_definition(),
+                weight_seq_schema::Schema::ts_definition(),
+                "Partial<Record<string, T>>",
+            ),
+            (
+                WeightIndex::<u32>::zod_schema(),
+                weight_seq_schema::Schema::zod_schema(),
+                "z.record(z.string(), T$Schema)",
+            ),
+            (
+                BareTag::<String>::ts_definition(),
+                bare_seq_schema::Schema::ts_definition(),
+                "<T> = T",
+            ),
+            (
+                BareTag::<String>::zod_schema(),
+                bare_seq_schema::Schema::zod_schema(),
+                "= T$Schema",
+            ),
+        ] {
+            assert!(brand.contains(shared), "brand got:\n{brand}");
+            assert!(alias.contains(shared), "alias got:\n{alias}");
+        }
+    }
+}
+
+/// A brand's doc example is Rust the expansion has to compile, so it is instantiated at as many
+/// concrete types as the brand declares parameters — one per parameter, not one overall.
+#[cfg(feature = "zod")]
+mod branded_example_arity_tests {
+    use super::*;
+
+    /// One parameter per side of the pair.
+    ///
+    /// ```rust example
+    /// PairId(("a".to_string(), "b".to_string()))
+    /// ```
+    #[model_schema(no_display)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct PairId<A, B>(pub (A, B));
+
+    /// The one parameter the example is written against.
+    ///
+    /// ```rust example
+    /// SoloId("a".to_string())
+    /// ```
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct SoloId<T>(pub T);
+
+    #[test]
+    fn a_two_parameter_brand_renders_the_example_its_inner_writes() {
+        assert_eq!(
+            PairId::<String, String>::schema_example(),
+            serde_json::json!(["a", "b"])
+        );
+    }
+
+    /// A single parameter is instantiated exactly as it was before arity was counted.
+    #[test]
+    fn a_one_parameter_brand_renders_the_example_it_always_did() {
+        assert_eq!(SoloId::<String>::schema_example(), serde_json::json!("a"));
     }
 }
 
