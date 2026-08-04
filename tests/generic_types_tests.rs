@@ -9,3 +9,7 @@ extern crate alloc;
 #[cfg(test)]
 #[path = "generic_types_tests/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "generic_types_tests/whole_type_tests.rs"]
+mod whole_type_tests;

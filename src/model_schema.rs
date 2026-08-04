@@ -25,6 +25,9 @@ use crate::{
     utils::{get_field_docs, get_variant_docs, strip_examples_from_docs},
 };
 
+#[cfg(feature = "jsonschema")]
+use crate::field_type::is_undescribable_primitive;
+
 #[cfg(feature = "typescript")]
 use crate::utils::ts_generic_params;
 use crate::utils::type_parameters_in_scope;
@@ -1072,6 +1075,21 @@ pub fn exec_model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
     ) {
         return output;
     }
+    // A const handed to a written type as an argument stands where a type belongs, and no surface
+    // that renders an argument list can spell it — refused here, beside the example refusal, and
+    // ahead of every shape.
+    if let Some(output) = guard_failure_output(
+        &item,
+        item_schema_ident(&item),
+        &const_parameter_argument_errors(&item),
+    ) {
+        return output;
+    }
+    // Which Zod binding this item publishes turns on whether it declares type parameters, and a
+    // field written at the item's own name reads that answer back the way any other reference
+    // does. Recorded here, ahead of every shape, because a self-reference is rendered while the
+    // item's own expansion is still running and would otherwise read an answer nobody had given.
+    record_own_zod_binding(&item);
     // Whether a filling satisfies the bounds its parameter declares is a question about trait
     // impls, which a proc macro cannot answer — so it is asked here, of the compiler, and read off
     // the item before the shapes take it.
@@ -2085,6 +2103,33 @@ const fn item_schema_ident(item: &Item) -> Option<&syn::Ident> {
     }
 }
 
+/// Records which of the two Zod bindings an item publishes, ahead of the shape it is dispatched to.
+///
+/// The decision is whether the item declares type parameters: one publishes a factory, taking one
+/// argument per parameter, and one that declares none publishes the single schema it has. Taken
+/// here rather than where the binding is finally spelled — which is after the item's own fields
+/// have been rendered — because a field written at the item's own name is a reference like any
+/// other and reads the answer off the store while those fields are being rendered.
+///
+/// An item shape this attribute does not expand declares nothing and publishes nothing.
+#[cfg(feature = "zod")]
+fn record_own_zod_binding(item: &Item) {
+    let Some(generics) = item_generics(item) else {
+        return;
+    };
+    let Some(name) = item_schema_ident(item) else {
+        return;
+    };
+    record_zod_factory(
+        &name.to_string(),
+        !type_parameters_in_scope(generics).is_empty(),
+    );
+}
+
+/// Nothing, in a build that publishes no Zod binding at all.
+#[cfg(not(feature = "zod"))]
+const fn record_own_zod_binding(_item: &Item) {}
+
 /// The parameters an item declares — the three shapes `model_schema` expands each bind their own;
 /// anything else binds none this expansion can read.
 const fn item_generics(item: &Item) -> Option<&syn::Generics> {
@@ -2133,6 +2178,8 @@ fn default_types_guard_errors(
     let rejections = entries_naming_no_parameter(args, &declared);
     #[cfg(feature = "jsonschema")]
     rejections.extend(parameters_left_without_a_default(args, &declared));
+    #[cfg(feature = "jsonschema")]
+    rejections.extend(fillings_no_document_can_be_built_from(args));
 
     rejections
         .iter()
@@ -2211,6 +2258,72 @@ fn missing_default_message(name: &syn::Ident, declared: &[&syn::Ident]) -> Strin
          because the `jsonschema` feature is enabled. Declare one for every parameter of this item, \
          each with the type its document should be generated from: \
          `#[model_schema(default_types({sample}))]`."
+    )
+}
+
+/// The refusal every `default_types` entry earns whose filling names a value no document can be
+/// built from, spanned on the filling as written.
+///
+/// A filling is rendered through the same dispatch a field's type is, and that dispatch takes a
+/// name it does not recognise for a sibling — another `model_schema` item, whose schema module the
+/// emission then names. For `Foo` that is right even when `Foo` is declared below. For `char` it is
+/// gibberish: the emission names `char_schema`, no such module is ever published, and the author
+/// reads an `E0433` about a module they never wrote plus two `E0425`s about bindings that belong to
+/// the generated body — three diagnostics, none of which mentions `char`.
+///
+/// The guard cannot separate the two by tokens, so it refuses only what is provably not a sibling:
+/// see [`is_undescribable_primitive`]. A forward-referenced sibling keeps compiling exactly as it
+/// does today.
+///
+/// Gated, on the same footing as the missing-entry direction: the filling is read to build a
+/// document and nowhere else, so a build that generates none is not short of anything. The same
+/// fixture compiles and passes under `serde,typescript,zod`.
+#[cfg(feature = "jsonschema")]
+fn fillings_no_document_can_be_built_from(args: &ModelSchemaArgs) -> Vec<syn::Error> {
+    args.default_types
+        .iter()
+        .filter_map(|(name, filling)| {
+            let written = bare_type_name(filling)?;
+            is_undescribable_primitive(&written).then(|| {
+                syn::Error::new_spanned(filling, undescribable_filling_message(name, &written))
+            })
+        })
+        .collect()
+}
+
+/// The name a type is written as when it is written as a bare name and nothing else — no
+/// qualifier, no path, no arguments — or `None` for every other spelling.
+///
+/// Only that shape can be checked against a list of reserved names: `some::path::char` names
+/// whatever that path resolves to, and a name carrying arguments is not a primitive at all.
+#[cfg(feature = "jsonschema")]
+fn bare_type_name(filling: &syn::Type) -> Option<String> {
+    let syn::Type::Path(type_path) = filling else {
+        return None;
+    };
+    if type_path.qself.is_some() {
+        return None;
+    }
+    let [segment] = type_path.path.segments.iter().collect::<Vec<_>>()[..] else {
+        return None;
+    };
+    matches!(segment.arguments, syn::PathArguments::None).then(|| segment.ident.to_string())
+}
+
+/// Why a filling the dispatch has no arm for is refused: what the filling is read for, what the
+/// emission would otherwise name, what the feature has to do with it, and the way out.
+#[cfg(feature = "jsonschema")]
+fn undescribable_filling_message(name: &syn::Ident, written: &str) -> String {
+    format!(
+        "`default_types` entry `{name}` is filled at `{written}`, which `#[model_schema]` cannot \
+         build a JSON-schema document from. The filling is what the parameter's document is \
+         generated from, and it is rendered through the same dispatch a field's type is — a \
+         dispatch that has no arm for `{written}` and so takes it for another `#[model_schema]` \
+         item, emitting a call into a `{written}_schema` module that nothing publishes. This is \
+         refused because the `jsonschema` feature is enabled, the document being the only thing \
+         the filling is read for. Fill the parameter at a type the macro describes — a primitive it \
+         maps, or a `#[model_schema]` item — or model `{written}` as a newtype over one that \
+         carries what the wire holds."
     )
 }
 
@@ -2556,6 +2669,197 @@ fn const_parameter_example_message(consts: &[&syn::Ident]) -> String {
          enabled, `zod` being the only surface that reads an example. Remove the ` ```rust example \
          ` block, or the const parameter, whichever this item can do without."
     )
+}
+
+/// The `compile_error!` tokens an item earns for handing one of its own const parameters to a
+/// generic type it writes, or none where no type written on it does that.
+///
+/// A const parameter reaches the emitted surfaces in two ways, and only one of them is renderable.
+/// As an array length — `[u8; N]` — it describes as an unbounded array, which README.md states
+/// outright as the reading of every length the expansion cannot read, alongside a `const` item and
+/// any computed expression. As an *argument* to another type it is renderable nowhere: the argument
+/// list of a written type is read as a list of types, so `ConstLeaf<N>` puts `N` where a type
+/// belongs and every surface takes it for one. The JSON side emits a call into an `n_schema` module
+/// nothing publishes; the TypeScript side writes `ConstLeaf<N>` into a declaration that binds no
+/// `N` and beside a `ConstLeaf` that binds no parameter, a const being dropped from the declaration
+/// it was written on. Neither is a document the author can act on, and neither names the const.
+///
+/// Answered at the one seam every expanded shape is dispatched from, beside the example refusal a
+/// const already earns, so a struct, an enum and an alias cannot come to answer differently.
+///
+/// Gated on the two surfaces that render the argument. Zod names the schema the *item* publishes
+/// and a const-declaring item publishes the one schema it has, so a build with neither of those two
+/// on renders this correctly and is owed nothing. An item whose const reaches no argument — a const
+/// no type is written around, which is what `PlainConst` and `Padded` carry — earns nothing in any
+/// build.
+#[cfg(any(feature = "typescript", feature = "jsonschema"))]
+fn const_parameter_argument_errors(item: &Item) -> Vec<proc_macro2::TokenStream> {
+    let Some(generics) = item_generics(item) else {
+        return Vec::new();
+    };
+    let consts: Vec<String> = generics
+        .params
+        .iter()
+        .filter_map(|param| match param {
+            syn::GenericParam::Const(const_param) => Some(const_param.ident.to_string()),
+            syn::GenericParam::Type(_) | syn::GenericParam::Lifetime(_) => None,
+        })
+        .collect();
+    if consts.is_empty() {
+        return Vec::new();
+    }
+    let mut found: Vec<syn::Ident> = Vec::new();
+    for written in item_written_types(item) {
+        collect_const_arguments(written, &consts, &mut found);
+    }
+    found
+        .iter()
+        .map(|argument| {
+            attr_guard_error(
+                &syn::Error::new_spanned(
+                    argument,
+                    const_parameter_argument_message(&argument.to_string()),
+                ),
+                &item_label(item),
+            )
+        })
+        .collect()
+}
+
+/// Every type an item writes out: a struct's field types, an enum's variant field types, an alias's
+/// target. The types whose spelling reaches a surface, which is where an argument is written.
+#[cfg(any(feature = "typescript", feature = "jsonschema"))]
+fn item_written_types(item: &Item) -> Vec<&syn::Type> {
+    if let Item::Struct(item_struct) = item {
+        item_struct.fields.iter().map(|field| &field.ty).collect()
+    } else if let Item::Enum(item_enum) = item {
+        item_enum
+            .variants
+            .iter()
+            .flat_map(|variant| variant.fields.iter().map(|field| &field.ty))
+            .collect()
+    } else if let Item::Type(item_type) = item {
+        vec![item_type.ty.as_ref()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Every place one of `consts` is handed to a written type as an argument, collected as the ident
+/// it was written at so the refusal points there.
+///
+/// An array length is walked *through* rather than read: `[ConstLeaf<N>; 4]` holds an argument and
+/// `[u8; N]` holds a length, and only the first is what this collects. A bare ident inside angle
+/// brackets can reach here as either a type or a const argument depending on what `syn` could
+/// decide from the tokens alone, so both spellings are read.
+#[cfg(any(feature = "typescript", feature = "jsonschema"))]
+fn collect_const_arguments(written: &syn::Type, consts: &[String], found: &mut Vec<syn::Ident>) {
+    match written {
+        syn::Type::Path(type_path) => {
+            for segment in &type_path.path.segments {
+                let syn::PathArguments::AngleBracketed(angled) = &segment.arguments else {
+                    continue;
+                };
+                for argument in &angled.args {
+                    match argument {
+                        syn::GenericArgument::Type(inner) => {
+                            if let Some(ident) = bare_ident(inner)
+                                && consts.contains(&ident.to_string())
+                            {
+                                found.push(ident);
+                            } else {
+                                collect_const_arguments(inner, consts, found);
+                            }
+                        }
+                        syn::GenericArgument::Const(syn::Expr::Path(path)) => {
+                            if let Some(ident) = path.path.get_ident()
+                                && consts.contains(&ident.to_string())
+                            {
+                                found.push(ident.clone());
+                            }
+                        }
+                        // A const written as anything but a bare name is an expression, not one of
+                        // the item's parameters standing alone; a lifetime and an associated
+                        // binding name no const at all.
+                        syn::GenericArgument::Const(_)
+                        | syn::GenericArgument::Lifetime(_)
+                        | syn::GenericArgument::AssocType(_)
+                        | syn::GenericArgument::AssocConst(_)
+                        | syn::GenericArgument::Constraint(_)
+                        | _ => {}
+                    }
+                }
+            }
+        }
+        syn::Type::Array(array) => collect_const_arguments(&array.elem, consts, found),
+        syn::Type::Slice(slice) => collect_const_arguments(&slice.elem, consts, found),
+        syn::Type::Reference(reference) => collect_const_arguments(&reference.elem, consts, found),
+        syn::Type::Paren(paren) => collect_const_arguments(&paren.elem, consts, found),
+        syn::Type::Group(group) => collect_const_arguments(&group.elem, consts, found),
+        syn::Type::Tuple(tuple) => {
+            for element in &tuple.elems {
+                collect_const_arguments(element, consts, found);
+            }
+        }
+        // None of these writes an argument list a const could stand in: a function pointer, an
+        // `impl Trait`, an inferred or never type, a trait object, a raw pointer, and the two
+        // spellings `syn` hands back unparsed.
+        syn::Type::FnPtr(_)
+        | syn::Type::ImplTrait(_)
+        | syn::Type::Infer(_)
+        | syn::Type::Macro(_)
+        | syn::Type::Never(_)
+        | syn::Type::Ptr(_)
+        | syn::Type::TraitObject(_)
+        | syn::Type::Verbatim(_)
+        | _ => {}
+    }
+}
+
+/// The ident a type is written as when it is written as a bare name and nothing else, or `None`.
+#[cfg(any(feature = "typescript", feature = "jsonschema"))]
+fn bare_ident(written: &syn::Type) -> Option<syn::Ident> {
+    let syn::Type::Path(type_path) = written else {
+        return None;
+    };
+    if type_path.qself.is_some() {
+        return None;
+    }
+    type_path.path.get_ident().cloned()
+}
+
+/// Why a const handed to a written type as an argument is refused: where the const does render,
+/// where this one stands instead, what each surface would emit, what the features have to do with
+/// it, and the way out.
+#[cfg(any(feature = "typescript", feature = "jsonschema"))]
+fn const_parameter_argument_message(name: &str) -> String {
+    let surfaces = if cfg!(feature = "typescript") && cfg!(feature = "jsonschema") {
+        "the `typescript` and `jsonschema` features are enabled, the two surfaces that render an \
+         argument list"
+    } else if cfg!(feature = "typescript") {
+        "the `typescript` feature is enabled, a surface that renders an argument list"
+    } else {
+        "the `jsonschema` feature is enabled, a surface that renders an argument list"
+    };
+    format!(
+        "`#[model_schema]` cannot render the const parameter `{name}` as a type argument. An \
+         argument list is read as a list of types — that is what every surface writes one from — so \
+         `{name}` standing in one is taken for a type, and no surface can spell it: the JSON \
+         document would call into a `{}_schema` module nothing publishes, and the TypeScript \
+         declaration would write `{name}` where nothing binds it, a const being dropped from the \
+         declaration it was written on. This is refused because {surfaces}. A const does render as \
+         an array length — `[T; {name}]`, which describes as an unbounded array — so hold the value \
+         that way, or fill the argument with a type.",
+        name.to_lowercase()
+    )
+}
+
+/// Nothing, in a build that renders no argument list: Zod names the schema the *item* published and
+/// a const-declaring item publishes the one schema it has, so the const never stands where a type
+/// is read.
+#[cfg(not(any(feature = "typescript", feature = "jsonschema")))]
+const fn const_parameter_argument_errors(_item: &Item) -> Vec<proc_macro2::TokenStream> {
+    Vec::new()
 }
 
 /// The `compile_error!` tokens for every `cfg_attr`-wrapped serde attribute an enum carries: on the
@@ -7377,7 +7681,7 @@ fn untagged_member_field_def(
         &prop_meta,
         serde_guard_errors,
     );
-    field_def.resolve_self_references(ctx.type_name);
+    field_def.resolve_self_references(ctx.type_name, ctx.type_parameters);
     apply_model_schema_prop_meta(&mut field_def, prop_meta, field_name);
     (field_def, member_guard_errors)
 }
@@ -9758,10 +10062,14 @@ fn write_field_type_and_schema(
     {
         let zod_type = fld.zod_type();
 
-        // Check if this field contains a recursive reference to self
-        let is_recursive = self_type_name.is_some_and(|name| fld.contains_type_reference(name));
+        // A reference back to the item being defined, and a reference forward to one declared
+        // below it, are the two a value cannot be read for while this object literal is being
+        // built — see `reaches_a_type_declared_later` for why deferring the second ends every
+        // cycle a set of generic types can form.
+        let defer = self_type_name.is_some_and(|name| fld.contains_type_reference(name))
+            || fld.reaches_a_type_declared_later();
 
-        if is_recursive {
+        if defer {
             // Use getter syntax to defer the reference
             format!("  get {}() {{ return {}; }},\n", fld.name, zod_type)
         } else {
@@ -10910,7 +11218,7 @@ fn process_field(
     // Resolve `Self` references to the concrete type name so recursive fields
     // (e.g. `Vec<Self>`) are treated exactly like `Vec<EnclosingType>`. Resolved before the guards
     // read the field so each one asks its question of the type the surfaces will render.
-    field_def.resolve_self_references(ctx.type_name);
+    field_def.resolve_self_references(ctx.type_name, ctx.type_parameters);
 
     // The field as the author spelled it, kept for the one guard that reads a written *name*: an
     // `as = Type` may name one of the item's own parameters, and the target it is compared against

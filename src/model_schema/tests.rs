@@ -4147,6 +4147,79 @@ fn a_default_types_refusal_is_spanned_on_what_earned_it() {
     }
 }
 
+/// A filling is rendered through the dispatch a field's type is, and that dispatch takes a name it
+/// has no arm for to be another `#[model_schema]` item — right for `Foo`, gibberish for `char`,
+/// which emitted a call into a `char_schema` module nothing publishes and left the author reading
+/// an `E0433` about a module they never wrote plus two `E0425`s about the generated body's own
+/// bindings. Refused at the entry instead, in words that name the type and the limitation.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_filling_no_document_can_be_built_from_is_refused_at_the_entry() {
+    for written in ["char", "i128", "u128", "f16", "f128"] {
+        let messages = default_types_messages(
+            "pub struct Probe<ValueType> { pub held: ValueType }",
+            &format!("default_types(ValueType = {written})"),
+        );
+        assert_eq!(messages.len(), 1, "for {written}: {messages:?}");
+        for needle in [
+            "compile_error",
+            written,
+            "ValueType",
+            &format!("{}_schema", written.to_lowercase()),
+            "`jsonschema` feature",
+            "type `Probe`",
+        ] {
+            assert!(
+                messages[0].contains(needle),
+                "{needle} missing for {written}: {}",
+                messages[0]
+            );
+        }
+    }
+}
+
+/// The refusal points at the filling as written — the token the author can change — rather than at
+/// the parameter it fills or the whole attribute.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_undescribable_filling_refusal_is_spanned_on_the_filling() {
+    let refusals = default_types_refusals(
+        "pub struct Probe<WideType, NarrowType> { pub wide: WideType, pub narrow: NarrowType }",
+        "default_types(WideType = String, NarrowType = char)",
+    );
+    assert_eq!(refusals.len(), 1, "got: {refusals:?}");
+    assert_eq!(refusals[0].span().source_text().as_deref(), Some("char"));
+}
+
+/// Only what is provably not a sibling is refused. A bare `Foo` is a legitimate forward reference
+/// to an item declared below, every primitive the dispatch has an arm for describes as it always
+/// did, and a name carrying arguments or a path qualifier is not a primitive at all.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_renderable_or_sibling_named_filling_is_left_alone() {
+    for written in [
+        "Foo",
+        "String",
+        "bool",
+        "u8",
+        "u64",
+        "i64",
+        "usize",
+        "isize",
+        "f32",
+        "f64",
+        "PathBuf",
+        "Vec<char>",
+        "some::path::char",
+    ] {
+        let messages = default_types_messages(
+            "pub struct Probe<ValueType> { pub held: ValueType }",
+            &format!("default_types(ValueType = {written})"),
+        );
+        assert!(messages.is_empty(), "for {written}: {messages:?}");
+    }
+}
+
 /// The JSON document is built from the declared default, so a parameter left without one is
 /// refused wherever that document is written — and the refusal says what the default is for, that
 /// the feature is what requires it, and the attribute to write for this item's own parameters.
@@ -4683,6 +4756,105 @@ fn a_const_declaring_alias_is_left_alone() {
     let source = format!("{EXAMPLE_DOC_BLOCK}pub type Probe<const WIDTH: usize> = [u8; WIDTH];");
     let messages = const_example_messages(&source);
     assert!(messages.is_empty(), "got: {messages:?}");
+}
+
+/// The `compile_error!` tokens `source` earns for handing one of its own consts to a written type.
+/// Parsed from text so the tokens carry file locations and each refusal's span can be read back as
+/// the source it points at.
+#[cfg(any(feature = "typescript", feature = "jsonschema"))]
+fn const_argument_refusals(source: &str) -> Vec<proc_macro2::TokenStream> {
+    super::const_parameter_argument_errors(&syn::parse_str(source).unwrap())
+}
+
+/// The refusals `source` earns, rendered.
+#[cfg(any(feature = "typescript", feature = "jsonschema"))]
+fn const_argument_messages(source: &str) -> Vec<String> {
+    const_argument_refusals(source)
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// An argument list is read as a list of types, so a const standing in one is taken for a type and
+/// no surface that renders the list can spell it — the JSON side names a module nothing publishes,
+/// the TypeScript side writes a name its declaration does not bind. Refused wherever a type is
+/// written, in every shape the attribute expands.
+#[cfg(any(feature = "typescript", feature = "jsonschema"))]
+#[test]
+fn a_const_handed_to_a_written_type_as_an_argument_is_refused() {
+    for (source, label) in [
+        (
+            "pub struct Probe<const WIDTH: usize> { pub held: Leaf<WIDTH> }",
+            "type `Probe`",
+        ),
+        (
+            "pub enum Probe<const WIDTH: usize> { Held { held: Leaf<WIDTH> } }",
+            "type `Probe`",
+        ),
+        (
+            "pub type Probe<const WIDTH: usize> = Leaf<WIDTH>;",
+            "type `Probe`",
+        ),
+    ] {
+        let messages = const_argument_messages(source);
+        assert_eq!(messages.len(), 1, "for {source}: {messages:?}");
+        for needle in ["compile_error", "WIDTH", "const parameter", label] {
+            assert!(
+                messages[0].contains(needle),
+                "{needle} missing for {source}: {}",
+                messages[0]
+            );
+        }
+    }
+}
+
+/// The refusal points at the argument as written, which is the one token the author can act on —
+/// not at the parameter's declaration, and not at the whole field.
+#[cfg(any(feature = "typescript", feature = "jsonschema"))]
+#[test]
+fn a_const_argument_refusal_is_spanned_on_the_argument() {
+    let refusals =
+        const_argument_refusals("pub struct Probe<const WIDTH: usize> { pub held: Leaf<WIDTH> }");
+    assert_eq!(refusals.len(), 1, "got: {refusals:?}");
+    assert_eq!(refusals[0].span().source_text().as_deref(), Some("WIDTH"));
+}
+
+/// An argument nested under whatever the author wrapped it in is the same argument: the walk
+/// reaches through collections, references and tuples, and reads a const under a second type's
+/// argument list too.
+#[cfg(any(feature = "typescript", feature = "jsonschema"))]
+#[test]
+fn a_const_argument_is_found_under_every_wrapper_it_can_be_written_beneath() {
+    for source in [
+        "pub struct Probe<const WIDTH: usize> { pub held: Vec<Leaf<WIDTH>> }",
+        "pub struct Probe<const WIDTH: usize> { pub held: Option<Box<Leaf<WIDTH>>> }",
+        "pub struct Probe<const WIDTH: usize> { pub held: [Leaf<WIDTH>; 4] }",
+        "pub struct Probe<const WIDTH: usize> { pub held: (String, Leaf<WIDTH>) }",
+        "pub struct Probe<const WIDTH: usize> { pub held: HashMap<String, Leaf<WIDTH>> }",
+    ] {
+        let messages = const_argument_messages(source);
+        assert_eq!(messages.len(), 1, "for {source}: {messages:?}");
+    }
+}
+
+/// The one place a const does render is an array *length*, which `README.md` states describes as an
+/// unbounded array — so a length is walked through rather than read, and a const no written type
+/// carries at all earns nothing. Neither does a type parameter standing where a type belongs.
+#[cfg(any(feature = "typescript", feature = "jsonschema"))]
+#[test]
+fn a_const_that_reaches_no_argument_list_earns_no_refusal() {
+    for source in [
+        "pub struct Probe<const WIDTH: usize> { pub held: [u8; WIDTH] }",
+        "pub struct Probe<const WIDTH: usize> { pub held: Vec<[u8; WIDTH]> }",
+        "pub struct Probe<const WIDTH: usize> { pub held: String }",
+        "pub enum Probe<const WIDTH: usize> { Held }",
+        "pub struct Probe<ValueType> { pub held: Leaf<ValueType> }",
+        "pub struct Probe<'label> { pub held: Leaf<'label> }",
+        "pub struct Probe { pub held: Leaf<String> }",
+    ] {
+        let messages = const_argument_messages(source);
+        assert!(messages.is_empty(), "for {source}: {messages:?}");
+    }
 }
 
 /// Builds the `Display` assertion for the sole field of `source`, parsed from text so its spans
