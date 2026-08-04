@@ -675,29 +675,31 @@ pub fn exec_model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 
 /// Classifies what an alias resolves to, for the registry.
 ///
-/// A target serde writes as a bare string answers first, and it answers for the alias too: an alias
-/// is the type it names, so `type LateKey = String` is written as that bare string and keys a map
-/// exactly as a `String` does, under the alias's own exported name. `PathBuf`, a string-wire brand,
-/// and an alias chain ending in either are the same target wearing another spelling, which is why
-/// the question is asked of the key dispatch rather than of the target's syntax.
+/// An alias *is* the type it names — a type path resolves straight through it — so the registry's
+/// question, what serde writes for a value spelled this way, is asked of the target and the answer
+/// stands under the alias's own exported name. That is the same question a brand answers for its
+/// inner, so it is read through the same dispatch, and the four verdicts carry across whole: a
+/// target serde writes as a bare string keys a map the way `String` does; a target serde stringifies
+/// for the author — a number, a `bool`, a chrono rendering, a generic spelling this expansion has no
+/// members for — keys the open object its bare spelling already describes as; a target serde writes
+/// as no key at all leaves the alias refused, under its own name rather than under the target's, so
+/// the diagnostic still points at what the author wrote; and a target that can still reach a plain
+/// enum stays on the enumerating path.
 ///
-/// Below that, a `SiblingType` is the only shape that can reach a plain enum, and it answers with
-/// whatever the named type registered: an alias of an alias of an enum inherits `EnumMembers` down
-/// the chain. A target registered after its alias reads as `Unknown`, which callers must treat as
-/// "cannot rule it out" rather than as a negative. An array (`Vec<Slot>`, `[Slot; 4]`) is a
-/// collection, not the enum it holds.
+/// Only that last verdict consults the registry, and it answers with whatever the named type
+/// registered: an alias of an alias of an enum inherits `EnumMembers` down the chain. A target
+/// registered after its alias reads as `Unknown`, which callers must treat as "cannot rule it out"
+/// rather than as a negative.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn alias_target_kind(alias_field_def: &FieldDef) -> AliasKind {
-    if matches!(map_key_path(alias_field_def), MapKeyPath::Open) {
-        return AliasKind::StringWire;
+    match map_key_path(alias_field_def) {
+        MapKeyPath::Open => AliasKind::StringWire,
+        MapKeyPath::Unnarrowed => AliasKind::Stringified,
+        MapKeyPath::Refused(_) => AliasKind::NoEnumMembers,
+        MapKeyPath::Enumerated(target_name) => {
+            registered_key_kind(target_name).unwrap_or(AliasKind::Unknown)
+        }
     }
-    let FieldDefType::SiblingType(target_name, generic_args) = &alias_field_def.field_type else {
-        return AliasKind::NoEnumMembers;
-    };
-    if !generic_args.is_empty() || alias_field_def.is_array() {
-        return AliasKind::NoEnumMembers;
-    }
-    lookup_alias_info(target_name).map_or(AliasKind::Unknown, |target| target.kind)
 }
 
 /// The `compile_error!` tokens an alias whose target reaches a map key with no `enum_members()`
@@ -725,15 +727,25 @@ fn alias_map_key_guard_error(
 /// name it has already seen: `Unknown` is not a negative, and a struct and a branded newtype
 /// register alike. So this is a partial answer by construction, and the merge is where the rest is
 /// caught.
+///
+/// The name is looked up directly rather than through the map-key dispatch: what is asked here is
+/// whether the named type publishes `enum_members()`, and that stays true of an `Option<Slot>`
+/// whose `Some` writes the variant name straight into the object — where the key dispatch, asking
+/// what serde writes for a *key*, refuses the `Option` for its `None`. A generic spelling and an
+/// array are excluded because neither is the enum: they are a type this expansion has no members
+/// for, and the collection holding it.
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
 ))]
 fn flattened_plain_enum(inner: &FieldDef) -> Option<&str> {
-    let FieldDefType::SiblingType(name, _) = &inner.field_type else {
+    let FieldDefType::SiblingType(name, generic_args) = &inner.field_type else {
         return None;
     };
-    (alias_target_kind(inner) == AliasKind::EnumMembers).then_some(name.as_str())
+    if !generic_args.is_empty() || inner.is_array() {
+        return None;
+    }
+    (registered_key_kind(name) == Some(AliasKind::EnumMembers)).then_some(name.as_str())
 }
 
 /// The alias schema module is referenced by all three schema features — `typescript` and `zod`

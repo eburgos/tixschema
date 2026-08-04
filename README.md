@@ -784,6 +784,36 @@ Notes:
 - Serde transparent serialization works normally -- the wrapper is invisible in JSON.
 - Use branded newtypes for opaque IDs and phantom types to prevent passing the wrong ID type across domain boundaries.
 
+#### A Named Inner Must Carry `#[model_schema()]`
+
+**Error:** `cannot find module or crate <type>_schema in this scope` (`E0433`), reported at the inner type.
+
+A brand carries its inner's wire form and adds a name to it, so it describes as that inner describes — by reference, through the schema module the inner's own `#[model_schema()]` publishes. A named inner declared without the attribute publishes no such module, and the reference names one that was never emitted. This is the same requirement a field naming that type lives under, reported the same way and at the same place:
+
+```rust
+// Wrong: `Foreign` carries no `#[model_schema()]`, so no `foreign_schema` module exists
+#[derive(Serialize, Deserialize)]
+pub struct Foreign(pub String);
+
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+pub struct HoldsForeign {
+    pub id: Foreign, // E0433: cannot find module or crate `foreign_schema` in this scope
+}
+
+#[model_schema(no_display)]
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Wrapped(pub Foreign); // E0433: the same module, named in brand position
+```
+
+The remedy is either of two:
+
+- **Annotate the inner.** Put `#[model_schema()]` on `Foreign`, and both spellings resolve — the brand describing as whatever `Foreign` describes as.
+- **Brand the wire form instead.** Where the inner is a foreign scalar this crate cannot annotate -- `uuid::Uuid`, `rust_decimal::Decimal` -- brand the type it is written as: `pub struct Wrapped(pub String)`, with `pattern` on the brand where the format is worth pinning.
+
+A type this crate describes must be one it can read. The alternative -- letting a name it cannot resolve fall back to `{"type": "string"}` -- describes a struct as a string whenever the inner turns out to be one, which is the failure the brand's schema path exists to rule out.
+
 #### The `Display` Requirement and `no_display`
 
 Every branded newtype gets a `Display` impl that delegates to its inner value, so **the inner type must implement `Display`**. An inner type that does not is reported at the inner field, naming the trait:
