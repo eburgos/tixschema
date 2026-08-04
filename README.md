@@ -511,6 +511,8 @@ Notes:
 - **JSON Schema** stays strict: rather than `allOf` (which cannot faithfully compose a tagged union under `additionalProperties: false`), the base properties are distributed into each branch of the flattened union, keeping every branch closed. Both spellings of a union are distributed into: a discriminated enum's `oneOf` and an untagged enum's `anyOf`. Plain-struct flattens merge into a single closed object; multiple flattened unions form a cross-product.
 - Each flattened union keeps the spelling it was written under. A discriminated enum's members are exclusive, so its branches stay a `oneOf`; an untagged enum is first-match-wins and its members may overlap (one member's keys a subset of another's, the difference optional), so its branches are an `anyOf` -- under `oneOf` the document would reject exactly what Serde writes for the narrower member, which matches both branches. An object flattening one of each nests the wrappers, the untagged `anyOf` sitting inside each branch of the discriminated `oneOf`.
 - A flattened source reached through an `Option` is a choice rather than a key set. Serde writes its members beside the object's own for a `Some` and writes the object alone for a `None`, so the **JSON Schema** offers both under an `anyOf`: one branch with the source's members merged in, one naming the object's own keys alone. Folding the members into a single object would require keys the `None` payload never carries, and dropping them from `required` would admit a base written in part -- neither is a payload Serde produces. A union reached through an `Option` keeps its own spelling inside the branch and gains the absence outside it.
+- **Zod** cannot name a choice as an operand, so it multiplies instead. An intersection recognizes exactly the keys its operands name; `z.discriminatedUnion` propagates its members' keys and is an operand like any other, while a plain `z.union` names none -- each of its branches would be asked to validate the whole payload alone and reject the keys the container and the sibling branches carry, which is every payload the object writes. So a flattened untagged enum, and a flattened source reached through an `Option`, are written as a union *of* intersections: one branch per combination, with the object's own keys bound once to `{Type}$OwnSchema` and read by every branch. A union nested inside a union contributes its leaves, the nesting writing no key of its own. With one combination there is nothing to choose between, so the object's own keys stay where they were.
+- That multiplication needs the union's members, which reach the merge through the registry -- so **an untagged enum must be declared above the object that flattens it**. Declared below, it has not expanded yet and the merge names it as one operand, the spelling that rejects every payload the object writes. Nothing at the merge tells such a source apart from a plain struct declared below, which is a spelling that works, so this is a declaration-order requirement rather than a diagnostic. It sits beside the reason the operands are deferred at all: a base is a `const` of its own, and nothing orders one type's schema against another's.
 - Only a value Serde writes as an object can be flattened -- Serde refuses the rest at run time (`can only flatten structs and maps`). Flattening a plain `#[model_schema()]` enum is rejected at expansion; any other type that turns out not to be written as an object is caught when `json_schema()` runs, naming the field's type and the remedy (write the field as a named member). A flattened union whose members are described one by one is checked the same way, member by member: a member Serde does not write as an object is refused with its branch named.
 
 ### Untagged Enums (`#[serde(untagged)]`)
@@ -580,7 +582,26 @@ z.union([z.strictObject({ x: z.string(), }), z.strictObject({ y: z.number().int(
 
 Untagged enums compose with `#[serde(flatten)]`: a flattened variant carrying `Vec<DateValue>` renders `sampleValues: z.array(DateValue$Schema)` (TypeScript `Array<DateValue>`), and the JSON-schema `items` for that field is the `DateValue` `anyOf`.
 
-A member of an untagged variant carries `#[model_schema_prop(...)]` exactly as the same field written in a tagged variant does: the constraint reaches the Zod schema and the JSON Schema, and every guard the attribute earns is reported at the member. The one difference is the Rust side -- an untagged enum generates no per-field validators, so a constrained member has no `validate()` contribution and no deserialization check.
+A member of an untagged variant carries `#[model_schema_prop(...)]` exactly as the same field written in a tagged variant does: the constraint reaches the Zod schema, the JSON Schema and the Rust side alike -- the same per-member validator, the same `deserialize_with` hook, and the same [`validate()` accessor](#the-validate-method) -- and every guard the attribute earns is reported at the member.
+
+What differs is the position, and it costs the read its diagnosis. Serde tries an untagged enum's variants in declaration order, and a member whose bound fails takes its variant out of the candidate set rather than ending the read -- which is exactly what the same declaration means under `anyOf` and under `z.union`. So a value the bound rejects lands on the next variant that accepts it, and when none does, serde's derived `Deserialize` has already discarded each candidate's own error and answers with one sentence of its own:
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SoleConstrained {
+    Slug {
+        #[model_schema_prop(minLength = 2)]
+        slug: String,
+    },
+}
+
+let refused = serde_json::from_str::<SoleConstrained>(r#"{"slug":"A"}"#).unwrap_err();
+assert_eq!(refused.to_string(), "data did not match any variant of untagged enum SoleConstrained");
+```
+
+The tagged twin of that declaration reads back `'slug' is too short: minimum length is 2, got 1`, because its tag names the variant before its members are read. To learn which bound refused an untagged value, ask a surface that answers per member rather than per variant: validate the payload against the generated Zod schema or JSON Schema for a diagnosable verdict, or -- once the value is in hand -- call the enum's `validate()`, or the schema module's `validate_{variant}_{member}_value` directly.
 
 A member holding a map or a tuple describes as the struct field written from the same type does, on every surface. A map is dispatched on the classification its key earns -- enumerated properties for a key whose members the expansion knows, `additionalProperties` for an open one -- and a key no surface can write is refused at the member, at whatever depth the map sits at. A tuple is the fixed-arity array Serde writes, `prefixItems` and the arity bounds included. A member the parser could not classify at all is the one shape that stays permissive: it carries no type name to narrow with, so it admits any value, exactly as the same field does.
 
@@ -787,13 +808,19 @@ pub struct CorrelationId(pub String);
 Generated TypeScript (with `zod` feature):
 
 ```typescript
-export type UserId<ID_TYPE> = ID_TYPE & z.$brand<"UserId">;
-const UserId$RawSchema = ID_TYPE$Schema.brand<"UserId">();
+export type UserId<ID_TYPE> = ID_TYPE & $brand<"UserId">;
+const UserId$RawSchema = ID_TYPE$Schema.brand<"UserId">().meta({
+  description: "UserId",
+});
+
 export const UserId$Schema: $ZodBranded<typeof ID_TYPE$Schema, "UserId"> = UserId$RawSchema;
 
-export type CorrelationId = string & z.$brand<"CorrelationId">;
-const CorrelationId$RawSchema = z.string().brand<"CorrelationId">();
-export const CorrelationId$Schema: ZodType<CorrelationId> = CorrelationId$RawSchema;
+export type CorrelationId = string & $brand<"CorrelationId">;
+const CorrelationId$RawSchema = z.string().brand<"CorrelationId">().meta({
+  description: "CorrelationId",
+});
+
+export const CorrelationId$Schema: $ZodBranded<ZodString, "CorrelationId"> = CorrelationId$RawSchema;
 ```
 
 Generated TypeScript (without `zod` feature):
@@ -801,11 +828,9 @@ Generated TypeScript (without `zod` feature):
 ```typescript
 declare const __brand_UserId: unique symbol;
 export type UserId<ID_TYPE> = ID_TYPE & { readonly [__brand_UserId]: true };
-export function assertUserId<ID_TYPE>(value: ID_TYPE): asserts value is UserId<ID_TYPE> {}
 
 declare const __brand_CorrelationId: unique symbol;
 export type CorrelationId = string & { readonly [__brand_CorrelationId]: true };
-export function assertCorrelationId(value: string): asserts value is CorrelationId {}
 ```
 
 Notes:
@@ -917,14 +942,9 @@ pub struct SlugId(pub String);
 Generated Zod:
 
 ```typescript
-const SlugId$RawSchema = z.string()
-  .min(3)
-  .max(50)
-  .check(z.regex(/^[a-z0-9_]+$/))
-  .brand<"SlugId">()
-  .meta({
-    description: "SlugId",
-  });
+const SlugId$RawSchema = z.string().min(3).max(50).check(z.regex(/^[a-z0-9_]+$/)).brand<"SlugId">().meta({
+  description: "SlugId",
+});
 
 export const SlugId$Schema: $ZodBranded<ZodString, "SlugId"> = SlugId$RawSchema;
 ```
@@ -953,9 +973,11 @@ assert!(slug.validate().is_ok());
 let bad = SlugId("ab".to_string());
 match bad.validate() {
     Ok(()) => unreachable!(),
-    Err(errors) => println!("{:?}", errors), // ["'value' is too short: minimum length is 3, got 2"]
+    Err(errors) => println!("{:?}", errors), // ["value is too short: minimum length is 3, got 2"]
 }
 ```
+
+A brand names the rejected value `value`, bare, where a struct field is named and quoted (`'username'`): a newtype has one value and no field name to quote.
 
 You can use any combination of the three constraints:
 
@@ -1039,12 +1061,12 @@ pub struct DocumentId<ID_TYPE>(pub ID_TYPE);
 Generated Zod:
 
 ```typescript
-const DocumentId$RawSchema = z.string().brand<"DocumentId">().meta({
-  description: "Generic document identifier.\n...",
+const DocumentId$RawSchema = ID_TYPE$Schema.brand<"DocumentId">().meta({
+  description: "Generic document identifier.\n- `DocumentId<String>` for API/HTTP layer\n- `DocumentId<ObjectId>` for MongoDB layer",
   example: "64de3d95ff45b119e5b53a7e",
 });
 
-export const DocumentId$Schema: $ZodBranded<ZodString, "DocumentId"> = DocumentId$RawSchema;
+export const DocumentId$Schema: $ZodBranded<typeof ID_TYPE$Schema, "DocumentId"> = DocumentId$RawSchema;
 ```
 
 ## Field Validation (`model_schema_prop`)
@@ -1152,8 +1174,8 @@ match reg.validate() {
         for e in &errors {
             println!("Error: {e}");
         }
-        // "username: too short (minimum length 3, got 2)"
-        // "age: too large (maximum 120, got 150)"
+        // "'username' is too short: minimum length is 3, got 2"
+        // "'age' is too large: maximum is 120, got 150"
     }
 }
 ```
@@ -1163,6 +1185,34 @@ The macro also generates into the type's schema module:
 - `deserialize_{field}(D) -> Result<FieldType, E>` -- serde hook that calls the static validator
 
 A constrained field of an enum variant is named for its variant too -- `validate_{variant}_{field}_value` and `deserialize_{variant}_{field}`, with `{variant}` in `snake_case`. One schema module holds every variant's helpers, and a field name is unique only within the variant that declares it, so two variants naming one field carry their own constraints.
+
+An enum whose members carry constraints publishes the same `validate(&self) -> Result<(), Vec<String>>`, under every tagging serde offers (externally, internally and adjacently tagged, and `#[serde(untagged)]`). A value holds one variant at a time, so the check runs that variant's members and no other's, collecting every violation in the words a struct's field is answered in:
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum Action {
+    Delete {
+        #[model_schema_prop(minLength = 5)]
+        note: String,
+    },
+    Upload {
+        #[model_schema_prop(minLength = 3)]
+        note: String,
+    },
+}
+
+let deleting = Action::Delete { note: "abc".to_string() };
+assert_eq!(
+    deleting.validate().unwrap_err(),
+    vec!["'note' is too short: minimum length is 5, got 3".to_string()],
+);
+// The same value read as an `Upload` is held to that variant's own minimum, and passes.
+assert!(Action::Upload { note: "abc".to_string() }.validate().is_ok());
+```
+
+Parity with structs runs both ways: an enum no member of which carries a constraint publishes no `validate()`, exactly as a constraint-free struct publishes none.
 
 #### Constraints under `Option`, wrappers, and sequences
 

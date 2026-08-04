@@ -1012,6 +1012,33 @@ impl FieldDef {
             pre_result
         }
     }
+
+    /// The members of the untagged union this field names, as the registry recorded them, and
+    /// nothing for a field that names no such union.
+    ///
+    /// A merge cannot join a union as one operand — an intersection recognizes exactly the keys its
+    /// operands name, and a `z.union` names none — so it joins one member per branch instead, and
+    /// these are the branches. The members are recorded already multiplied out, so a member that is
+    /// itself a union has already contributed its own.
+    ///
+    /// Answered only for a field whose whole Zod spelling *is* the name the registry keys — an
+    /// array level or a preprocess wrap is part of what the operand validates, and a member spliced
+    /// in the name's place would drop it. The outermost `Option` is not one of those: it is what
+    /// [`Self::zod_merged_schema`] already leaves to the merge.
+    #[cfg(feature = "zod")]
+    pub fn zod_union_members(&self) -> Vec<String> {
+        let wrapped = self
+            .model_schema_prop_meta
+            .as_ref()
+            .is_some_and(|meta| !meta.preprocess.is_empty());
+        if self.array_depth > 0 || wrapped {
+            return Vec::new();
+        }
+        let FieldDefType::SiblingType(name, _) = &self.field_type else {
+            return Vec::new();
+        };
+        lookup_alias_info(name).map_or_else(Vec::new, |info| info.zod_union_members)
+    }
 }
 
 /// The one list of std wrappers the crate renders as arrays, shared by every surface.
