@@ -49,7 +49,11 @@ use crate::features::serde::{SerdeFieldMeta, SerdeTypeMeta, has_serde_default};
 #[cfg(feature = "serde")]
 use crate::field_type::{parse_serde_field_attributes, parse_serde_type_attributes};
 
-#[cfg(any(feature = "jsonschema", feature = "serde"))]
+#[cfg(any(
+    feature = "jsonschema",
+    feature = "serde",
+    all(feature = "typescript", feature = "zod")
+))]
 use crate::field_type::is_sequence_wrapper;
 
 #[cfg(feature = "serde")]
@@ -187,6 +191,25 @@ struct BrandedValidation {
     validate_fn: proc_macro2::TokenStream,
 }
 
+/// What a branded newtype's inner writes when what it writes is a composite: an array, a map, a
+/// tuple, or a value the parser could not classify at all.
+///
+/// These are the shapes no one `"type"` keyword and no one Zod class names, so a brand over one of
+/// them is described by nothing but the type it holds — the array, the object, or the fixed-arity
+/// array `#[serde(transparent)]` puts on the wire.
+///
+/// A `SiblingType` is absent: it is a name, not a shape. This expansion cannot resolve it, and the
+/// type it names may itself be a brand over one string — which is a shape the brand's own
+/// constraints *are* permitted over — so it keeps the description it has.
+#[cfg(any(feature = "jsonschema", all(feature = "typescript", feature = "zod")))]
+enum BrandedComposite {
+    Array,
+    Map,
+    /// A value with no type name to narrow with, which admits anything.
+    Opaque,
+    Tuple,
+}
+
 /// The JSON schema shape a branded newtype's inner field describes.
 #[cfg(feature = "jsonschema")]
 enum BrandedJsonInner {
@@ -196,6 +219,10 @@ enum BrandedJsonInner {
     ObjectId,
     /// A `"type"` keyword those constraints sit beside.
     Scalar(String),
+    /// An inner no one keyword names, carried by the dispatch that describes the same type
+    /// wherever else it is written. Boxed so the whole field def does not set the size of an enum
+    /// whose other shapes are a type name and a unit.
+    Slot(Box<FieldDef>),
 }
 
 /// What a field bottoms out in, under the wrappers it was written beneath.
@@ -1972,6 +1999,27 @@ fn branded_constrained_schema_obj(
     }
 }
 
+/// The description a brand carries for an inner no `"type"` keyword names: the one the slot
+/// dispatch gives that type, so the brand describes as the type it wraps describes wherever else
+/// it is written. An inner the dispatch cannot render replaces the body with the single diagnostic
+/// naming the brand, as an unrenderable slot does in every other position.
+///
+/// The brand's own constraints are not written beside it. [`branded_constraint_inner_error`]
+/// refuses them over an array, a map, a tuple, and an opaque inner, so there is nothing to write —
+/// except through the one spelling that guard reads as a name rather than as the array it writes,
+/// a sequence wrapper, where they were being written onto a `"type": "string"` describing no value
+/// the type can hold.
+#[cfg(feature = "jsonschema")]
+fn branded_slot_json_schema(inner: &FieldDef, def_name: &str) -> proc_macro2::TokenStream {
+    match build_tuple_element_json_schema(inner) {
+        Ok(value) => value,
+        Err(rejection) => {
+            let message = map_member_rejection_message(&format!("`{def_name}`"), &rejection);
+            quote! { compile_error!(#message) }
+        }
+    }
+}
+
 /// Builds the `json_schema()` method for a branded newtype's schema module.
 #[cfg(feature = "jsonschema")]
 fn build_branded_json_schema_method(
@@ -1985,6 +2033,7 @@ fn build_branded_json_schema_method(
         BrandedJsonInner::ObjectId => {
             object_id_json_schema_value(&branded_constrained_schema_obj(args, "string"))
         }
+        BrandedJsonInner::Slot(inner) => branded_slot_json_schema(inner, def_name),
     };
     json_schema_methods(def_name, &body)
 }
@@ -2027,9 +2076,10 @@ fn branded_ts_type_and_generics(
 
 /// Resolves the JSON schema shape for a branded newtype's inner field.
 ///
-/// For generic newtypes this is always `"string"` (mirrors the Zod logic). An `ObjectId` is read
-/// off its own `FieldDef`, because the object it writes has no `"type"` keyword that describes it;
-/// every other non-generic inner maps from the resolved TypeScript type name.
+/// For generic newtypes this is always `"string"` (mirrors the Zod logic). An `ObjectId` and a
+/// composite are read off their own `FieldDef`, because neither writes a value one `"type"`
+/// keyword describes; every remaining non-generic inner maps from the resolved TypeScript type
+/// name.
 #[cfg(feature = "jsonschema")]
 fn branded_json_inner(is_generic: bool, inner_ty: &syn::Type) -> BrandedJsonInner {
     if is_generic {
@@ -2039,6 +2089,9 @@ fn branded_json_inner(is_generic: bool, inner_ty: &syn::Type) -> BrandedJsonInne
     #[cfg(feature = "object_id")]
     if branded_inner_is_object_id(&inner) {
         return BrandedJsonInner::ObjectId;
+    }
+    if branded_inner_composite(&inner).is_some() {
+        return BrandedJsonInner::Slot(Box::new(inner));
     }
     BrandedJsonInner::Scalar(match inner.typescript_typename().as_str() {
         "number" => "number".to_owned(),
@@ -2075,6 +2128,58 @@ const fn branded_inner_is_object_id(inner: &FieldDef) -> bool {
     matches!(inner.field_type, FieldDefType::ObjectId) && !inner.is_array()
 }
 
+/// What a branded newtype's inner writes when it writes a composite, and `None` when it writes a
+/// value one `"type"` keyword and one Zod class already name.
+///
+/// The array level is asked first, so an arrayed inner answers for the array around whatever it
+/// holds — which is what `#[serde(transparent)]` puts on the wire — rather than for the item. That
+/// is the same question [`branded_inner_is_object_id`] asks to exclude an arrayed `ObjectId`, whose
+/// array reaches here instead. A sequence wrapper is that same array under another name, and is
+/// read through the one list every surface reads it through.
+///
+/// Named exhaustively rather than caught by a wildcard: a new variant must be classified, not
+/// silently collapsed into the scalar mapping.
+#[cfg(any(feature = "jsonschema", all(feature = "typescript", feature = "zod")))]
+fn branded_inner_composite(inner: &FieldDef) -> Option<BrandedComposite> {
+    if inner.is_array() {
+        return Some(BrandedComposite::Array);
+    }
+    if let FieldDefType::SiblingType(name, args) = &inner.field_type
+        && matches!(args.as_slice(), [_])
+        && is_sequence_wrapper(name)
+    {
+        return Some(BrandedComposite::Array);
+    }
+    match &inner.field_type {
+        FieldDefType::Map(..) => Some(BrandedComposite::Map),
+        FieldDefType::Tuple(..) => Some(BrandedComposite::Tuple),
+        FieldDefType::Unknown => Some(BrandedComposite::Opaque),
+        FieldDefType::Boolean
+        | FieldDefType::F32
+        | FieldDefType::F64
+        | FieldDefType::I8
+        | FieldDefType::I16
+        | FieldDefType::I32
+        | FieldDefType::I64
+        | FieldDefType::Isize
+        | FieldDefType::SiblingType(..)
+        | FieldDefType::String
+        | FieldDefType::StringLiteral(_)
+        | FieldDefType::U8
+        | FieldDefType::U16
+        | FieldDefType::U32
+        | FieldDefType::U64
+        | FieldDefType::Usize => None,
+        #[cfg(feature = "object_id")]
+        FieldDefType::ObjectId => None,
+        #[cfg(feature = "chrono")]
+        FieldDefType::DateTime
+        | FieldDefType::NaiveDate
+        | FieldDefType::NaiveDateTime
+        | FieldDefType::NaiveTime => None,
+    }
+}
+
 /// Resolves the Zod base schema for a branded newtype's inner type, applying string constraints.
 ///
 /// The constraints measure the inner's `Display` rendering, which for every inner but an
@@ -2098,7 +2203,11 @@ fn branded_zod_inner(args: &ModelSchemaArgs, is_generic: bool, inner_ty: &syn::T
 /// type annotation.
 ///
 /// Read off the inner's own `FieldDef` rather than off its TypeScript name, so a user type merely
-/// spelled `ObjectId` is not mistaken for the `$oid` object.
+/// spelled `ObjectId` is not mistaken for the `$oid` object, and so a composite is annotated with
+/// the class its own value rendering produces instead of falling through to `ZodString`.
+///
+/// Each name is the class bare, as `ZodObject` is: every one of them defaults its type parameters,
+/// so the annotation widens the raw schema rather than restating its element types.
 #[cfg(all(feature = "zod", feature = "typescript"))]
 fn branded_zod_type_name(is_generic: bool, inner_ty: &syn::Type) -> String {
     if is_generic {
@@ -2108,6 +2217,14 @@ fn branded_zod_type_name(is_generic: bool, inner_ty: &syn::Type) -> String {
     #[cfg(feature = "object_id")]
     if branded_inner_is_object_id(&inner) {
         return "ZodObject".to_owned();
+    }
+    if let Some(composite) = branded_inner_composite(&inner) {
+        return match composite {
+            BrandedComposite::Array => "ZodArray".to_owned(),
+            BrandedComposite::Map => "ZodRecord".to_owned(),
+            BrandedComposite::Opaque => "ZodUnknown".to_owned(),
+            BrandedComposite::Tuple => "ZodTuple".to_owned(),
+        };
     }
     match inner.typescript_typename().as_str() {
         "number" => "ZodNumber".to_owned(),
