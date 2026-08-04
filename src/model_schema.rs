@@ -125,6 +125,16 @@ const KNOWN_ARGS: &[&str] = &["name", "pattern", "minLength", "maxLength", "no_d
 const FLATTENED_PLAIN_ENUM_SCOPE: &str = "Only a type the registry has already classified reaches this guard; one it has not keeps its \
      TypeScript and Zod intersection, and is refused by the JSON surface when the merge runs.";
 
+/// The two shapes [`crate::utils::record_value_shape`] records that a second reader matches on
+/// rather than merely prints: each names one JSON type keyword and only one, so the flatten guard
+/// can repeat the JSON-schema merge's words off the recorded shape alone. Written once so a rename
+/// moves both the recording and the reading.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+const VALUE_SHAPE_BOOLEAN: &str = "boolean";
+
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+const VALUE_SHAPE_ENUMERATED: &str = "enumerated";
+
 /// The two shapes a map key can write that `serde_json` will not use as an object key, as
 /// [`MapKeyRejection::Unwritable`] names them.
 /// The one helper every generated module carries above its per-type definitions, and the only
@@ -1723,7 +1733,7 @@ fn non_string_inner_shape(inner: &FieldDef) -> Option<&'static str> {
     match &inner.field_type {
         FieldDefType::SiblingType(inner_name, _) => registered_value_shape(inner_name),
         FieldDefType::Map(..) | FieldDefType::Tuple(..) => Some("container"),
-        FieldDefType::Boolean => Some("boolean"),
+        FieldDefType::Boolean => Some(VALUE_SHAPE_BOOLEAN),
         FieldDefType::U8
         | FieldDefType::U16
         | FieldDefType::U32
@@ -1759,6 +1769,39 @@ fn non_string_inner_shape(inner: &FieldDef) -> Option<&'static str> {
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn registered_value_shape(rust_ident: &str) -> Option<&'static str> {
     lookup_alias_info(rust_ident)?.value_shape
+}
+
+/// The JSON type keyword a registered name's wire describes as, when the registry proves that wire
+/// is no object, and `None` for every name it cannot prove one way or the other.
+///
+/// The same entry the constrained-brand guard reads, asked the merge's question instead of the
+/// brand's, in one lookup: `value_shape` is what the named item published as a value, and `kind` is
+/// what serde writes it as. The shape answers wherever it names something no object can be — a
+/// `boolean`, and the `string` an `enumerated` unit enum writes its member name as. Where the shape
+/// is `None`, which the brand's vocabulary uses for exactly the surfaces a string check lands on,
+/// the kind is what separates a proven bare string from a name nothing has classified.
+///
+/// `numeric` is deliberately not an answer. The one recorded word covers two published documents —
+/// a one-slot tuple struct over a `u32` publishes `{"type": "integer"}` and a
+/// `#[serde(transparent)]` brand over the same `u32` publishes `{"type": "number"}` — so naming
+/// either keyword would put this refusal into disagreement with the merge whose words it repeats,
+/// which is the disagreement it exists to remove. A `container`, which bundles the array with the
+/// map, and a `nullable`, whose absence sits a level below the name rather than at it, are
+/// unprovable here for the same reason. `Stringified` is likewise not read on its own: the map-key
+/// dispatch answers it for a generic spelling it has not resolved, so a brand over an unregistered
+/// `Foreign<T>` carries it with nothing recorded behind it.
+///
+/// A name the registry has no entry for keeps the emission it has always had — the fallback the
+/// merge already documents for a source declared below the object that flattens it.
+#[cfg(all(feature = "serde", feature = "zod"))]
+fn registered_non_object_wire(rust_ident: &str) -> Option<&'static str> {
+    let info = lookup_alias_info(rust_ident)?;
+    match info.value_shape {
+        Some(VALUE_SHAPE_BOOLEAN) => Some("boolean"),
+        Some(VALUE_SHAPE_ENUMERATED) => Some("string"),
+        Some(_) => None,
+        None => matches!(info.kind, AliasKind::StringWire).then_some("string"),
+    }
 }
 
 /// What the value surface a `#[model_schema()]` item publishes under a name is, as the
@@ -4052,8 +4095,12 @@ fn process_plain_enum(
     // Compute the schema module name and register the enum so other types can find it.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     // A plain enum is written as a `z.enum` of its variant names, which takes no string check.
-    let (_, module_ident) =
-        enum_module_idents(name, item_name, AliasKind::EnumMembers, Some("enumerated"));
+    let (_, module_ident) = enum_module_idents(
+        name,
+        item_name,
+        AliasKind::EnumMembers,
+        Some(VALUE_SHAPE_ENUMERATED),
+    );
     #[cfg(any(feature = "typescript", feature = "zod"))]
     let rust_ident = name.to_string();
 
@@ -5800,12 +5847,11 @@ fn collect_untagged_members(
 /// it names, when it names one the registry has recorded, and the member as rendered otherwise.
 ///
 /// This is where the recorded member list is multiplied out, so what the registry hands a merge is
-/// the leaf set rather than a chain to walk. A member reached through an `Option` is left as it was
-/// rendered: its absence is a bare `null` on the wire, which is not a key set and joins no object.
+/// the leaf set rather than a chain to walk.
 ///
-/// `branch` is the member's own one-based position, which the leaves of a nested union are reached
-/// through and so keep as the head of theirs — the multiplication flattens the chain and the trail
-/// is what still says where a leaf was written.
+/// `branch` is the member's own one-based position, which every leaf below it is reached through
+/// and so keeps as the head of its trail — the multiplication flattens the chain and the trail is
+/// what still says where a leaf was written.
 #[cfg(all(feature = "serde", feature = "zod"))]
 fn zod_merge_branches(
     kind: &VariantKind,
@@ -5813,22 +5859,15 @@ fn zod_merge_branches(
     rendered: &str,
     branch: usize,
 ) -> Vec<ZodUnionMember> {
-    let nested = match (kind, field_defs) {
-        (VariantKind::TupleSingle, [fld]) if !fld.is_optional() => fld.zod_union_members(),
-        _ => Vec::new(),
-    };
-    if nested.is_empty() {
-        let non_object = match (kind, field_defs) {
-            (VariantKind::TupleSingle, [fld]) => zod_member_non_object(fld),
-            _ => None,
-        };
-        return vec![ZodUnionMember {
-            branch: vec![branch],
-            non_object,
+    let leaves = match (kind, field_defs) {
+        (VariantKind::TupleSingle, [fld]) => zod_member_leaves(fld, rendered),
+        _ => vec![ZodUnionMember {
+            branch: Vec::new(),
+            non_object: None,
             spelling: rendered.to_owned(),
-        }];
-    }
-    nested
+        }],
+    };
+    leaves
         .into_iter()
         .map(|leaf| {
             let mut trail = vec![branch];
@@ -5842,14 +5881,57 @@ fn zod_merge_branches(
         .collect()
 }
 
+/// What one rendered member contributes below its own position: one entry for the member itself,
+/// the leaves of the union it names when it names one the registry has recorded, and — where it was
+/// written under an `Option` — those under the choice the value is, beside the choice the absence
+/// is.
+///
+/// An `Option` is a level of the document and not a decoration on one: the value's wire and a bare
+/// `null` are two branches, which is how the JSON-schema merge descends the same member and how it
+/// comes to name a leaf `n.2`. Recording them the same way is what keeps the two merges naming one
+/// member by one position.
+///
+/// The absence is proved to be no object outright. serde writes the flattened `None` as the object's
+/// own keys alone and then refuses to read those same keys back — the untagged enum matches no
+/// member for them — so the write side and the read side describe different payload sets, and no
+/// branch a multiplication could write is a description of the type. A merge that reads this is
+/// left with the refusal, which is what the JSON-schema merge already answers the same declaration
+/// with. The outer `Option` around a whole flattened source is the other case and keeps its
+/// multiplication: there the absence reads back as the absence.
+#[cfg(all(feature = "serde", feature = "zod"))]
+fn zod_member_leaves(fld: &FieldDef, rendered: &str) -> Vec<ZodUnionMember> {
+    let nested = fld.zod_union_members();
+    let mut leaves = if nested.is_empty() {
+        vec![ZodUnionMember {
+            branch: Vec::new(),
+            non_object: zod_member_non_object(fld),
+            spelling: rendered.to_owned(),
+        }]
+    } else {
+        nested
+    };
+    if fld.is_optional() {
+        for leaf in &mut leaves {
+            leaf.branch.insert(0, 1);
+        }
+        leaves.push(ZodUnionMember {
+            branch: vec![2],
+            non_object: Some("null"),
+            spelling: rendered.to_owned(),
+        });
+    }
+    leaves
+}
+
 /// What serde writes an untagged union's member as, when the member's own written type proves that
 /// is not an object, and `None` when nothing here proves it.
 ///
 /// Named by the JSON type keyword the JSON-schema surface writes for the same member, so the two
 /// merges refuse the same member in the same words. That surface reads the keyword off a document
-/// it has already built; here there is only the type, so the answer is a partial one by
-/// construction — a name the registry stands for and a map are left to the merge that does read
-/// them, and a union member is not asked at all, its own leaves having already been recorded.
+/// it has already built; here there is the type, and for a name the registry's answer for what the
+/// named item published — so the answer is still a partial one by construction, a map and a name
+/// nothing has classified being left to the merge that does read the document, and a union member
+/// not being asked at all, its own leaves having already been recorded.
 #[cfg(all(feature = "serde", feature = "zod"))]
 fn zod_member_non_object(fld: &FieldDef) -> Option<&'static str> {
     if fld.is_array() {
@@ -5875,7 +5957,9 @@ fn zod_member_non_object(fld: &FieldDef) -> Option<&'static str> {
         | FieldDefType::NaiveDateTime
         | FieldDefType::NaiveTime => Some("string"),
         FieldDefType::Tuple(_) => Some("array"),
-        FieldDefType::SiblingType(name, _) => is_sequence_wrapper(name).then_some("array"),
+        FieldDefType::SiblingType(name, _) => is_sequence_wrapper(name)
+            .then_some("array")
+            .or_else(|| registered_non_object_wire(name)),
         #[cfg(feature = "object_id")]
         FieldDefType::ObjectId => None,
         FieldDefType::Map(_, _) | FieldDefType::TypeParam(_) | FieldDefType::Unknown => None,

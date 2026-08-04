@@ -6302,6 +6302,253 @@ fn recorded_union_flatten_error(
     flattened_union_member_guard_error(field, "Host").map(|error| error.to_string())
 }
 
+/// The branch trails one untagged enum's members are recorded at, beside what each is proved to
+/// write, in declaration order.
+#[cfg(all(feature = "serde", feature = "zod"))]
+fn recorded_member_trails(mut item: syn::ItemEnum) -> Vec<(String, Option<&'static str>)> {
+    let (_, _, merge_parts, _, errors, _, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
+    assert!(errors.is_empty(), "got: {errors:?}");
+    merge_parts
+        .iter()
+        .map(|member| (member.branch_path(), member.non_object))
+        .collect()
+}
+
+/// Registers a name carrying both answers a `#[model_schema()]` item's own expansion records for
+/// it: what serde writes it as, and what it published as a value.
+#[cfg(all(feature = "serde", feature = "zod"))]
+fn seed_registered_wire(rust_ident: &str, kind: AliasKind, shape: Option<&'static str>) {
+    register_alias_info(
+        rust_ident,
+        rust_ident,
+        &ident_schema_module_name(rust_ident),
+        kind,
+    );
+    record_value_shape(rust_ident, shape);
+}
+
+/// A member reached through an `Option` is two choices and not one: serde writes the value's own
+/// wire or writes nothing, and the JSON-schema merge descends into both — naming the value `n.1`
+/// and the absence `n.2`. The recording carries the same two, so the merge that reads it names a
+/// member by the position the other surface names the same member by.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn an_optional_union_member_is_recorded_as_its_value_beside_the_absence() {
+    assert_eq!(
+        recorded_member_trails(syn::parse_quote! {
+            enum Choice {
+                Obj(Holder),
+                Maybe(Option<Holder>),
+                Text(Option<String>),
+            }
+        }),
+        vec![
+            ("1".to_owned(), None),
+            ("2.1".to_owned(), None),
+            ("2.2".to_owned(), Some("null")),
+            ("3.1".to_owned(), Some("string")),
+            ("3.2".to_owned(), Some("null")),
+        ]
+    );
+}
+
+/// A member serde writes as an object is recorded exactly as it was: one entry at its own position,
+/// with no level below it. The `Option` is what adds a level, and nothing else does.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_member_written_without_an_option_keeps_the_one_position_it_had() {
+    assert_eq!(
+        recorded_member_trails(syn::parse_quote! {
+            enum Choice {
+                Obj(Holder),
+                Other(Second),
+            }
+        }),
+        vec![("1".to_owned(), None), ("2".to_owned(), None)]
+    );
+}
+
+/// So an object flattening a union with an optional member is refused where the field was written,
+/// naming the null leaf in the words the JSON-schema merge names it with. The absence is no key
+/// set: serde writes the object's own keys alone for it and then refuses to read those same keys
+/// back, so no branch a multiplication could write describes the type.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn flattening_a_union_with_an_optional_member_is_refused_naming_the_null_leaf() {
+    let error = recorded_union_flatten_error(
+        "NullableChoice",
+        syn::parse_quote! {
+            enum NullableChoice {
+                Obj(Holder),
+                Maybe(Option<Holder>),
+            }
+        },
+        &syn::parse_quote! { #[serde(flatten)] either: NullableChoice },
+    )
+    .unwrap();
+    assert!(
+        error.contains(
+            "`#[serde(flatten)]` of `NullableChoice` writes a union member that is not an object"
+        ),
+        "got: {error}"
+    );
+    assert!(
+        error.contains("its branch 2.2 describes a `null`"),
+        "got: {error}"
+    );
+}
+
+/// And an optional member whose value serde already writes as a scalar is named at the value's own
+/// trail — the choice below the `Option`, which is where the merge descending the same document
+/// stops first.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn an_optional_scalar_union_member_is_refused_below_the_option_it_was_written_under() {
+    let error = recorded_union_flatten_error(
+        "NullableScalarChoice",
+        syn::parse_quote! {
+            enum NullableScalarChoice {
+                Obj(Holder),
+                Maybe(Option<String>),
+            }
+        },
+        &syn::parse_quote! { #[serde(flatten)] either: NullableScalarChoice },
+    )
+    .unwrap();
+    assert!(
+        error.contains("its branch 2.1 describes a `string`"),
+        "got: {error}"
+    );
+}
+
+/// A member that names another item is asked of the registry rather than left unanswered: the
+/// named item recorded what serde writes it as and what it published as a value, and between them
+/// they name the JSON type keyword the other surface writes for the same member.
+///
+/// `numeric` is not among them on purpose — see the guard's own note — and a name the registry
+/// cannot rule out keeps the emission it has always had.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_union_member_naming_a_registered_non_object_wire_is_recorded_as_that_wire() {
+    seed_registered_wire("StringBrand", AliasKind::StringWire, None);
+    seed_registered_wire("SwitchBrand", AliasKind::Stringified, Some("boolean"));
+    seed_registered_wire("PlainEnum", AliasKind::EnumMembers, Some("enumerated"));
+    seed_registered_wire("NamedStruct", AliasKind::NoEnumMembers, Some("object"));
+    seed_registered_wire("TaggedEnum", AliasKind::NoEnumMembers, Some("union"));
+    seed_registered_wire("CountBrand", AliasKind::Stringified, Some("numeric"));
+    assert_eq!(
+        recorded_member_trails(syn::parse_quote! {
+            enum Choice {
+                Named(NamedStruct),
+                Slug(StringBrand),
+                Switch(SwitchBrand),
+                Hue(PlainEnum),
+                Tagged(TaggedEnum),
+                Count(CountBrand),
+                Foreign(NeverRegistered),
+            }
+        }),
+        vec![
+            ("1".to_owned(), None),
+            ("2".to_owned(), Some("string")),
+            ("3".to_owned(), Some("boolean")),
+            ("4".to_owned(), Some("string")),
+            ("5".to_owned(), None),
+            ("6".to_owned(), None),
+            ("7".to_owned(), None),
+        ]
+    );
+}
+
+/// So flattening a union whose member names a brand over a string is refused in the branch-naming
+/// words, where before it emitted the object intersected with that brand — a branch no payload
+/// satisfies, and one serde refuses to write for the same reason it refuses a directly flattened
+/// brand.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn flattening_a_union_with_a_named_string_wire_member_is_refused_naming_the_branch() {
+    seed_registered_wire("Slug", AliasKind::StringWire, None);
+    let error = recorded_union_flatten_error(
+        "SlugChoice",
+        syn::parse_quote! {
+            enum SlugChoice {
+                Obj(Holder),
+                Slug(Slug),
+            }
+        },
+        &syn::parse_quote! { #[serde(flatten)] either: SlugChoice },
+    )
+    .unwrap();
+    assert!(
+        error.contains("its branch 2 describes a `string`"),
+        "got: {error}"
+    );
+}
+
+/// The same for a brand serde stringifies and for a plain unit enum, each named by the keyword its
+/// own published document carries: a brand over a `bool` describes as a `boolean`, and a unit enum
+/// describes as the `string` its member name is written as.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn flattening_a_union_with_a_named_stringified_or_enumerated_member_is_refused() {
+    seed_registered_wire("Switch", AliasKind::Stringified, Some("boolean"));
+    let switch = recorded_union_flatten_error(
+        "SwitchChoice",
+        syn::parse_quote! {
+            enum SwitchChoice {
+                Obj(Holder),
+                Switch(Switch),
+            }
+        },
+        &syn::parse_quote! { #[serde(flatten)] either: SwitchChoice },
+    )
+    .unwrap();
+    assert!(
+        switch.contains("its branch 2 describes a `boolean`"),
+        "got: {switch}"
+    );
+
+    seed_registered_wire("Hue", AliasKind::EnumMembers, Some("enumerated"));
+    let hue = recorded_union_flatten_error(
+        "HueChoice",
+        syn::parse_quote! {
+            enum HueChoice {
+                Obj(Holder),
+                Hue(Hue),
+            }
+        },
+        &syn::parse_quote! { #[serde(flatten)] either: HueChoice },
+    )
+    .unwrap();
+    assert!(
+        hue.contains("its branch 2 describes a `string`"),
+        "got: {hue}"
+    );
+}
+
+/// A member naming an item the registry says publishes an object, and one naming a type the
+/// registry has never seen, are both left alone — the second being the declaration-order fallback,
+/// which answers for a name written above the union no differently than for a foreign type.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_union_member_naming_an_object_or_an_unregistered_type_stays_admitted() {
+    seed_registered_wire("Doc", AliasKind::NoEnumMembers, Some("object"));
+    assert!(
+        recorded_union_flatten_error(
+            "NamedChoice",
+            syn::parse_quote! {
+                enum NamedChoice {
+                    Obj(Holder),
+                    Doc(Doc),
+                    Foreign(NeverRegistered),
+                }
+            },
+            &syn::parse_quote! { #[serde(flatten)] either: NamedChoice },
+        )
+        .is_none()
+    );
+}
+
 /// `^$` is the empty-string check, not a degenerate pattern: it pins both ends of the value to one
 /// position. It keeps the `is_empty()` call it has been emitted as, byte for byte, now that the
 /// shapes written out of the same two anchors are refused.
