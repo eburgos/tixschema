@@ -1121,7 +1121,7 @@ pub struct Annotated<'label, LabelType: Clone + Into<Cow<'label, str>>> {
 /// A const beside a bound that reads only type parameters. A const takes no filling, so it is
 /// declared nowhere in the joint check and left out of its call; the fixture compiling asserts its
 /// presence leaves that check standing.
-#[model_schema(default_types(WideType = String, NarrowType = char))]
+#[model_schema(default_types(WideType = String, NarrowType = String))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Padded<WideType: From<NarrowType>, NarrowType: Clone, const WIDTH: usize> {
     pub narrow: NarrowType,
