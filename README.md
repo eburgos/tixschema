@@ -1399,13 +1399,13 @@ export type Document = {
 };
 
 export const Document$Schema = z.strictObject({
-  id: z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/i, { message: "Invalid ObjectId" }) }),
+  id: z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) }),
   title: z.string(),
-  author_id: z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/i, { message: "Invalid ObjectId" }) }),
-  tags: z.array(z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/i, { message: "Invalid ObjectId" }) })),
-  metadata: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/i, { message: "Invalid ObjectId" }) })),
-  parent_id: z.union([z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/i, { message: "Invalid ObjectId" }) }), z.undefined()]).prefault(undefined),
-  related_docs: z.record(z.string(), z.array(z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/i, { message: "Invalid ObjectId" }) }))),
+  author_id: z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) }),
+  tags: z.array(z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) })),
+  metadata: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) })),
+  parent_id: z.union([z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) }), z.undefined()]).prefault(undefined),
+  related_docs: z.record(z.string(), z.array(z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) }))),
 });
 ```
 
