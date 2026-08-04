@@ -770,8 +770,9 @@ fn has_serde_transparent(attrs: &[syn::Attribute]) -> bool {
 /// The no-docs fallback names the item as it is exported, not as it is declared in Rust, so a
 /// `JSDoc` header never contradicts the `export type` one line under it.
 ///
-/// Doc lines reach the body as written: unlike the `item_plain_doc_lines` path, this one strips no
-/// ` ```rust example ` block.
+/// An item's ` ```rust example ` block is dropped before its lines reach the body, the way
+/// `item_plain_doc_lines` drops it: the block is Rust source, and nothing reads it as such once it
+/// is sitting in a `TypeScript` comment. A consumer after the example reads the Rust docs.
 #[cfg(feature = "typescript")]
 fn build_item_jsdoc(docs_vec: Option<&[String]>, item_name: &str) -> String {
     docs_vec.map_or_else(
@@ -783,7 +784,7 @@ fn build_item_jsdoc(docs_vec: Option<&[String]>, item_name: &str) -> String {
                 .join("\n")
         },
         |doc_lines| {
-            doc_lines
+            strip_examples_from_docs(doc_lines)
                 .iter()
                 .flat_map(|v| v.lines().map(ToOwned::to_owned).collect::<Vec<_>>())
                 .chain(vec![String::new()])
@@ -7314,8 +7315,26 @@ fn generate_ts_definition_method(
     }
 }
 
+/// A schema an intersection is built from, written so the name it carries is read when the
+/// intersection is used rather than while the `const` holding it is being initialized.
+///
+/// A flattened base is rendered as the base's own exported `const`. Spliced in as it stands, that
+/// name is read the moment the containing `const`'s initializer runs — which fails outright when
+/// the base is declared below, and no declaration order puts each of two bases that flatten each
+/// other above the other. Deferring the read is what makes every emitted module load whatever
+/// order they are assembled in; a pair that does flatten each other then fails when something asks
+/// it to validate, rather than at the import of everything declared alongside it.
+#[cfg(feature = "zod")]
+fn deferred_zod_operand(schema: &str) -> String {
+    format!("z.lazy(() => {schema})")
+}
+
 #[cfg(feature = "zod")]
 /// Generates the Zod schema method (Zod schemas only, no TypeScript types).
+///
+/// Each flattened base joins the intersection through [`deferred_zod_operand`]: a base names a
+/// `const` of its own, and one macro invocation sees one type, so nothing here can know whether
+/// that `const` is declared above the module this writes or below it.
 fn generate_zod_schema_method(
     item_name: &str,
     schema_code: &str,
@@ -7324,7 +7343,7 @@ fn generate_zod_schema_method(
 ) -> proc_macro2::TokenStream {
     #[cfg_attr(not(feature = "zod"), allow(unused_variables))]
     let and_suffix: String = flatten_schemas.iter().fold(String::new(), |mut acc, s| {
-        let _ = write!(acc, ".and({s})");
+        let _ = write!(acc, ".and({})", deferred_zod_operand(s));
         acc
     });
 
