@@ -384,6 +384,19 @@ the rendered argument folds onto that item's `$SchemaDefault` instead of reconst
 call the memo would not share with it — see `record_zod_default_arguments`. `zod_binding_reexport`
 covers both bindings wherever a renamed item re-exports its factory.
 
+`X$SchemaDefault` is a module-scope `const`, and any argument `default_zod_argument` renders as a
+reference to another item — the fold above, or an ordinary (non-folding) call to that item's own
+`X$SchemaFactory` — names one more module-scope `const`. One macro invocation sees one type, so
+nothing here can know whether that `const` is written above this one in the generated module or
+below it; `default_zod_argument` defers every such reference through `deferred_zod_operand`, the
+same `z.lazy(() => …)` wrap `.and(...)` already relies on for a flattened base. A self-contained
+expression like `z.string()` names no sibling `const` and is left eager. The deferral is also what
+ends a cycle between two declared defaults — `CycleLeader`'s naming `CycleFollower` and
+`CycleFollower`'s naming `CycleLeader` back: neither can have registered the other's arguments yet
+when it expands, so neither side folds, and both calls read the other's factory behind `z.lazy`
+rather than at the top of a `const` initializer — the module loads regardless of which of the two
+names the consuming project's entity list writes first.
+
 Each factory memoizes on the identity of its arguments, one cache level per parameter, so two
 calls with the same argument objects return the identical schema and no two argument lists
 collide. The levels are written out to the exact depth the type declares rather than looped over:
