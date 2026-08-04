@@ -463,7 +463,7 @@ fn a_generic_struct_renders_its_example_at_the_string_instantiation() {
     /// ```rust example
     /// Boxed { value: "x".to_owned() }
     /// ```
-    #[model_schema()]
+    #[model_schema(default_types(ValueType = String))]
     #[derive(Serialize, Deserialize, Debug, Clone)]
     pub struct Boxed<ValueType> {
         pub value: ValueType,
@@ -485,7 +485,7 @@ fn a_generic_enum_renders_its_example_at_the_string_instantiation() {
     /// ```rust example
     /// Tagged::Held { held: "x".to_owned(), tag: "t".to_owned() }
     /// ```
-    #[model_schema()]
+    #[model_schema(default_types(HeldType = String, TagType = String))]
     #[derive(Serialize, Deserialize, Debug, Clone)]
     pub enum Tagged<HeldType, TagType> {
         Held { held: HeldType, tag: TagType },
@@ -509,7 +509,7 @@ fn a_factory_carries_its_example_on_the_schema_it_memoizes() {
     /// ```rust example
     /// Held { value: "x".to_owned() }
     /// ```
-    #[model_schema()]
+    #[model_schema(default_types(ValueType = String))]
     #[derive(Serialize, Deserialize, Debug, Clone)]
     pub struct Held<ValueType> {
         pub value: ValueType,
