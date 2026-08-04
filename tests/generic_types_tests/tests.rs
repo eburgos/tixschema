@@ -183,8 +183,10 @@ mod zod {
             zod.contains("parameter_keyed: z.record(z.string(), z.string())"),
             "Got: {zod}"
         );
+        // The value parameter is the factory's own argument since the factories landing; only
+        // the KEY position is this rule's — it states the string keys serde writes.
         assert!(
-            zod.contains("both_parameters: z.record(z.string(), z.unknown())"),
+            zod.contains("both_parameters: z.record(z.string(), valueType)"),
             "Got: {zod}"
         );
         assert!(!zod.contains("z.record(z.unknown()"), "Got: {zod}");
