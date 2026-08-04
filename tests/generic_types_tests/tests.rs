@@ -892,11 +892,6 @@ pub struct Undefaulted<IdType> {
     pub id: IdType,
 }
 
-#[cfg(not(feature = "jsonschema"))]
-#[test]
-fn a_parameter_with_no_default_still_expands_where_no_json_document_is_built() {
-    assert_eq!(Undefaulted { id: 1_u32 }.id, 1);
-}
 
 /// The item the reference-site fixtures below point at. A generic type publishes a factory rather
 /// than a schema, so a field naming it has nothing to name — it has to call that factory with what
@@ -960,6 +955,12 @@ pub struct MixedArguments {
 pub struct Referrer {
     pub boxed: Boxed<u32>,
     pub tagged: Tagged<String>,
+}
+
+#[cfg(not(feature = "jsonschema"))]
+#[test]
+fn a_parameter_with_no_default_still_expands_where_no_json_document_is_built() {
+    assert_eq!(Undefaulted { id: 1_u32 }.id, 1);
 }
 
 /// The pair the attribute used to produce on any generic item: `E0107` on the emitted `impl`,
