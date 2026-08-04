@@ -178,6 +178,22 @@ fn assert_jsdoc_opens_with(ts: &str, expected: &str) {
     assert!(ts.starts_with(&header), "expected {expected} to open: {ts}");
 }
 
+/// The surface with the item's ident re-export taken off.
+///
+/// That line is the one place an item's Rust ident is written on purpose: a reference standing
+/// before the item has only the ident to spell, so each nominal surface answers at it. Everything
+/// else the item publishes is written under the name it is exported as, which is what the
+/// assertions below are about.
+#[cfg(any(feature = "typescript", feature = "zod"))]
+fn without_ident_reexport(surface: &str, ident: &str, exported: &str) -> String {
+    surface
+        .replace(&format!("\n\nexport type {ident} = {exported};"), "")
+        .replace(
+            &format!("\n\nexport const {ident}$Schema = {exported}$Schema;"),
+            "",
+        )
+}
+
 /// The ` * ` lines a definition's `JSDoc` block is written from, with the block's own delimiters and
 /// the surrounding indentation set aside — what every shape spells from one body, and the one part
 /// of the emitted `TypeScript` the shapes may be held against each other over.
@@ -224,19 +240,48 @@ fn an_undocumented_item_names_itself_in_jsdoc_as_it_is_exported() {
 }
 
 /// The reported failure was a `JSDoc` header contradicting the `export type` one line under it, so
-/// the name the item is declared under must reach neither.
+/// the name the item is declared under must reach neither. The ident re-export is the one line
+/// that writes the ident deliberately, and is taken off before the surface is read.
 #[cfg(feature = "typescript")]
 #[test]
 fn an_undocumented_item_never_writes_its_rust_ident() {
-    for ts in [
-        StructUnderRustName::ts_definition(),
-        TupleUnderRustName::ts_definition(),
-        SlotUnderRustName::ts_definition(),
-        ShapeUnderRustName::ts_definition(),
-        AdjacentUnderRustName::ts_definition(),
-        EitherUnderRustName::ts_definition(),
+    for (ts, ident, exported) in [
+        (
+            StructUnderRustName::ts_definition(),
+            "StructUnderRustName",
+            "RenamedStruct",
+        ),
+        (
+            TupleUnderRustName::ts_definition(),
+            "TupleUnderRustName",
+            "RenamedTuple",
+        ),
+        (
+            SlotUnderRustName::ts_definition(),
+            "SlotUnderRustName",
+            "RenamedSlot",
+        ),
+        (
+            ShapeUnderRustName::ts_definition(),
+            "ShapeUnderRustName",
+            "RenamedShape",
+        ),
+        (
+            AdjacentUnderRustName::ts_definition(),
+            "AdjacentUnderRustName",
+            "RenamedAdjacent",
+        ),
+        (
+            EitherUnderRustName::ts_definition(),
+            "EitherUnderRustName",
+            "RenamedEither",
+        ),
     ] {
-        assert!(!ts.contains("UnderRustName"), "rust ident reached: {ts}");
+        let described = without_ident_reexport(&ts, ident, exported);
+        assert!(
+            !described.contains("UnderRustName"),
+            "rust ident reached: {described}"
+        );
     }
     for (ts, ident) in [
         (SuffixedStructJson::ts_definition(), "SuffixedStructJson"),
@@ -329,9 +374,11 @@ fn a_plain_enum_describes_itself_as_it_is_exported() {
             "{exported} not described by: {zod}"
         );
     }
+    let slot = SlotUnderRustName::zod_schema();
     assert!(
-        !SlotUnderRustName::zod_schema().contains("UnderRustName"),
-        "rust ident reached the description"
+        !without_ident_reexport(&slot, "SlotUnderRustName", "RenamedSlot")
+            .contains("UnderRustName"),
+        "rust ident reached the description: {slot}"
     );
     assert!(
         !SuffixedSlotJson::zod_schema().contains("SuffixedSlotJson"),

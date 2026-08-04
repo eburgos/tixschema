@@ -510,6 +510,43 @@ pub fn compute_alias_export_name(rust_ident: &str, override_name: Option<&str>) 
     )
 }
 
+/// The spelling every reference to a `#[model_schema()]` item falls back to when the registry
+/// cannot answer for it, which is what a reference standing *before* the item expanded has and
+/// nothing else — the ident with the `Json` suffix taken off, that being what the field walk
+/// records for a sibling and what [`ident_schema_module_name`] names the module from.
+///
+/// An item exported under this spelling already answers at it. One exported under any other — an
+/// alias, which is given the `Type` suffix, or anything carrying a `name = "…"` override — does
+/// not, so it publishes the ident as a name of its own on each nominal surface: the two
+/// declaration orders then spell the reference differently, and both spellings are defined by the
+/// same emission. The module seam settled the same question for the JSON surface, which addresses
+/// a Rust path rather than a name.
+#[cfg(any(feature = "typescript", feature = "zod"))]
+fn ident_reexport_name(rust_ident: &str, export_name: &str) -> Option<String> {
+    let referenced = safe_type_name(rust_ident);
+    (referenced != export_name).then_some(referenced)
+}
+
+/// The `TypeScript` line an item publishes under its own Rust ident, or nothing when it is already
+/// exported under it. The parameter list is repeated on both sides so a generic item stays generic
+/// through the re-export.
+#[cfg(feature = "typescript")]
+pub fn ident_reexport_ts(rust_ident: &str, export_name: &str, ts_generics: &str) -> String {
+    ident_reexport_name(rust_ident, export_name).map_or_else(String::new, |referenced| {
+        format!("\n\nexport type {referenced}{ts_generics} = {export_name}{ts_generics};")
+    })
+}
+
+/// The zod counterpart of [`ident_reexport_ts`] — a binding, not a second schema, so the two names
+/// carry the one schema the item published. It is written unannotated because a zod-only build has
+/// no `ZodType` to annotate it with, and the binding's own type is the exported schema's.
+#[cfg(feature = "zod")]
+pub fn ident_reexport_zod(rust_ident: &str, export_name: &str) -> String {
+    ident_reexport_name(rust_ident, export_name).map_or_else(String::new, |referenced| {
+        format!("\n\nexport const {referenced}$Schema = {export_name}$Schema;")
+    })
+}
+
 /// [`compute_alias_export_name`] for a declared item — a struct, an enum, a tuple struct, a branded
 /// newtype. Without an override the item keeps the name it is declared under, which is the one
 /// difference from an alias: an alias has no surface name of its own and is given the `Type` suffix.
