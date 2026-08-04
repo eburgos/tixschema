@@ -1626,7 +1626,7 @@ fn test_bare_tag_zod_intersects_the_inner_schema() {
 
     assert!(
         zod.contains(
-            "z.strictObject({\n  type: z.literal(\"Wrapped\"),\n}).and(TagPayload$Schema)"
+            "z.strictObject({\n  type: z.literal(\"Wrapped\"),\n}).and(z.lazy(() => TagPayload$Schema))"
         ),
         "Got: {zod}"
     );
@@ -1636,6 +1636,29 @@ fn test_bare_tag_zod_intersects_the_inner_schema() {
         "An intersection member cannot be discriminated on. Got: {zod}"
     );
     assert!(!zod.contains("value:"), "Got: {zod}");
+}
+
+/// Test 22c2: the inner type is a `const` of its own and nothing orders one type's emitted module
+/// against another's, so naming it straight into the member would read it while the enum's own
+/// `const` initializes — which fails for any inner type declared below. The read is deferred to
+/// whenever something validates, the same way a `#[serde(flatten)]` base's is.
+#[cfg(feature = "zod")]
+#[test]
+fn test_a_newtype_variants_content_is_never_read_while_the_const_initializes() {
+    for (zod, inner) in [
+        (Internal::zod_schema(), "TagPayload"),
+        (InternalOverBrand::zod_schema(), "InternalSlug"),
+        (InternalOverUntagged::zod_schema(), "InternalEither"),
+    ] {
+        assert!(
+            zod.contains(&format!(".and(z.lazy(() => {inner}$Schema))")),
+            "expected a deferred content, got: {zod}"
+        );
+        assert!(
+            !zod.contains(&format!(".and({inner}$Schema)")),
+            "`{inner}$Schema` is read eagerly in: {zod}"
+        );
+    }
 }
 
 /// Test 22d: with no newtype variant every member is an object carrying the tag, so the union still

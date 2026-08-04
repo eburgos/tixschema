@@ -4029,11 +4029,13 @@ fn render_internal_variant(
     #[cfg(not(feature = "jsonschema"))]
     let json = quote! {};
 
+    // The content joins the member through [`deferred_zod_operand`] for the reason a flattened
+    // base does: it names a `const` of its own, and one macro invocation sees one type.
     #[cfg(feature = "zod")]
     let zod = format!(
         "z.strictObject({}).and({})",
         parts.schema_code,
-        inner.zod_type()
+        deferred_zod_operand(&inner.zod_type())
     );
     #[cfg(not(feature = "zod"))]
     let zod = String::new();
