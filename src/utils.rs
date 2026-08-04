@@ -8,7 +8,6 @@ use regex_syntax::ast::{
     ClassSetBinaryOpKind, ClassSetItem, Flag, FlagsItemKind, Group, GroupKind, HexLiteralKind,
     Literal, LiteralKind, SpecialLiteralKind,
 };
-#[cfg(feature = "serde")]
 use regex_syntax::hir;
 use std::collections::HashMap;
 use syn::{Attribute, Expr, Field, Lit, LitStr, Meta, Variant};
@@ -964,6 +963,125 @@ fn js_spelling(pattern: &str) -> Result<String, String> {
     Ok(walk.rewritten(pattern))
 }
 
+/// The `pattern` handed back when it turns some value away, or the refusal it earns for admitting
+/// every value -- spanned on the literal the author wrote.
+///
+/// A `pattern` that matches at some position of every string is a constraint that constrains
+/// nothing. Nothing downstream can make it say anything: the generated validator would reject no
+/// value, and the Zod and JSON Schema surfaces would publish a check every payload passes. Taking
+/// it silently leaves the author holding a contract that says the value is checked when nothing
+/// checks it -- the same claim a bound written where no surface reads one is refused for, so it is
+/// refused the same way, where it is written.
+///
+/// It also settles what such a pattern would have been emitted as. The `str` call
+/// [`trivial_pattern`] names for a simple pattern does not exist here -- there is no call for "and
+/// then check nothing" -- and dropping the check from a validator whose only constraint is that
+/// pattern leaves `value` unread in the emitted `pub fn validate_..._value(value: &str)`, which is
+/// a fresh `-D warnings` failure in the consumer crate the validator is written into. Refusing at
+/// expansion means no such validator is ever emitted.
+///
+/// What stays on the regex path is every pattern that turns some value away, `\b` included. That
+/// one is the residual: `clippy::trivial_regex` flags it and names no replacement -- a probe of
+/// `#[model_schema_prop(pattern = r"\b")]` under `cargo clippy --all-targets -- -D warnings` in a
+/// crate denying `clippy::nursery` reports `trivial regex ... the regex is unlikely to be useful
+/// as it is` against the `#[model_schema]` attribute -- and it is left standing, because `\b` is a
+/// real constraint: the empty string holds no word boundary, so a value is turned away by it, and
+/// refusing it would drop a check the author is owed.
+pub fn constraining_pattern(lit: &LitStr, pattern: String) -> Result<String, syn::Error> {
+    if admits_every_value(&pattern) {
+        return Err(syn::Error::new_spanned(
+            lit,
+            "`pattern` admits every value, so it constrains nothing: every string has a position \
+             this matches at, which leaves the generated validator turning no value away and the \
+             Zod and JSON schemas publishing a check every payload passes. Taking it would leave a \
+             contract that says the value is checked when nothing checks it -- the same silent \
+             claim a bound written where no surface reads one is refused for. Write the pattern \
+             the value has to match, or drop it.",
+        ));
+    }
+    Ok(pattern)
+}
+
+/// Whether a search for `pattern` succeeds in every haystack, read off the HIR rather than off the
+/// pattern text: `^` and `(^)` and `^|a` are one verdict written three ways, and `^$` is written
+/// out of the same two anchors as `^` and `$` yet admits only the empty string.
+///
+/// The rule is one sentence with one exception. A pattern admits every value when nothing in it
+/// asks the haystack for anything -- when it matches the empty string wherever it is tried
+/// ([`matches_at_every_position`]) -- and the exception is that a single whole-text anchor asks
+/// for nothing either, since every haystack has a start and an end. Two of them do ask: `^$` pins
+/// both to one position, which only the empty string has.
+///
+/// It errs toward `false` everywhere the reading is not certain, and everything it declines keeps
+/// its `regex::Regex`, where being conservative costs nothing. `^^` and `(?:^)+` are both admit-
+/// everything shapes it does not classify, and a pattern the parser cannot read is not classified
+/// at all -- that one is [`portable_pattern`]'s refusal to make, ahead of this one.
+fn admits_every_value(pattern: &str) -> bool {
+    regex_syntax::ParserBuilder::new()
+        .unicode(true)
+        .utf8(true)
+        .build()
+        .parse(pattern)
+        .is_ok_and(|parsed| matches_every_haystack(&parsed))
+}
+
+/// Whether a search for this sub-expression succeeds in every haystack.
+fn matches_every_haystack(hir: &hir::Hir) -> bool {
+    match hir.kind() {
+        hir::HirKind::Look(_) => is_text_anchor(hir),
+        hir::HirKind::Capture(capture) => matches_every_haystack(&capture.sub),
+        hir::HirKind::Alternation(branches) => branches.iter().any(matches_every_haystack),
+        hir::HirKind::Concat(parts) => concat_matches_every_haystack(parts),
+        hir::HirKind::Empty
+        | hir::HirKind::Literal(_)
+        | hir::HirKind::Class(_)
+        | hir::HirKind::Repetition(_) => matches_at_every_position(hir),
+    }
+}
+
+/// Whether a concatenation matches at a position every haystack has.
+///
+/// Every part that asks the haystack for nothing can be tried anywhere, so a run of them matches
+/// anywhere; one whole-text anchor among them fixes that anywhere to a position every haystack
+/// still has. A second anchor is what breaks it -- `^$` requires the start and the end to be the
+/// same position -- and so is any part that consumes a character.
+fn concat_matches_every_haystack(parts: &[hir::Hir]) -> bool {
+    parts.iter().filter(|part| is_text_anchor(part)).count() <= 1
+        && parts
+            .iter()
+            .filter(|part| !is_text_anchor(part))
+            .all(matches_at_every_position)
+}
+
+/// Whether this sub-expression matches the empty string at every position of every haystack, and
+/// so asks the haystack for nothing at all.
+///
+/// A repetition that may run zero times is such a match wherever it is tried, whatever it repeats;
+/// an alternation is one as soon as any single branch is. A literal or a class consumes a
+/// character, and a look-around holds only where the haystack has the property it names -- `^` at
+/// the start, `\b` at a word boundary — so neither asks for nothing.
+fn matches_at_every_position(hir: &hir::Hir) -> bool {
+    match hir.kind() {
+        hir::HirKind::Empty => true,
+        hir::HirKind::Repetition(repetition) => repetition.min == 0,
+        hir::HirKind::Capture(capture) => matches_at_every_position(&capture.sub),
+        hir::HirKind::Concat(parts) => parts.iter().all(matches_at_every_position),
+        hir::HirKind::Alternation(branches) => branches.iter().any(matches_at_every_position),
+        hir::HirKind::Literal(_) | hir::HirKind::Class(_) | hir::HirKind::Look(_) => false,
+    }
+}
+
+/// Whether a sub-expression is one of the two whole-text anchors, the only assertions a search
+/// finds in every haystack. The line anchors `(?m)` turns these into never reach this crate --
+/// [`portable_pattern`] refuses an inline flag first -- and every word-boundary flavour asks the
+/// haystack for something the empty string does not have.
+fn is_text_anchor(hir: &hir::Hir) -> bool {
+    matches!(
+        *hir.kind(),
+        hir::HirKind::Look(hir::Look::Start | hir::Look::End)
+    )
+}
+
 /// What a `pattern` accepts stated without a regex, for exactly the patterns
 /// `clippy::trivial_regex` proves one is unnecessary for -- and `None` for every other pattern,
 /// which keeps its `regex::Regex` and is the only thing that reads a pattern of any real shape.
@@ -981,9 +1099,11 @@ fn js_spelling(pattern: &str) -> Result<String, String> {
 /// than that. A shape the lint does not name is left on the regex path, where it costs nothing;
 /// a shape misread as trivial would silently change which values a constraint admits.
 ///
-/// The two shapes the lint calls trivial and offers no replacement for -- a pattern that matches
-/// everything (`""`, `^`, `$`), and one whose alternatives are all empty (`|`) -- are not
-/// classified here: there is no call to emit for them, only the absence of a check.
+/// Two of the shapes the lint calls trivial and offers no replacement for -- a pattern that
+/// matches everything (`""`, `^`, `$`), and one whose alternatives are all empty (`|`) -- never
+/// reach here at all: [`constraining_pattern`] refuses them where they are written, since there is
+/// no call to emit for them, only the absence of a check. The third, a bare `\b`, does reach here
+/// and keeps its regex, because it turns a value away and so has a check worth keeping.
 ///
 /// The HIR walked is the one the lint reads, parsed with the options it parses with, so what is
 /// classified here is what it classifies. Anchors are the whole-haystack `Look::Start` and
