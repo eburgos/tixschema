@@ -2230,8 +2230,13 @@ fn branded_schema_example_instantiates_every_parameter() {
 #[cfg(feature = "typescript")]
 #[test]
 fn plain_enum_ts_definition_carries_no_cfg_attribute() {
-    let tokens =
-        super::generate_plain_enum_ts_definition_method(" * Status", "Status", "Status", "  'a'");
+    let tokens = super::generate_plain_enum_ts_definition_method(
+        " * Status",
+        "Status",
+        "Status",
+        "",
+        "  'a'",
+    );
     assert_no_cfg_attribute(&tokens, "generate_plain_enum_ts_definition_method");
 }
 
@@ -2239,7 +2244,7 @@ fn plain_enum_ts_definition_carries_no_cfg_attribute() {
 #[test]
 fn discriminated_enum_ts_definition_carries_no_cfg_attribute() {
     let tokens = super::generate_discriminated_enum_ts_definition_method(
-        " * Shape", "Shape", "Shape", "  'a'",
+        " * Shape", "Shape", "Shape", "", "  'a'",
     );
     assert_no_cfg_attribute(&tokens, "generate_discriminated_enum_ts_definition_method");
 }
