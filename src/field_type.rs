@@ -237,6 +237,61 @@ impl PartialEq for FieldDef {
 }
 
 impl FieldDef {
+    /// The enclosing item's own type parameter this field reaches *below* its own position — the
+    /// `T` a `Later<T>` hands to the type it names, and the same `T` inside a tuple or a map.
+    ///
+    /// [`Self::parameter_shape_name`] answers for the field itself, this for everything it is
+    /// written over, and a field answering either one describes a value the expansion never sees a
+    /// type for. What differs is what can still be said about it: a field that *is* a parameter has
+    /// no shape at all, while one merely written over a parameter keeps the shape it was written
+    /// with — an array stays an array — and only the leaf goes opaque. So a bound written against
+    /// the shape still reaches something, and a bound written against the leaf reaches nothing on
+    /// any surface however the instantiation fills it.
+    ///
+    /// The first such parameter in declaration order is the one named; a field reaching two names
+    /// them both for the same reason, and one is enough to say what the answer is.
+    ///
+    /// Reads a def already rewritten by [`Self::erase_type_parameters`], for the reason
+    /// `parameter_shape_name` does.
+    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+    pub fn argument_parameter_name(&self) -> Option<&str> {
+        match &self.field_type {
+            FieldDefType::SiblingType(_, arguments) => arguments
+                .iter()
+                .find_map(|argument| argument.parameter_or_argument_name()),
+            FieldDefType::Map(key, value) => key
+                .parameter_or_argument_name()
+                .or_else(|| value.parameter_or_argument_name()),
+            FieldDefType::Tuple(elements) => {
+                elements.iter().find_map(Self::parameter_or_argument_name)
+            }
+            FieldDefType::TypeParam(_)
+            | FieldDefType::Unknown
+            | FieldDefType::StringLiteral(_)
+            | FieldDefType::Boolean
+            | FieldDefType::String
+            | FieldDefType::U8
+            | FieldDefType::U16
+            | FieldDefType::U32
+            | FieldDefType::U64
+            | FieldDefType::I8
+            | FieldDefType::I16
+            | FieldDefType::I32
+            | FieldDefType::I64
+            | FieldDefType::Usize
+            | FieldDefType::Isize
+            | FieldDefType::F32
+            | FieldDefType::F64 => None,
+            #[cfg(feature = "object_id")]
+            FieldDefType::ObjectId => None,
+            #[cfg(feature = "chrono")]
+            FieldDefType::NaiveDate
+            | FieldDefType::NaiveTime
+            | FieldDefType::NaiveDateTime
+            | FieldDefType::DateTime => None,
+        }
+    }
+
     /// The element of a collection wrapper, as the field the wrapper's own serialization makes it.
     ///
     /// A `Vec<T>` and a set of `T` both write a JSON array of `T`, so the element carries the
@@ -650,6 +705,14 @@ impl FieldDef {
             | FieldDefType::NaiveDateTime
             | FieldDefType::DateTime => None,
         }
+    }
+
+    /// The parameter this field is or reaches, which is what a nested position is asked for: below
+    /// the top level the two questions have one answer.
+    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+    fn parameter_or_argument_name(&self) -> Option<&str> {
+        self.parameter_shape_name()
+            .or_else(|| self.argument_parameter_name())
     }
 
     /// The enclosing item's own type parameter this field renders as, when a bound spelled against

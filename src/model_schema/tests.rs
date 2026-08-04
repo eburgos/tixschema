@@ -3261,11 +3261,103 @@ fn string_constraints_over_a_named_inner_the_registry_calls_a_string_pass() {
 /// a diagnostic out of declaration order: moving a declaration would turn a compiling program into
 /// a refused one without changing what it means. The `Display` assertion still bounds the Rust
 /// surface either way.
+///
+/// Both of them name a type the declaration has already fixed, which is what the admission rests
+/// on; a name written over one of the brand's own parameters has not, and is refused below.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn string_constraints_over_a_name_the_registry_cannot_answer_for_pass() {
-    let errors = brand_over_named_inner_errors("SiblingRegisteredNowhere");
-    assert!(errors.is_empty(), "got: {errors:?}");
+    let bare = brand_over_named_inner_errors("SiblingRegisteredNowhere");
+    assert!(bare.is_empty(), "got: {bare:?}");
+
+    for inner in ["UnregisteredGeneric<String>", "UnregisteredGeneric<u32>"] {
+        let ty: syn::Type = syn::parse_str(inner).unwrap();
+        let carrying_a_fixed_argument = branded_errors_with(
+            &syn::parse_quote! {
+                #[serde(transparent)]
+                struct Branded<T>(pub #ty);
+            },
+            &pattern_args(),
+        );
+        assert!(
+            carrying_a_fixed_argument.is_empty(),
+            "for {inner}, got: {carrying_a_fixed_argument:?}"
+        );
+    }
+}
+
+/// A name written over one of the brand's own type parameters is refused, wherever the parameter
+/// sits inside it.
+///
+/// The registry's silence is not consent here. The brand composes the named type's schema from the
+/// argument the caller supplies, so the checks land on whatever that argument turns out to be: Zod
+/// appends them to a shape the call site decides, the one JSON document written for every
+/// instantiation still holds the `{}` a parameter describes as, and `validate()` measures the
+/// inner's `Display` — a numeric filling rejected for its digit count rather than for its value.
+/// The same two items written in the other order already refuse through the registry, so admitting
+/// this one puts the diagnostic back on declaration order the long way round.
+///
+/// The refusal names the brand, the inner and the parameter, so the author reads which declaration
+/// to fix and which name in it.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn string_constraints_over_a_name_written_over_the_brands_own_parameter_are_rejected() {
+    for inner in [
+        "UnregisteredGeneric<T>",
+        "UnregisteredGeneric<Vec<T>>",
+        "UnregisteredGeneric<String, U>",
+        "UnregisteredGeneric<HashMap<String, T>>",
+        "UnregisteredGeneric<(u32, U)>",
+    ] {
+        let ty: syn::Type = syn::parse_str(inner).unwrap();
+        let errors = branded_errors_with(
+            &syn::parse_quote! {
+                #[serde(transparent)]
+                struct Branded<T, U>(pub #ty);
+            },
+            &pattern_args(),
+        );
+        assert_eq!(errors.len(), 1, "for {inner}, got: {errors:?}");
+        assert!(errors[0].contains("compile_error"), "got: {}", errors[0]);
+        assert!(errors[0].contains("`Branded`"), "got: {}", errors[0]);
+        assert!(
+            errors[0].contains("UnregisteredGeneric"),
+            "for {inner}, got: {}",
+            errors[0]
+        );
+        assert!(
+            errors[0].contains("type parameter"),
+            "for {inner}, got: {}",
+            errors[0]
+        );
+    }
+}
+
+/// A name the registry calls a string publisher is refused too, once one of the brand's own
+/// parameters is written into it.
+///
+/// That registration answers for the declaration, and the declaration here is one whose value the
+/// filling supplies: `Later<T>` publishes a string for a `Later<String>` and something else for
+/// every other filling, so the checks still land on whatever the call site handed over. The
+/// registry's own arm cannot tell this case from an unregistered one — a string publisher records
+/// no shape, exactly as an absence records none — which is why it is the parameter that decides.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn string_constraints_over_a_registered_name_carrying_the_brands_parameter_are_rejected() {
+    seed_value_shape("RegisteredStringGeneric", None);
+    let errors = branded_errors_with(
+        &syn::parse_quote! {
+            #[serde(transparent)]
+            struct Branded<T>(pub RegisteredStringGeneric<T>);
+        },
+        &pattern_args(),
+    );
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(
+        errors[0].contains("RegisteredStringGeneric"),
+        "got: {}",
+        errors[0]
+    );
 }
 
 /// What a brand records for the next brand written over it: whatever its own inner publishes, read
