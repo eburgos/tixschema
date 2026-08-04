@@ -290,8 +290,10 @@ impl FieldDef {
     /// Whether a length, a pattern or a range written on this field reaches no surface at all —
     /// the one question both the refusal and the docs are written from, so neither can come to
     /// answer it differently from the other.
-    pub const fn constraints_reach_nothing(&self) -> bool {
-        self.fixed_shape_name().is_some() || self.composite_shape_name().is_some()
+    pub fn constraints_reach_nothing(&self) -> bool {
+        self.fixed_shape_name().is_some()
+            || self.composite_shape_name().is_some()
+            || self.parameter_shape_name().is_some()
     }
 
     #[cfg(feature = "zod")]
@@ -564,6 +566,51 @@ impl FieldDef {
             }
             FieldDefType::Tuple(elements) => elements.iter().find_map(Self::os_string_name),
             FieldDefType::TypeParam(_)
+            | FieldDefType::Unknown
+            | FieldDefType::StringLiteral(_)
+            | FieldDefType::Boolean
+            | FieldDefType::String
+            | FieldDefType::U8
+            | FieldDefType::U16
+            | FieldDefType::U32
+            | FieldDefType::U64
+            | FieldDefType::I8
+            | FieldDefType::I16
+            | FieldDefType::I32
+            | FieldDefType::I64
+            | FieldDefType::Usize
+            | FieldDefType::Isize
+            | FieldDefType::F32
+            | FieldDefType::F64 => None,
+            #[cfg(feature = "object_id")]
+            FieldDefType::ObjectId => None,
+            #[cfg(feature = "chrono")]
+            FieldDefType::NaiveDate
+            | FieldDefType::NaiveTime
+            | FieldDefType::NaiveDateTime
+            | FieldDefType::DateTime => None,
+        }
+    }
+
+    /// The enclosing item's own type parameter this field renders as, when a bound spelled against
+    /// it names a value whose type the expansion never sees.
+    ///
+    /// A parameter names no type at expansion — the instantiation names one, and one schema is
+    /// written for every instantiation. So the two validating surfaces describe the value as the
+    /// opaque one, which takes no length, no pattern and no range, while the generated validator
+    /// and serde read whatever type the instantiation supplied and hold it to nothing written here.
+    /// A bound therefore reaches nothing on any surface, exactly as one written beside a map's
+    /// members does; the caller turns that into a guard error naming the parameter.
+    ///
+    /// Only a field already read through [`Self::erase_type_parameters`] answers here: which of
+    /// the two a written name is — the item's own parameter or a reference to another type — is
+    /// that rewrite's question, and asking it twice is how the two answers come to differ.
+    pub fn parameter_shape_name(&self) -> Option<&str> {
+        match &self.field_type {
+            FieldDefType::TypeParam(name) => Some(name),
+            FieldDefType::SiblingType(_, _)
+            | FieldDefType::Map(_, _)
+            | FieldDefType::Tuple(_)
             | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
             | FieldDefType::Boolean
@@ -875,7 +922,7 @@ impl FieldDef {
                 }
             }
             FieldDefType::Map(k, v) => {
-                format!("z.record({}, {})", k.zod_type(), v.zod_slot_type())
+                format!("z.record({}, {})", k.zod_map_key_type(), v.zod_slot_type())
             }
             FieldDefType::Boolean => "z.boolean()".to_owned(),
             FieldDefType::String => self.zod_string_type(),
@@ -940,6 +987,27 @@ impl FieldDef {
         } else {
             array_result
         }
+    }
+
+    /// The key schema a `z.record(…)` is written with: the key's own, except where the key is one
+    /// of the enclosing item's type parameters.
+    ///
+    /// A record key has to produce string keys, and the opaque value a parameter describes as
+    /// everywhere else declines to say anything at all about them — the one position where saying
+    /// nothing says less than the wire already guarantees. serde is what guarantees it: an
+    /// instantiation either writes this map's object keys as strings or refuses the whole map at
+    /// serialization with `key must be a string`, with no fallback form, so `z.string()` holds for
+    /// every instantiation that serializes at all. It is also the answer the JSON surface reads off
+    /// the same key through its own classification, which is what keeps the two saying one thing.
+    ///
+    /// Only a bare key reaches the parameter arm: a key written under a sequence or an `Option`
+    /// wrapper is refused before any surface renders the map.
+    #[cfg(feature = "zod")]
+    fn zod_map_key_type(&self) -> String {
+        if self.parameter_shape_name().is_some() {
+            return "z.string()".to_owned();
+        }
+        self.zod_type()
     }
 
     /// The same value on the Zod surface, for the same reason: what a merged source validates, with
