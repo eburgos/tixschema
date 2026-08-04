@@ -4975,6 +4975,7 @@ fn emitted_pattern_validator(pattern: &str) -> String {
         &meta,
         &constrained_shape(&ty).unwrap(),
         &ty,
+        MemberAccess::SelfField,
     )
     .module_items
     .to_string();
