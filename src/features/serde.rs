@@ -56,9 +56,11 @@ impl SerdeKeyOmission {
     ///
     /// Where the member has a key, the two payloads still overlap — the key is simply absent from
     /// one of them, which an optional key describes. Where it has only a place in a tuple there is
-    /// no such spelling, and the two payloads differ in their arity. So the question is asked only
-    /// by the builds that describe a tuple, which is what the gate below says.
-    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+    /// no such spelling, so the question is the positional seams' to ask.
+    ///
+    /// Not gated on any feature, for the reason [`Self::absent_from_wire`] is not: the variant walk
+    /// that reads it runs in every build, and a toggle that changed the answer would leave one
+    /// declaration refused in one build and described in another.
     pub const fn drops_one_direction_only(self) -> bool {
         self.omits_key != self.skips_deserializing
     }

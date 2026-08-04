@@ -1657,10 +1657,9 @@ mod branded_sibling_inner_tests {
     pub struct LateSlug(pub String);
 
     // The same forward declaration with the inner's argument fixed where it is written, which is
-    // what the refusal for a parameterised inner does not reach. Written above `LateTag` on
-    // purpose: what the registry records for a generic publisher is one shape for every
-    // instantiation, so the same pair written in the other order is refused for the recorded shape
-    // instead — a difference this fixture keeps in view rather than papering over.
+    // what the refusal for a parameterised inner does not reach. Written above `LateTag`, with
+    // `TrailingFixedTag` below it, so the one declaration stands here in both the orders it can be
+    // written in — the registry silent for the first and answering for the second.
     #[model_schema(minLength = 3)]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
@@ -1677,6 +1676,13 @@ mod branded_sibling_inner_tests {
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct LateTag<TagType>(pub TagType);
+
+    // `FixedTag`'s mirror: the same two declarations, this one written where the registry has
+    // already classified `LateTag`.
+    #[model_schema(minLength = 3)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct TrailingFixedTag(pub LateTag<String>);
 
     #[test]
     fn a_sibling_brand_writes_the_object_its_inner_writes() {
@@ -1829,6 +1835,39 @@ mod branded_sibling_inner_tests {
         FixedTag(LateTag("abcd".to_owned())).validate().unwrap();
         assert_eq!(
             FixedTag(LateTag("ab".to_owned())).validate().unwrap_err(),
+            vec!["value is too short: minimum length is 3, got 2".to_owned()]
+        );
+    }
+
+    /// The same declaration written after the item it names carries the same checks to the same
+    /// three surfaces, byte for byte.
+    ///
+    /// What `LateTag` records is a position rather than a word, so the registry answers with the
+    /// argument this brand wrote — a string, which is what the emission composes the checks onto.
+    /// One word could not have said that: it would have to stand for every filling, and the only
+    /// word that does is the opaque one, which refuses the very declaration the other order
+    /// admits. What the author reads is the same verdict wherever the two items are written.
+    #[test]
+    fn a_constrained_brand_over_a_fixed_instantiation_reads_the_same_in_either_order() {
+        assert_eq!(TrailingFixedTag::json_schema(), FixedTag::json_schema());
+        let zod = TrailingFixedTag::zod_schema();
+        assert!(
+            zod.contains(
+                r#"const TrailingFixedTag$RawSchema = LateTag$SchemaFactory(z.string()).min(3).brand<"TrailingFixedTag">()"#
+            ),
+            "Got:\n{zod}"
+        );
+        assert_eq!(
+            TrailingFixedTag::ts_definition(),
+            r#"export type TrailingFixedTag = LateTag<string> & $brand<"TrailingFixedTag">;"#
+        );
+        TrailingFixedTag(LateTag("abcd".to_owned()))
+            .validate()
+            .unwrap();
+        assert_eq!(
+            TrailingFixedTag(LateTag("ab".to_owned()))
+                .validate()
+                .unwrap_err(),
             vec!["value is too short: minimum length is 3, got 2".to_owned()]
         );
     }

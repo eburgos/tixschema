@@ -29,7 +29,7 @@ use tixschema::model_schema;
 const PREDICATE_BULLET: &str = "- `#[serde(skip_serializing_if = \"...\")]` -- the key is left out of the payload when the predicate fires, so the member is described under an optional key: `roles?: Array<string>;` in TypeScript, `roles: z.array(z.string()).optional(),` in Zod, and no `required` entry in the JSON Schema";
 
 /// The bare-`skip` bullet, whose claim is an absence on every surface.
-const SKIP_BULLET: &str = "- `#[serde(skip)]` -- the key is written into no payload and read out of none, so no surface describes the member at all: no TypeScript member, no Zod key, and neither a `properties` nor a `required` entry. On a tuple-struct slot it takes the slot out of the described tuple, which shortens the arity";
+const SKIP_BULLET: &str = "- `#[serde(skip)]` -- the key is written into no payload and read out of none, so no surface describes the member at all: no TypeScript member, no Zod key, and neither a `properties` nor a `required` entry. On a tuple-struct or tuple-variant slot it takes the slot out of the described tuple, which shortens the arity -- and a variant declaring one slot becomes a unit variant, which is what serde writes for it";
 
 /// The write-half bullet, which lands where the predicate bullet does.
 const WRITE_HALF_BULLET: &str = "- `#[serde(skip_serializing)]` -- the write half of `skip`: the key is left out of every payload while a supplied one is still read, so the member is described under an optional key, as `skip_serializing_if` is";
