@@ -219,6 +219,8 @@ All of them are covered under [Compilation Errors](#compilation-errors), with th
 
 Every other key is neither open nor enumerable, and none of them is refused: serde stringifies each one into a key for you. The JSON schema describes such a map as an object and says nothing about its members — `{"type": "object", "additionalProperties": true}` — while TypeScript and Zod keep the key's own type, so a `HashMap<u32, String>` is `Partial<Record<number, string>>` and `z.record(z.number().int(), z.string())`. serde writes the object with the key's string form for its keys: `7` becomes `"7"`, `true` becomes `"true"`, a chrono `NaiveDate` its ISO rendering. A brand over one of those writes the same object and describes as the same one, under the brand's name. Only the narrowing is missing, not the object. The rule the refusals apply is refuse-what-serde-refuses, never refuse-what-is-not-a-`String`.
 
+A key written as one of the enclosing item's own type parameters is the open case, read off that same rule. The expansion cannot see which type the instantiation will supply, but serde has already settled what any of them may write: an instantiation whose key writes as a string keys the map, and one whose key does not fails the whole map at serialization with `key must be a string` — so string keys hold for every instantiation that serializes at all. The two validating surfaces say exactly that and nothing more, `{"type": "object", "additionalProperties": V}` and `z.record(z.string(), V)`, the pair a `String` key earns; the value side stays described, being no parameter's business. TypeScript keeps the parameter in the key position the way it keeps a parameter anywhere — see [Type Parameters](#type-parameters).
+
 ### Pointers and Borrowed Values
 
 `Box<T>`, `Rc<T>`, `Arc<T>` and `Cow<'_, T>` describe as `T`. serde writes each of them as the value it holds, with nothing of its own around it, so a field written under one is the field its inner type is — on every surface, and wherever the wrapper was written: `Box<Option<T>>` is the `Option<T>` field, optional; `Vec<Rc<T>>` is the `Vec<T>` field; `Box<str>`, `Rc<str>` and `Cow<'_, str>` are `String` fields, `str` being what a `String` writes.
@@ -878,7 +880,17 @@ export const WrapperType$Schema: ZodType<WrapperType<unknown>> = WrapperType$Raw
 
 Only the item's *own* parameters are read this way. A name the expansion cannot resolve because the type lives elsewhere keeps its `Name$Schema` reference, since that type publishes the binding.
 
-One consequence is worth stating outright: an opaque value carries no string checks, so a branded newtype cannot apply `pattern`, `minLength`, or `maxLength` to one of its own type parameters. See [Branded Newtype Validation Constraints](#branded-newtype-validation-constraints).
+One consequence is worth stating outright: an opaque value carries no checks, so no `model_schema_prop` bound may be spelled against a type parameter. A branded newtype cannot apply `pattern`, `minLength`, or `maxLength` to one of its own — see [Branded Newtype Validation Constraints](#branded-newtype-validation-constraints) — and a *field* typed with one is refused for the same reason, at every depth the parameter is reached through:
+
+```rust
+#[model_schema()]
+pub struct Constrained<IdType> {
+    #[model_schema_prop(minLength = 3)] // refused, and so is it on `Option<IdType>` or `Vec<IdType>`
+    pub id: IdType,
+}
+```
+
+The value's type is whatever the instantiation supplies, so nothing here holds it to anything: Zod and the JSON schema describe the value as the opaque one, the generated validator emits no check for it, and serde reads the payload back untouched. Constrain the argument instead — declare the type the instantiation supplies as a branded newtype carrying the bound — or drop the key. The JSDoc says nothing about a bound the refusal turns away either, the sentence being written only where something holds the value to it.
 
 ### Branded Newtypes
 

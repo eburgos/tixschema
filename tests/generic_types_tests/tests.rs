@@ -15,9 +15,36 @@
 #[cfg(feature = "typescript")]
 mod typescript {
     use super::{
-        Adjacent, External, Holder, Internal, LifetimeStruct, Pair, PlainConst, Positional,
-        Untagged, Wrapper,
+        Adjacent, External, Holder, Internal, KeyedByParameter, LifetimeStruct, Pair, PlainConst,
+        Positional, Untagged, Wrapper,
     };
+
+    /// TypeScript is a type surface and the declaration binds the parameter for real, so the key
+    /// stays the name the author wrote where the two validating surfaces erase it.
+    #[test]
+    fn a_parameter_keyed_map_keeps_the_parameter_on_the_type_surface() {
+        let ts = KeyedByParameter::<String, u32>::ts_definition();
+        assert!(
+            ts.contains("export type KeyedByParameter<KeyType, ValueType> = {"),
+            "Got: {ts}"
+        );
+        assert!(
+            ts.contains("  parameter_keyed: Partial<Record<KeyType, string>>;"),
+            "Got: {ts}"
+        );
+        assert!(
+            ts.contains("  both_parameters: Partial<Record<KeyType, ValueType>>;"),
+            "Got: {ts}"
+        );
+        assert!(
+            ts.contains("  concrete_string_key: Partial<Record<string, string>>;"),
+            "Got: {ts}"
+        );
+        assert!(
+            ts.contains("  stringified_number_key: Partial<Record<number, string>>;"),
+            "Got: {ts}"
+        );
+    }
 
     /// The declaration binds what the fields under it are written with, so a field typed with a
     /// parameter is that parameter and not a reference to a generated type of the same name.
@@ -45,14 +72,9 @@ mod typescript {
             ts.contains("  by_key: Partial<Record<string, ValueType>>;"),
             "Got: {ts}"
         );
-        // The omission attribute is serde's, so only a serde build reads it and writes the key
-        // optional; without serde the value stays the undefined-flavored member.
-        let maybe = if cfg!(feature = "serde") {
-            "  maybe?: ValueType;"
-        } else {
-            "  maybe: ValueType | undefined;"
-        };
-        assert!(ts.contains(maybe), "Got: {ts}");
+        // serde drops the key for a `None`, which every build reads off the attribute on the
+        // field.
+        assert!(ts.contains("  maybe?: ValueType;"), "Got: {ts}");
         assert!(ts.contains("  tuple: [KeyType, ValueType];"), "Got: {ts}");
     }
 
@@ -141,9 +163,48 @@ mod typescript {
 #[cfg(feature = "zod")]
 mod zod {
     use super::{
-        Adjacent, Carried, Envelope, External, Holder, Internal, LifetimeStruct, Pair, PlainConst,
-        Positional, Quintet, Tagged, Untagged, Wrapper,
+        Adjacent, Carried, Envelope, External, Holder, Internal, KeyedByParameter, LifetimeStruct,
+        Pair, PlainConst, Positional, Quintet, Tagged, Untagged, Wrapper,
     };
+
+    /// A record key has to produce string keys, and serde says every instantiation this map has
+    /// does: it writes a JSON object key as a string or refuses the map outright at serialization.
+    /// So the key states that guarantee rather than declining to state anything, and the member
+    /// comes out byte-identical to the concrete `String`-keyed one beside it.
+    #[test]
+    fn a_parameter_keyed_map_states_the_string_keys_serde_writes() {
+        let zod = KeyedByParameter::<String, u32>::zod_schema();
+        assert!(
+            zod.contains("parameter_keyed: z.record(z.string(), z.string())"),
+            "Got: {zod}"
+        );
+        // The value parameter is the factory's own argument since the factories landing; only
+        // the KEY position is this rule's — it states the string keys serde writes.
+        assert!(
+            zod.contains("both_parameters: z.record(z.string(), valueType)"),
+            "Got: {zod}"
+        );
+        assert!(!zod.contains("z.record(z.unknown()"), "Got: {zod}");
+        // The factory legitimately names the parameter in its own signature; what must never
+        // appear is the parameter standing where the KEY schema goes.
+        assert!(!zod.contains("z.record(keyType"), "Got: {zod}");
+        assert!(!zod.contains("KeyType$Schema"), "Got: {zod}");
+    }
+
+    /// A concrete key keeps its own answer: a bare string opens the object, and a key serde
+    /// stringifies for the author keeps the narrowing it has always described as.
+    #[test]
+    fn a_concrete_key_beside_a_parameter_one_renders_as_it_always_did() {
+        let zod = KeyedByParameter::<String, u32>::zod_schema();
+        assert!(
+            zod.contains("concrete_string_key: z.record(z.string(), z.string())"),
+            "Got: {zod}"
+        );
+        assert!(
+            zod.contains("stringified_number_key: z.record(z.number().int(), z.string())"),
+            "Got: {zod}"
+        );
+    }
 
     /// Whether the output publishes `name` as a plain exported `const` — the binding a type that
     /// declares no parameter writes, in either build flavour. Asked this way because
@@ -472,7 +533,39 @@ mod zod {
 
 #[cfg(feature = "jsonschema")]
 mod jsonschema {
-    use super::{Pair, Wrapper};
+    use super::{KeyedByParameter, Pair, Wrapper};
+
+    /// A key every instantiation writes as a string leaves the value side describable, so the
+    /// object says what it holds instead of opening entirely — the answer the concrete
+    /// `String`-keyed member beside it already gave.
+    #[test]
+    fn a_parameter_keyed_map_still_describes_its_values() {
+        let schema = KeyedByParameter::<String, u32>::json_schema();
+        let properties = &schema["properties"];
+        assert_eq!(
+            properties["parameter_keyed"],
+            serde_json::json!({ "type": "object", "additionalProperties": { "type": "string" } })
+        );
+        assert_eq!(
+            properties["both_parameters"],
+            serde_json::json!({ "type": "object", "additionalProperties": {} })
+        );
+        assert_eq!(
+            properties["parameter_keyed"],
+            properties["concrete_string_key"]
+        );
+    }
+
+    /// A key serde stringifies for the author is not the same question, and keeps the open object
+    /// it has always described as.
+    #[test]
+    fn a_stringified_concrete_key_keeps_its_open_object() {
+        let schema = KeyedByParameter::<String, u32>::json_schema();
+        assert_eq!(
+            schema["properties"]["stringified_number_key"],
+            serde_json::json!({ "type": "object", "additionalProperties": true })
+        );
+    }
 
     /// One schema is written for every instantiation, so a parameter admits any value while the
     /// shape it sits in stays described.
@@ -522,6 +615,13 @@ mod jsonschema {
 }
 
 use alloc::borrow::Cow;
+#[cfg(any(
+    feature = "serde",
+    feature = "typescript",
+    feature = "zod",
+    feature = "jsonschema"
+))]
+use core::hash::Hash;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -595,6 +695,24 @@ pub struct Holder<IdType> {
 #[model_schema()]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Positional<IdType>(pub IdType, pub String);
+
+/// A map keyed by one of the item's own parameters, beside the concrete-keyed members the two
+/// validating surfaces must keep answering for exactly as before. Consumed only by the surface
+/// modules and the serde wire tests, so it exists only where one of them compiles.
+#[cfg(any(
+    feature = "serde",
+    feature = "typescript",
+    feature = "zod",
+    feature = "jsonschema"
+))]
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyedByParameter<KeyType: Eq + Hash, ValueType> {
+    pub both_parameters: HashMap<KeyType, ValueType>,
+    pub concrete_string_key: HashMap<String, String>,
+    pub parameter_keyed: HashMap<KeyType, String>,
+    pub stringified_number_key: HashMap<u32, String>,
+}
 
 #[model_schema()]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -715,6 +833,69 @@ fn a_generic_enum_expands_to_rust_that_compiles() {
         Untagged::Numbered { .. }
     ));
     assert!(matches!(PlainConst::<4>::Wide, PlainConst::Wide));
+}
+
+/// The evidence the string-keyed rendering rests on: serde writes a JSON object key as a string
+/// for every instantiation it accepts at all, and refuses the whole map at serialization for the
+/// ones it does not — there is no instantiation whose keys reach the wire as anything else.
+#[cfg(feature = "serde")]
+#[test]
+fn every_instantiation_the_wire_accepts_writes_string_keys() {
+    let string_instantiation = KeyedByParameter::<String, u32> {
+        parameter_keyed: HashMap::from([("a".to_owned(), "one".to_owned())]),
+        both_parameters: HashMap::from([("a".to_owned(), 1_u32)]),
+        concrete_string_key: HashMap::new(),
+        stringified_number_key: HashMap::new(),
+    };
+    let written = serde_json::to_value(&string_instantiation).unwrap();
+    assert_eq!(
+        written["parameter_keyed"],
+        serde_json::json!({ "a": "one" })
+    );
+
+    let by_number = KeyedByParameter::<u32, u32> {
+        parameter_keyed: HashMap::from([(7_u32, "seven".to_owned())]),
+        both_parameters: HashMap::new(),
+        concrete_string_key: HashMap::new(),
+        stringified_number_key: HashMap::new(),
+    };
+    assert_eq!(
+        serde_json::to_value(&by_number).unwrap()["parameter_keyed"],
+        serde_json::json!({ "7": "seven" }),
+        "a key serde stringifies still reaches the wire as a string"
+    );
+
+    let by_bool = KeyedByParameter::<bool, u32> {
+        parameter_keyed: HashMap::from([(true, "yes".to_owned())]),
+        both_parameters: HashMap::new(),
+        concrete_string_key: HashMap::new(),
+        stringified_number_key: HashMap::new(),
+    };
+    assert_eq!(
+        serde_json::to_value(&by_bool).unwrap()["parameter_keyed"],
+        serde_json::json!({ "true": "yes" })
+    );
+
+    let by_sequence = KeyedByParameter::<Vec<u32>, u32> {
+        parameter_keyed: HashMap::from([(vec![1_u32], "no".to_owned())]),
+        both_parameters: HashMap::new(),
+        concrete_string_key: HashMap::new(),
+        stringified_number_key: HashMap::new(),
+    };
+    let refused = serde_json::to_value(&by_sequence).unwrap_err();
+    assert!(
+        refused.to_string().contains("key must be a string"),
+        "an instantiation whose key is no string fails the whole map: {refused}"
+    );
+
+    let read_back = serde_json::from_value::<KeyedByParameter<u32, u32>>(serde_json::json!({
+        "parameter_keyed": { "7": "seven" },
+        "both_parameters": {},
+        "concrete_string_key": {},
+        "stringified_number_key": {},
+    }))
+    .unwrap();
+    assert_eq!(read_back.parameter_keyed[&7], "seven");
 }
 
 /// A lifetime is the half of the `impl` fix no schema surface can show: nothing renders it, and

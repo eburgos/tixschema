@@ -53,7 +53,8 @@ use crate::utils::{
 use crate::utils::{TrivialPattern, trivial_pattern};
 
 #[cfg(feature = "serde")]
-use crate::features::serde::{SerdeFieldMeta, SerdeTypeMeta, has_serde_default};
+use crate::features::serde::{SerdeFieldMeta, SerdeTypeMeta};
+use crate::features::serde::{has_serde_default, parse_serde_key_omission};
 
 #[cfg(feature = "serde")]
 use crate::field_type::{parse_serde_field_attributes, parse_serde_type_attributes};
@@ -124,6 +125,16 @@ const KNOWN_ARGS: &[&str] = &["name", "pattern", "minLength", "maxLength", "no_d
 ))]
 const FLATTENED_PLAIN_ENUM_SCOPE: &str = "Only a type the registry has already classified reaches this guard; one it has not keeps its \
      TypeScript and Zod intersection, and is refused by the JSON surface when the merge runs.";
+
+/// The two shapes [`crate::utils::record_value_shape`] records that a second reader matches on
+/// rather than merely prints: each names one JSON type keyword and only one, so the flatten guard
+/// can repeat the JSON-schema merge's words off the recorded shape alone. Written once so a rename
+/// moves both the recording and the reading.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+const VALUE_SHAPE_BOOLEAN: &str = "boolean";
+
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+const VALUE_SHAPE_ENUMERATED: &str = "enumerated";
 
 /// The two shapes a map key can write that `serde_json` will not use as an object key, as
 /// [`MapKeyRejection::Unwritable`] names them.
@@ -503,6 +514,20 @@ struct MergedOperand {
     members: Vec<ZodUnionMember>,
     optional: bool,
     spelling: String,
+}
+
+/// What the item around a field says about it: everything [`process_field`] needs that is not the
+/// field itself, bundled so the walk hands one context down instead of six loose parameters.
+struct FieldContext<'ctx> {
+    /// Whether the container carries `#[serde(default)]`, which supplies a value for every field
+    /// under it whose key the payload leaves out.
+    container_defaulted: bool,
+    rename_all: Option<&'ctx str>,
+    schema_module_name: Option<&'ctx str>,
+    type_name: &'ctx str,
+    type_parameters: &'ctx [String],
+    /// The variant this field belongs to, or `None` for a struct's own field.
+    variant_ident: Option<&'ctx str>,
 }
 
 /// Mutable output buffers shared by the discriminated-enum variant writers. Bundled so each writer
@@ -1727,7 +1752,7 @@ fn non_string_inner_shape(inner: &FieldDef) -> Option<&'static str> {
     match &inner.field_type {
         FieldDefType::SiblingType(inner_name, _) => registered_value_shape(inner_name),
         FieldDefType::Map(..) | FieldDefType::Tuple(..) => Some("container"),
-        FieldDefType::Boolean => Some("boolean"),
+        FieldDefType::Boolean => Some(VALUE_SHAPE_BOOLEAN),
         FieldDefType::U8
         | FieldDefType::U16
         | FieldDefType::U32
@@ -1763,6 +1788,39 @@ fn non_string_inner_shape(inner: &FieldDef) -> Option<&'static str> {
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn registered_value_shape(rust_ident: &str) -> Option<&'static str> {
     lookup_alias_info(rust_ident)?.value_shape
+}
+
+/// The JSON type keyword a registered name's wire describes as, when the registry proves that wire
+/// is no object, and `None` for every name it cannot prove one way or the other.
+///
+/// The same entry the constrained-brand guard reads, asked the merge's question instead of the
+/// brand's, in one lookup: `value_shape` is what the named item published as a value, and `kind` is
+/// what serde writes it as. The shape answers wherever it names something no object can be — a
+/// `boolean`, and the `string` an `enumerated` unit enum writes its member name as. Where the shape
+/// is `None`, which the brand's vocabulary uses for exactly the surfaces a string check lands on,
+/// the kind is what separates a proven bare string from a name nothing has classified.
+///
+/// `numeric` is deliberately not an answer. The one recorded word covers two published documents —
+/// a one-slot tuple struct over a `u32` publishes `{"type": "integer"}` and a
+/// `#[serde(transparent)]` brand over the same `u32` publishes `{"type": "number"}` — so naming
+/// either keyword would put this refusal into disagreement with the merge whose words it repeats,
+/// which is the disagreement it exists to remove. A `container`, which bundles the array with the
+/// map, and a `nullable`, whose absence sits a level below the name rather than at it, are
+/// unprovable here for the same reason. `Stringified` is likewise not read on its own: the map-key
+/// dispatch answers it for a generic spelling it has not resolved, so a brand over an unregistered
+/// `Foreign<T>` carries it with nothing recorded behind it.
+///
+/// A name the registry has no entry for keeps the emission it has always had — the fallback the
+/// merge already documents for a source declared below the object that flattens it.
+#[cfg(all(feature = "serde", feature = "zod"))]
+fn registered_non_object_wire(rust_ident: &str) -> Option<&'static str> {
+    let info = lookup_alias_info(rust_ident)?;
+    match info.value_shape {
+        Some(VALUE_SHAPE_BOOLEAN) => Some("boolean"),
+        Some(VALUE_SHAPE_ENUMERATED) => Some("string"),
+        Some(_) => None,
+        None => matches!(info.kind, AliasKind::StringWire).then_some("string"),
+    }
 }
 
 /// What the value surface a `#[model_schema()]` item publishes under a name is, as the
@@ -2045,6 +2103,7 @@ fn collect_struct_fields(
     module_name_opt: Option<&str>,
     type_name: &str,
     generics: &syn::Generics,
+    container_defaulted: bool,
 ) -> StructFieldData {
     let type_parameters = type_parameters_in_scope(generics);
     let mut field_defs = Vec::new();
@@ -2075,12 +2134,15 @@ fn collect_struct_fields(
         }
 
         let (f_def, validation_fn, validate_body, field_guard_errors) = process_field(
-            rename_all,
+            &FieldContext {
+                container_defaulted,
+                rename_all,
+                schema_module_name: module_name_opt,
+                type_name,
+                type_parameters: &type_parameters,
+                variant_ident: None,
+            },
             field,
-            module_name_opt,
-            None,
-            type_name,
-            &type_parameters,
             &mut deferred_attrs,
         );
 
@@ -2208,6 +2270,17 @@ fn struct_cfg_attr_guard_output(
         &[cfg_attr_guard_error(rejection?, &format!("type `{ident}`"))],
     )
 }
+/// The struct's own `rename_all`, or the `cfg_attr` refusal that pre-empts reading anything.
+#[cfg(feature = "serde")]
+fn struct_rename_all(item_struct: &syn::ItemStruct) -> Result<Option<String>, TokenStream> {
+    let serde_type_meta = parse_serde_type_attributes(&item_struct.attrs);
+    if let Some(output) =
+        struct_cfg_attr_guard_output(item_struct, serde_type_meta.cfg_attr_rejection.as_ref())
+    {
+        return Err(output);
+    }
+    Ok(serde_type_meta.rename_all)
+}
 
 fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> TokenStream {
     // Check if this is a branded newtype (transparent single-field tuple struct)
@@ -2223,19 +2296,16 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
     let rust_ident = name.to_string();
 
     #[cfg(feature = "serde")]
-    let serde_type_meta = parse_serde_type_attributes(&item_struct.attrs);
-
-    #[cfg(feature = "serde")]
-    if let Some(output) =
-        struct_cfg_attr_guard_output(&item_struct, serde_type_meta.cfg_attr_rejection.as_ref())
-    {
-        return output;
-    }
-
-    #[cfg(feature = "serde")]
-    let rename_all = serde_type_meta.rename_all;
+    let rename_all = match struct_rename_all(&item_struct) {
+        Ok(rename_all) => rename_all,
+        Err(output) => return output,
+    };
     #[cfg(not(feature = "serde"))]
     let rename_all: Option<String> = None;
+
+    // A `default` on the container answers a missing key for every field under it, which is one of
+    // the things that makes a dropped key readable.
+    let container_defaulted = has_serde_default(&item_struct.attrs);
 
     // A tuple struct's slots have no keys, so the named-field emitters below would render every
     // one of them under the empty ident it carries.
@@ -2270,6 +2340,7 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
         module_name_opt,
         &rust_ident,
         &item_struct.generics,
+        container_defaulted,
     );
     #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
     let _: &_ = &&collected;
@@ -2367,6 +2438,7 @@ fn collect_tuple_slots(
     module_name: &str,
     type_name: &str,
     generics: &syn::Generics,
+    container_defaulted: bool,
 ) -> (Vec<FieldDef>, Vec<proc_macro2::TokenStream>) {
     let type_parameters = type_parameters_in_scope(generics);
     let mut slots: Vec<FieldDef> = Vec::new();
@@ -2374,12 +2446,15 @@ fn collect_tuple_slots(
     let mut deferred_attrs: Vec<Vec<syn::Attribute>> = Vec::new();
     for field in fields.iter_mut() {
         let (slot, _, _, slot_guard_errors) = process_field(
-            rename_all,
+            &FieldContext {
+                container_defaulted,
+                rename_all,
+                schema_module_name: Some(module_name),
+                type_name,
+                type_parameters: &type_parameters,
+                variant_ident: None,
+            },
             field,
-            Some(module_name),
-            None,
-            type_name,
-            &type_parameters,
             &mut deferred_attrs,
         );
         guard_errors.extend(slot_guard_errors);
@@ -2524,6 +2599,7 @@ fn process_tuple_struct(
         &module_name,
         &name.to_string(),
         &item_struct.generics,
+        has_serde_default(&item_struct.attrs),
     );
 
     // A violated slot guard makes the whole contract unsound, so the schema surface is dropped and
@@ -4081,8 +4157,12 @@ fn process_plain_enum(
     // Compute the schema module name and register the enum so other types can find it.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     // A plain enum is written as a `z.enum` of its variant names, which takes no string check.
-    let (_, module_ident) =
-        enum_module_idents(name, item_name, AliasKind::EnumMembers, Some("enumerated"));
+    let (_, module_ident) = enum_module_idents(
+        name,
+        item_name,
+        AliasKind::EnumMembers,
+        Some(VALUE_SHAPE_ENUMERATED),
+    );
     #[cfg(any(feature = "typescript", feature = "zod"))]
     let rust_ident = name.to_string();
 
@@ -4246,6 +4326,9 @@ fn collect_discriminated_variants(
         let final_name =
             get_final_variant_name(&variant_ident, field_rename.as_deref(), rename_all);
         let variant_kind = classify_variant(item);
+        // A struct variant is where serde accepts a container-level `default`, so it is the
+        // container its own fields' omissions are read against.
+        let variant_defaulted = has_serde_default(&item.attrs);
 
         let mut field_defs: Vec<FieldDef> = Vec::new();
         let mut bound: Vec<(proc_macro2::Ident, proc_macro2::Ident)> = Vec::new();
@@ -4253,12 +4336,15 @@ fn collect_discriminated_variants(
         let total_fields = item.fields.len();
         for field in &mut item.fields {
             let (f_def, validation_fn, validate_body, field_guard_errors) = process_field(
-                rename_all,
+                &FieldContext {
+                    container_defaulted: variant_defaulted,
+                    rename_all,
+                    schema_module_name: enum_module_name_opt,
+                    type_name: &enum_type_name,
+                    type_parameters: &type_parameters,
+                    variant_ident: Some(&variant_ident),
+                },
                 field,
-                enum_module_name_opt,
-                Some(&variant_ident),
-                &enum_type_name,
-                &type_parameters,
                 &mut deferred_attrs,
             );
             if let Some(vfn) = validation_fn {
@@ -5443,12 +5529,12 @@ fn untagged_named_json_value(field_defs: &[FieldDef]) -> proc_macro2::TokenStrea
     let property_inserts = field_defs.iter().map(|fld| {
         let name_str = fld.name.clone();
         let value = field_json_schema_value(fld);
-        let required_insert = if fld.is_optional() {
-            quote! {}
-        } else {
+        let required_insert = if fld.key_is_required() {
             quote! {
                 required.push(serde_json::Value::String(#name_str.to_string()));
             }
+        } else {
+            quote! {}
         };
         quote! {
             properties.insert(#name_str.to_string(), #value);
@@ -5617,26 +5703,77 @@ fn member_rejection_value(
     quote! { compile_error!(#message) }
 }
 
-/// The guard verdicts one untagged member earns, serde's and this crate's own combined — the
-/// checks [`process_field`] runs through its own channels, asked here by the walk that builds its
-/// field defs directly.
+/// One untagged member's field def in the two readings the guards need: as the surfaces will
+/// render it, every reference to one of the enclosing item's own parameters already the opaque
+/// value, and as the author spelled it. [`process_field`] reads the same pair off the same erase.
 #[cfg(feature = "serde")]
-fn untagged_member_guard_errors(
+fn untagged_member_field_defs(
     field: &Field,
-    field_def: &FieldDef,
     field_name: &str,
-    prop_meta: &ModelSchemaPropMeta,
+    type_parameters: &[String],
+) -> (FieldDef, FieldDef) {
+    let written = get_field_def(field_name, &field.ty, "");
+    let mut rendered = written.clone();
+    rendered.erase_type_parameters(type_parameters);
+    (rendered, written)
+}
+/// The [`FieldContext`] one untagged variant hands each of its members: the variant is the
+/// container the omission is read against, and the enum is the type the names resolve in.
+#[cfg(feature = "serde")]
+const fn untagged_variant_context<'ctx>(
+    variant_defaulted: bool,
+    schema_module_name: Option<&'ctx str>,
+    enum_type_name: &'ctx str,
+    type_parameters: &'ctx [String],
+    variant_name: &'ctx str,
+) -> FieldContext<'ctx> {
+    FieldContext {
+        container_defaulted: variant_defaulted,
+        rename_all: None,
+        schema_module_name,
+        type_name: enum_type_name,
+        type_parameters,
+        variant_ident: Some(variant_name),
+    }
+}
+
+/// One untagged member's finished def, beside the guard verdicts it earned: built next to its
+/// written twin, stamped, guarded (serde's checks and this crate's own combined), resolved, and
+/// carrying its meta — the whole of what the collector's loop needs back for the field.
+///
+/// The context's `container_defaulted` is the variant's own `#[serde(default)]`: a struct variant
+/// is where serde accepts one, and it is the container this member's omission is read against.
+#[cfg(feature = "serde")]
+fn untagged_member_field_def(
+    ctx: &FieldContext<'_>,
+    field: &Field,
+    field_name: &str,
+    prop_meta: ModelSchemaPropMeta,
     serde_field_meta: &SerdeFieldMeta,
     positional_constraint_error: Option<proc_macro2::TokenStream>,
-) -> Vec<proc_macro2::TokenStream> {
+) -> (FieldDef, Vec<proc_macro2::TokenStream>) {
+    let (mut field_def, written_def) =
+        untagged_member_field_defs(field, field_name, ctx.type_parameters);
+    apply_serde_key_omission(&mut field_def, field);
     let serde_guard_errors = field_guard_errors(
         field,
         field_name,
         field_def.is_optional(),
         serde_field_meta,
+        ctx.container_defaulted,
         positional_constraint_error,
     );
-    collect_field_guard_errors(field, field_def, field_name, prop_meta, serde_guard_errors)
+    let member_guard_errors = collect_field_guard_errors(
+        field,
+        &field_def,
+        &written_def,
+        field_name,
+        &prop_meta,
+        serde_guard_errors,
+    );
+    field_def.resolve_self_references(ctx.type_name);
+    apply_model_schema_prop_meta(&mut field_def, prop_meta, field_name);
+    (field_def, member_guard_errors)
 }
 
 /// Collects each untagged variant's union-member parts: the TypeScript member type, the Zod member
@@ -5687,17 +5824,14 @@ fn collect_untagged_members(
     for variant in &mut item_enum.variants {
         let kind = classify_variant(variant);
         let variant_name = variant.ident.to_string();
+        let variant_defaulted = has_serde_default(&variant.attrs);
 
         let mut field_defs: Vec<FieldDef> = Vec::new();
         let mut bound: Vec<(proc_macro2::Ident, proc_macro2::Ident)> = Vec::new();
         let mut checks: Vec<proc_macro2::TokenStream> = Vec::new();
         let total_fields = variant.fields.len();
         for field in &mut variant.fields {
-            let field_name = field
-                .ident
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_default();
+            let field_name = field_ident_string(field);
             let prop_meta = parse_model_schema_prop_attributes(&field.attrs);
             let serde_field_meta = parse_serde_field_attributes(&field.attrs);
 
@@ -5720,22 +5854,23 @@ fn collect_untagged_members(
                 checks.push(body);
             }
 
-            let mut field_def = get_field_def(&field_name, &field.ty, "");
-            apply_serde_key_omission(&mut field_def, field, &serde_field_meta);
-            guard_errors.extend(untagged_member_guard_errors(
+            let member_ctx = untagged_variant_context(
+                variant_defaulted,
+                schema_module_name,
+                &enum_type_name,
+                &type_parameters,
+                &variant_name,
+            );
+            let (member_def, member_guard_errors) = untagged_member_field_def(
+                &member_ctx,
                 field,
-                &field_def,
                 &field_name,
-                &prop_meta,
+                prop_meta,
                 &serde_field_meta,
                 positional_constraint_error,
-            ));
-
-            field_def.resolve_self_references(&enum_type_name);
-            apply_model_schema_prop_meta(&mut field_def, prop_meta, &field_name);
-            // Applied where `process_field` applies it: after every guard has read the field.
-            field_def.erase_type_parameters(&type_parameters);
-            field_defs.push(field_def);
+            );
+            guard_errors.extend(member_guard_errors);
+            field_defs.push(member_def);
         }
 
         per_variant_checks.push((
@@ -5785,12 +5920,11 @@ fn collect_untagged_members(
 /// it names, when it names one the registry has recorded, and the member as rendered otherwise.
 ///
 /// This is where the recorded member list is multiplied out, so what the registry hands a merge is
-/// the leaf set rather than a chain to walk. A member reached through an `Option` is left as it was
-/// rendered: its absence is a bare `null` on the wire, which is not a key set and joins no object.
+/// the leaf set rather than a chain to walk.
 ///
-/// `branch` is the member's own one-based position, which the leaves of a nested union are reached
-/// through and so keep as the head of theirs — the multiplication flattens the chain and the trail
-/// is what still says where a leaf was written.
+/// `branch` is the member's own one-based position, which every leaf below it is reached through
+/// and so keeps as the head of its trail — the multiplication flattens the chain and the trail is
+/// what still says where a leaf was written.
 #[cfg(all(feature = "serde", feature = "zod"))]
 fn zod_merge_branches(
     kind: &VariantKind,
@@ -5798,22 +5932,15 @@ fn zod_merge_branches(
     rendered: &str,
     branch: usize,
 ) -> Vec<ZodUnionMember> {
-    let nested = match (kind, field_defs) {
-        (VariantKind::TupleSingle, [fld]) if !fld.is_optional() => fld.zod_union_members(),
-        _ => Vec::new(),
-    };
-    if nested.is_empty() {
-        let non_object = match (kind, field_defs) {
-            (VariantKind::TupleSingle, [fld]) => zod_member_non_object(fld),
-            _ => None,
-        };
-        return vec![ZodUnionMember {
-            branch: vec![branch],
-            non_object,
+    let leaves = match (kind, field_defs) {
+        (VariantKind::TupleSingle, [fld]) => zod_member_leaves(fld, rendered),
+        _ => vec![ZodUnionMember {
+            branch: Vec::new(),
+            non_object: None,
             spelling: rendered.to_owned(),
-        }];
-    }
-    nested
+        }],
+    };
+    leaves
         .into_iter()
         .map(|leaf| {
             let mut trail = vec![branch];
@@ -5827,14 +5954,57 @@ fn zod_merge_branches(
         .collect()
 }
 
+/// What one rendered member contributes below its own position: one entry for the member itself,
+/// the leaves of the union it names when it names one the registry has recorded, and — where it was
+/// written under an `Option` — those under the choice the value is, beside the choice the absence
+/// is.
+///
+/// An `Option` is a level of the document and not a decoration on one: the value's wire and a bare
+/// `null` are two branches, which is how the JSON-schema merge descends the same member and how it
+/// comes to name a leaf `n.2`. Recording them the same way is what keeps the two merges naming one
+/// member by one position.
+///
+/// The absence is proved to be no object outright. serde writes the flattened `None` as the object's
+/// own keys alone and then refuses to read those same keys back — the untagged enum matches no
+/// member for them — so the write side and the read side describe different payload sets, and no
+/// branch a multiplication could write is a description of the type. A merge that reads this is
+/// left with the refusal, which is what the JSON-schema merge already answers the same declaration
+/// with. The outer `Option` around a whole flattened source is the other case and keeps its
+/// multiplication: there the absence reads back as the absence.
+#[cfg(all(feature = "serde", feature = "zod"))]
+fn zod_member_leaves(fld: &FieldDef, rendered: &str) -> Vec<ZodUnionMember> {
+    let nested = fld.zod_union_members();
+    let mut leaves = if nested.is_empty() {
+        vec![ZodUnionMember {
+            branch: Vec::new(),
+            non_object: zod_member_non_object(fld),
+            spelling: rendered.to_owned(),
+        }]
+    } else {
+        nested
+    };
+    if fld.is_optional() {
+        for leaf in &mut leaves {
+            leaf.branch.insert(0, 1);
+        }
+        leaves.push(ZodUnionMember {
+            branch: vec![2],
+            non_object: Some("null"),
+            spelling: rendered.to_owned(),
+        });
+    }
+    leaves
+}
+
 /// What serde writes an untagged union's member as, when the member's own written type proves that
 /// is not an object, and `None` when nothing here proves it.
 ///
 /// Named by the JSON type keyword the JSON-schema surface writes for the same member, so the two
 /// merges refuse the same member in the same words. That surface reads the keyword off a document
-/// it has already built; here there is only the type, so the answer is a partial one by
-/// construction — a name the registry stands for and a map are left to the merge that does read
-/// them, and a union member is not asked at all, its own leaves having already been recorded.
+/// it has already built; here there is the type, and for a name the registry's answer for what the
+/// named item published — so the answer is still a partial one by construction, a map and a name
+/// nothing has classified being left to the merge that does read the document, and a union member
+/// not being asked at all, its own leaves having already been recorded.
 #[cfg(all(feature = "serde", feature = "zod"))]
 fn zod_member_non_object(fld: &FieldDef) -> Option<&'static str> {
     if fld.is_array() {
@@ -5860,7 +6030,9 @@ fn zod_member_non_object(fld: &FieldDef) -> Option<&'static str> {
         | FieldDefType::NaiveDateTime
         | FieldDefType::NaiveTime => Some("string"),
         FieldDefType::Tuple(_) => Some("array"),
-        FieldDefType::SiblingType(name, _) => is_sequence_wrapper(name).then_some("array"),
+        FieldDefType::SiblingType(name, _) => is_sequence_wrapper(name)
+            .then_some("array")
+            .or_else(|| registered_non_object_wire(name)),
         #[cfg(feature = "object_id")]
         FieldDefType::ObjectId => None,
         FieldDefType::Map(_, _) | FieldDefType::TypeParam(_) | FieldDefType::Unknown => None,
@@ -6790,7 +6962,11 @@ fn map_key_path(key: &FieldDef) -> MapKeyPath<'_> {
         return MapKeyPath::Refused(MapKeyRejection::Optional(map_key_element_name(key)));
     }
     match &key.field_type {
-        FieldDefType::String => MapKeyPath::Open,
+        // A parameter names no type here, so nothing about the key can be enumerated or narrowed —
+        // but serde has already said the one thing an object key needs: every instantiation this
+        // map has either writes its keys as strings or refuses the whole map at serialization, so
+        // the open member set is true of every instantiation that serializes at all.
+        FieldDefType::String | FieldDefType::TypeParam(_) => MapKeyPath::Open,
         FieldDefType::SiblingType(key_type_name, args) if args.is_empty() => {
             match registered_key_kind(key_type_name) {
                 Some(AliasKind::StringWire) => MapKeyPath::Open,
@@ -6803,7 +6979,6 @@ fn map_key_path(key: &FieldDef) -> MapKeyPath<'_> {
         #[cfg(feature = "object_id")]
         FieldDefType::ObjectId => MapKeyPath::Refused(unwritable_key(key, WRITTEN_AS_OBJECT)),
         FieldDefType::SiblingType(..)
-        | FieldDefType::TypeParam(_)
         | FieldDefType::Unknown
         | FieldDefType::Boolean
         | FieldDefType::StringLiteral(_)
@@ -7665,12 +7840,12 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
     let field_name_str = fld.name.clone();
     let schema_code = build_field_type_schema(fld, &field_name_str);
 
-    let required_code = if fld.is_optional() {
-        quote! {}
-    } else {
+    let required_code = if fld.key_is_required() {
         quote! {
             required.push(serde_json::Value::String(#field_name_str.to_string()));
         }
+    } else {
+        quote! {}
     };
 
     quote! {
@@ -8343,15 +8518,28 @@ fn validate_ts_optional_flag(field_optional: bool, flag_set: bool) -> Result<(),
     Ok(())
 }
 
-/// Hands the field def the one serde fact the object surfaces spend: whether a `None` leaves the
-/// key out of the serialized object rather than writing it.
+/// The field's ident as a string, empty for a positional slot that has none.
+fn field_ident_string(field: &Field) -> String {
+    field
+        .ident
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_default()
+}
+
+/// Hands the field def the one serde fact the object surfaces spend: whether the field's value
+/// leaves the key out of the serialized object rather than writing it.
 ///
 /// Only a named field has a key to leave out. A positional one is written by its place in a tuple,
 /// where nothing can be dropped and a `None` reaches the wire as a `null`, so the omission the
 /// attribute names never happens there and the slot spellings stand as written.
-#[cfg(feature = "serde")]
-const fn apply_serde_key_omission(field_def: &mut FieldDef, field: &Field, meta: &SerdeFieldMeta) {
-    field_def.omits_none = field.ident.is_some() && meta.omits_none;
+///
+/// Not gated on the `serde` feature. The attribute is on the field in every build and the surfaces
+/// claim to describe the payload serde writes in every build, so a toggle that changed the answer
+/// would make one declaration describe two different wires.
+fn apply_serde_key_omission(field_def: &mut FieldDef, field: &Field) {
+    field_def.omits_value =
+        field.ident.is_some() && parse_serde_key_omission(&field.attrs).omits_key;
 }
 
 /// Rejects a named `Option` field whose serde attributes let a `None` reach the wire as `null`.
@@ -8367,15 +8555,11 @@ const fn apply_serde_key_omission(field_def: &mut FieldDef, field: &Field, meta:
 /// array around it is always written, so the key is always present and the `None` is an item, which
 /// the field's own schema describes as nullable.
 #[cfg(feature = "serde")]
-fn check_optional_field_serialization(
-    field: &Field,
-    is_optional: bool,
-    meta: &SerdeFieldMeta,
-) -> Result<(), syn::Error> {
+fn check_optional_field_serialization(field: &Field, is_optional: bool) -> Result<(), syn::Error> {
     let Some(ident) = field.ident.as_ref() else {
         return Ok(());
     };
-    if !is_optional || meta.omits_none {
+    if !is_optional || parse_serde_key_omission(&field.attrs).omits_key {
         return Ok(());
     }
     Err(syn::Error::new_spanned(
@@ -8385,6 +8569,51 @@ fn check_optional_field_serialization(
              while the generated schema only accepts the key being absent. Add \
              #[serde(skip_serializing_if = \"Option::is_none\")] (plus `default` if the type \
              derives Deserialize), or `skip` / `skip_serializing`."
+        ),
+    ))
+}
+
+/// Rejects a named field whose serde attributes drop its key on the way out while serde still
+/// insists on finding that key on the way in.
+///
+/// `skip_serializing` and `skip_serializing_if` suppress the key but leave deserialization alone,
+/// so the field is still looked for by name — and a field with no `default` behind it has nothing
+/// to be when the key is missing. Recorded from serde itself: a `Vec` field carrying
+/// `skip_serializing_if = "Vec::is_empty"` and nothing else serializes to `{"id":"1"}` and then
+/// fails to deserialize that very payload, reporting the field as missing. The generated surfaces
+/// are now written to admit the absent key, so leaving this spelling alone would publish a
+/// contract whose own author cannot read what it describes.
+///
+/// Three spellings are exempt, each because serde already answers the missing key:
+/// - a bare `skip`, which stops deserializing too and so supplies `Default` itself;
+/// - an `Option` field, which serde reads back as `None` from a missing key with no `default`
+///   written (the `Option`-null guard above is what polices those);
+/// - a `default` on the field or on the container, either of which writes the value.
+#[cfg(feature = "serde")]
+fn check_omitted_key_is_readable(
+    field: &Field,
+    is_optional: bool,
+    container_defaulted: bool,
+) -> Result<(), syn::Error> {
+    let Some(ident) = field.ident.as_ref() else {
+        return Ok(());
+    };
+    let omission = parse_serde_key_omission(&field.attrs);
+    if is_optional
+        || container_defaulted
+        || omission.defaulted
+        || omission.skips_deserializing
+        || !omission.omits_key
+    {
+        return Ok(());
+    }
+    Err(syn::Error::new_spanned(
+        field,
+        format!(
+            "model_schema: field `{ident}` is left out of the serialized object by its serde \
+             attribute, but serde still requires the key when deserializing, so the payload it \
+             writes cannot be read back. Add #[serde(default)] to the field (or to the type), or \
+             use `skip` if the field should never be read from the payload."
         ),
     ))
 }
@@ -8400,13 +8629,17 @@ fn field_guard_errors(
     raw_field_ident: &str,
     is_optional: bool,
     serde_field_meta: &SerdeFieldMeta,
+    container_defaulted: bool,
     positional_constraint_error: Option<proc_macro2::TokenStream>,
 ) -> Vec<proc_macro2::TokenStream> {
     positional_constraint_error
         .into_iter()
         .chain(serde_field_meta.cfg_attr_rejection.as_ref().map_or_else(
             || {
-                check_optional_field_serialization(field, is_optional, serde_field_meta)
+                check_optional_field_serialization(field, is_optional)
+                    .and_then(|()| {
+                        check_omitted_key_is_readable(field, is_optional, container_defaulted)
+                    })
                     .err()
                     .map(|err| err.to_compile_error())
             },
@@ -8420,15 +8653,22 @@ fn field_guard_errors(
         .collect()
 }
 
-/// Every guard error the field violates: the two the written type earns — the `OsString` guard and
-/// the map-key guard, neither of which any attribute can hide — then everything the
+/// Every guard error the field violates: the two the type earns — the `OsString` guard and the
+/// map-key guard, neither of which any attribute can hide — then everything the
 /// `model_schema_prop` attribute earned, then the serde-side guards when any fired.
+///
+/// `field_def` is the field as the surfaces will render it, every reference to one of the enclosing
+/// item's own parameters already the opaque value: a guard and the renderer standing behind it read
+/// one def, so neither can answer for a parameter the other has not. `written_def` is the same
+/// field as the author spelled it, which only [`check_as_type_override`] reads — `as` names a type,
+/// and a parameter is one of the names it may name.
 ///
 /// The map-key guard stands under every subset that emits a schema at all, which is the same set
 /// the registry it reads is populated under.
 fn collect_field_guard_errors(
     field: &Field,
     field_def: &FieldDef,
+    written_def: &FieldDef,
     raw_field_ident: &str,
     prop_meta: &ModelSchemaPropMeta,
     serde_guard_errors: Vec<proc_macro2::TokenStream>,
@@ -8448,7 +8688,11 @@ fn collect_field_guard_errors(
         .into_iter()
         .chain(map_key_error)
         .chain(model_schema_prop_guard_errors(
-            field, field_def, &label, prop_meta,
+            field,
+            field_def,
+            written_def,
+            &label,
+            prop_meta,
         ))
         .chain(serde_guard_errors)
         .collect()
@@ -8465,12 +8709,13 @@ fn collect_field_guard_errors(
 fn model_schema_prop_guard_errors(
     field: &Field,
     field_def: &FieldDef,
+    written_def: &FieldDef,
     label: &str,
     prop_meta: &ModelSchemaPropMeta,
 ) -> Vec<proc_macro2::TokenStream> {
     let refusals = [
         check_fixed_shape_constraints(field, field_def, prop_meta, label).err(),
-        check_as_type_override(field, field_def, prop_meta, label).err(),
+        check_as_type_override(field, written_def, prop_meta, label).err(),
         check_as_preprocess_conflict(field, prop_meta, label).err(),
         flag_guard_error(
             field,
@@ -8533,12 +8778,13 @@ fn written_constraint_keys(prop_meta: &ModelSchemaPropMeta) -> Vec<&'static str>
 
 /// Rejects a length, pattern or range written on a field no surface reads one beside.
 ///
-/// Two shapes earn it. The types [`FieldDef::fixed_shape_name`] answers for render a shape fixed in
-/// this crate rather than the plain string or number a bound is spelled against; the ones
+/// Three shapes earn it. The types [`FieldDef::fixed_shape_name`] answers for render a shape fixed
+/// in this crate rather than the plain string or number a bound is spelled against; the ones
 /// [`FieldDef::composite_shape_name`] answers for render their members, which are built from inner
-/// field defs that carry no meta. Either way every surface writes the field without ever reading the
-/// bound — so it is accepted at expansion and reaches nothing, which leaves the author holding a
-/// contract that says the value is checked when nothing checks it.
+/// field defs that carry no meta; and the one [`FieldDef::parameter_shape_name`] answers for
+/// renders a value whose type no instantiation has yet supplied. Every one of them writes the field
+/// without ever reading the bound — so it is accepted at expansion and reaches nothing, which
+/// leaves the author holding a contract that says the value is checked when nothing checks it.
 fn check_fixed_shape_constraints(
     field: &Field,
     field_def: &FieldDef,
@@ -8562,17 +8808,31 @@ fn check_fixed_shape_constraints(
             ),
         ));
     }
-    let Some(shape) = field_def.composite_shape_name() else {
+    if let Some(shape) = field_def.composite_shape_name() {
+        return Err(syn::Error::new_spanned(
+            field,
+            format!(
+                "model_schema: {label}: `{keys}` cannot apply to {shape} — a map renders its keys \
+                 and its values, a tuple renders each of its elements, and every surface builds \
+                 those from the members: the bound names no value here, and `model_schema_prop` \
+                 has no way to say which member it meant, so the constraint would reach neither \
+                 Zod, nor the JSON schema, nor the generated validator. Constrain the member \
+                 instead — declare its type as a branded newtype carrying the bound — or drop it."
+            ),
+        ));
+    }
+    let Some(parameter) = field_def.parameter_shape_name() else {
         return Ok(());
     };
     Err(syn::Error::new_spanned(
         field,
         format!(
-            "model_schema: {label}: `{keys}` cannot apply to {shape} — a map renders its keys and \
-             its values, a tuple renders each of its elements, and every surface builds those from \
-             the members: the bound names no value here, and `model_schema_prop` has no way to say \
-             which member it meant, so the constraint would reach neither Zod, nor the JSON schema, \
-             nor the generated validator. Constrain the member instead — declare its type as a \
+            "model_schema: {label}: `{keys}` cannot apply to the type parameter `{parameter}` — \
+             the value's type is whatever the instantiation supplies, and one schema is written \
+             for every instantiation: Zod and the JSON schema describe the value as the opaque one \
+             a bound cannot be spelled against, and neither the generated validator nor serde \
+             holds it to anything written here, so the constraint would reach none of them. \
+             Constrain the argument instead — declare the type the instantiation supplies as a \
              branded newtype carrying the bound — or drop it."
         ),
     ))
@@ -8676,12 +8936,8 @@ fn check_os_string_field(
 /// and inert to every derive, so a copy left on the emitted item is one rustc reports as an
 /// attribute that does not exist.
 fn process_field(
-    rename_all: Option<&str>,
+    ctx: &FieldContext<'_>,
     field: &mut Field,
-    schema_module_name: Option<&str>,
-    variant_ident: Option<&str>,
-    type_name: &str,
-    type_parameters: &[String],
     deferred_attrs: &mut Vec<Vec<syn::Attribute>>,
 ) -> (
     FieldDef,
@@ -8703,11 +8959,7 @@ fn process_field(
     let field_rename: Option<String> = None;
 
     // Get raw field ident (before renaming) for validation function name
-    let raw_field_ident = field
-        .ident
-        .as_ref()
-        .map(ToString::to_string)
-        .unwrap_or_default();
+    let raw_field_ident = field_ident_string(field);
 
     // Parse model_schema_prop attributes before filtering them out
     let model_schema_prop_meta = parse_model_schema_prop_attributes(&field.attrs);
@@ -8718,9 +8970,9 @@ fn process_field(
     #[cfg(feature = "serde")]
     let (validation_fn, validate_body, positional_constraint_error) = generate_field_validation(
         field,
-        schema_module_name,
+        ctx.schema_module_name,
         &raw_field_ident,
-        variant_ident,
+        ctx.variant_ident,
         &model_schema_prop_meta,
         &mut injected_attrs,
     );
@@ -8731,14 +8983,15 @@ fn process_field(
         Option<proc_macro2::TokenStream>,
     ) = (None, None);
     #[cfg(not(feature = "serde"))]
-    let _: &_ = &(schema_module_name, variant_ident);
+    let _: &_ = &(ctx.schema_module_name, ctx.variant_ident);
 
     field.attrs = new_attrs;
     deferred_attrs.push(injected_attrs);
 
     let field_type: &syn::Type = &field.ty;
 
-    let final_name = get_final_field_name(&raw_field_ident, field_rename.as_deref(), rename_all);
+    let final_name =
+        get_final_field_name(&raw_field_ident, field_rename.as_deref(), ctx.rename_all);
     let field_docs = build_jsdoc_body(get_field_docs(field).as_deref(), &final_name);
 
     // Create the field definition and apply any model_schema_prop overrides
@@ -8747,10 +9000,19 @@ fn process_field(
     // Resolve `Self` references to the concrete type name so recursive fields
     // (e.g. `Vec<Self>`) are treated exactly like `Vec<EnclosingType>`. Resolved before the guards
     // read the field so each one asks its question of the type the surfaces will render.
-    field_def.resolve_self_references(type_name);
+    field_def.resolve_self_references(ctx.type_name);
 
-    #[cfg(feature = "serde")]
-    apply_serde_key_omission(&mut field_def, field, &serde_field_meta);
+    // The field as the author spelled it, kept for the one guard that reads a written *name*: an
+    // `as = Type` may name one of the item's own parameters, and the target it is compared against
+    // is built from the written type too.
+    let written_def = field_def.clone();
+
+    // Every other guard, and the constraint docs below, ask what the surfaces will render — where
+    // one of the item's own parameters is the opaque value rather than a reference to a type of
+    // that name. Erased here so a guard and the renderer standing behind it read one def.
+    field_def.erase_type_parameters(ctx.type_parameters);
+
+    apply_serde_key_omission(&mut field_def, field);
 
     #[cfg(feature = "serde")]
     let serde_guard_errors = field_guard_errors(
@@ -8758,24 +9020,25 @@ fn process_field(
         &raw_field_ident,
         field_def.is_optional(),
         &serde_field_meta,
+        ctx.container_defaulted,
         positional_constraint_error,
     );
     #[cfg(not(feature = "serde"))]
-    let serde_guard_errors: Vec<proc_macro2::TokenStream> = Vec::new();
+    let serde_guard_errors: Vec<proc_macro2::TokenStream> = {
+        let _: bool = ctx.container_defaulted;
+        Vec::new()
+    };
 
     let guard_errors = collect_field_guard_errors(
         field,
         &field_def,
+        &written_def,
         &raw_field_ident,
         &model_schema_prop_meta,
         serde_guard_errors,
     );
 
     apply_model_schema_prop_meta(&mut field_def, model_schema_prop_meta, &final_name);
-
-    // Last, so every guard above asked its question of the type the author wrote, and so an
-    // `as = Type` override is read for a parameter too.
-    field_def.erase_type_parameters(type_parameters);
 
     (field_def, validation_fn, validate_body, guard_errors)
 }
