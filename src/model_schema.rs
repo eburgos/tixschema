@@ -115,11 +115,8 @@ use crate::utils::record_zod_union_members;
 #[cfg(all(feature = "serde", feature = "zod"))]
 use crate::utils::ZodUnionMember;
 
-#[cfg(all(feature = "serde", feature = "zod"))]
-use crate::utils::record_zod_flatten_variants;
-
 #[cfg(all(feature = "serde", any(feature = "zod", feature = "typescript")))]
-use crate::utils::{WireLeaf, record_wire_leaves};
+use crate::utils::{FlattenVariant, WireLeaf, record_flatten_variants, record_wire_leaves};
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::register_alias_info;
@@ -1683,7 +1680,7 @@ fn compute_flatten_outputs(
             absence: SourceAbsence::written(fld),
             #[cfg(feature = "zod")]
             branches: Vec::new(),
-            spelling: fld.typescript_merged_typename(),
+            spelling: flattened_ts_spelling(fld),
         })
         .collect();
     #[cfg(not(feature = "typescript"))]
@@ -1744,10 +1741,11 @@ const fn flattened_name_offers_absence(_fld: &FieldDef) -> bool {
 /// serde writes a unit variant as a bare name standing alone and as that name holding `null` where
 /// the enum is flattened.
 ///
-/// The tagged variants are read only where the same enum's recorded leaves prove one of them is no
-/// object, which is the bound those leaves are already spliced under one position further in. A
-/// tagged enum every variant of which serde writes as an object publishes one operand per branch
-/// that names what the enum's own binding names, and is left as the one operand it was.
+/// Every recorded variant is read, whatever its leaves prove. A Zod intersection recognizes exactly
+/// the keys its operands name and a `z.union` names none, so joining the object to the union as one
+/// operand describes a payload set no value inhabits — including the tagged enum every variant of
+/// which serde writes as an object, whose branches prove nothing and whose single-operand join
+/// nonetheless admits nothing.
 ///
 /// A source declared below the object has recorded neither, and takes the fallback the merge
 /// documents.
@@ -1757,10 +1755,10 @@ fn flattened_zod_branches(fld: &FieldDef) -> Vec<String> {
     if !members.is_empty() {
         return members.into_iter().map(|member| member.spelling).collect();
     }
-    if named_wire_leaves(fld).is_none() {
-        return Vec::new();
-    }
-    fld.zod_flatten_variants()
+    fld.flatten_variants()
+        .into_iter()
+        .map(|variant| variant.zod)
+        .collect()
 }
 
 /// No source names branches where nothing reads `#[serde(flatten)]`, for the reason no source offers
@@ -1771,6 +1769,45 @@ fn flattened_zod_branches(fld: &FieldDef) -> Vec<String> {
         .into_iter()
         .map(|member| member.spelling)
         .collect()
+}
+
+/// What one flattened source is written as where the TypeScript merge names it: the parenthesised
+/// union of the per-variant key sets an externally tagged enum recorded, and the name itself
+/// everywhere else.
+///
+/// TypeScript distributes an intersection over a union on its own, so a name standing for a choice
+/// every branch of which is an object already describes what the multiplication would write and is
+/// left as the one operand it is. What it cannot distribute over is a branch that is no object: the
+/// bare string a unit variant publishes standing alone intersects the object to `never`, and the
+/// payload serde actually writes for that variant — the variant's name holding `null` — belongs to
+/// no branch of the result. Where the enum's recorded leaves prove such a branch, the operand is
+/// spelled as the key sets serde writes instead of as the union the enum publishes.
+///
+/// A name the registry proves nothing about, and a source declared below the object, keep the
+/// spelling they always had.
+#[cfg(all(feature = "serde", feature = "typescript"))]
+fn flattened_ts_spelling(fld: &FieldDef) -> String {
+    let named = fld.typescript_merged_typename();
+    if named_wire_leaves(fld).is_none() {
+        return named;
+    }
+    let variants: Vec<String> = fld
+        .flatten_variants()
+        .into_iter()
+        .map(|variant| variant.typescript)
+        .collect();
+    if variants.is_empty() {
+        named
+    } else {
+        format!("({})", variants.join(" | "))
+    }
+}
+
+/// No name proves a branch where nothing reads `#[serde(flatten)]`: the registry records no wire for
+/// one to prove it in, and no field reaches the merge to begin with.
+#[cfg(all(feature = "typescript", not(feature = "serde")))]
+fn flattened_ts_spelling(fld: &FieldDef) -> String {
+    fld.typescript_merged_typename()
 }
 
 /// The schema methods a struct's module publishes — the JSON-schema document, the TypeScript
@@ -3006,7 +3043,8 @@ fn flatten_edge_guard_error(
     let refused = inner
         .zod_union_members()
         .into_iter()
-        .find_map(|member| member.non_object.map(|named| (member.branch_path(), named)));
+        .find_map(|member| member.non_object.map(|named| (member.branch_path(), named)))
+        .or_else(|| flattened_name_refused_branch(&inner));
     let message = if let Some((branch, named)) = refused {
         format!(
             "model_schema: `{type_name}`: `#[serde(flatten)]` of `{inner_name}` writes a \
@@ -3046,6 +3084,44 @@ fn flattened_name_non_object_wire(inner: &FieldDef) -> Option<&'static str> {
         return None;
     };
     registered_non_object_wire(name)
+}
+
+/// The branch a flattened field's own name proves is no object, beside the JSON type keyword that
+/// branch describes as — and `None` for every name whose leaves prove no such branch.
+///
+/// [`registered_non_object_wire`] answers a name publishing one leaf, which is a name that has no
+/// position of its own to be named at. A name publishing a choice does: a registration whose surface
+/// is nullable writes its value or writes nothing, so it publishes the value's own leaves beside its
+/// published absence, and the merge that reads the document names that value by the branch it sits
+/// at. The absence itself needs no refusal — serde writes the object's own keys alone for it and
+/// reads them back as the absent value, which is the multiplication the merge already writes — so
+/// what the declaration turns on is whether every leaf beside it is proved to be no object. Where
+/// they all are, the value side is unwritable at the flatten edge whichever leaf it took, and the
+/// refusal names the first of them in the branch-naming words the JSON-schema merge refuses the same
+/// declaration in.
+///
+/// A nullable object keeps its absence multiplication, having no leaf proved to be no object beside
+/// the `null`. The array and plain-enum carve-outs are [`flattened_name_non_object_wire`]'s, for its
+/// reasons.
+#[cfg(all(feature = "serde", feature = "zod"))]
+fn flattened_name_refused_branch(inner: &FieldDef) -> Option<(String, &'static str)> {
+    if inner.is_array() || flattened_plain_enum(inner).is_some() {
+        return None;
+    }
+    let FieldDefType::SiblingType(name, _) = &inner.field_type else {
+        return None;
+    };
+    let leaves = lookup_alias_info(name)?.wire;
+    let (absences, values): (Vec<&WireLeaf>, Vec<&WireLeaf>) =
+        leaves.iter().partition(|leaf| leaf.is_published_absence());
+    if absences.len() != 1 {
+        return None;
+    }
+    if !values.iter().all(|leaf| leaf.non_object.is_some()) {
+        return None;
+    }
+    let first = values.first()?;
+    Some((first.branch_path(), first.non_object?))
 }
 
 /// Processes every field of a struct, returning the regular field defs, the `#[serde(flatten)]`
@@ -6031,31 +6107,48 @@ fn render_external_variant(
 /// the order the union writes them.
 ///
 /// A data-carrying variant contributes the single-key object it already renders as: serde writes
-/// exactly that into the object being merged, and the member is the operand. A unit variant renders
-/// as the bare name it is written as standing alone, which no object joins — flattened, serde writes
-/// that name as a key holding `null`, so the operand is written here instead of taken from the
-/// member.
-#[cfg(all(feature = "serde", feature = "zod"))]
+/// exactly that into the object being merged, and the member is the operand on both surfaces. A unit
+/// variant renders as the bare name it is written as standing alone, which no object joins —
+/// flattened, serde writes that name as a key holding `null`, so the operand is written here instead
+/// of taken from the member, in the shape the same variant would have rendered as had it carried
+/// data. That is what puts the two spellings of one variant at one indent and under one `JSDoc`
+/// block.
+#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod")))]
 fn record_external_flatten_operands(
     rust_ident: &str,
     variants: &[DiscriminatedVariant],
     members: &[(String, String, proc_macro2::TokenStream)],
 ) {
-    let operands: Vec<String> = variants
+    let operands: Vec<FlattenVariant> = variants
         .iter()
         .zip(members)
-        .map(|(variant, (_, zod, _))| {
-            if matches!(variant.kind, VariantKind::Unit) {
+        .map(|(variant, member)| {
+            let unit = matches!(variant.kind, VariantKind::Unit);
+            let key = &variant.discriminator_value;
+            #[cfg(feature = "typescript")]
+            let typescript = if unit {
                 format!(
-                    "z.strictObject({{\n  \"{}\": z.null(),\n}})",
-                    variant.discriminator_value
+                    "{{\n{}\n  \"{key}\": null;\n}}",
+                    member_jsdoc_block(&variant.docs)
                 )
             } else {
-                zod.clone()
+                member.0.clone()
+            };
+            #[cfg(feature = "zod")]
+            let zod = if unit {
+                format!("z.strictObject({{\n  \"{key}\": z.null(),\n}})")
+            } else {
+                member.1.clone()
+            };
+            FlattenVariant {
+                #[cfg(feature = "typescript")]
+                typescript,
+                #[cfg(feature = "zod")]
+                zod,
             }
         })
         .collect();
-    record_zod_flatten_variants(rust_ident, &operands);
+    record_flatten_variants(rust_ident, &operands);
 }
 
 /// Joins an externally tagged enum's rendered members into its three union surfaces: the
@@ -6160,7 +6253,7 @@ fn process_externally_tagged_enum(
 
     // Recorded once the variants have rendered, because the flatten-edge spelling of a data-carrying
     // one is the member's own and only this expansion holds it.
-    #[cfg(all(feature = "serde", feature = "zod"))]
+    #[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod")))]
     record_external_flatten_operands(&name.to_string(), &variants.0, &members);
 
     let (main_schema_code, type_code, schema_code) = join_external_union(&members);

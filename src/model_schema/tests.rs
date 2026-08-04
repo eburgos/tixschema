@@ -7951,6 +7951,78 @@ fn a_direct_flatten_of_a_plain_enum_is_left_to_the_guard_written_for_it() {
     );
 }
 
+/// A registration publishing a choice reaches the same refusal, named by the branch its value sits
+/// at rather than at no position at all — the wording the JSON-schema merge, which reads that same
+/// choice back as a union, already refuses the declaration in.
+///
+/// The absence beside it is not what is refused: serde writes the object's own keys alone for it and
+/// reads them back as the absent value, which is the branch the merge already writes. What no
+/// spelling describes is the value, and one declaration cannot carry a branch that round-trips and a
+/// branch no payload satisfies.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_direct_flatten_of_a_nullable_scalar_registration_is_refused_at_its_value_branch() {
+    seed_slot_registration(&syn::parse_quote! { struct DirectMaybeCount(Option<i64>); });
+    let field: syn::Field = syn::parse_quote! { #[serde(flatten)] c: DirectMaybeCount };
+    let error = direct_flatten_error(&field).unwrap();
+    assert!(
+        error.contains(
+            "`#[serde(flatten)]` of `DirectMaybeCount` writes a union member that is not an object"
+        ),
+        "got: {error}"
+    );
+    assert!(
+        error.contains("its branch 1 describes a `integer`"),
+        "got: {error}"
+    );
+    assert!(
+        error.contains("write the field as a named member so the value gets a key of its own"),
+        "got: {error}"
+    );
+}
+
+/// Every keyword the value side can prove reaches that same refusal, each named by the word its own
+/// published document carries — the array a nullable sequence writes among them, which is the one
+/// the name proves rather than the one a field wrote around it.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_nullable_registration_is_refused_by_the_keyword_its_value_side_proves() {
+    seed_slot_registration(&syn::parse_quote! { struct DirectMaybeName(Option<String>); });
+    seed_slot_registration(&syn::parse_quote! { struct DirectMaybeFlag(Option<bool>); });
+    seed_slot_registration(&syn::parse_quote! { struct DirectMaybeList(Option<Vec<String>>); });
+    for (rust_ident, keyword) in [
+        ("DirectMaybeName", "string"),
+        ("DirectMaybeFlag", "boolean"),
+        ("DirectMaybeList", "array"),
+    ] {
+        let named: syn::Type = syn::parse_str(rust_ident).unwrap();
+        let error =
+            direct_flatten_error(&syn::parse_quote! { #[serde(flatten)] v: #named }).unwrap();
+        assert!(
+            error.contains(&format!("its branch 1 describes a `{keyword}`")),
+            "got: {error}"
+        );
+    }
+}
+
+/// And a registration whose value side is an object keeps the absence multiplication it was landed
+/// with: nothing beside the `null` is proved to be no object, so both branches are ones serde writes
+/// and reads back. A name publishing a `null` at no top level of its own is not this shape at all —
+/// there the `null` sits under a choice serde matched a member on, which the member position already
+/// answers for.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_direct_flatten_of_a_nullable_object_registration_stays_admitted() {
+    seed_registered_wire("DirectPlainDoc", AliasKind::NoEnumMembers, None);
+    seed_slot_registration(&syn::parse_quote! { struct DirectMaybeDoc(Option<DirectPlainDoc>); });
+    let field: syn::Field = syn::parse_quote! { #[serde(flatten)] base: DirectMaybeDoc };
+    assert!(
+        direct_flatten_error(&field).is_none(),
+        "got a rejection for {}",
+        quote::ToTokens::to_token_stream(&field)
+    );
+}
+
 /// Runs the registration a tuple struct's own expansion runs, so what the registry answers for the
 /// name is what a declaration put there rather than a word written by hand.
 #[cfg(all(feature = "serde", feature = "zod"))]
