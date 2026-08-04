@@ -86,6 +86,14 @@ pub enum DocumentedSlot {
     Secondary,
 }
 
+/// A documented alias.
+/// ```rust example
+/// let item: DocumentedAlias = 3;
+/// println!("Item: {:?}", item);
+/// ```
+#[model_schema()]
+pub type DocumentedAlias = u32;
+
 /// Every documented shape above, paired with the description its `JSDoc` is left with once the
 /// example is dropped. The plain enum rides along as the shape that already dropped it.
 fn documented_shapes() -> Vec<(String, &'static str)> {
@@ -112,6 +120,10 @@ fn documented_shapes() -> Vec<(String, &'static str)> {
             "A documented untagged enum.",
         ),
         (DocumentedSlot::ts_definition(), "A documented plain enum."),
+        (
+            documented_alias_schema::Schema::ts_definition(),
+            "A documented alias.",
+        ),
     ]
 }
 
@@ -119,11 +131,27 @@ fn documented_shapes() -> Vec<(String, &'static str)> {
 /// neither the fence nor anything written inside it may reach the emitted `TypeScript`.
 #[test]
 fn a_documented_item_never_carries_its_rust_example_into_the_emitted_typescript() {
+    // The alias publishes `ts_definition` from its own module rather than from the alias, so naming
+    // the type here is what keeps the fixture from being pruned as unused.
+    let aliased: DocumentedAlias = 3;
+    assert_eq!(aliased, 3);
+
     for (ts, description) in documented_shapes() {
-        for leaked in ["```", "let item =", "println!"] {
+        for leaked in ["```", "let item", "println!"] {
             assert!(!ts.contains(leaked), "{leaked} reached: {ts}");
         }
         assert!(ts.contains(description), "docs dropped from: {ts}");
+    }
+}
+
+/// Only the `JSDoc` side of an alias changed. What its example reaches on the Zod side is what it
+/// always reached: nothing — an alias publishes no `example` field to drop it into.
+#[cfg(feature = "zod")]
+#[test]
+fn a_documented_alias_publishes_the_same_zod_schema_it_always_did() {
+    let zod = documented_alias_schema::Schema::zod_schema();
+    for leaked in ["```", "let item", "println!", "example"] {
+        assert!(!zod.contains(leaked), "{leaked} reached: {zod}");
     }
 }
 
