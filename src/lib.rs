@@ -712,3 +712,45 @@ pub fn model_schema_prop(_args: TokenStream, input: TokenStream) -> TokenStream 
     // For now, simply pass through the input
     input
 }
+
+/// # `typescript_preamble`
+///
+/// The `TypeScript` a generated module carries once, above the per-type definitions it is
+/// assembled from. Expands to a string literal and takes no arguments.
+///
+/// ```rust
+/// const PREAMBLE: &str = tixschema::typescript_preamble!();
+/// ```
+///
+/// A generic type publishes `X$SchemaFactory` rather than `X$Schema`, because a Zod schema is a
+/// runtime value and one value cannot stand for every filling of a parameter. Each factory
+/// memoizes on the identity of the arguments it was handed, and `createSchemaCache` is the helper
+/// they all build those caches with:
+///
+#[cfg_attr(
+    feature = "typescript",
+    doc = "```typescript
+const createSchemaCache = <Cache extends object>(): Cache => new WeakMap() as unknown as Cache;
+```"
+)]
+#[cfg_attr(
+    not(feature = "typescript"),
+    doc = "```javascript
+const createSchemaCache = () => new WeakMap();
+```"
+)]
+///
+/// A cache maps an argument to the schema built from *that* argument, so its value type depends on
+/// its key type. `TypeScript` can declare that dependency — each factory writes it out, one
+/// interface per parameter — but cannot construct a map that satisfies it, since a `WeakMap` fixes
+/// both of its own parameters at construction. So the dependency is declared where it does the
+/// work and asserted exactly once, here: this line is the only assertion anywhere in the generated
+/// output.
+///
+/// Emit it once per module, ahead of every `zod_schema()` the module carries. A module with no
+/// generic type in it needs no preamble, and one that has any needs it exactly once.
+#[cfg(feature = "zod")]
+#[proc_macro]
+pub fn typescript_preamble(input: TokenStream) -> TokenStream {
+    model_schema::typescript_preamble_tokens(input.into()).into()
+}

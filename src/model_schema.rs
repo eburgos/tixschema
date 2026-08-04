@@ -29,8 +29,11 @@ use crate::{
 use crate::utils::ts_generic_params;
 use crate::utils::type_parameters_in_scope;
 
+#[cfg(all(feature = "zod", feature = "typescript"))]
+use core::iter::once;
+
 #[cfg(feature = "zod")]
-use crate::utils::{escape_js_regex_literal, extract_example_from_docs};
+use crate::utils::{escape_js_regex_literal, extract_example_from_docs, zod_factory_argument};
 
 #[cfg(all(feature = "zod", feature = "object_id"))]
 use crate::features::object_id::get_object_id_zod_schema_with;
@@ -122,6 +125,26 @@ const FLATTENED_PLAIN_ENUM_SCOPE: &str = "Only a type the registry has already c
 
 /// The two shapes a map key can write that `serde_json` will not use as an object key, as
 /// [`MapKeyRejection::Unwritable`] names them.
+/// The one helper every generated module carries above its per-type definitions, and the only
+/// assertion anything here writes.
+///
+/// A factory's cache maps an argument to the schema built from *that* argument, so the value type
+/// depends on the key type. TypeScript can declare that dependency — each level's `get` and `set`
+/// are written generic over the key — but cannot construct a map that satisfies it, since a
+/// `WeakMap`'s two parameters are fixed at construction. So the dependency is declared in the
+/// interfaces, where it does the work, and asserted exactly once here, where a reader can see the
+/// whole of what was asserted.
+///
+/// A `WeakMap` is what makes an argument nobody else holds collectable rather than pinned for the
+/// life of the module.
+#[cfg(all(feature = "zod", feature = "typescript"))]
+const TYPESCRIPT_PREAMBLE: &str = "const createSchemaCache = <Cache extends object>(): Cache => new WeakMap() as unknown as Cache;";
+
+/// The JavaScript flavour of [`TYPESCRIPT_PREAMBLE`]: a build with no `typescript` writes plain
+/// JavaScript, which declares no types and so has nothing to assert.
+#[cfg(all(feature = "zod", not(feature = "typescript")))]
+const TYPESCRIPT_PREAMBLE: &str = "const createSchemaCache = () => new WeakMap();";
+
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 const WRITTEN_AS_ARRAY: &str = "a JSON array";
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -970,6 +993,7 @@ fn build_struct_delegate_items(
     module_ident: &Ident,
     item_name: &str,
     rust_ident: &str,
+    parameters: &[String],
     schema_example_method: Option<&proc_macro2::TokenStream>,
     validate_method: Option<proc_macro2::TokenStream>,
 ) -> Vec<proc_macro2::TokenStream> {
@@ -977,9 +1001,9 @@ fn build_struct_delegate_items(
     #[cfg(feature = "zod")]
     let has_example = schema_example_method.is_some();
     #[cfg(feature = "zod")]
-    let reexport = ident_reexport_zod(rust_ident, item_name);
+    let reexport = ident_reexport_zod(rust_ident, item_name, zod_binding_suffix(parameters));
     #[cfg(not(feature = "zod"))]
-    let _: &_ = &(item_name, rust_ident);
+    let _: &_ = &(item_name, rust_ident, parameters);
     #[cfg(not(feature = "zod"))]
     let _: Option<&proc_macro2::TokenStream> = schema_example_method;
 
@@ -1292,7 +1316,7 @@ fn struct_schema_impl_items(
     #[cfg(feature = "typescript")]
     let ts_generics = ts_generic_params(generics);
     #[cfg(feature = "zod")]
-    let ts_type_args = erased_type_arguments(generics);
+    let type_parameters = type_parameters_in_scope(generics);
     // bodies: (type_code, schema_code, json_schema_fields, fields_empty)
     let bodies = render_struct_field_bodies(field_defs, Some(item_name));
     // flatten: (ts_types, zod_schemas)
@@ -1319,7 +1343,7 @@ fn struct_schema_impl_items(
         generate_zod_schema_method(
             item_name,
             rust_ident,
-            &ts_type_args,
+            &type_parameters,
             &bodies.1,
             "",
             &flatten.1,
@@ -2173,6 +2197,7 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
         &module_ident,
         &item_name,
         &rust_ident,
+        &type_parameters_in_scope(&item_struct.generics),
         schema_example_method.as_ref(),
         validate_method,
     );
@@ -2315,26 +2340,17 @@ fn build_tuple_struct_ts_definition_method(
 }
 
 /// Builds the `zod_schema()` method for a tuple struct's schema module, in the same framing every
-/// unbranded type publishes: the raw schema, then the exported binding annotated with the
-/// TypeScript type the module's own `ts_definition()` writes.
+/// unbranded type publishes: the annotated binding, or the factory when the tuple struct declares
+/// parameters.
 #[cfg(feature = "zod")]
 fn build_tuple_struct_zod_schema_method(
     item_name: &str,
     rust_ident: &str,
-    ts_type_args: &str,
+    parameters: &[String],
     zod_body: &str,
 ) -> proc_macro2::TokenStream {
-    let reexport = ident_reexport_zod(rust_ident, item_name);
-    #[cfg(feature = "typescript")]
-    let schema_str = format!(
-        "const {item_name}$RawSchema = {zod_body};\n\nexport const {item_name}$Schema: ZodType<{item_name}{ts_type_args}> = {item_name}$RawSchema;{reexport}"
-    );
-    // The annotation is the only place the arguments are written, and a zod-only build has no
-    // `ZodType` to annotate with.
-    #[cfg(not(feature = "typescript"))]
-    let _: &_ = &ts_type_args;
-    #[cfg(not(feature = "typescript"))]
-    let schema_str = format!("export const {item_name}$Schema = {zod_body};{reexport}");
+    let reexport = ident_reexport_zod(rust_ident, item_name, zod_binding_suffix(parameters));
+    let schema_str = zod_published_binding(item_name, parameters, "", zod_body, &reexport);
     quote! {
         pub fn zod_schema() -> String {
             #schema_str.to_owned()
@@ -2393,7 +2409,7 @@ fn process_tuple_struct(
         build_tuple_struct_zod_schema_method(
             &item_name,
             &name.to_string(),
-            &erased_type_arguments(&item_struct.generics),
+            &type_parameters_in_scope(&item_struct.generics),
             &tuple_struct_zod_body(&slots),
         ),
     ];
@@ -2409,6 +2425,7 @@ fn process_tuple_struct(
         &module_ident,
         &item_name,
         &name.to_string(),
+        &type_parameters_in_scope(&item_struct.generics),
         schema_example_method.as_ref(),
         None,
     );
@@ -2754,9 +2771,12 @@ fn value_surface_field_def(generics: &syn::Generics, written: &FieldDef) -> Fiel
 /// The annotation states the type of the value beside it, and that value was composed with every
 /// parameter erased — so the name it is written under has to be filled in the same way. Naming the
 /// generic bare instead is a TypeScript error in its own right, the type requiring its arguments.
+///
+/// Only an alias reaches this with parameters now: every other generic item publishes a factory,
+/// whose return type is read off the arguments the caller supplied rather than declared ahead of
+/// them.
 #[cfg(feature = "zod")]
-fn erased_type_arguments(generics: &syn::Generics) -> String {
-    let parameters = type_parameters_in_scope(generics);
+fn erased_type_arguments(parameters: &[String]) -> String {
     if parameters.is_empty() {
         return String::new();
     }
@@ -3017,6 +3037,10 @@ fn build_branded_ts_definition_method(
 ///
 /// The value and the annotation are both read off the one erased inner, so the type the binding
 /// claims and the schema it holds cannot describe different things.
+///
+/// A brand publishes a `const` rather than a factory, so a parameter inside its inner has no
+/// argument to name and is opaqued before either is rendered — see
+/// [`FieldDef::with_opaque_type_parameters`].
 #[cfg(feature = "zod")]
 fn build_branded_zod_schema_method(
     args: &ModelSchemaArgs,
@@ -3025,11 +3049,12 @@ fn build_branded_zod_schema_method(
     inner: &FieldDef,
     plain_description: &str,
 ) -> proc_macro2::TokenStream {
-    let zod_inner = branded_zod_inner(args, inner);
-    let reexport = ident_reexport_zod(rust_ident, item_name);
+    let opaque_inner = &inner.clone().with_opaque_type_parameters();
+    let zod_inner = branded_zod_inner(args, opaque_inner);
+    let reexport = ident_reexport_zod(rust_ident, item_name, "$Schema");
     #[cfg(feature = "typescript")]
     {
-        let zod_type_name = branded_zod_type_name(inner);
+        let zod_type_name = branded_zod_type_name(opaque_inner);
         let zod_type_annotation = format!("$ZodBranded<{zod_type_name}, \"{item_name}\">");
         quote! {
             pub fn zod_schema() -> String {
@@ -4208,7 +4233,7 @@ fn process_discriminated_enum(
     let zod_schema_method = generate_discriminated_enum_zod_schema_method(
         item_name,
         &name.to_string(),
-        &erased_type_arguments(&item_enum.generics),
+        &type_parameters_in_scope(&item_enum.generics),
         &schema_code,
     );
 
@@ -4238,6 +4263,7 @@ fn process_discriminated_enum(
         &module_ident,
         item_name,
         &name.to_string(),
+        &type_parameters_in_scope(&item_enum.generics),
         schema_example_method.as_ref(),
         build_enum_validate_method(&variants.3, &module_ident),
     );
@@ -4609,7 +4635,7 @@ fn process_externally_tagged_enum(
     let zod_schema_method = generate_discriminated_enum_zod_schema_method(
         item_name,
         &name.to_string(),
-        &erased_type_arguments(&item_enum.generics),
+        &type_parameters_in_scope(&item_enum.generics),
         &schema_code,
     );
 
@@ -4634,6 +4660,7 @@ fn process_externally_tagged_enum(
         &module_ident,
         item_name,
         &name.to_string(),
+        &type_parameters_in_scope(&item_enum.generics),
         schema_example_method.as_ref(),
         build_enum_validate_method(&variants.3, &module_ident),
     );
@@ -5012,7 +5039,7 @@ fn process_internally_tagged_enum(
     let zod_schema_method = generate_discriminated_enum_zod_schema_method(
         item_name,
         &name.to_string(),
-        &erased_type_arguments(&item_enum.generics),
+        &type_parameters_in_scope(&item_enum.generics),
         &schema_code,
     );
 
@@ -5037,6 +5064,7 @@ fn process_internally_tagged_enum(
         &module_ident,
         item_name,
         &name.to_string(),
+        &type_parameters_in_scope(&item_enum.generics),
         schema_example_method.as_ref(),
         build_enum_validate_method(&variants.3, &module_ident),
     );
@@ -5675,7 +5703,7 @@ fn build_untagged_schema_impl_items(
     let zod_schema_method = generate_discriminated_enum_zod_schema_method(
         item_name,
         &name.to_string(),
-        &erased_type_arguments(generics),
+        &type_parameters_in_scope(generics),
         &schema_code,
     );
 
@@ -5762,6 +5790,7 @@ fn process_untagged_enum(
         &module_ident,
         item_name,
         &name.to_string(),
+        &type_parameters_in_scope(&item_enum.generics),
         schema_example_method.as_ref(),
         build_enum_validate_method(&validate_arms, &module_ident),
     );
@@ -8851,6 +8880,277 @@ fn deferred_zod_operand(schema: &str) -> String {
     format!("z.lazy(() => {schema})")
 }
 
+/// The tokens `typescript_preamble!()` expands to — the preamble as a string literal, or the
+/// `compile_error!` for a call that was handed arguments it has none of.
+#[cfg(feature = "zod")]
+pub fn typescript_preamble_tokens(input: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    if !input.is_empty() {
+        return syn::Error::new_spanned(
+            input,
+            "tixschema: `typescript_preamble!()` takes no arguments",
+        )
+        .to_compile_error();
+    }
+    quote! { #TYPESCRIPT_PREAMBLE }
+}
+
+/// The suffix the binding an item publishes is named with. A generic type publishes a factory —
+/// one schema per filling, built on demand — where a type that declares no parameter publishes the
+/// one schema it has.
+#[cfg(feature = "zod")]
+const fn zod_binding_suffix(parameters: &[String]) -> &'static str {
+    if parameters.is_empty() {
+        "$Schema"
+    } else {
+        "$SchemaFactory"
+    }
+}
+
+/// The identifier holding the expression a factory's arguments compose into. Bound beside the
+/// factory rather than inlined in it, so the factory's return type can be read back off it and
+/// neither can drift from the other.
+#[cfg(feature = "zod")]
+fn zod_factory_builder_name(item_name: &str) -> String {
+    format!("build{item_name}$Schema")
+}
+
+/// The `TypeScript` parameter list a factory and everything written around it are declared under —
+/// `<IdType extends ZodType, DateType extends ZodType>`.
+///
+/// Every parameter is a parameter of the function for real. A bare `ZodType` annotation compiles
+/// and infers nothing: `ZodType` defaults its own parameters, so a field validated by such an
+/// argument comes back as `unknown` and the caller learns nothing from the schema it was handed.
+#[cfg(all(feature = "zod", feature = "typescript"))]
+fn zod_factory_bounds(parameters: &[String]) -> String {
+    format!(
+        "<{}>",
+        parameters
+            .iter()
+            .map(|parameter| format!("{parameter} extends ZodType"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// The argument list a factory and its builder are written with, one line per parameter. Required,
+/// every one of them: a default would let a call site say nothing about a filling and still get a
+/// schema back, which is the silent mis-validation the factory exists to prevent.
+#[cfg(feature = "zod")]
+fn zod_factory_arguments(parameters: &[String]) -> String {
+    parameters.iter().fold(String::new(), |mut acc, parameter| {
+        let argument = zod_factory_argument(parameter);
+        #[cfg(feature = "typescript")]
+        let _ = write!(acc, "\n  {argument}: {parameter},");
+        #[cfg(not(feature = "typescript"))]
+        let _ = write!(acc, "\n  {argument},");
+        acc
+    })
+}
+
+/// The cache interface keying on the parameter at `depth`, named for how many parameters it has
+/// already resolved: the root resolves none, and each level below carries the ones above it.
+#[cfg(all(feature = "zod", feature = "typescript"))]
+fn zod_cache_level_name(item_name: &str, depth: usize) -> String {
+    if depth == 0 {
+        format!("{item_name}$SchemaFactoryCache")
+    } else {
+        format!("{item_name}$SchemaFactoryCacheL{depth}")
+    }
+}
+
+/// What a lookup at `depth` hands back: the level below it while parameters remain, and the schema
+/// itself once the last one is resolved.
+#[cfg(all(feature = "zod", feature = "typescript"))]
+fn zod_cache_level_value(item_name: &str, parameters: &[String], depth: usize) -> String {
+    if depth + 1 == parameters.len() {
+        format!("{item_name}$SchemaOf<{}>", parameters.join(", "))
+    } else {
+        format!(
+            "{}<{}>",
+            zod_cache_level_name(item_name, depth + 1),
+            parameters[..=depth].join(", ")
+        )
+    }
+}
+
+/// One cache interface per parameter, each written generic over the key it is about to resolve and
+/// carrying the parameters resolved above it.
+///
+/// Nesting spelled to the exact depth the type declares rather than looped over: a loop needs a
+/// key type it cannot name and a value it cannot type, which is `unknown` and a cast at every
+/// level. Written out, a lookup comes back already typed and the factory body asserts nothing.
+#[cfg(all(feature = "zod", feature = "typescript"))]
+fn zod_cache_interfaces(item_name: &str, parameters: &[String]) -> String {
+    let mut written = String::new();
+    for depth in (1..parameters.len()).chain(once(0)) {
+        let key = &parameters[depth];
+        let value = zod_cache_level_value(item_name, parameters, depth);
+        let held = if depth == 0 {
+            String::new()
+        } else {
+            zod_factory_bounds(&parameters[..depth])
+        };
+        let _ = write!(
+            written,
+            "interface {}{held} {{\n  get<{key} extends ZodType>(key: {key}): {value} | \
+             undefined;\n  set<{key} extends ZodType>(key: {key}, value: {value}): this;\n}}\n\n",
+            zod_cache_level_name(item_name, depth)
+        );
+    }
+    written
+}
+
+/// The factory's body: walk down to the map the last argument keys, hand back what is already
+/// there, and otherwise build once, store, and return the very schema that was stored — which is
+/// what makes two calls with the same arguments the same schema rather than two that agree.
+///
+/// Every argument is read on the way down, so no two argument lists share a slot: a change in the
+/// first re-keys the outermost map and a change in the last re-keys the one the schema sits in.
+#[cfg(feature = "zod")]
+fn zod_factory_body(item_name: &str, parameters: &[String]) -> String {
+    let arguments: Vec<String> = parameters.iter().map(|p| zod_factory_argument(p)).collect();
+    let mut body = String::new();
+    let mut holder = format!("{item_name}$SchemaFactoryCache");
+    for depth in 1..parameters.len() {
+        let below = format!("by{}", parameters[depth]);
+        let key = &arguments[depth - 1];
+        #[cfg(feature = "typescript")]
+        let fresh = format!(
+            "createSchemaCache<{}<{}>>()",
+            zod_cache_level_name(item_name, depth),
+            parameters[..depth].join(", ")
+        );
+        #[cfg(not(feature = "typescript"))]
+        let fresh = "createSchemaCache()".to_owned();
+        let _ = write!(
+            body,
+            "  let {below} = {holder}.get({key});\n  if (!{below}) {{\n    {below} = \
+             {fresh};\n    {holder}.set({key}, {below});\n  }}\n\n"
+        );
+        holder = below;
+    }
+    let last = arguments.last().map_or_else(String::new, Clone::clone);
+    let _ = write!(
+        body,
+        "  const hit = {holder}.get({last});\n  if (hit) return hit;\n\n  const schema = \
+         {}({});\n  {holder}.set({last}, schema);\n  return schema;",
+        zod_factory_builder_name(item_name),
+        arguments.join(", ")
+    );
+    body
+}
+
+/// What a generic type's Zod surface is written as: the builder holding the schema its arguments
+/// compose into, the return type read back off it, the cache interfaces, and the exported factory.
+///
+/// A Zod schema is a runtime value and TypeScript generics do not exist at runtime, so a generic
+/// type has no one schema to publish — the caller has to say what fills each parameter before
+/// anything can validate. What it publishes instead is the function that answers that, and the
+/// cache is what keeps a filling asked for twice from becoming two schemas.
+#[cfg(feature = "zod")]
+fn zod_factory_block(
+    item_name: &str,
+    parameters: &[String],
+    preamble: &str,
+    expression: &str,
+    reexport: &str,
+) -> String {
+    let builder = zod_factory_builder_name(item_name);
+    let arguments = zod_factory_arguments(parameters);
+    let body = zod_factory_body(item_name, parameters);
+
+    #[cfg(feature = "typescript")]
+    let bounds = zod_factory_bounds(parameters);
+    #[cfg(not(feature = "typescript"))]
+    let bounds = String::new();
+
+    // A merged object binds its own keys ahead of the branches that read them, and those keys are
+    // composed from the arguments — so the binding belongs inside the builder, where the arguments
+    // are in scope, rather than beside it at module level.
+    let built = if preamble.is_empty() {
+        format!("const {builder} = {bounds}({arguments}\n) =>\n  {expression};")
+    } else {
+        format!(
+            "const {builder} = {bounds}({arguments}\n) => {{\n  {preamble}  return {expression};\n}};"
+        )
+    };
+
+    #[cfg(feature = "typescript")]
+    let declarations = format!(
+        "type {item_name}$SchemaOf{bounds} = ReturnType<\n  typeof {builder}<{}>\n>;\n\n{}const \
+         {item_name}$SchemaFactoryCache = \
+         createSchemaCache<{item_name}$SchemaFactoryCache>();\n\n",
+        parameters.join(", "),
+        zod_cache_interfaces(item_name, parameters)
+    );
+    #[cfg(not(feature = "typescript"))]
+    let declarations = format!("const {item_name}$SchemaFactoryCache = createSchemaCache();\n\n");
+
+    #[cfg(feature = "typescript")]
+    let returns = format!(": {item_name}$SchemaOf<{}>", parameters.join(", "));
+    #[cfg(not(feature = "typescript"))]
+    let returns = String::new();
+
+    format!(
+        "{built}\n\n{declarations}export const {item_name}$SchemaFactory = \
+         {bounds}({arguments}\n){returns} => {{\n{body}\n}};{reexport}"
+    )
+}
+
+/// The binding a type that declares no parameter publishes: the raw schema, then the exported
+/// `const` annotated with the type it validates.
+///
+/// The annotation is the only place a TypeScript type is named, so a build without `typescript`
+/// writes the same value under a bare `const`.
+#[cfg(feature = "zod")]
+fn zod_const_block(
+    item_name: &str,
+    ts_type_args: &str,
+    preamble: &str,
+    expression: &str,
+    reexport: &str,
+) -> String {
+    #[cfg(feature = "typescript")]
+    {
+        format!(
+            "{preamble}const {item_name}$RawSchema = {expression};\n\nexport const \
+             {item_name}$Schema: ZodType<{item_name}{ts_type_args}> = \
+             {item_name}$RawSchema;{reexport}"
+        )
+    }
+    #[cfg(not(feature = "typescript"))]
+    {
+        let _: &str = ts_type_args;
+        format!("{preamble}export const {item_name}$Schema = {expression};{reexport}")
+    }
+}
+
+/// The whole of what a type publishes on the Zod surface: a factory when it declares parameters,
+/// and the annotated `const` when it declares none.
+///
+/// The one seam every declared item takes that decision at, so a struct, a tuple struct and an
+/// enum cannot come to answer it differently.
+#[cfg(feature = "zod")]
+fn zod_published_binding(
+    item_name: &str,
+    parameters: &[String],
+    preamble: &str,
+    expression: &str,
+    reexport: &str,
+) -> String {
+    if parameters.is_empty() {
+        zod_const_block(
+            item_name,
+            &erased_type_arguments(parameters),
+            preamble,
+            expression,
+            reexport,
+        )
+    } else {
+        zod_factory_block(item_name, parameters, preamble, expression, reexport)
+    }
+}
+
 /// What one merged source contributes to each branch: one schema per member of the untagged union
 /// it names, and the source itself when it names none.
 #[cfg(feature = "zod")]
@@ -8941,30 +9241,18 @@ fn zod_merged_statements(
 fn generate_zod_schema_method(
     item_name: &str,
     rust_ident: &str,
-    ts_type_args: &str,
+    parameters: &[String],
     schema_code: &str,
     show_opts: &str,
     flatten_schemas: &[MergedOperand],
 ) -> proc_macro2::TokenStream {
     #[cfg(feature = "zod")]
     {
-        let reexport = ident_reexport_zod(rust_ident, item_name);
+        let reexport = ident_reexport_zod(rust_ident, item_name, zod_binding_suffix(parameters));
         let own = format!("z.strictObject({{\n{schema_code}\n}}){show_opts}");
         let (preamble, expression) = zod_merged_statements(item_name, &own, flatten_schemas);
-        // When typescript feature is enabled, generate TypeScript-style Zod schema
-        // Note: Example injection is handled by the delegating method on the type itself
-        #[cfg(feature = "typescript")]
-        let body = format!(
-            "{preamble}const {item_name}$RawSchema = {expression};\n\nexport const \
-             {item_name}$Schema: ZodType<{item_name}{ts_type_args}> = {item_name}$RawSchema;{reexport}"
-        );
-
-        // When typescript feature is disabled, generate JavaScript-style Zod schema, which
-        // carries no annotation for the arguments to fill in.
-        #[cfg(not(feature = "typescript"))]
-        let _: &_ = &ts_type_args;
-        #[cfg(not(feature = "typescript"))]
-        let body = format!("{preamble}export const {item_name}$Schema = {expression};{reexport}");
+        // Note: Example injection is handled by the delegating method on the type itself.
+        let body = zod_published_binding(item_name, parameters, &preamble, &expression, &reexport);
 
         quote::quote! {
             pub fn zod_schema() -> String {
@@ -8978,7 +9266,7 @@ fn generate_zod_schema_method(
         let _: &_ = &(
             item_name,
             rust_ident,
-            ts_type_args,
+            parameters,
             schema_code,
             show_opts,
             flatten_schemas,
@@ -9085,6 +9373,10 @@ fn generate_plain_enum_ts_definition_method(
 #[cfg(feature = "zod")]
 /// Generates the Zod schema method for plain enums (Zod schemas only)
 /// Note: Example injection is handled by the delegating method on the type itself.
+///
+/// A plain enum publishes the one schema it has whatever it declares: Rust refuses a *type*
+/// parameter no variant uses, and every variant of a plain enum is a unit, so there is never a
+/// parameter here for a factory to bind.
 fn generate_plain_enum_zod_schema_method(
     item_name: &str,
     rust_ident: &str,
@@ -9093,7 +9385,7 @@ fn generate_plain_enum_zod_schema_method(
 ) -> proc_macro2::TokenStream {
     #[cfg(feature = "zod")]
     {
-        let reexport = ident_reexport_zod(rust_ident, item_name);
+        let reexport = ident_reexport_zod(rust_ident, item_name, "$Schema");
         // When typescript feature is enabled, generate TypeScript-style Zod schema
         #[cfg(feature = "typescript")]
         {
@@ -9174,37 +9466,23 @@ fn generate_discriminated_enum_ts_definition_method(
 fn generate_discriminated_enum_zod_schema_method(
     item_name: &str,
     rust_ident: &str,
-    ts_type_args: &str,
+    parameters: &[String],
     schema_code: &str,
 ) -> proc_macro2::TokenStream {
     #[cfg(feature = "zod")]
     {
-        let reexport = ident_reexport_zod(rust_ident, item_name);
-        // When typescript feature is enabled, generate TypeScript-style Zod schema
-        #[cfg(feature = "typescript")]
-        {
-            quote::quote! {
-                pub fn zod_schema() -> String {
-                    format!("const {}$RawSchema = {};\n\nexport const {}$Schema: ZodType<{}{}> = {}$RawSchema;{}", #item_name, #schema_code, #item_name, #item_name, #ts_type_args, #item_name, #reexport)
-                }
-            }
-        }
-
-        // When typescript feature is disabled, generate JavaScript-style Zod schema
-        #[cfg(not(feature = "typescript"))]
-        {
-            let _: &_ = &ts_type_args;
-            quote::quote! {
-                pub fn zod_schema() -> String {
-                    format!(r#"export const {}$Schema = {};{}"#, #item_name, #schema_code, #reexport)
-                }
+        let reexport = ident_reexport_zod(rust_ident, item_name, zod_binding_suffix(parameters));
+        let schema_str = zod_published_binding(item_name, parameters, "", schema_code, &reexport);
+        quote::quote! {
+            pub fn zod_schema() -> String {
+                #schema_str.to_owned()
             }
         }
     }
 
     #[cfg(not(feature = "zod"))]
     {
-        let _: &_ = &(item_name, rust_ident, ts_type_args, schema_code);
+        let _: &_ = &(item_name, rust_ident, parameters, schema_code);
         quote::quote! {
             // Zod schema method not available - zod feature disabled
             // To enable: add "zod" to your features
@@ -9336,9 +9614,14 @@ fn generate_alias_zod_method(
         // the null-flavored `z.tuple([...])`, a scalar yields `z.string()`, a sibling
         // yields `Name$Schema`). Bind it to `$RawSchema` and re-export the annotated
         // `$Schema`, mirroring how struct/enum schemas expose their const.
-        let schema_code = value_surface_field_def(&alias.generics, field_def).zod_type();
-        let annotated_name = format!("{export_name}{}", erased_type_arguments(&alias.generics));
-        let reexport = ident_reexport_zod(rust_ident, export_name);
+        let schema_code = value_surface_field_def(&alias.generics, field_def)
+            .with_opaque_type_parameters()
+            .zod_type();
+        let annotated_name = format!(
+            "{export_name}{}",
+            erased_type_arguments(&type_parameters_in_scope(&alias.generics))
+        );
+        let reexport = ident_reexport_zod(rust_ident, export_name, "$Schema");
         quote! {
             pub fn zod_schema() -> String {
                 format!(
