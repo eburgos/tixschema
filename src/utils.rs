@@ -10,10 +10,12 @@ use regex_syntax::ast::{
 };
 use regex_syntax::hir;
 use std::collections::HashMap;
-use syn::{Attribute, Expr, Field, Lit, LitStr, Meta, Variant};
+use syn::{Attribute, Expr, Field, GenericParam, Generics, Lit, LitStr, Meta, Variant};
 
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+use syn::ItemEnum;
 #[cfg(any(feature = "typescript", feature = "zod"))]
-use syn::{ItemEnum, ItemStruct};
+use syn::ItemStruct;
 
 /// The JavaScript engine generation the emitted Zod regex literals and JSON Schema `pattern`
 /// keywords are written for, and therefore the line the guard admits and refuses along.
@@ -127,6 +129,42 @@ pub enum TrivialPattern {
     StartsWith(String),
 }
 
+/// One member of an untagged union as the Zod surface writes it, beside the two things a merge
+/// that flattens the union has to know about it and cannot recover from the spelling.
+///
+/// `branch` is the trail of one-based choices the member sits at, so a member of a nested union is
+/// named `1.2` rather than twice as `2` — the position the JSON-schema merge names the same member
+/// by, the recording being already multiplied out where that merge descends.
+///
+/// `non_object` is what serde writes the member as when that is provably not an object, named by
+/// the JSON type keyword the other surface writes for it. serde flattens structs and maps and
+/// nothing else, so such a member is one no object can be merged with, on any surface.
+///
+/// Both travel under `serde` alone, which is the feature that reads `#[serde(untagged)]` and
+/// `#[serde(flatten)]` at all: without it nothing records a member and nothing merges one, and the
+/// spelling is all the Zod surface still writes.
+#[cfg(feature = "zod")]
+#[derive(Clone)]
+pub struct ZodUnionMember {
+    #[cfg(feature = "serde")]
+    pub branch: Vec<usize>,
+    #[cfg(feature = "serde")]
+    pub non_object: Option<&'static str>,
+    pub spelling: String,
+}
+
+#[cfg(all(feature = "serde", feature = "zod"))]
+impl ZodUnionMember {
+    /// The member's position, spelled the way the JSON-schema merge spells the same one.
+    pub fn branch_path(&self) -> String {
+        self.branch
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<String>>()
+            .join(".")
+    }
+}
+
 #[derive(Clone)]
 pub struct AliasInfo {
     pub export_name: String,
@@ -144,7 +182,7 @@ pub struct AliasInfo {
     /// item. Filled by [`record_zod_union_members`] once the enum's own expansion has rendered
     /// them.
     #[cfg(feature = "zod")]
-    pub zod_union_members: Vec<String>,
+    pub zod_union_members: Vec<ZodUnionMember>,
 }
 
 /// The walk over a parsed `pattern` that collects the rewrites its JavaScript spelling needs and
@@ -553,8 +591,13 @@ pub fn record_value_shape(rust_ident: &str, shape: Option<&'static str>) {
 /// walk is what could not be made to terminate — two unions naming each other is a shape a merge is
 /// free to reach. The recording cannot hold such a cycle, because an entry is only ever built from
 /// entries registered before it.
+///
+/// Each member carries where it sits and whether serde writes it as an object, because the merge is
+/// the position that has to answer for both and the spelling tells it neither. The member itself is
+/// left alone: an untagged enum may hold a scalar, and it is joining that scalar to an object that
+/// no value satisfies.
 #[cfg(feature = "zod")]
-pub fn record_zod_union_members(rust_ident: &str, members: &[String]) {
+pub fn record_zod_union_members(rust_ident: &str, members: &[ZodUnionMember]) {
     ALIAS_INFO.with(|map| {
         if let Some(info) = map.borrow_mut().get_mut(rust_ident) {
             info.zod_union_members = members.to_vec();
@@ -647,6 +690,50 @@ fn ident_reexport_name(rust_ident: &str, export_name: &str) -> Option<String> {
     (referenced != export_name).then_some(referenced)
 }
 
+/// The names an item's own declaration binds as type parameters.
+///
+/// This is the whole of what separates a name the expansion cannot resolve *because it is a
+/// parameter* from one it cannot resolve because the type lives elsewhere: the first is in scope
+/// at the declaration and names no type any emitted output can reference, the second names a type
+/// that publishes its own schema module. Every surface that has to draw that line draws it here —
+/// see [`crate::field_type::FieldDef::erase_type_parameters`] for what each of them then does with
+/// it.
+///
+/// Lifetimes and const parameters name no type a field position can be written out of, so they are
+/// left out. That is also why an emitted `impl` block is spelled from `split_for_impl` instead of
+/// from this list: the block has to carry every parameter the declaration binds, lifetimes and
+/// consts included, while only these can reach a schema.
+pub fn type_parameters_in_scope(generics: &Generics) -> Vec<String> {
+    generics
+        .params
+        .iter()
+        .filter_map(|param| match param {
+            GenericParam::Type(type_param) => Some(type_param.ident.to_string()),
+            GenericParam::Const(_) | GenericParam::Lifetime(_) => None,
+        })
+        .collect()
+}
+
+/// The parameter list a generic item's `TypeScript` declaration is written under — `<IdType>`,
+/// `<IdType, DateType>` — or the empty string for an item that binds none.
+///
+/// Spelled once for the alias, the struct and every enum shape, so the three cannot come to write
+/// the same declaration differently. The names are written as declared, which is what a field
+/// typed with one already renders as: the declaration and the fields it binds have to spell a
+/// parameter the same way or the type does not close.
+///
+/// A lifetime and a const parameter never reach here — they name no type `TypeScript` has a
+/// declaration slot for — so `struct Label<'a>` publishes a plain `export type Label`.
+#[cfg(feature = "typescript")]
+pub fn ts_generic_params(generics: &Generics) -> String {
+    let parameters = type_parameters_in_scope(generics);
+    if parameters.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", parameters.join(", "))
+    }
+}
+
 /// The `TypeScript` line an item publishes under its own Rust ident, or nothing when it is already
 /// exported under it. The parameter list is repeated on both sides so a generic item stays generic
 /// through the re-export.
@@ -694,7 +781,9 @@ pub fn get_struct_docs(item_struct: &ItemStruct) -> Option<Vec<String>> {
     collect_doc_lines(&item_struct.attrs)
 }
 
-#[cfg(any(feature = "typescript", feature = "zod"))]
+/// An enum's doc lines. Reachable in every schema build, not just the two that publish prose: the
+/// `schema_example()` an item's ` ```rust example ` block earns is read off these too.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 pub fn get_enum_docs(item_enum: &ItemEnum) -> Option<Vec<String>> {
     collect_doc_lines(&item_enum.attrs)
 }
