@@ -904,6 +904,18 @@ mod constrained_generic_branded_tests {
     #[serde(transparent)]
     pub struct StrictDocumentId<IdType>(pub IdType);
 
+    /// A declared default naming `StrictDocumentId` at exactly its own declared default — the
+    /// `ProDoctivity` `EcmDocument`/`DocumentId` shape the fold feature was motivated by. Before
+    /// the fix, the comparison read `StrictDocumentId$SchemaDefault`'s emitted text — the
+    /// `.min`/`.max`/`.check` chain and all — against the plain rendering this struct's own field
+    /// computes, so the two could never agree and the fold silently composed an unconstrained
+    /// `StrictDocumentId$SchemaFactory(z.string())` in its place.
+    #[model_schema(default_types(HolderType = StrictDocumentId<String>))]
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct StrictDocumentIdHolder<HolderType> {
+        pub id: HolderType,
+    }
+
     /// The builder every call to the factory runs through carries no string check at all: a caller
     /// filling `IdType` with something other than the declared default — an `ObjectId` schema, say
     /// — must not inherit bounds meant for the default.
@@ -945,6 +957,21 @@ mod constrained_generic_branded_tests {
 
         let too_short: Result<StrictDocumentId<String>, _> = serde_json::from_str("\"abc\"");
         assert!(too_short.is_err(), "Should reject a too-short id via serde");
+    }
+
+    /// `$SchemaDefault` folds onto `StrictDocumentId$SchemaDefault` by reference, carrying the
+    /// 24-hex bounds in rather than reconstructing an unconstrained instantiation the memo would
+    /// not share with it.
+    #[test]
+    fn a_default_naming_the_constrained_brands_own_default_folds_onto_its_binding() {
+        let zod = StrictDocumentIdHolder::<String>::zod_schema();
+        assert!(
+            zod.contains(
+                "= StrictDocumentIdHolder$SchemaFactory(z.lazy(() => \
+                 StrictDocumentId$SchemaDefault));"
+            ),
+            "Got:\n{zod}"
+        );
     }
 }
 
