@@ -794,7 +794,7 @@ A struct, a tuple struct, an enum, an alias and a branded newtype can each name 
 
 **TypeScript binds the parameter for real.** It is a type surface, and the declaration it emits carries the parameter list: `export type Wrapper<T> = { id: T }` is a generic type, and a use site fills `T` in. The one position where it does not is a map's key, which states `string` on all three surfaces — see [Collections and Maps](#collections-and-maps).
 
-**JSON Schema describes it as the open schema** -- `{}`. A parameter names no type until the item is instantiated, and one JSON schema is written for every instantiation, so the parameter admits any value while the shape around it -- an array, a map's keys, a tuple's arity -- stays described.
+**JSON Schema writes the document of whatever fills the parameter.** JSON Schema has no type parameters at all, so a document exists only at one filling: the type `default_types` declares where the document stands on its own, and the reference site's arguments where a field embeds it. The shape around the parameter -- an array, a map's keys, a tuple's arity -- is described either way.
 
 **Zod publishes a factory rather than a schema.** A Zod schema is a runtime value and TypeScript generics do not exist at runtime, so there is no one value a generic type could publish: the caller has to say what fills each parameter before anything can validate. A generic type therefore exports `X$SchemaFactory`, a function taking one required schema argument per parameter, and a field written with a parameter composes the argument bound for it.
 
@@ -877,6 +877,20 @@ pub struct EcmDocument<IdType, DateType> {
 
 The pairs may be written in any order, and the argument sits beside every other item-level argument -- `name`, `pattern`, `minLength`, `maxLength`, `no_display` -- changing none of them. A lifetime and a const parameter name no type, so neither takes an entry.
 
+The declared filling is what `json_schema()` writes the document at. Beside it, a generic type's schema module publishes `json_schema_with`, which takes one document per parameter, positionally, in the order the item declares them:
+
+```rust
+let wire = EcmDocument::<String, f64>::json_schema();
+assert_eq!(wire["properties"]["createdAt"], serde_json::json!({ "type": "number" }));
+
+let stored = ecm_document_schema::Schema::json_schema_with(&[
+    serde_json::json!({ "type": "object", "properties": { "$oid": { "type": "string" } } }),
+    serde_json::json!({ "type": "string", "format": "date-time" }),
+]);
+```
+
+A field naming a generic type reaches that same entry point with the arguments written at the field, so what it embeds is the document its own filling describes -- a `StoredFolder` holding `EcmDocument<ObjectId, DateTime<Utc>>` embeds the `$oid` object and a date-time string, where a `WireFolder` holding `EcmDocument<String, f64>` embeds a string and a number. A parameter forwarded into such a reference carries whatever filled the item forwarding it.
+
 The declaration is read in both directions, and each refusal points at what earned it:
 
 | Written | Verdict |
@@ -923,7 +937,7 @@ const buildWrapperType$Schema = <T extends ZodType>(
 
 Only the item's *own* parameters are read this way. A name the expansion cannot resolve because the type lives elsewhere keeps its `Name$Schema` reference, since that type publishes the binding.
 
-One consequence is worth stating outright: a parameter is a value only where a factory binds one for it, and the one JSON document an item publishes covers every filling it could be handed — so no `model_schema_prop` bound may be spelled against a type parameter. A branded newtype cannot apply `pattern`, `minLength`, or `maxLength` to one of its own — see [Branded Newtype Validation Constraints](#branded-newtype-validation-constraints) — and a *field* typed with one is refused for the same reason, at every depth the parameter is reached through:
+One consequence is worth stating outright: a parameter is a value only where a factory binds one for it, and a JSON document is written at one filling rather than for the type as declared — so no `model_schema_prop` bound may be spelled against a type parameter. A branded newtype cannot apply `pattern`, `minLength`, or `maxLength` to one of its own — see [Branded Newtype Validation Constraints](#branded-newtype-validation-constraints) — and a *field* typed with one is refused for the same reason, at every depth the parameter is reached through:
 
 ```rust
 #[model_schema(default_types(IdType = String))]

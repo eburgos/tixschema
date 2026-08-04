@@ -129,10 +129,11 @@ pub enum FieldDefType {
     /// One of the enclosing item's own type parameters — `IdType` in `struct Wrapper<IdType>`.
     ///
     /// Held apart from [`FieldDefType::SiblingType`] because the three surfaces answer for it
-    /// differently, and only one of them can name it: TypeScript binds the parameter for real, so
-    /// it renders as the name it was written with, while the two validating surfaces render the
-    /// opaque value. [`FieldDef::erase_type_parameters`] is where that rule is written down and
-    /// where a written name becomes this.
+    /// differently, and none of them answers with a reference to a generated type of that name:
+    /// TypeScript binds the parameter for real and renders the name it was written with, Zod binds
+    /// the argument its factory takes for it, and JSON Schema — which has no parameters at all —
+    /// writes the document of whatever filled it. [`FieldDef::erase_type_parameters`] is where that
+    /// rule is written down and where a written name becomes this.
     TypeParam(String),
     U16,
     U32,
@@ -437,11 +438,11 @@ impl FieldDef {
     /// generated type.
     ///
     /// This is the one rule the two validating surfaces read a type parameter under, and the one
-    /// place they part company with TypeScript over it. A parameter names no type at expansion —
-    /// the instantiation names one, and one schema is written for every instantiation. So on those
-    /// two surfaces a parameter describes as an opaque value does (`{}` in JSON Schema,
-    /// `z.unknown()` in Zod), which leaves the shape it sits in — a tuple's arity, an array, a
-    /// map's keys — described. TypeScript needs no such rule: it is a type surface, and
+    /// place they part company with TypeScript over it. A parameter names no type at expansion, so
+    /// neither surface can leave it standing: each renders the filling that reached it instead —
+    /// the argument the enclosing Zod factory binds, the document the JSON caller supplied or the
+    /// item declared for itself — while the shape it sits in, a tuple's arity, an array, a map's
+    /// keys, stays described either way. TypeScript needs no such rule: it is a type surface, and
     /// `export type Wrapper<IdType> = { id: IdType }` binds the parameter for real, so it renders
     /// the name.
     ///
@@ -452,13 +453,13 @@ impl FieldDef {
     /// enclosing item's *own* parameters are rewritten: a genuinely unresolved sibling type keeps
     /// its `$Schema` reference, because the type it names does publish that binding.
     ///
-    /// The rewrite carries into what a schema surface may then claim about the value. A parameter
-    /// is a value on one surface and no value at all on the other — Zod reaches it through the
-    /// argument the enclosing factory binds, while the one JSON document written covers every
-    /// instantiation and so describes it as `{}` — so a branded newtype constraining one of its
-    /// own parameters is refused, through the opaque arm of `non_string_inner_shape` this rewrite
-    /// puts it in front of. Three surfaces answering three ways is the refusal: `minLength` goes
-    /// inert beside a `{}`, while `validate()` still measures `Display`.
+    /// The rewrite carries into what a schema surface may then claim about the value. Each surface
+    /// reaches a parameter through a filling of its own — Zod through the argument the enclosing
+    /// factory binds, JSON through the one document written for the instantiation that asked — so a
+    /// branded newtype constraining one of its own parameters is refused, through the opaque arm of
+    /// `non_string_inner_shape` this rewrite puts it in front of. Three surfaces answering three
+    /// ways is the refusal: a `minLength` written at the declaration would hold against one filling
+    /// on each schema surface, while `validate()` measures `Display` at every instantiation.
     ///
     /// Recurses through `SiblingType` generics, `Map` keys/values, and `Tuple` elements. Applied
     /// after the field guards have read the field, so every guard asks its question of the type
