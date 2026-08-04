@@ -2640,6 +2640,82 @@ fn a_string_filling_annotates_the_example_as_no_filling_does() {
     assert_eq!(render(&filled), render(&super::ModelSchemaArgs::default()));
 }
 
+/// The three shapes a declared default renders as: a primitive's ordinary Zod expression, another
+/// primitive's, and a reference to a generic sibling read back through [`super::default_zod_argument`]
+/// rather than reconstructed. The third row is the one that matters — `DocumentId` is registered as
+/// a factory publisher whose own `$SchemaDefault` was recorded at exactly `z.string()`, and
+/// `IdType = DocumentId<String>` names it at that identical argument, so the render folds onto
+/// `DocumentId$SchemaDefault` instead of composing `DocumentId$SchemaFactory(z.string())` a second
+/// time.
+#[cfg(feature = "zod")]
+#[test]
+fn declared_default_renders_each_shape_the_table_describes() {
+    register_alias_info(
+        "DocumentId",
+        "DocumentId",
+        "document_id_schema",
+        AliasKind::NoEnumMembers,
+    );
+    super::record_zod_factory("DocumentId", true);
+    super::record_zod_default_arguments("DocumentId", vec!["z.string()".to_owned()]);
+
+    for (parameter, filled_at, expected) in [
+        ("IdType", quote::quote! { String }, "z.string()"),
+        ("DateType", quote::quote! { f64 }, "z.number()"),
+        (
+            "IdType",
+            quote::quote! { DocumentId<String> },
+            "DocumentId$SchemaDefault",
+        ),
+    ] {
+        let ty: syn::Type = syn::parse2(filled_at.clone()).unwrap();
+        let default_types = vec![(
+            syn::Ident::new(parameter, proc_macro2::Span::call_site()),
+            ty,
+        )];
+        let field = super::declared_default_field(parameter, &default_types);
+        assert_eq!(
+            super::default_zod_argument(&field),
+            expected,
+            "for `{parameter} = {filled_at}`"
+        );
+    }
+}
+
+/// The fold only fires where the written arguments match the sibling's own recorded default; a
+/// reference to the same generic sibling at a *different* argument still calls its factory, exactly
+/// as an ordinary field naming it does.
+#[cfg(feature = "zod")]
+#[test]
+fn a_default_naming_a_sibling_at_other_than_its_own_default_calls_the_factory() {
+    register_alias_info(
+        "DocumentId",
+        "DocumentId",
+        "document_id_schema",
+        AliasKind::NoEnumMembers,
+    );
+    super::record_zod_factory("DocumentId", true);
+    super::record_zod_default_arguments("DocumentId", vec!["z.string()".to_owned()]);
+
+    let ty: syn::Type = syn::parse_quote!(DocumentId<u32>);
+    let default_types = vec![(syn::parse_quote!(IdType), ty)];
+    let field = super::declared_default_field("IdType", &default_types);
+    assert_eq!(
+        super::default_zod_argument(&field),
+        "DocumentId$SchemaFactory(z.number().int())"
+    );
+}
+
+/// A parameter with no `default_types` entry falls back to `String`, exactly as
+/// [`super::schema_example_value_type`] falls back for the identical absence — reached only in a
+/// build without `jsonschema`, the one feature that requires every parameter to declare one.
+#[cfg(feature = "zod")]
+#[test]
+fn a_parameter_with_no_declared_default_falls_back_to_string() {
+    let field = super::declared_default_field("IdType", &[]);
+    assert_eq!(super::default_zod_argument(&field), "z.string()");
+}
+
 #[cfg(feature = "jsonschema")]
 #[test]
 fn branded_json_schema_method_carries_no_cfg_attribute() {
@@ -2868,8 +2944,9 @@ fn an_alias_type_parameter_is_erased_at_every_depth_on_the_value_surface() {
     ] {
         let alias: syn::ItemType = syn::parse_str(alias_source).unwrap();
         let field_def = super::get_field_def("HolderType", &alias.ty, "");
-        let tokens = super::generate_alias_zod_method(&alias, "HolderType", "Holder", &field_def)
-            .to_string();
+        let tokens =
+            super::generate_alias_zod_method(&alias, "HolderType", "Holder", &field_def, &[])
+                .to_string();
         assert!(
             !tokens.contains("V$Schema"),
             "for {alias_source}, got: {tokens}"
@@ -2905,7 +2982,7 @@ fn alias_zod_method_carries_no_cfg_attribute() {
     );
     let ty: syn::Type = syn::parse_quote!(String);
     let field_def = super::get_field_def("AliasType", &ty, "");
-    let tokens = super::generate_alias_zod_method(&alias, "AliasType", "Alias", &field_def);
+    let tokens = super::generate_alias_zod_method(&alias, "AliasType", "Alias", &field_def, &[]);
     assert_no_cfg_attribute(&tokens, "generate_alias_zod_method");
 }
 

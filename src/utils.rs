@@ -662,6 +662,9 @@ thread_local! {
     /// The names whose items publish a Zod factory. Kept out of [`ALIAS_INFO`] so the answer
     /// survives the item's own registration — see [`record_zod_factory`].
     static ZOD_FACTORY_PUBLISHERS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// Each generic item's own `$SchemaDefault` argument list, one rendered Zod expression per
+    /// parameter in declaration order — see [`record_zod_default_arguments`].
+    static ZOD_DEFAULT_ARGUMENTS: RefCell<HashMap<String, Vec<String>>> = RefCell::new(HashMap::new());
 }
 
 thread_local! {
@@ -890,6 +893,29 @@ pub fn record_zod_factory(rust_ident: &str, publishes: bool) {
 #[cfg(feature = "zod")]
 pub fn publishes_zod_factory(rust_ident: &str) -> bool {
     ZOD_FACTORY_PUBLISHERS.with(|names| names.borrow().contains(rust_ident))
+}
+
+/// Records the Zod argument list `rust_ident`'s own `$SchemaDefault` calls its factory with, one
+/// rendered expression per parameter in declaration order.
+///
+/// Recorded once as the item's `$SchemaDefault` is built, so a later item whose own declared
+/// default names this one at the identical arguments can read them back and fold onto this
+/// binding instead of composing a second call the memo cache does not share with it — two
+/// separately written `z.string()` calls are two different objects, and the cache keys on argument
+/// identity, not on what the argument says.
+#[cfg(feature = "zod")]
+pub fn record_zod_default_arguments(rust_ident: &str, arguments: Vec<String>) {
+    ZOD_DEFAULT_ARGUMENTS.with(|map| {
+        map.borrow_mut().insert(rust_ident.to_owned(), arguments);
+    });
+}
+
+/// The argument list [`record_zod_default_arguments`] recorded for `rust_ident`, or `None` where
+/// nothing was — the item declares no parameter, has not registered yet, or this build never
+/// reads defaults at all.
+#[cfg(feature = "zod")]
+pub fn zod_default_arguments(rust_ident: &str) -> Option<Vec<String>> {
+    ZOD_DEFAULT_ARGUMENTS.with(|map| map.borrow().get(rust_ident).cloned())
 }
 
 /// The characters a `\d`, `\w` or `\s` covers in *both* engines, written out as a class body.

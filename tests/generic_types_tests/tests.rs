@@ -238,9 +238,10 @@ mod zod {
     #[cfg(all(feature = "chrono", feature = "object_id"))]
     use super::MixedArguments;
     use super::{
-        Adjacent, Carried, Envelope, External, FolderTree, Holder, Internal, KeyedByParameter,
-        LifetimeStruct, Pair, PlainConst, Positional, Quintet, Referrer, Summarised, Tagged,
-        Untagged, WireFolder, Wrapper, keyed_alias_schema,
+        Adjacent, Carried, EchoedDefault, EcmDocument, Envelope, External, FolderTree, Holder,
+        Internal, KeyedByParameter, LifetimeStruct, OverriddenDefault, Pair, PlainConst,
+        Positional, Quintet, Referrer, Summarised, Tagged, Untagged, WireFolder, Wrapper,
+        keyed_alias_schema,
     };
 
     /// A record key has to produce string keys, and serde says every instantiation this map has
@@ -395,7 +396,8 @@ mod zod {
     }
 
     /// A const parameter and a lifetime name no type, so neither reaches a schema and there is
-    /// nothing for a factory to bind — the item publishes the one schema it has.
+    /// nothing for a factory to bind — the item publishes the one schema it has, and no default
+    /// beside it: a `$SchemaDefault` calls a factory, and there is none to call.
     #[test]
     fn an_item_binding_no_type_parameter_still_publishes_a_schema() {
         for (name, zod) in [
@@ -404,6 +406,7 @@ mod zod {
         ] {
             assert!(publishes_a_schema_const(&zod, name), "Got: {zod}");
             assert!(!zod.contains("$SchemaFactory"), "Got: {zod}");
+            assert!(!zod.contains("$SchemaDefault"), "Got: {zod}");
         }
     }
 
@@ -417,6 +420,91 @@ mod zod {
             "Got: {zod}"
         );
         assert!(!publishes_a_schema_const(&zod, "Holder"), "Got: {zod}");
+    }
+
+    /// The re-export covers both bindings a generic item publishes, not only the factory it always
+    /// had — a renamed item's alias answers to `$SchemaDefault` exactly as it answers to
+    /// `$SchemaFactory`.
+    #[test]
+    fn the_default_is_reexported_alongside_the_factory() {
+        let zod = Holder::<String>::zod_schema();
+        assert!(
+            zod.contains("export const Holder$SchemaDefault = RenamedHolder$SchemaDefault;"),
+            "Got: {zod}"
+        );
+    }
+
+    /// A generic item's `$SchemaDefault` is the factory called with each parameter's declared
+    /// default — the ordinary case a consumer no longer has to construct by hand.
+    #[test]
+    fn a_generic_type_publishes_a_default_through_its_own_factory() {
+        let zod = Wrapper::<String>::zod_schema();
+        assert!(
+            zod.contains("export const Wrapper$SchemaDefault"),
+            "Got: {zod}"
+        );
+        assert!(
+            zod.contains("= Wrapper$SchemaFactory(z.string());"),
+            "Got: {zod}"
+        );
+    }
+
+    /// Under `typescript`, the default carries an annotation naming the instantiation it validates
+    /// — the one place a `TypeScript` type is spelled for a binding a factory otherwise reads its
+    /// return type back off.
+    #[cfg(feature = "typescript")]
+    #[test]
+    fn the_default_is_annotated_with_the_instantiation_it_validates() {
+        let zod = Wrapper::<String>::zod_schema();
+        assert!(
+            zod.contains(
+                "export const Wrapper$SchemaDefault: ZodType<Wrapper<string>> = \
+                 Wrapper$SchemaFactory(z.string());"
+            ),
+            "Got: {zod}"
+        );
+    }
+
+    /// Two parameters fill two arguments, each read off its own `default_types` entry and written
+    /// in declaration order.
+    #[test]
+    fn a_two_parameter_default_fills_each_argument_in_declaration_order() {
+        let zod = EcmDocument::<String, f64>::zod_schema();
+        assert!(
+            zod.contains("export const EcmDocument$SchemaDefault"),
+            "Got: {zod}"
+        );
+        assert!(
+            zod.contains("= EcmDocument$SchemaFactory(z.string(), z.number());"),
+            "Got: {zod}"
+        );
+    }
+
+    /// A declared default naming another generic item at exactly the arguments that item calls its
+    /// own default folds the argument onto that item's own `$SchemaDefault`, so the checks and
+    /// brand it declared are carried in by reference instead of rebuilt under a `z.string()` the
+    /// memo would not share with it.
+    #[test]
+    fn a_default_naming_a_siblings_own_default_folds_onto_its_binding() {
+        let zod = EchoedDefault::<String>::zod_schema();
+        assert!(
+            zod.contains("= EchoedDefault$SchemaFactory(Tagged$SchemaDefault);"),
+            "Got: {zod}"
+        );
+    }
+
+    /// The same shape at a filling that names the sibling at an argument other than its own
+    /// default — the fold does not fire, and the reference still calls the sibling's factory
+    /// exactly as an ordinary field naming it does.
+    #[test]
+    fn a_default_naming_a_sibling_at_another_filling_still_calls_its_factory() {
+        let zod = OverriddenDefault::<String>::zod_schema();
+        assert!(
+            zod.contains(
+                "= OverriddenDefault$SchemaFactory(Tagged$SchemaFactory(z.number().int()));"
+            ),
+            "Got: {zod}"
+        );
     }
 
     /// A base is read when the intersection is used rather than while the value holding it is
@@ -1507,6 +1595,28 @@ pub struct Perch {
 pub struct Summarised<ValueType> {
     pub boxed: Boxed<ValueType>,
     pub tagged: Tagged<ValueType>,
+}
+
+/// A `default_types` entry naming another generic item at exactly the arguments that item calls
+/// its own default — the fold that lets the argument read `Tagged$SchemaDefault` rather than
+/// reconstruct `Tagged$SchemaFactory(z.string())` beside it, a call the memo would not share with
+/// `Tagged`'s own binding. Read by the Zod surface alone, which is the only one that renders a
+/// declared default as an argument.
+#[cfg(feature = "zod")]
+#[model_schema(default_types(HolderType = Tagged<String>))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EchoedDefault<HolderType> {
+    pub held: HolderType,
+}
+
+/// The same shape at a filling that names `Tagged` at an argument other than its own declared
+/// default — the whole of the evidence that the fold is conditioned on the arguments matching
+/// rather than firing for any reference to a generic sibling.
+#[cfg(feature = "zod")]
+#[model_schema(default_types(HolderType = Tagged<u32>))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverriddenDefault<HolderType> {
+    pub held: HolderType,
 }
 
 /// A generic type that names itself, at the filling it was entered at — the cycle a document

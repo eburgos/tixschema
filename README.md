@@ -798,7 +798,7 @@ A struct, a tuple struct, an enum, an alias and a branded newtype can each name 
 
 **JSON Schema writes the document of whatever fills the parameter.** JSON Schema has no type parameters at all, so a document exists only at one filling: the type `default_types` declares where the document stands on its own, and the reference site's arguments where a field embeds it. The shape around the parameter -- an array, a map's keys, a tuple's arity -- is described either way.
 
-**Zod publishes a factory rather than a schema.** A Zod schema is a runtime value and TypeScript generics do not exist at runtime, so there is no one value a generic type could publish: the caller has to say what fills each parameter before anything can validate. A generic type therefore exports `X$SchemaFactory`, a function taking one required schema argument per parameter, and a field written with a parameter composes the argument bound for it.
+**Zod publishes a factory rather than a schema -- and a default beside it.** A Zod schema is a runtime value and TypeScript generics do not exist at runtime, so there is no one value a generic type could publish: the caller has to say what fills each parameter before anything can validate. A generic type therefore exports `X$SchemaFactory`, a function taking one required schema argument per parameter, and a field written with a parameter composes the argument bound for it. It also exports `X$SchemaDefault`: the factory called at the type's own declared `default_types`, memoized like any other call, so a consumer who wants the ordinary filling never constructs the argument list by hand.
 
 **With the `jsonschema` feature on, every type parameter needs a declared default type.** JSON Schema has no type parameters, so its document has to be built from one concrete filling, and `default_types` is where that filling is named — see [Declaring the default type](#declaring-the-default-type) below.
 
@@ -848,6 +848,8 @@ export const Wrapper$SchemaFactory = <IdType extends ZodType>(
   Wrapper$SchemaFactoryCache.set(idType, schema);
   return schema;
 };
+
+export const Wrapper$SchemaDefault: ZodType<Wrapper<string>> = Wrapper$SchemaFactory(z.string());
 ```
 
 Every parameter is a real TypeScript type parameter, never a bare `ZodType` annotation: `ZodType` defaults its own parameters, so an argument annotated with it would infer every field it validates as `unknown` and the caller would learn nothing from the schema handed back. Arguments are required -- a default would let a call site say nothing about a filling and still be handed a schema, which is exactly the silent mis-validation the factory exists to prevent.
@@ -860,6 +862,8 @@ const storedDocument = EcmDocument$SchemaFactory(objectIdSchema, z.date());
 
 EcmDocument$SchemaFactory(z.string(), z.number()) === wireDocument;  // false -- fresh arguments, new key
 ```
+
+That is why `$SchemaDefault` is written as a call through the factory rather than composed inline: a declared default that itself names another generic item -- `default_types(IdType = DocumentId<String>)` -- reads back `DocumentId`'s own `$SchemaDefault` rather than reconstructing `DocumentId$SchemaFactory(z.string())` from scratch. The two calls would key different cache entries even though they mean the same filling, so reading the sibling's binding back is what keeps `EcmDocument$SchemaDefault` sharing the one `DocumentId` schema everything else that asks for the ordinary filling shares too.
 
 A generic type that also flattens keeps the deferred read of its base, so declaration order stays irrelevant: `.and(z.lazy(() => Envelope$Schema))` composes inside the factory unchanged.
 
@@ -924,6 +928,8 @@ let stored = ecm_document_schema::Schema::json_schema_with(&[
 ```
 
 A field naming a generic type reaches that same entry point with the arguments written at the field, so what it embeds is the document its own filling describes -- a `StoredFolder` holding `EcmDocument<ObjectId, DateTime<Utc>>` embeds the `$oid` object and a date-time string, where a `WireFolder` holding `EcmDocument<String, f64>` embeds a string and a number. A parameter forwarded into such a reference carries whatever filled the item forwarding it.
+
+Zod reads the same declaration for `EcmDocument$SchemaDefault` -- see [Type Parameters](#type-parameters) above -- so the JSON document a standalone type describes and the Zod schema its ordinary filling validates against are built from the one statement of what that filling is, never two.
 
 The declaration is read in both directions, and each refusal points at what earned it:
 
@@ -1037,6 +1043,8 @@ export const UserId$SchemaFactory = <IdType extends ZodType>(
   UserId$SchemaFactoryCache.set(idType, schema);
   return schema;
 };
+
+export const UserId$SchemaDefault: ZodType<UserId<string>> = UserId$SchemaFactory(z.string());
 
 export type CorrelationId = string & $brand<"CorrelationId">;
 const CorrelationId$RawSchema = z.string().brand<"CorrelationId">().meta({
@@ -1335,6 +1343,8 @@ export const DocumentId$SchemaFactory = <IdType extends ZodType>(
   DocumentId$SchemaFactoryCache.set(idType, schema);
   return schema;
 };
+
+export const DocumentId$SchemaDefault: ZodType<DocumentId<string>> = DocumentId$SchemaFactory(z.string());
 ```
 
 ## Field Validation (`model_schema_prop`)
