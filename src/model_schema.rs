@@ -678,6 +678,18 @@ struct VariantParts {
     type_code: String,
 }
 
+/// What [`zod_default_block`] and [`zod_factory_block`] need beyond the item's own name and
+/// parameter list, bundled into one reference because the two already carry as many positional
+/// parameters as `clippy::too_many_arguments` admits.
+///
+/// `constrained` is `None` for every item but a branded newtype's own — see
+/// [`zod_default_block`]'s doc comment for what it names.
+#[cfg(feature = "zod")]
+struct ZodDefaultInputs<'defaults> {
+    constrained: Option<(&'defaults str, &'defaults str)>,
+    default_types: &'defaults [(syn::Ident, syn::Type)],
+}
+
 #[cfg(feature = "jsonschema")]
 impl MapMemberItem {
     /// The item wrapped for its slot, kept in the form it arrived in.
@@ -2972,13 +2984,23 @@ fn branded_option_inner_error(
 /// the Rust one. A sequence wrapper is the one `SiblingType` spelling that says its shape outright
 /// without being asked, and is refused as the array it is.
 ///
-/// One of the brand's *own* type parameters is not such a name: it says its shape outright too,
-/// because both validating surfaces have already settled that it has none. Reading the inner off
-/// [`surface_field_def`] puts it in front of the opaque arm, where it belongs — Zod 4's
-/// `z.unknown()` carries no `.min`/`.max` at all, and `.brand()` returns the same instance rather
-/// than a wrapper that could, so there is nothing for the checks to attach to; JSON Schema's
-/// string keywords go inert beside the `{}` a parameter describes as; and `validate()` still
-/// measures `Display`. Three surfaces, three answers — the disagreement this guard exists to stop.
+/// One of the brand's *own* type parameters is not asked of the registry — nothing is registered
+/// under a parameter's own name — but nor is it refused outright the way it once was. It is asked
+/// of the item's own `default_types` declaration instead, the same declaration
+/// [`default_zod_argument`] reads when it composes `$SchemaDefault`'s arguments: the *factory*'s
+/// parameter still says its shape outright, because a caller supplying `ObjectId$Schema` must not
+/// inherit string bounds meant for `String`, so [`branded_zod_inner`] never appends a check to the
+/// bare parameter it renders inside the builder. What the checks reach instead is the default
+/// argument the factory is called with to produce `$SchemaDefault` — and a declared default is a
+/// concrete filling, which is exactly the case the next paragraph already admits for a *named*
+/// argument. So this guard resolves the same declaration [`declared_default_field`] resolves and
+/// asks [`non_string_inner_shape`] the same question of it: string-shaped, the checks compose onto
+/// that default and the declaration compiles; not string-shaped, the refusal below names the
+/// default rather than the parameter, because the default is what the author has to change. An
+/// entry the declaration left out is not asked here at all — a build generating JSON documents
+/// already refuses that under `jsonschema`, and a build that does not falls back to the same
+/// `String` every other reader of an absent entry falls back to, which carries the checks same as
+/// a written one would.
 ///
 /// A name written *over* one of those parameters is the same answer reached one module out, and is
 /// refused ahead of the registry entirely. `Later<T>` names a type whose schema the brand composes
@@ -3025,6 +3047,19 @@ fn branded_constraint_inner_error(
         );
         return Some(syn::Error::new_spanned(inner_field, message).to_compile_error());
     }
+    if !inner.is_array()
+        && let FieldDefType::TypeParam(parameter) = &inner.field_type
+    {
+        let default = declared_default_field(parameter, &args.default_types);
+        // `None` here means string-shaped — including the `String` fallback for an entry the
+        // declaration left out — so the bare parameter is admitted exactly where a concrete
+        // argument of the same shape would be.
+        return non_string_inner_shape(&default).map(|_| {
+            let default_ty = declared_default_type_name(parameter, &args.default_types);
+            let message = declared_default_constraint_message(name, parameter, &default_ty);
+            syn::Error::new_spanned(inner_field, message).to_compile_error()
+        });
+    }
     let message = match (&inner.field_type, non_string_inner_shape(&inner)) {
         (FieldDefType::SiblingType(inner_name, _), Some(shape)) => {
             named_inner_constraint_message(&name.to_string(), inner_name, shape)
@@ -3040,6 +3075,37 @@ fn branded_constraint_inner_error(
         (_, None) => return None,
     };
     Some(syn::Error::new_spanned(inner_field, message).to_compile_error())
+}
+
+/// The Rust spelling of `parameter`'s declared default, for the refusal that names it — `String`
+/// for an entry the declaration left out, the same fallback [`declared_default_field`] resolves to
+/// a `FieldDef` from. Only reached once that fallback has already proven *not* string-shaped, so
+/// the fallback branch here is unreachable in practice; it is total anyway because a refusal
+/// message is not the place to let a lookup miss go unspelled.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn declared_default_type_name(
+    parameter: &str,
+    default_types: &[(syn::Ident, syn::Type)],
+) -> String {
+    default_types
+        .iter()
+        .find(|(declared, _)| declared == parameter)
+        .map_or_else(|| "String".to_owned(), |(_, ty)| quote! { #ty }.to_string())
+}
+
+/// Why a constrained brand's bare-parameter inner is refused when its *declared default* — not the
+/// parameter — turns out not to be string-shaped: the default is what `$SchemaDefault` composes
+/// the checks onto, so a default the checks cannot measure is refused in its place.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn declared_default_constraint_message(name: &Ident, parameter: &str, default_ty: &str) -> String {
+    format!(
+        "model_schema: branded newtype `{name}` applies string constraints (pattern, minLength, \
+         maxLength), but its declared default for `{parameter}` is `{default_ty}`, which cannot \
+         carry them: Zod reads `.min`/`.max` as bounds on the value itself and has no regex check \
+         for a non-string schema, JSON Schema ignores `minLength`/`maxLength`/`pattern` outside \
+         `\"type\": \"string\"`, and `validate()` measures the inner's `Display` rendering. \
+         Declare a string-typed default, or drop the constraints."
+    )
 }
 
 /// The consult a constrained brand leaves unanswered, for the expansion that registers the name to
@@ -4843,11 +4909,17 @@ fn branded_inner_composite(inner: &FieldDef) -> Option<BrandedComposite> {
 /// its `Display` is the `$oid` member and the checks land there.
 ///
 /// The inner is the def [`surface_field_def`] has already erased the brand's own type
-/// parameters out of, so a parameter composes into the value as `z.unknown()` rather than as a
-/// binding nothing declares. The checks never land on one: an opaque inner carries no string for
-/// them to measure and is refused by [`branded_constraint_inner_error`] before this.
+/// parameters out of, so a parameter composes into the value as the argument the factory binds
+/// for it rather than as a binding nothing declares. A bare parameter carries no checks here even
+/// when the brand declares them: the factory's argument is whatever a caller supplies, and a
+/// caller supplying `ObjectId$Schema` must not inherit string bounds meant for the declared
+/// default. Those checks are appended once, to the default argument `$SchemaDefault` composes the
+/// factory with — see [`zod_default_block`] — never to the parameter this function renders.
 #[cfg(feature = "zod")]
 fn branded_zod_inner(args: &ModelSchemaArgs, inner: &FieldDef) -> String {
+    if !inner.is_array() && matches!(inner.field_type, FieldDefType::TypeParam(_)) {
+        return inner.zod_type();
+    }
     let checks = branded_zod_string_checks(args);
     #[cfg(feature = "object_id")]
     if branded_inner_is_object_id(inner) {
@@ -4990,6 +5062,11 @@ fn branded_zod_expression(
 /// class read off its inner, rather than with the `ZodType<Name>` every other `const` carries: the
 /// brand is what the annotation has to state, and only the value it wraps says which class it is.
 /// A factory needs no such annotation — its return type is read back off the builder.
+///
+/// When the brand carries string constraints over a bare-parameter inner — the case
+/// [`branded_constraint_inner_error`] admits rather than refuses — the checks are routed onto
+/// `$SchemaDefault`'s argument for that parameter, never onto the factory's own. See
+/// [`zod_default_block`].
 #[cfg(feature = "zod")]
 fn build_branded_zod_schema_method(
     args: &ModelSchemaArgs,
@@ -5004,11 +5081,22 @@ fn build_branded_zod_schema_method(
     let body = if parameters.is_empty() {
         branded_zod_const_block(item_name, inner, &expression, &reexport)
     } else {
+        let checks = branded_zod_string_checks(args);
+        let constrained_default = match (&inner.field_type, checks.is_empty()) {
+            (FieldDefType::TypeParam(parameter), false) if !inner.is_array() => {
+                Some((parameter.as_str(), checks.as_str()))
+            }
+            _ => None,
+        };
+        let defaults = ZodDefaultInputs {
+            default_types: &args.default_types,
+            constrained: constrained_default,
+        };
         zod_factory_block(
             item_name,
             rust_ident,
             parameters,
-            &args.default_types,
+            &defaults,
             "",
             &expression,
             &reexport,
@@ -12200,10 +12288,12 @@ fn zod_factory_memoized_binding(item_name: &str, parameters: &[String]) -> Strin
 }
 
 /// The `FieldDef` one `default_types` entry parses as: the declared filling for `parameter`, or —
-/// absent one — `String`, [`schema_example_value_type`]'s own fallback for the identical gap.
-/// Reached only in a build without `jsonschema`, the one feature that requires every parameter to
-/// declare one.
-#[cfg(feature = "zod")]
+/// absent one — `String`, [`schema_example_value_type`]'s own fallback for the identical gap. The
+/// fallback is only ever the *answer* in a build without `jsonschema`, the one feature that
+/// requires every parameter to declare one — but the constrained-brand guard,
+/// [`branded_constraint_inner_error`], reads this in every build, string constraints being a
+/// question the Zod and Rust surfaces answer regardless of `jsonschema`.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn declared_default_field(parameter: &str, default_types: &[(syn::Ident, syn::Type)]) -> FieldDef {
     default_types
         .iter()
@@ -12273,18 +12363,37 @@ fn default_zod_argument(field: &FieldDef) -> String {
 /// returns, so an item declared below this one can read it back through [`default_zod_argument`]
 /// and fold onto this very binding where its own declared default names this item at the same
 /// arguments.
+///
+/// `defaults.constrained` names the one parameter, if any, a branded newtype's own
+/// `pattern`/`minLength`/`maxLength` land on — the parameter its bare-parameter inner *is* —
+/// together with the check chain [`branded_zod_string_checks`] built for it. Every ordinary
+/// generic struct, tuple struct, enum and alias passes `None`: only a brand carries type-level
+/// string constraints, and [`branded_zod_inner`] already keeps them off the factory's own
+/// parameter, so the one place left for them is the default argument built here.
 #[cfg(feature = "zod")]
 fn zod_default_block(
     item_name: &str,
     rust_ident: &str,
     parameters: &[String],
-    default_types: &[(syn::Ident, syn::Type)],
+    defaults: &ZodDefaultInputs<'_>,
 ) -> String {
     let fields: Vec<FieldDef> = parameters
         .iter()
-        .map(|parameter| declared_default_field(parameter, default_types))
+        .map(|parameter| declared_default_field(parameter, defaults.default_types))
         .collect();
-    let arguments: Vec<String> = fields.iter().map(default_zod_argument).collect();
+    let arguments: Vec<String> = parameters
+        .iter()
+        .zip(&fields)
+        .map(|(parameter, field)| {
+            let argument = default_zod_argument(field);
+            match defaults.constrained {
+                Some((target, checks)) if target == parameter.as_str() => {
+                    format!("{argument}{checks}")
+                }
+                _ => argument,
+            }
+        })
+        .collect();
     record_zod_default_arguments(rust_ident, arguments.clone());
 
     #[cfg(feature = "typescript")]
@@ -12316,12 +12425,14 @@ fn zod_default_block(
 /// Beside the factory, this also publishes `$SchemaDefault` — see [`zod_default_block`] — the
 /// factory called at the item's own declared defaults, so a consumer who wants the ordinary
 /// filling never has to construct the argument list by hand.
+///
+/// `defaults` is passed straight through to [`zod_default_block`].
 #[cfg(feature = "zod")]
 fn zod_factory_block(
     item_name: &str,
     rust_ident: &str,
     parameters: &[String],
-    default_types: &[(syn::Ident, syn::Type)],
+    defaults: &ZodDefaultInputs<'_>,
     preamble: &str,
     expression: &str,
     reexport: &str,
@@ -12362,7 +12473,7 @@ fn zod_factory_block(
     #[cfg(not(feature = "typescript"))]
     let returns = String::new();
 
-    let default_block = zod_default_block(item_name, rust_ident, parameters, default_types);
+    let default_block = zod_default_block(item_name, rust_ident, parameters, defaults);
 
     format!(
         "{built}\n\n{declarations}export const {item_name}$SchemaFactory = \
@@ -12395,7 +12506,9 @@ fn zod_const_block(item_name: &str, preamble: &str, expression: &str, reexport: 
 ///
 /// The one seam every item takes that decision at, so a struct, a tuple struct, an enum and an
 /// alias cannot come to answer it differently. A branded newtype takes the same decision beside
-/// this one, because only its `const` half differs — see [`branded_zod_const_block`].
+/// this one, because only its `const` half differs — see [`branded_zod_const_block`]. None of
+/// these items carries type-level string constraints — that is a brand's alone — so the factory is
+/// always built with no constrained parameter to route checks onto.
 #[cfg(feature = "zod")]
 fn zod_published_binding(
     item_name: &str,
@@ -12409,14 +12522,12 @@ fn zod_published_binding(
     if parameters.is_empty() {
         zod_const_block(item_name, preamble, expression, reexport)
     } else {
-        zod_factory_block(
-            item_name,
-            rust_ident,
-            parameters,
+        let defaults = ZodDefaultInputs {
             default_types,
-            preamble,
-            expression,
-            reexport,
+            constrained: None,
+        };
+        zod_factory_block(
+            item_name, rust_ident, parameters, &defaults, preamble, expression, reexport,
         )
     }
 }
