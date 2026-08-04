@@ -5076,7 +5076,10 @@ fn collect_untagged_members(
 /// it, a `|` union, a `z.union`. The joins live next to the method that reads them because each is
 /// read exactly once and every one is feature-gated; keeping the pair together is what lets a
 /// disabled surface take its join with it.
-#[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
+#[cfg(all(
+    feature = "serde",
+    any(feature = "zod", feature = "typescript", feature = "jsonschema")
+))]
 fn build_untagged_schema_impl_items(
     name: &syn::Ident,
     item_name: &str,
