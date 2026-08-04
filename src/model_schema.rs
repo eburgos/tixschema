@@ -33,7 +33,9 @@ use crate::utils::type_parameters_in_scope;
 use core::iter::once;
 
 #[cfg(feature = "zod")]
-use crate::utils::{escape_js_regex_literal, extract_example_from_docs, zod_factory_argument};
+use crate::utils::{
+    escape_js_regex_literal, extract_example_from_docs, record_zod_factory, zod_factory_argument,
+};
 
 #[cfg(all(feature = "zod", feature = "object_id"))]
 use crate::features::object_id::get_object_id_zod_schema_with;
@@ -1005,7 +1007,11 @@ fn build_struct_delegate_items(
     #[cfg(feature = "zod")]
     let has_example = schema_example_method.is_some();
     #[cfg(feature = "zod")]
-    let reexport = ident_reexport_zod(rust_ident, item_name, zod_binding_suffix(parameters));
+    let reexport = ident_reexport_zod(
+        rust_ident,
+        item_name,
+        zod_binding_suffix(rust_ident, parameters),
+    );
     #[cfg(not(feature = "zod"))]
     let _: &_ = &(item_name, rust_ident, parameters);
     #[cfg(not(feature = "zod"))]
@@ -2471,7 +2477,11 @@ fn build_tuple_struct_zod_schema_method(
     parameters: &[String],
     zod_body: &str,
 ) -> proc_macro2::TokenStream {
-    let reexport = ident_reexport_zod(rust_ident, item_name, zod_binding_suffix(parameters));
+    let reexport = ident_reexport_zod(
+        rust_ident,
+        item_name,
+        zod_binding_suffix(rust_ident, parameters),
+    );
     let schema_str = zod_published_binding(item_name, parameters, "", zod_body, &reexport);
     quote! {
         pub fn zod_schema() -> String {
@@ -9127,8 +9137,13 @@ pub fn typescript_preamble_tokens(input: proc_macro2::TokenStream) -> proc_macro
 /// The suffix the binding an item publishes is named with. A generic type publishes a factory —
 /// one schema per filling, built on demand — where a type that declares no parameter publishes the
 /// one schema it has.
+///
+/// Recorded on the item's registry entry as it is decided, because a reference to the item is
+/// written from it too and cannot read it off its own spelling — see [`record_zod_factory`]. This
+/// is the one place the decision is taken, so the binding and every reference to it move together.
 #[cfg(feature = "zod")]
-const fn zod_binding_suffix(parameters: &[String]) -> &'static str {
+fn zod_binding_suffix(rust_ident: &str, parameters: &[String]) -> &'static str {
+    record_zod_factory(rust_ident, !parameters.is_empty());
     if parameters.is_empty() {
         "$Schema"
     } else {
@@ -9478,7 +9493,11 @@ fn generate_zod_schema_method(
 ) -> proc_macro2::TokenStream {
     #[cfg(feature = "zod")]
     {
-        let reexport = ident_reexport_zod(rust_ident, item_name, zod_binding_suffix(parameters));
+        let reexport = ident_reexport_zod(
+            rust_ident,
+            item_name,
+            zod_binding_suffix(rust_ident, parameters),
+        );
         let own = format!("z.strictObject({{\n{schema_code}\n}}){show_opts}");
         let (preamble, expression) = zod_merged_statements(item_name, &own, flatten_schemas);
         // Note: Example injection is handled by the delegating method on the type itself.
@@ -9701,7 +9720,11 @@ fn generate_discriminated_enum_zod_schema_method(
 ) -> proc_macro2::TokenStream {
     #[cfg(feature = "zod")]
     {
-        let reexport = ident_reexport_zod(rust_ident, item_name, zod_binding_suffix(parameters));
+        let reexport = ident_reexport_zod(
+            rust_ident,
+            item_name,
+            zod_binding_suffix(rust_ident, parameters),
+        );
         let schema_str = zod_published_binding(item_name, parameters, "", schema_code, &reexport);
         quote::quote! {
             pub fn zod_schema() -> String {
