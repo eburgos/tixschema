@@ -165,6 +165,26 @@ impl ZodUnionMember {
     }
 }
 
+/// One leaf of the value surface a `#[model_schema()]` item published, in the vocabulary the
+/// flatten-member refusal names a wire by.
+///
+/// `branch` is the trail of one-based choices the leaf sits at behind the name, empty for a surface
+/// that offers no choice at all — so an item publishing `anyOf[value, null]` carries its null at
+/// `2`, and a member naming that item carries it at the member's own position followed by that `2`.
+/// `non_object` is the JSON type keyword the leaf describes as where the registration proves it is
+/// no object, and `None` where nothing there proves it — a map, an object, and a name nothing has
+/// classified alike.
+///
+/// Recorded and read under `serde` and `zod` together, which is the pair that reads
+/// `#[serde(untagged)]` and `#[serde(flatten)]` and multiplies one over the other: without both
+/// there is no merge to answer for and nothing asks.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[derive(Clone)]
+pub struct WireLeaf {
+    pub branch: Vec<usize>,
+    pub non_object: Option<&'static str>,
+}
+
 #[derive(Clone)]
 pub struct AliasInfo {
     pub export_name: String,
@@ -178,6 +198,16 @@ pub struct AliasInfo {
     /// registers.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     pub value_shape: Option<&'static str>,
+    /// What the value surface written under this name puts on the wire, one entry per leaf of it,
+    /// and empty when nothing has been recorded at all. Filled by [`record_wire_leaves`] as each
+    /// item registers.
+    ///
+    /// The shape above it answers the constrained-brand guard's question, which is what a check can
+    /// be appended to; this answers the merge's, which is whether an object can be joined to it —
+    /// two questions one word could not hold apart, an `integer` and a `number` being one shape and
+    /// two documents, and an array and a map one shape and opposite answers.
+    #[cfg(all(feature = "serde", feature = "zod"))]
+    pub wire: Vec<WireLeaf>,
     /// What an untagged enum's members are spelled as on the Zod surface, and empty for every other
     /// item. Filled by [`record_zod_union_members`] once the enum's own expansion has rendered
     /// them.
@@ -546,6 +576,8 @@ pub fn register_alias_info(
                 #[cfg(feature = "jsonschema")]
                 module_name: module_name.to_owned(),
                 value_shape: None,
+                #[cfg(all(feature = "serde", feature = "zod"))]
+                wire: Vec::new(),
                 #[cfg(feature = "zod")]
                 zod_union_members: Vec::new(),
             },
@@ -574,6 +606,32 @@ pub fn record_value_shape(rust_ident: &str, shape: Option<&'static str>) {
     ALIAS_INFO.with(|map| {
         if let Some(info) = map.borrow_mut().get_mut(rust_ident) {
             info.value_shape = shape;
+        }
+    });
+}
+
+/// Records what the value surface written under a name puts on the wire, on the entry that name has
+/// just registered.
+///
+/// The question is the flatten merge's: what serde writes for a member, named by the JSON type
+/// keyword the other surface writes for the same member, so the two refuse the same declaration in
+/// the same words. A name is the one member spelling the expansion reading it cannot answer for —
+/// the document lives in the module the *named* item published — so each item answers for itself as
+/// it registers.
+///
+/// Recorded as leaves rather than as one word because a published surface may be a choice: an item
+/// whose own surface is nullable publishes its value and a bare `null`, and the merge descending it
+/// names that `null` a level below the member. One word at the member's own position could not say
+/// where it sits, and naming it at the member's position would put the two merges into
+/// disagreement — the very thing the branch trail exists to prevent.
+///
+/// A chain resolves one link at a time and cannot cycle, because an entry is only ever built from
+/// entries registered before it.
+#[cfg(all(feature = "serde", feature = "zod"))]
+pub fn record_wire_leaves(rust_ident: &str, leaves: &[WireLeaf]) {
+    ALIAS_INFO.with(|map| {
+        if let Some(info) = map.borrow_mut().get_mut(rust_ident) {
+            info.wire = leaves.to_vec();
         }
     });
 }

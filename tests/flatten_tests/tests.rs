@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+use std::collections::HashMap;
 use tixschema::model_schema;
 
 #[model_schema()]
@@ -434,6 +436,121 @@ struct FlatOverLaterMemberSlugUntagged {
 enum LaterMemberSlugEither {
     Base(FlatFirst),
     Slug(MemberSlug),
+}
+
+/// Three more members that name another item rather than spelling a type out, all three of them one
+/// word to the shape vocabulary and three different answers to the merge: a registration whose wire
+/// is a JSON array, one whose wire is the object a map writes, and one whose own published surface
+/// is nullable. serde flattens the map and refuses the other two.
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct MemberBag(Vec<String>);
+
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct MemberBucket(HashMap<String, String>);
+
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct MemberMaybeSecond(Option<FlatSecond>);
+
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum MemberBagEither {
+    Base(FlatFirst),
+    Items(MemberBag),
+}
+
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum MemberBucketEither {
+    Base(FlatFirst),
+    Bucket(MemberBucket),
+}
+
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum MemberMaybeEither {
+    Base(FlatFirst),
+    Maybe(MemberMaybeSecond),
+}
+
+#[cfg(all(feature = "jsonschema", not(feature = "zod")))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatOverMemberBagUntagged {
+    #[serde(flatten)]
+    either: MemberBagEither,
+    own: String,
+}
+
+#[cfg(all(feature = "jsonschema", not(feature = "zod")))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatOverMemberMaybeUntagged {
+    #[serde(flatten)]
+    either: MemberMaybeEither,
+    own: String,
+}
+
+/// The map-shaped member is the one of the three that stays where it was: serde writes a map's keys
+/// straight into the object being written, which is what flattening is, so the multiplication keeps
+/// its branch and the merge keeps its document.
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatOverMemberBucketUntagged {
+    #[serde(flatten)]
+    either: MemberBucketEither,
+    own: String,
+}
+
+/// The array-shaped and nullable members in unions declared below the object that flattens them,
+/// which keeps the fallback: the recording holds nothing for either name, so the Zod merge writes
+/// the one operand it is while the JSON-schema merge refuses it wherever it was declared.
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatOverLaterMemberBagUntagged {
+    #[serde(flatten)]
+    either: LaterMemberBagEither,
+    own: String,
+}
+
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum LaterMemberBagEither {
+    Base(FlatFirst),
+    Items(MemberBag),
+}
+
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatOverLaterMemberMaybeUntagged {
+    #[serde(flatten)]
+    either: LaterMemberMaybeEither,
+    own: String,
+}
+
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum LaterMemberMaybeEither {
+    Base(FlatFirst),
+    Maybe(MemberMaybeSecond),
 }
 
 /// A union member that names itself, and the struct that flattens the union. The member describes
@@ -2209,5 +2326,162 @@ fn test_a_union_with_a_scalar_member_declared_below_is_still_named_as_one_operan
     assert!(
         !zod.contains(".and(z.lazy(() => z.string()))"),
         "the scalar member reached the intersection in: {zod}"
+    );
+}
+
+/// A member naming a registration whose wire is a JSON array is one serde refuses to flatten for
+/// the reason it refuses a directly written array: what it writes is the array its slot writes, and
+/// an array carries no keys to put into the object.
+#[test]
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+fn test_flattening_an_untagged_enum_over_a_named_array_member_is_unserializable() {
+    let refusal = serde_json::to_value(FlatOverLaterMemberBagUntagged {
+        own: "o".to_owned(),
+        either: LaterMemberBagEither::Items(MemberBag(vec!["x".to_owned()])),
+    })
+    .unwrap_err()
+    .to_string();
+    assert!(
+        refusal.contains("can only flatten structs and maps"),
+        "Got: {refusal}"
+    );
+}
+
+/// So the merge refuses the whole union, naming the array the member describes as — the keyword the
+/// registry now carries for the name, where before the one recorded word covered the array and the
+/// map alike and could rule neither out.
+#[test]
+#[cfg(all(feature = "jsonschema", not(feature = "zod")))]
+#[should_panic(
+    expected = "`FlatOverMemberBagUntagged`: `#[serde(flatten)]` of `MemberBagEither` writes a union member that is not an object — its branch 2 describes a `array`"
+)]
+fn test_a_named_array_member_of_a_flattened_untagged_enum_is_refused_by_the_merge() {
+    assert!(FlatOverMemberBagUntagged::json_schema().is_object());
+}
+
+/// And in those same words wherever the union was declared, which is the one reading of the
+/// declaration that survives the Zod surface refusing it at expansion.
+#[test]
+#[cfg(feature = "jsonschema")]
+#[should_panic(
+    expected = "`FlatOverLaterMemberBagUntagged`: `#[serde(flatten)]` of `LaterMemberBagEither` writes a union member that is not an object — its branch 2 describes a `array`"
+)]
+fn test_a_named_array_member_of_a_later_flattened_untagged_enum_is_refused_by_the_merge() {
+    assert!(FlatOverLaterMemberBagUntagged::json_schema().is_object());
+}
+
+/// A member naming a registration whose own published surface is nullable carries the same null the
+/// member written `Option<T>` carries, one name away — and serde's two directions describe
+/// different payload sets for it exactly as they do there: the absent form is written without an
+/// error and then matches no member on the way back.
+#[test]
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+fn test_a_named_nullable_flattened_union_member_is_written_and_then_not_read_back() {
+    let written = serde_json::to_value(FlatOverLaterMemberMaybeUntagged {
+        own: "o".to_owned(),
+        either: LaterMemberMaybeEither::Maybe(MemberMaybeSecond(None)),
+    })
+    .unwrap();
+    assert_eq!(written, serde_json::json!({ "own": "o" }));
+    let refusal = serde_json::from_value::<FlatOverLaterMemberMaybeUntagged>(written)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refusal.contains("did not match any variant"),
+        "Got: {refusal}"
+    );
+
+    let present = serde_json::to_value(FlatOverLaterMemberMaybeUntagged {
+        own: "o".to_owned(),
+        either: LaterMemberMaybeEither::Maybe(MemberMaybeSecond(Some(FlatSecond { b: true }))),
+    })
+    .unwrap();
+    assert_eq!(present, serde_json::json!({ "own": "o", "b": true }));
+    serde_json::from_value::<FlatOverLaterMemberMaybeUntagged>(present).unwrap();
+}
+
+/// So the merge refuses it at the leaf the null sits at — `2.2`, a position below the member, which
+/// is where the name's own choice puts it and not where the member stands.
+#[test]
+#[cfg(all(feature = "jsonschema", not(feature = "zod")))]
+#[should_panic(
+    expected = "`FlatOverMemberMaybeUntagged`: `#[serde(flatten)]` of `MemberMaybeEither` writes a union member that is not an object — its branch 2.2 describes a `null`"
+)]
+fn test_a_named_nullable_member_of_a_flattened_untagged_enum_is_refused_by_the_merge() {
+    assert!(FlatOverMemberMaybeUntagged::json_schema().is_object());
+}
+
+#[test]
+#[cfg(feature = "jsonschema")]
+#[should_panic(
+    expected = "`FlatOverLaterMemberMaybeUntagged`: `#[serde(flatten)]` of `LaterMemberMaybeEither` writes a union member that is not an object — its branch 2.2 describes a `null`"
+)]
+fn test_a_named_nullable_member_of_a_later_flattened_untagged_enum_is_refused_by_the_merge() {
+    assert!(FlatOverLaterMemberMaybeUntagged::json_schema().is_object());
+}
+
+/// The map-shaped member is admitted on every surface, and serde agrees in both directions: it
+/// writes the map's keys into the object and reads those same keys back. That is what the array
+/// and the map being one recorded word could not tell apart.
+#[test]
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+fn test_a_named_map_member_of_a_flattened_untagged_enum_round_trips() {
+    let written = serde_json::to_value(FlatOverMemberBucketUntagged {
+        own: "o".to_owned(),
+        either: MemberBucketEither::Bucket(MemberBucket(HashMap::from([(
+            "k".to_owned(),
+            "v".to_owned(),
+        )]))),
+    })
+    .unwrap();
+    assert_eq!(written, serde_json::json!({ "own": "o", "k": "v" }));
+    serde_json::from_value::<FlatOverMemberBucketUntagged>(written).unwrap();
+}
+
+/// And its Zod schema keeps the multiplication it always had, byte for byte.
+#[test]
+#[cfg(feature = "zod")]
+fn test_a_named_map_member_keeps_its_multiplication() {
+    let zod = FlatOverMemberBucketUntagged::zod_schema();
+    assert!(
+        zod.contains(
+            "z.union([\n  FlatOverMemberBucketUntagged$OwnSchema.and(z.lazy(() => FlatFirst$Schema)),\n  FlatOverMemberBucketUntagged$OwnSchema.and(z.lazy(() => MemberBucket$Schema)),\n])"
+        ),
+        "expected the map member's branch, got: {zod}"
+    );
+}
+
+/// And the JSON-schema merge writes its document rather than refusing it.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_a_named_map_member_keeps_its_merged_document() {
+    assert!(FlatOverMemberBucketUntagged::json_schema().is_object());
+}
+
+/// Standing on their own the three unions are unions like any other, spelled byte for byte as they
+/// were before the merge could tell the shapes apart.
+#[test]
+#[cfg(feature = "zod")]
+fn test_the_named_wire_unions_are_byte_identical_standing_alone() {
+    #[cfg(feature = "typescript")]
+    const EXPECTED: [&str; 3] = [
+        "const MemberBagEither$RawSchema = z.union([FlatFirst$Schema, MemberBag$Schema]);\n\nexport const MemberBagEither$Schema: ZodType<MemberBagEither> = MemberBagEither$RawSchema;",
+        "const MemberBucketEither$RawSchema = z.union([FlatFirst$Schema, MemberBucket$Schema]);\n\nexport const MemberBucketEither$Schema: ZodType<MemberBucketEither> = MemberBucketEither$RawSchema;",
+        "const MemberMaybeEither$RawSchema = z.union([FlatFirst$Schema, MemberMaybeSecond$Schema]);\n\nexport const MemberMaybeEither$Schema: ZodType<MemberMaybeEither> = MemberMaybeEither$RawSchema;",
+    ];
+    #[cfg(not(feature = "typescript"))]
+    const EXPECTED: [&str; 3] = [
+        "export const MemberBagEither$Schema = z.union([FlatFirst$Schema, MemberBag$Schema]);",
+        "export const MemberBucketEither$Schema = z.union([FlatFirst$Schema, MemberBucket$Schema]);",
+        "export const MemberMaybeEither$Schema = z.union([FlatFirst$Schema, MemberMaybeSecond$Schema]);",
+    ];
+
+    assert_eq!(
+        [
+            MemberBagEither::zod_schema(),
+            MemberBucketEither::zod_schema(),
+            MemberMaybeEither::zod_schema(),
+        ],
+        EXPECTED.map(str::to_owned)
     );
 }
