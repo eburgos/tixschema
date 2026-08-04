@@ -769,7 +769,10 @@ mod branded_constrained_json_schema_tests {
         assert_eq!(schema["type"], "string", "Got: {schema}");
         assert_eq!(schema["minLength"], 24_i64, "Got: {schema}");
         assert_eq!(schema["maxLength"], 24_i64, "Got: {schema}");
-        assert_eq!(schema["pattern"], "^[a-f\\d]{24}$", "Got: {schema}");
+        // The `\d` the brand is declared with reaches the schema as the members it stands for: a
+        // JSON Schema `pattern` is an ECMA-262 regex, which reads `\d` as ASCII, while the Rust
+        // validator beside it reads the Unicode class. Written out, both read the one set.
+        assert_eq!(schema["pattern"], "^[a-f0-9]{24}$", "Got: {schema}");
     }
 
     #[test]
