@@ -24,12 +24,12 @@ mod zod_ts_tests {
     /// ```rust example
     /// DocumentId("64de3d95ff45b119e5b53a7e".to_string())
     /// ```
-    #[model_schema()]
+    #[model_schema(default_types(IdType = String))]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct DocumentId<IdType>(pub IdType);
 
-    #[model_schema()]
+    #[model_schema(default_types(IdType = String))]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct RoleId<IdType>(pub IdType);
@@ -584,7 +584,7 @@ mod branded_in_struct_all_features_tests {
     #[serde(transparent)]
     pub struct TaskId(pub String);
 
-    #[model_schema()]
+    #[model_schema(default_types(T = String))]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct TaskTypeId<T>(pub T);
@@ -669,7 +669,7 @@ mod branded_in_struct_no_jsonschema_tests {
     #[serde(transparent)]
     pub struct TaskIdNJ(pub String);
 
-    #[model_schema()]
+    #[model_schema(default_types(T = String))]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct TaskTypeIdNJ<T>(pub T);
@@ -720,7 +720,7 @@ mod branded_in_struct_jsonschema_only_tests {
     #[serde(transparent)]
     pub struct TaskIdJO(pub String);
 
-    #[model_schema()]
+    #[model_schema(default_types(T = String))]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct TaskTypeIdJO<T>(pub T);
@@ -773,7 +773,7 @@ mod branded_in_struct_typescript_only_tests {
     #[serde(transparent)]
     pub struct TaskIdTO(pub String);
 
-    #[model_schema()]
+    #[model_schema(default_types(T = String))]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct TaskTypeIdTO<T>(pub T);
@@ -847,7 +847,7 @@ mod branded_constrained_json_schema_tests {
 mod branded_display_tests {
     use super::*;
 
-    #[model_schema()]
+    #[model_schema(default_types(T = String))]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct DisplayId<T>(pub T);
@@ -888,7 +888,7 @@ mod branded_no_display_tests {
     #[serde(transparent)]
     pub struct Tags(pub Vec<String>);
 
-    #[model_schema(no_display)]
+    #[model_schema(no_display, default_types(T = String))]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct TagList<T>(pub Vec<T>);
@@ -1256,23 +1256,23 @@ mod branded_generic_inner_tests {
     use super::*;
     use std::collections::HashMap;
 
-    #[model_schema()]
+    #[model_schema(default_types(T = String))]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct BareTag<T>(pub T);
 
-    #[model_schema(no_display)]
+    #[model_schema(no_display, default_types(T = u32))]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct WeightIndex<T>(pub HashMap<String, T>);
 
-    #[model_schema()]
+    #[model_schema(default_types(T = String))]
     pub type BareSeq<T> = T;
 
-    #[model_schema()]
+    #[model_schema(default_types(T = String))]
     pub type TagSeq<T> = Vec<T>;
 
-    #[model_schema()]
+    #[model_schema(default_types(T = u32))]
     pub type WeightSeq<T> = HashMap<String, T>;
 
     #[test]
@@ -1489,7 +1489,7 @@ mod branded_example_arity_tests {
     /// ```rust example
     /// PairId(("a".to_string(), "b".to_string()))
     /// ```
-    #[model_schema(no_display)]
+    #[model_schema(no_display, default_types(A = String, B = String))]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct PairId<A, B>(pub (A, B));
@@ -1499,7 +1499,7 @@ mod branded_example_arity_tests {
     /// ```rust example
     /// SoloId("a".to_string())
     /// ```
-    #[model_schema()]
+    #[model_schema(default_types(T = String))]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct SoloId<T>(pub T);
@@ -2121,7 +2121,7 @@ mod constrained_no_display_tests {
 mod no_zod_tests {
     use super::*;
 
-    #[model_schema()]
+    #[model_schema(default_types(IdType = String))]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct RoleIdNoZod<IdType>(pub IdType);
@@ -2170,7 +2170,7 @@ mod no_zod_tests {
 mod serde_tests {
     use super::*;
 
-    #[model_schema()]
+    #[model_schema(default_types(IdType = String))]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct GenericId<IdType>(pub IdType);

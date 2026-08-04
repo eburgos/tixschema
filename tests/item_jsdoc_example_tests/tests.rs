@@ -399,11 +399,14 @@ fn an_example_only_item_and_member_name_themselves() {
         ts.starts_with("/**\n * ExampleOnlyStruct\n * \n"),
         "item did not name itself: {ts}"
     );
-    assert!(ts.contains("/**\n * label\n * \n"), "field unnamed: {ts}");
+    assert!(
+        ts.contains("  /**\n   * label\n   * \n"),
+        "field unnamed: {ts}"
+    );
 
     let variants = ExampleOnlyVariantHolder::ts_definition();
     assert!(
-        variants.contains("/**\n * Named\n * \n"),
+        variants.contains("  /**\n   * Named\n   * \n"),
         "variant unnamed: {variants}"
     );
 

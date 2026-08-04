@@ -49,7 +49,7 @@ pub type OrderId = String;
 
 /// Generic type alias with two type parameters.
 #[cfg(all(test, feature = "typescript"))]
-#[model_schema(name = "Pair")]
+#[model_schema(name = "Pair", default_types(T = String, U = u32))]
 pub type Pair<T, U> = (T, U);
 
 /// Numeric type alias (i64).
@@ -73,7 +73,7 @@ pub type Tags = Vec<String>;
 
 /// Generic type alias with single type parameter.
 #[cfg(all(test, feature = "typescript"))]
-#[model_schema(name = "Wrapper")]
+#[model_schema(name = "Wrapper", default_types(T = String))]
 pub type Wrapper<T> = Option<T>;
 
 #[cfg(all(test, feature = "typescript", feature = "serde"))]

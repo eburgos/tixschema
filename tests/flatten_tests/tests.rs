@@ -2028,7 +2028,7 @@ fn test_the_optional_flatten_schema_admits_no_partial_base() {
 fn test_the_optional_flatten_schema_binds_the_objects_own_keys_once() {
     let zod = OptHolder::zod_schema();
     assert!(
-        zod.contains("const OptHolder$OwnSchema = z.strictObject({\n  own: z.string(),\n\n});"),
+        zod.contains("const OptHolder$OwnSchema = z.strictObject({\n  own: z.string(),\n});"),
         "expected the object's own keys bound once, got: {zod}"
     );
     assert_eq!(
@@ -2048,7 +2048,7 @@ fn test_a_non_optional_flatten_type_is_byte_identical() {
     let declared = &ts[ts.find("export type").unwrap()..];
     assert_eq!(
         declared,
-        "export type MultiFlatten = {\n  /**\n * id\n * \n**/\n  id: string;\n\n} & BasePart & ExtraPart;"
+        "export type MultiFlatten = {\n  /**\n   * id\n   * \n   */\n  id: string;\n} & BasePart & ExtraPart;"
     );
 }
 
@@ -2056,9 +2056,9 @@ fn test_a_non_optional_flatten_type_is_byte_identical() {
 #[cfg(feature = "zod")]
 fn test_a_non_optional_flatten_schema_is_byte_identical() {
     #[cfg(feature = "typescript")]
-    const EXPECTED: &str = "const MultiFlatten$RawSchema = z.strictObject({\n  id: z.string(),\n\n}).and(z.lazy(() => BasePart$Schema)).and(z.lazy(() => ExtraPart$Schema));\n\nexport const MultiFlatten$Schema: ZodType<MultiFlatten> = MultiFlatten$RawSchema;";
+    const EXPECTED: &str = "const MultiFlatten$RawSchema = z.strictObject({\n  id: z.string(),\n}).and(z.lazy(() => BasePart$Schema)).and(z.lazy(() => ExtraPart$Schema));\n\nexport const MultiFlatten$Schema: ZodType<MultiFlatten> = MultiFlatten$RawSchema;";
     #[cfg(not(feature = "typescript"))]
-    const EXPECTED: &str = "export const MultiFlatten$Schema = z.strictObject({\n  id: z.string(),\n\n}).and(z.lazy(() => BasePart$Schema)).and(z.lazy(() => ExtraPart$Schema));";
+    const EXPECTED: &str = "export const MultiFlatten$Schema = z.strictObject({\n  id: z.string(),\n}).and(z.lazy(() => BasePart$Schema)).and(z.lazy(() => ExtraPart$Schema));";
 
     assert_eq!(MultiFlatten::zod_schema(), EXPECTED);
 }
@@ -2078,9 +2078,9 @@ fn test_a_non_optional_flatten_schema_is_byte_identical() {
 #[cfg(feature = "zod")]
 fn test_the_untagged_flatten_schema_multiplies_the_object_over_the_unions_members() {
     #[cfg(feature = "typescript")]
-    const EXPECTED: &str = "const FlatOverUntagged$OwnSchema = z.strictObject({\n  own: z.string(),\n\n});\n\nconst FlatOverUntagged$RawSchema = z.union([\n  FlatOverUntagged$OwnSchema.and(z.lazy(() => FlatFirst$Schema)),\n  FlatOverUntagged$OwnSchema.and(z.lazy(() => FlatSecond$Schema)),\n]);\n\nexport const FlatOverUntagged$Schema: ZodType<FlatOverUntagged> = FlatOverUntagged$RawSchema;";
+    const EXPECTED: &str = "const FlatOverUntagged$OwnSchema = z.strictObject({\n  own: z.string(),\n});\n\nconst FlatOverUntagged$RawSchema = z.union([\n  FlatOverUntagged$OwnSchema.and(z.lazy(() => FlatFirst$Schema)),\n  FlatOverUntagged$OwnSchema.and(z.lazy(() => FlatSecond$Schema)),\n]);\n\nexport const FlatOverUntagged$Schema: ZodType<FlatOverUntagged> = FlatOverUntagged$RawSchema;";
     #[cfg(not(feature = "typescript"))]
-    const EXPECTED: &str = "const FlatOverUntagged$OwnSchema = z.strictObject({\n  own: z.string(),\n\n});\n\nexport const FlatOverUntagged$Schema = z.union([\n  FlatOverUntagged$OwnSchema.and(z.lazy(() => FlatFirst$Schema)),\n  FlatOverUntagged$OwnSchema.and(z.lazy(() => FlatSecond$Schema)),\n]);";
+    const EXPECTED: &str = "const FlatOverUntagged$OwnSchema = z.strictObject({\n  own: z.string(),\n});\n\nexport const FlatOverUntagged$Schema = z.union([\n  FlatOverUntagged$OwnSchema.and(z.lazy(() => FlatFirst$Schema)),\n  FlatOverUntagged$OwnSchema.and(z.lazy(() => FlatSecond$Schema)),\n]);";
 
     assert_eq!(FlatOverUntagged::zod_schema(), EXPECTED);
 }
@@ -2227,9 +2227,9 @@ fn test_a_union_declared_below_the_object_is_named_as_one_operand() {
 #[cfg(feature = "zod")]
 fn test_an_internally_tagged_flatten_schema_is_byte_identical() {
     #[cfg(feature = "typescript")]
-    const EXPECTED: &str = "const DataElementSampleValueEntry$RawSchema = z.strictObject({\n  dataElementId: z.string(),\n\n}).and(z.lazy(() => DataElementSampleValueVariant$Schema));\n\nexport const DataElementSampleValueEntry$Schema: ZodType<DataElementSampleValueEntry> = DataElementSampleValueEntry$RawSchema;";
+    const EXPECTED: &str = "const DataElementSampleValueEntry$RawSchema = z.strictObject({\n  dataElementId: z.string(),\n}).and(z.lazy(() => DataElementSampleValueVariant$Schema));\n\nexport const DataElementSampleValueEntry$Schema: ZodType<DataElementSampleValueEntry> = DataElementSampleValueEntry$RawSchema;";
     #[cfg(not(feature = "typescript"))]
-    const EXPECTED: &str = "export const DataElementSampleValueEntry$Schema = z.strictObject({\n  dataElementId: z.string(),\n\n}).and(z.lazy(() => DataElementSampleValueVariant$Schema));";
+    const EXPECTED: &str = "export const DataElementSampleValueEntry$Schema = z.strictObject({\n  dataElementId: z.string(),\n}).and(z.lazy(() => DataElementSampleValueVariant$Schema));";
 
     assert_eq!(DataElementSampleValueEntry::zod_schema(), EXPECTED);
 }

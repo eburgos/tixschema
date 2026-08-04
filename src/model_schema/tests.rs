@@ -7,11 +7,11 @@ use super::{
 #[cfg(feature = "serde")]
 use super::{
     ConstraintLeaf, MemberAccess, ModelSchemaPropMeta, build_field_validation,
-    cfg_attr_guard_error, check_optional_field_serialization, collect_untagged_members,
-    constrained_shape, enum_cfg_attr_guard_errors, generate_field_validation,
-    generate_numeric_validation_code, generate_string_validation_code, helper_name_stem,
-    internally_tagged_guard_errors, needs_injected_default, parse_serde_field_attributes,
-    parse_serde_type_attributes,
+    cfg_attr_guard_error, check_omitted_key_is_readable, check_optional_field_serialization,
+    collect_untagged_members, constrained_shape, enum_cfg_attr_guard_errors,
+    generate_field_validation, generate_numeric_validation_code, generate_string_validation_code,
+    has_serde_default, helper_name_stem, internally_tagged_guard_errors, needs_injected_default,
+    parse_serde_field_attributes, parse_serde_type_attributes,
 };
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -34,7 +34,6 @@ use super::tuple_struct_zod_body;
 #[cfg(feature = "jsonschema")]
 use super::tuple_struct_json_body;
 
-#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use syn::spanned::Spanned as _;
 
 /// The variants of [`rendered_discriminated_union`]'s enum, in the order they are declared.
@@ -133,8 +132,25 @@ fn guard_result(item: &syn::ItemStruct) -> Result<(), syn::Error> {
         .map(ToString::to_string)
         .unwrap_or_default();
     let field_def = get_field_def(&field_name, &field.ty, "");
-    let meta = parse_serde_field_attributes(&field.attrs);
-    check_optional_field_serialization(field, field_def.is_optional(), &meta)
+    check_optional_field_serialization(field, field_def.is_optional())
+}
+
+/// Runs the omitted-key readability guard over the sole field of `item`, with the container's own
+/// `default` read off the item the way the generator reads it.
+#[cfg(feature = "serde")]
+fn omitted_key_guard_result(item: &syn::ItemStruct) -> Result<(), syn::Error> {
+    let field = item.fields.iter().next().unwrap();
+    let field_name = field
+        .ident
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    let field_def = get_field_def(&field_name, &field.ty, "");
+    check_omitted_key_is_readable(
+        field,
+        field_def.is_optional(),
+        has_serde_default(&item.attrs),
+    )
 }
 
 #[cfg(feature = "serde")]
@@ -148,6 +164,65 @@ fn bare_option_field_is_rejected() {
     let message = guard_result(&item).unwrap_err().to_string();
     assert!(message.contains("note"));
     assert!(message.contains("skip_serializing_if = \"Option::is_none\""));
+}
+
+/// Read off serde itself: a `Vec` behind a `skip_serializing_if` and nothing else serializes to
+/// `{"id":"1"}` and then fails to deserialize that payload, reporting the field as missing. The
+/// surfaces now admit the absent key, so the spelling that writes a payload it cannot read back is
+/// refused rather than described.
+#[cfg(feature = "serde")]
+#[test]
+fn a_non_option_omitted_key_with_no_default_is_rejected() {
+    for spelling in [
+        "skip_serializing_if = \"Vec::is_empty\"",
+        "skip_serializing",
+    ] {
+        let item: syn::ItemStruct = syn::parse_str(&format!(
+            "struct Report {{ #[serde({spelling})] roles: Vec<String> }}"
+        ))
+        .unwrap();
+        let message = omitted_key_guard_result(&item).unwrap_err().to_string();
+        assert!(message.contains("roles"), "{spelling}: {message}");
+        assert!(message.contains("default"), "{spelling}: {message}");
+    }
+}
+
+/// Every spelling serde can already read a missing key back from. Each is left alone, because the
+/// guard's subject is a payload with no reader — not an omitted key as such.
+#[cfg(feature = "serde")]
+#[test]
+fn an_omitted_key_serde_can_read_back_is_left_alone() {
+    for item_source in [
+        // `default` on the field writes the value the missing key does not carry.
+        "struct Report { #[serde(default, skip_serializing_if = \"Vec::is_empty\")] roles: Vec<String> }",
+        "struct Report { #[serde(default = \"mk\", skip_serializing_if = \"Vec::is_empty\")] roles: Vec<String> }",
+        // A bare `skip` stops serde reading the field at all, so it supplies `Default` itself.
+        "struct Report { #[serde(skip)] roles: Vec<String> }",
+        // serde reads a missing `Option` field back as `None` with no `default` written.
+        "struct Report { #[serde(skip_serializing_if = \"Option::is_none\")] note: Option<String> }",
+        // A `default` on the container answers for every field under it.
+        "#[serde(default)] struct Report { #[serde(skip_serializing_if = \"Vec::is_empty\")] roles: Vec<String> }",
+        // No omission at all.
+        "struct Report { roles: Vec<String> }",
+    ] {
+        let item: syn::ItemStruct = syn::parse_str(item_source).unwrap();
+        let refusal = omitted_key_guard_result(&item)
+            .err()
+            .map(|err| err.to_string());
+        assert_eq!(refusal, None, "for: {item_source}");
+    }
+}
+
+/// A positional slot has no key to drop — it is written by its place in the tuple — so the guard
+/// has no subject there whatever the attribute says.
+#[cfg(feature = "serde")]
+#[test]
+fn a_positional_slot_is_not_subject_to_the_omitted_key_guard() {
+    let item: syn::ItemStruct = syn::parse_str(
+        "struct Report(#[serde(skip_serializing_if = \"Vec::is_empty\")] Vec<String>);",
+    )
+    .unwrap();
+    omitted_key_guard_result(&item).unwrap();
 }
 
 /// The single-field `Report` written with `notes` at the given spelling.
@@ -1577,6 +1652,7 @@ fn a_refused_pattern_leaves_no_hook_naming_the_dropped_module() {
         Some("probe_caret_schema"),
         "ProbeCaret",
         &syn::Generics::default(),
+        false,
     )
     .4;
     assert_eq!(errors.len(), 1, "got: {errors:?}");
@@ -1664,6 +1740,7 @@ fn a_field_that_clears_the_guards_carries_the_hook_it_earned() {
         Some("report_schema"),
         "Report",
         &syn::Generics::default(),
+        false,
     )
     .4;
     assert!(errors.is_empty(), "got: {errors:?}");
@@ -2435,9 +2512,35 @@ fn the_cfg_probe_sees_an_emitted_cfg_attribute() {
 #[test]
 fn struct_schema_example_carries_no_cfg_attribute() {
     let name: syn::Ident = syn::parse_quote!(Report);
+    let generics = syn::Generics::default();
     let tokens =
-        super::build_struct_schema_example(Some(&"Report { id: 1 }".to_owned()), &name).unwrap();
-    assert_no_cfg_attribute(&tokens, "build_struct_schema_example");
+        super::item_schema_example_method(Some(&"Report { id: 1 }".to_owned()), &name, &generics)
+            .unwrap();
+    assert_no_cfg_attribute(&tokens, "item_schema_example_method");
+}
+
+/// The type the example is bound at carries one argument per declared parameter, the way a brand's
+/// already does — a bare ident on a generic item is `E0107` before the example is ever read. A
+/// lifetime and a const are not parameters a filling is chosen for, so neither reaches the list.
+#[cfg(feature = "zod")]
+#[test]
+fn struct_schema_example_instantiates_every_type_parameter() {
+    let name: syn::Ident = syn::parse_quote!(Report);
+    let example = "Report { id: 1 }".to_owned();
+    for (generics, expected) in [
+        (syn::Generics::default(), "let value : Report ="),
+        (syn::parse_quote!(<A>), "let value : Report < String > ="),
+        (
+            syn::parse_quote!(<A, B>),
+            "let value : Report < String , String > =",
+        ),
+        (syn::parse_quote!(<'a>), "let value : Report ="),
+    ] {
+        let rendered = super::item_schema_example_method(Some(&example), &name, &generics)
+            .unwrap()
+            .to_string();
+        assert!(rendered.contains(expected), "Got: {rendered}");
+    }
 }
 
 #[cfg(feature = "jsonschema")]
@@ -3350,12 +3453,13 @@ fn an_exported_name_can_carry_no_double_quote() {
 /// name is one it actually reads — the list and the arms cannot drift apart while both hold.
 #[test]
 fn no_argument_the_parser_reads_is_rejected() {
-    let probes: [proc_macro2::TokenStream; 5] = [
+    let probes: [proc_macro2::TokenStream; 6] = [
         quote::quote! { name = "Renamed" },
         quote::quote! { pattern = "^[a-z]+$" },
         quote::quote! { minLength = 1 },
         quote::quote! { maxLength = 50 },
         quote::quote! { no_display },
+        quote::quote! { default_types(IdType = String) },
     ];
     assert_eq!(probes.len(), super::KNOWN_ARGS.len());
 
@@ -3440,6 +3544,226 @@ fn every_expanded_shape_names_itself_in_a_guard_message() {
         (syn::parse_quote! { fn carrier() {} }, "item"),
     ] {
         assert_eq!(super::item_label(&item), label);
+    }
+}
+
+/// `default_types(IdType = String, DateType = f64)` reads as the pairs it was written as, in the
+/// order they were written, each type kept whole — the order is what a reader of the declaration
+/// lines up against the parameter list.
+#[test]
+fn default_types_reads_its_pairs_in_declaration_order() {
+    let args = super::parse_model_schema_args(quote::quote! {
+        default_types(IdType = String, DateType = f64, Nested = Vec<Option<u8>>)
+    });
+    assert_eq!(args.arg_rejection.as_ref().map(ToString::to_string), None);
+    let read: Vec<(String, String)> = args
+        .default_types
+        .iter()
+        .map(|(name, ty)| (name.to_string(), quote::quote!(#ty).to_string()))
+        .collect();
+    assert_eq!(
+        read,
+        vec![
+            ("IdType".to_owned(), "String".to_owned()),
+            ("DateType".to_owned(), "f64".to_owned()),
+            ("Nested".to_owned(), "Vec < Option < u8 > >".to_owned()),
+        ]
+    );
+}
+
+/// Every shape the argument is not: a value where the list belongs, a bare flag, an entry with no
+/// type beside it, a name no parameter can be spelled as, a trailing hole, and a list that
+/// declares nothing at all.
+#[test]
+fn a_default_types_shape_the_parser_cannot_read_is_refused() {
+    let probes: [proc_macro2::TokenStream; 6] = [
+        quote::quote! { default_types = "IdType" },
+        quote::quote! { default_types },
+        quote::quote! { default_types() },
+        quote::quote! { default_types(IdType) },
+        quote::quote! { default_types("IdType" = String) },
+        quote::quote! { default_types(IdType = String, , DateType = f64) },
+    ];
+    for probe in probes {
+        let rendered = probe.to_string();
+        assert!(args_rejection(probe).is_some(), "for {rendered}");
+    }
+}
+
+/// The argument shares the list with the string constraints and the name override, and reading it
+/// costs none of them. This is the only place the coexistence can be asked: a type-level string
+/// constraint is a brand's alone, and a brand over a type parameter is already refused at its
+/// inner field, so no one item reaches an emitter carrying both.
+#[test]
+fn default_types_coexists_with_every_other_argument() {
+    let args = super::parse_model_schema_args(quote::quote! {
+        name = "Slug", pattern = "^[a-z]+$", minLength = 1, maxLength = 8, no_display,
+        default_types(IdType = String)
+    });
+    assert_eq!(args.arg_rejection.as_ref().map(ToString::to_string), None);
+    assert_eq!(args.name_override.as_deref(), Some("Slug"));
+    assert_eq!(args.pattern.as_deref(), Some("^[a-z]+$"));
+    assert_eq!(args.min_length, Some(1));
+    assert_eq!(args.max_length, Some(8));
+    assert!(args.no_display);
+    assert_eq!(args.default_types.len(), 1);
+}
+
+/// The `compile_error!` tokens `default_types` earns when `args` is written on `source`. Both are
+/// parsed from text so their tokens carry file locations and each refusal's span can be read back
+/// as the source it points at.
+fn default_types_refusals(source: &str, args: &str) -> Vec<proc_macro2::TokenStream> {
+    let item: syn::Item = syn::parse_str(source).unwrap();
+    let parsed = super::parse_model_schema_args(syn::parse_str(args).unwrap());
+    assert_eq!(
+        parsed.arg_rejection.as_ref().map(ToString::to_string),
+        None,
+        "for {args}"
+    );
+    super::default_types_guard_errors(&item, &parsed)
+}
+
+/// The refusals of `args` on `source`, rendered.
+fn default_types_messages(source: &str, args: &str) -> Vec<String> {
+    default_types_refusals(source, args)
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// An entry naming nothing the item declares fills nothing, so it is refused in every build: no
+/// surface reads the default it carries, and the parameter it was meant for is left without one.
+#[test]
+fn an_entry_naming_no_declared_parameter_is_refused_in_every_build() {
+    let messages = default_types_messages(
+        "pub struct Renamed<IdType, DateType> { pub id: IdType, pub at: DateType }",
+        "default_types(IdType = String, DateType = f64, WrongName = String)",
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    for needle in [
+        "compile_error",
+        "WrongName",
+        "IdType",
+        "DateType",
+        "type `Renamed`",
+    ] {
+        assert!(
+            messages[0].contains(needle),
+            "{needle} missing: {}",
+            messages[0]
+        );
+    }
+}
+
+/// An item with no type parameter has nothing for a default to fill, whatever the entry names and
+/// whichever shape carries the attribute — a lifetime and a const name no type either.
+#[test]
+fn default_types_on_an_item_declaring_no_type_parameter_is_refused() {
+    for source in [
+        "pub struct Plain { pub id: String }",
+        "pub enum Plain { One }",
+        "pub type Plain = String;",
+        "pub struct Borrowed<'label> { pub id: &'label str }",
+        "pub struct Fixed<const WIDTH: usize> { pub id: [u8; WIDTH] }",
+    ] {
+        let messages = default_types_messages(source, "default_types(IdType = String)");
+        assert_eq!(messages.len(), 1, "for {source}: {messages:?}");
+        assert!(
+            messages[0].contains("IdType"),
+            "for {source}: {}",
+            messages[0]
+        );
+    }
+}
+
+/// A declaration that answers for every parameter earns nothing, in every shape the attribute
+/// expands and beside the lifetimes and consts that name no type.
+#[test]
+fn an_item_declaring_a_default_for_every_parameter_earns_no_refusal() {
+    for (source, args) in [
+        (
+            "pub struct Both<IdType, DateType> { pub id: IdType, pub at: DateType }",
+            "default_types(IdType = String, DateType = f64)",
+        ),
+        (
+            "pub enum Tagged<IdType> { Named { id: IdType } }",
+            "default_types(IdType = String)",
+        ),
+        (
+            "pub type Boxed<ValueType> = Vec<ValueType>;",
+            "default_types(ValueType = String)",
+        ),
+        (
+            "pub struct Mixed<'label, IdType, const WIDTH: usize> { pub id: IdType }",
+            "default_types(IdType = String)",
+        ),
+        ("pub struct Plain { pub id: String }", ""),
+    ] {
+        let messages = default_types_messages(source, args);
+        assert!(messages.is_empty(), "for {source}: {messages:?}");
+    }
+}
+
+/// The refusal points at what earned it: the entry, for a name the item does not declare, and the
+/// parameter itself, for one left with no default.
+#[test]
+fn a_default_types_refusal_is_spanned_on_what_earned_it() {
+    let entry = default_types_refusals(
+        "pub struct Renamed<IdType> { pub id: IdType }",
+        "default_types(IdType = String, WrongName = String)",
+    );
+    assert_eq!(entry.len(), 1, "got: {}", entry.len());
+    assert_eq!(entry[0].span().source_text().as_deref(), Some("WrongName"));
+
+    #[cfg(feature = "jsonschema")]
+    {
+        let parameter = default_types_refusals(
+            "pub struct EcmDocument<IdType, DateType> { pub id: IdType, pub at: DateType }",
+            "default_types(IdType = String)",
+        );
+        assert_eq!(parameter.len(), 1, "got: {}", parameter.len());
+        assert_eq!(
+            parameter[0].span().source_text().as_deref(),
+            Some("DateType")
+        );
+    }
+}
+
+/// The JSON document is built from the declared default, so a parameter left without one is
+/// refused wherever that document is written — and the refusal says what the default is for, that
+/// the feature is what requires it, and the attribute to write for this item's own parameters.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_parameter_with_no_default_is_refused_where_the_json_document_is_built() {
+    let messages = default_types_messages(
+        "pub struct EcmDocument<IdType, DateType> { pub id: IdType, pub at: DateType }",
+        "",
+    );
+    assert_eq!(messages.len(), 2, "got: {messages:?}");
+    let joined = messages.join("\n");
+    for needle in [
+        "IdType",
+        "DateType",
+        "silently rejects valid payloads",
+        "`jsonschema` feature",
+        "default_types(IdType = String, DateType = String)",
+        "type `EcmDocument`",
+    ] {
+        assert!(joined.contains(needle), "{needle} missing: {joined}");
+    }
+}
+
+/// Without the feature that reads it, nothing is generated from a default type, so an item that
+/// declares none is left alone — the same item that is refused above.
+#[cfg(not(feature = "jsonschema"))]
+#[test]
+fn a_parameter_with_no_default_is_accepted_where_no_json_document_is_built() {
+    for args in ["", "default_types(IdType = String)"] {
+        let messages = default_types_messages(
+            "pub struct EcmDocument<IdType, DateType> { pub id: IdType, pub at: DateType }",
+            args,
+        );
+        assert!(messages.is_empty(), "for {args:?}: {messages:?}");
     }
 }
 
@@ -4996,7 +5320,7 @@ fn wrapped_u32_value(wrapper: &str) -> super::FieldDef {
         model_schema_prop_meta: None,
         nullable_levels: Vec::new(),
         name: "items".to_owned(),
-        omits_none: false,
+        omits_value: false,
         type_span: proc_macro2::Span::call_site(),
     }
 }
