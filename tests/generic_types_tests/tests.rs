@@ -190,7 +190,10 @@ mod zod {
             "Got: {zod}"
         );
         assert!(!zod.contains("z.record(z.unknown()"), "Got: {zod}");
-        assert!(!zod.contains("KeyType"), "Got: {zod}");
+        // The factory legitimately names the parameter in its own signature; what must never
+        // appear is the parameter standing where the KEY schema goes.
+        assert!(!zod.contains("z.record(keyType"), "Got: {zod}");
+        assert!(!zod.contains("KeyType$Schema"), "Got: {zod}");
     }
 
     /// A concrete key keeps its own answer: a bare string opens the object, and a key serde
