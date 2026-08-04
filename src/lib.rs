@@ -507,6 +507,35 @@ export const Document$Schema: ZodType<Document> = Document$RawSchema;
 /// Moving the named type out of the function body — to the module the referencing type is written
 /// in, or any module in scope there — is what resolves it.
 ///
+/// ## Type Parameters and `default_types`
+///
+/// JSON Schema has no type parameters, so a generic item's document has to be built from one
+/// concrete filling. `default_types` is where that filling is named — one `Parameter = Type` pair
+/// per type parameter, in any order, beside every other item-level argument:
+///
+/// ```rust
+/// use tixschema::model_schema;
+/// use serde::{Deserialize, Serialize};
+///
+/// #[model_schema(default_types(IdType = String, DateType = f64))]
+/// #[derive(Serialize, Deserialize)]
+/// pub struct EcmDocument<IdType, DateType> {
+///     pub document_id: IdType,
+///     pub created_at: DateType,
+/// }
+/// ```
+///
+/// The declaration is read in both directions, and each refusal is spanned on what earned it. An
+/// entry naming something the item does not declare is refused in **every** feature configuration:
+/// a misspelled parameter fills nothing, and the parameter it was meant for would keep no default
+/// at all. A type parameter with no entry is refused only where the `jsonschema` feature is on,
+/// nothing else reading the default — without that feature the same item compiles untouched.
+/// `default_types` on an item that declares no type parameter is refused, there being nothing for a
+/// filling to fill; a lifetime and a const parameter name no type, so neither takes an entry.
+///
+/// There is no fallback filling. A guessed one produces a document that silently rejects valid
+/// payloads, which is the failure the declaration exists to prevent.
+///
 /// ## Branded Newtypes and `no_display`
 ///
 /// A `#[serde(transparent)]` single-field tuple struct becomes a branded type, and the macro gives
@@ -542,8 +571,8 @@ export const Document$Schema: ZodType<Document> = Document$RawSchema;
 /// real, but the two validating surfaces read it as the opaque value — one schema is written for
 /// every instantiation — and an opaque value takes no string checks: Zod 4's `z.unknown()` carries
 /// no `.min`/`.max`, and `.brand()` returns that same schema rather than a wrapper that could. So
-/// `#[model_schema(minLength = 3)] struct Slug<T>(pub T);` is refused at the inner field. Constrain
-/// a string-typed inner instead.
+/// `#[model_schema(minLength = 3, default_types(T = String))] struct Slug<T>(pub T);` is refused at
+/// the inner field. Constrain a string-typed inner instead.
 ///
 /// A named inner is judged by what that name publishes, since that is the schema the checks are
 /// appended to: `#[model_schema(minLength = 3)] struct Outer(pub Blob);` over

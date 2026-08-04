@@ -11,6 +11,11 @@
 //! declaration for an unused parameter before the attribute is reached. What it can bind is a
 //! const, which `PlainConst` carries, and that is the plain-enum shape of the same question: the
 //! `impl` has to repeat the const while the declaration names nothing.
+//!
+//! Every fixture binding a type parameter declares a default type for it, which is what a build
+//! generating a JSON document requires. Nothing here reads that declaration yet, so the surfaces
+//! pinned below are the ones the undeclared fixtures pinned — which is the whole of the evidence
+//! that declaring a default changes no emission.
 
 #[cfg(feature = "typescript")]
 mod typescript {
@@ -737,7 +742,7 @@ use mongodb::bson::oid::ObjectId;
 use serde::{Deserialize, Serialize};
 use tixschema::model_schema;
 
-#[model_schema()]
+#[model_schema(default_types(IdType = String))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Wrapper<IdType> {
     pub children: Vec<IdType>,
@@ -745,7 +750,7 @@ pub struct Wrapper<IdType> {
     pub name: String,
 }
 
-#[model_schema()]
+#[model_schema(default_types(KeyType = String, ValueType = u32))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pair<KeyType, ValueType> {
     pub by_key: HashMap<String, ValueType>,
@@ -755,7 +760,7 @@ pub struct Pair<KeyType, ValueType> {
     pub tuple: (KeyType, ValueType),
 }
 
-#[model_schema()]
+#[model_schema(default_types(IdType = String))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
 pub enum Adjacent<IdType> {
@@ -764,7 +769,7 @@ pub enum Adjacent<IdType> {
     Single(IdType),
 }
 
-#[model_schema()]
+#[model_schema(default_types(IdType = String))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum Internal<IdType> {
@@ -772,7 +777,7 @@ pub enum Internal<IdType> {
     Nothing,
 }
 
-#[model_schema()]
+#[model_schema(default_types(IdType = String))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum External<IdType> {
     Named { id: IdType },
@@ -780,7 +785,7 @@ pub enum External<IdType> {
     Single(IdType),
 }
 
-#[model_schema()]
+#[model_schema(default_types(IdType = String))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Untagged<IdType> {
@@ -796,13 +801,13 @@ pub enum PlainConst<const WIDTH: usize> {
     Wide,
 }
 
-#[model_schema(name = "RenamedHolder")]
+#[model_schema(name = "RenamedHolder", default_types(IdType = String))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Holder<IdType> {
     pub id: IdType,
 }
 
-#[model_schema()]
+#[model_schema(default_types(IdType = String))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Positional<IdType>(pub IdType, pub String);
 
@@ -815,7 +820,7 @@ pub struct Positional<IdType>(pub IdType, pub String);
     feature = "zod",
     feature = "jsonschema"
 ))]
-#[model_schema()]
+#[model_schema(default_types(KeyType = String, ValueType = u32))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyedByParameter<KeyType: Eq + Hash, ValueType> {
     pub both_parameters: HashMap<KeyType, ValueType>,
@@ -834,7 +839,13 @@ pub struct LifetimeStruct<'label> {
 /// Enough parameters that every level of the lookup is a level with two neighbours: the first
 /// argument keys the outermost map, the last keys the one the schema is stored in, and the three
 /// between are only reached through the two.
-#[model_schema()]
+#[model_schema(default_types(
+    AType = u32,
+    BType = String,
+    CType = u32,
+    DType = String,
+    EType = u32
+))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Quintet<AType, BType, CType, DType, EType> {
     pub alpha: AType,
@@ -852,17 +863,17 @@ pub struct Envelope {
 
 /// A generic alias, and a generic branded newtype: the two surfaces that publish a `const` rather
 /// than a factory, and so the two a parameter inside still reaches as the opaque value.
-#[model_schema(name = "Boxed")]
+#[model_schema(name = "Boxed", default_types(ValueType = String))]
 pub type Boxed<ValueType> = Vec<ValueType>;
 
-#[model_schema()]
+#[model_schema(default_types(ValueType = String))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Tagged<ValueType>(pub ValueType);
 
 /// A generic type that also flattens, which is the one shape where the parameters and the deferred
 /// read of another type's binding have to hold at once.
-#[model_schema()]
+#[model_schema(default_types(IdType = String))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Carried<IdType> {
     #[serde(flatten)]
@@ -870,10 +881,21 @@ pub struct Carried<IdType> {
     pub id: IdType,
 }
 
+/// A parameter with no declared default type, which only a build generating a JSON document
+/// refuses: nothing else reads the default, so there is nothing for the absence to break. The
+/// fixture compiling under the feature sets that admit it is the whole of the assertion — under
+/// the one that does not, it is not declared at all.
+#[cfg(not(feature = "jsonschema"))]
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Undefaulted<IdType> {
+    pub id: IdType,
+}
+
 /// The item the reference-site fixtures below point at. A generic type publishes a factory rather
 /// than a schema, so a field naming it has nothing to name — it has to call that factory with what
 /// fills each parameter.
-#[model_schema()]
+#[model_schema(default_types(IdType = String, DateType = String))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EcmDocument<IdType, DateType> {
     pub created_at: DateType,
@@ -881,13 +903,13 @@ pub struct EcmDocument<IdType, DateType> {
 }
 
 /// The inner half of a reference whose own argument is generic.
-#[model_schema()]
+#[model_schema(default_types(ValueType = String))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Inner<ValueType> {
     pub value: ValueType,
 }
 
-#[model_schema()]
+#[model_schema(default_types(ValueType = String))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Outer<ValueType> {
     pub held: ValueType,
@@ -905,7 +927,7 @@ pub struct WireFolder {
 /// A referrer that forwards its own parameter into a reference beside a concrete argument, holds a
 /// reference whose argument is itself generic, and names a set — the shape a sibling carrying one
 /// argument could be mistaken for.
-#[model_schema()]
+#[model_schema(default_types(IdType = String))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FolderTree<IdType> {
     pub labels: HashSet<String>,
@@ -932,6 +954,12 @@ pub struct MixedArguments {
 pub struct Referrer {
     pub boxed: Boxed<u32>,
     pub tagged: Tagged<String>,
+}
+
+#[cfg(not(feature = "jsonschema"))]
+#[test]
+fn a_parameter_with_no_default_still_expands_where_no_json_document_is_built() {
+    assert_eq!(Undefaulted { id: 1_u32 }.id, 1);
 }
 
 /// The pair the attribute used to produce on any generic item: `E0107` on the emitted `impl`,

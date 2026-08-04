@@ -784,8 +784,10 @@ A struct, a tuple struct, an enum, an alias and a branded newtype can each name 
 
 **Zod publishes a factory rather than a schema.** A Zod schema is a runtime value and TypeScript generics do not exist at runtime, so there is no one value a generic type could publish: the caller has to say what fills each parameter before anything can validate. A generic type therefore exports `X$SchemaFactory`, a function taking one required schema argument per parameter, and a field written with a parameter composes the argument bound for it.
 
+**With the `jsonschema` feature on, every type parameter needs a declared default type.** JSON Schema has no type parameters, so its document has to be built from one concrete filling, and `default_types` is where that filling is named — see [Declaring the default type](#declaring-the-default-type) below.
+
 ```rust
-#[model_schema()]
+#[model_schema(default_types(IdType = String))]
 pub struct Wrapper<IdType> {
     pub children: Vec<IdType>,
     pub id: IdType,
@@ -845,6 +847,32 @@ EcmDocument$SchemaFactory(z.string(), z.number()) === wireDocument;  // false --
 
 A generic type that also flattens keeps the deferred read of its base, so declaration order stays irrelevant: `.and(z.lazy(() => Envelope$Schema))` composes inside the factory unchanged.
 
+#### Declaring the default type
+
+JSON Schema has no type parameters. A generic type's document has to be built from one concrete filling, and nothing in the declaration says which — so `default_types` says it, one `Parameter = Type` pair per type parameter:
+
+```rust
+#[model_schema(default_types(IdType = String, DateType = f64))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EcmDocument<IdType, DateType> {
+    pub document_id: DocumentId<IdType>,
+    pub created_at: DateType,
+}
+```
+
+The pairs may be written in any order, and the argument sits beside every other item-level argument -- `name`, `pattern`, `minLength`, `maxLength`, `no_display` -- changing none of them. A lifetime and a const parameter name no type, so neither takes an entry.
+
+The declaration is read in both directions, and each refusal points at what earned it:
+
+| Written | Verdict |
+|---------|---------|
+| An entry naming something the item does not declare | Refused in **every** feature configuration, spanned on the entry. A misspelled parameter fills nothing, and the parameter it was meant for would be left with no default at all. |
+| A type parameter with no entry | Refused only where `jsonschema` is on, spanned on the parameter. Nothing else reads the default, so the same item compiles untouched without that feature. |
+| `default_types` on an item declaring no type parameter | Refused, there being nothing for a filling to fill. |
+
+There is deliberately no fallback. Guessing a filling produces a document that silently rejects valid payloads, which is the failure the declaration exists to prevent.
+
 #### The module preamble
 
 The factories share one helper, which every generated module carries once above its per-type definitions:
@@ -866,7 +894,7 @@ A cache maps an argument to the schema built from *that* argument, so its value 
 A generic alias and a generic branded newtype publish a plain `const`, so a parameter inside either has no argument to name and still renders as the opaque value -- `z.unknown()`, the same answer JSON Schema gives:
 
 ```rust
-#[model_schema()]
+#[model_schema(default_types(T = String))]
 pub type Wrapper<T> = Vec<T>;
 ```
 
@@ -883,7 +911,7 @@ Only the item's *own* parameters are read this way. A name the expansion cannot 
 One consequence is worth stating outright: an opaque value carries no checks, so no `model_schema_prop` bound may be spelled against a type parameter. A branded newtype cannot apply `pattern`, `minLength`, or `maxLength` to one of its own — see [Branded Newtype Validation Constraints](#branded-newtype-validation-constraints) — and a *field* typed with one is refused for the same reason, at every depth the parameter is reached through:
 
 ```rust
-#[model_schema()]
+#[model_schema(default_types(IdType = String))]
 pub struct Constrained<IdType> {
     #[model_schema_prop(minLength = 3)] // refused, and so is it on `Option<IdType>` or `Vec<IdType>`
     pub id: IdType,
@@ -901,7 +929,7 @@ use tixschema::model_schema;
 use serde::{Deserialize, Serialize};
 
 // Generic branded newtype (good for parameterized IDs)
-#[model_schema()]
+#[model_schema(default_types(ID_TYPE = String))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct UserId<ID_TYPE>(pub ID_TYPE);
@@ -1019,7 +1047,7 @@ An opaque inner is `serde_json::Value` **or one of the brand's own type paramete
 
 ```rust
 // Rejected: the checks would have to measure a value no surface has a shape for.
-#[model_schema(minLength = 3)]
+#[model_schema(minLength = 3, default_types(T = String))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct GenericSlug<T>(pub T);
@@ -1164,7 +1192,7 @@ Branded newtypes support doc comments (for Zod `.meta({ description })`) and com
 /// ```rust example
 /// DocumentId("64de3d95ff45b119e5b53a7e".to_string())
 /// ```
-#[model_schema()]
+#[model_schema(default_types(ID_TYPE = String))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct DocumentId<ID_TYPE>(pub ID_TYPE);

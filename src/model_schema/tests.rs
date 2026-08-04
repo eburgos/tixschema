@@ -32,7 +32,6 @@ use super::tuple_struct_zod_body;
 #[cfg(feature = "jsonschema")]
 use super::tuple_struct_json_body;
 
-#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use syn::spanned::Spanned as _;
 
 /// The variants of [`rendered_discriminated_union`]'s enum, in the order they are declared.
@@ -3423,12 +3422,13 @@ fn an_exported_name_can_carry_no_double_quote() {
 /// name is one it actually reads — the list and the arms cannot drift apart while both hold.
 #[test]
 fn no_argument_the_parser_reads_is_rejected() {
-    let probes: [proc_macro2::TokenStream; 5] = [
+    let probes: [proc_macro2::TokenStream; 6] = [
         quote::quote! { name = "Renamed" },
         quote::quote! { pattern = "^[a-z]+$" },
         quote::quote! { minLength = 1 },
         quote::quote! { maxLength = 50 },
         quote::quote! { no_display },
+        quote::quote! { default_types(IdType = String) },
     ];
     assert_eq!(probes.len(), super::KNOWN_ARGS.len());
 
@@ -3513,6 +3513,226 @@ fn every_expanded_shape_names_itself_in_a_guard_message() {
         (syn::parse_quote! { fn carrier() {} }, "item"),
     ] {
         assert_eq!(super::item_label(&item), label);
+    }
+}
+
+/// `default_types(IdType = String, DateType = f64)` reads as the pairs it was written as, in the
+/// order they were written, each type kept whole — the order is what a reader of the declaration
+/// lines up against the parameter list.
+#[test]
+fn default_types_reads_its_pairs_in_declaration_order() {
+    let args = super::parse_model_schema_args(quote::quote! {
+        default_types(IdType = String, DateType = f64, Nested = Vec<Option<u8>>)
+    });
+    assert_eq!(args.arg_rejection.as_ref().map(ToString::to_string), None);
+    let read: Vec<(String, String)> = args
+        .default_types
+        .iter()
+        .map(|(name, ty)| (name.to_string(), quote::quote!(#ty).to_string()))
+        .collect();
+    assert_eq!(
+        read,
+        vec![
+            ("IdType".to_owned(), "String".to_owned()),
+            ("DateType".to_owned(), "f64".to_owned()),
+            ("Nested".to_owned(), "Vec < Option < u8 > >".to_owned()),
+        ]
+    );
+}
+
+/// Every shape the argument is not: a value where the list belongs, a bare flag, an entry with no
+/// type beside it, a name no parameter can be spelled as, a trailing hole, and a list that
+/// declares nothing at all.
+#[test]
+fn a_default_types_shape_the_parser_cannot_read_is_refused() {
+    let probes: [proc_macro2::TokenStream; 6] = [
+        quote::quote! { default_types = "IdType" },
+        quote::quote! { default_types },
+        quote::quote! { default_types() },
+        quote::quote! { default_types(IdType) },
+        quote::quote! { default_types("IdType" = String) },
+        quote::quote! { default_types(IdType = String, , DateType = f64) },
+    ];
+    for probe in probes {
+        let rendered = probe.to_string();
+        assert!(args_rejection(probe).is_some(), "for {rendered}");
+    }
+}
+
+/// The argument shares the list with the string constraints and the name override, and reading it
+/// costs none of them. This is the only place the coexistence can be asked: a type-level string
+/// constraint is a brand's alone, and a brand over a type parameter is already refused at its
+/// inner field, so no one item reaches an emitter carrying both.
+#[test]
+fn default_types_coexists_with_every_other_argument() {
+    let args = super::parse_model_schema_args(quote::quote! {
+        name = "Slug", pattern = "^[a-z]+$", minLength = 1, maxLength = 8, no_display,
+        default_types(IdType = String)
+    });
+    assert_eq!(args.arg_rejection.as_ref().map(ToString::to_string), None);
+    assert_eq!(args.name_override.as_deref(), Some("Slug"));
+    assert_eq!(args.pattern.as_deref(), Some("^[a-z]+$"));
+    assert_eq!(args.min_length, Some(1));
+    assert_eq!(args.max_length, Some(8));
+    assert!(args.no_display);
+    assert_eq!(args.default_types.len(), 1);
+}
+
+/// The `compile_error!` tokens `default_types` earns when `args` is written on `source`. Both are
+/// parsed from text so their tokens carry file locations and each refusal's span can be read back
+/// as the source it points at.
+fn default_types_refusals(source: &str, args: &str) -> Vec<proc_macro2::TokenStream> {
+    let item: syn::Item = syn::parse_str(source).unwrap();
+    let parsed = super::parse_model_schema_args(syn::parse_str(args).unwrap());
+    assert_eq!(
+        parsed.arg_rejection.as_ref().map(ToString::to_string),
+        None,
+        "for {args}"
+    );
+    super::default_types_guard_errors(&item, &parsed)
+}
+
+/// The refusals of `args` on `source`, rendered.
+fn default_types_messages(source: &str, args: &str) -> Vec<String> {
+    default_types_refusals(source, args)
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// An entry naming nothing the item declares fills nothing, so it is refused in every build: no
+/// surface reads the default it carries, and the parameter it was meant for is left without one.
+#[test]
+fn an_entry_naming_no_declared_parameter_is_refused_in_every_build() {
+    let messages = default_types_messages(
+        "pub struct Renamed<IdType, DateType> { pub id: IdType, pub at: DateType }",
+        "default_types(IdType = String, DateType = f64, WrongName = String)",
+    );
+    assert_eq!(messages.len(), 1, "got: {messages:?}");
+    for needle in [
+        "compile_error",
+        "WrongName",
+        "IdType",
+        "DateType",
+        "type `Renamed`",
+    ] {
+        assert!(
+            messages[0].contains(needle),
+            "{needle} missing: {}",
+            messages[0]
+        );
+    }
+}
+
+/// An item with no type parameter has nothing for a default to fill, whatever the entry names and
+/// whichever shape carries the attribute — a lifetime and a const name no type either.
+#[test]
+fn default_types_on_an_item_declaring_no_type_parameter_is_refused() {
+    for source in [
+        "pub struct Plain { pub id: String }",
+        "pub enum Plain { One }",
+        "pub type Plain = String;",
+        "pub struct Borrowed<'label> { pub id: &'label str }",
+        "pub struct Fixed<const WIDTH: usize> { pub id: [u8; WIDTH] }",
+    ] {
+        let messages = default_types_messages(source, "default_types(IdType = String)");
+        assert_eq!(messages.len(), 1, "for {source}: {messages:?}");
+        assert!(
+            messages[0].contains("IdType"),
+            "for {source}: {}",
+            messages[0]
+        );
+    }
+}
+
+/// A declaration that answers for every parameter earns nothing, in every shape the attribute
+/// expands and beside the lifetimes and consts that name no type.
+#[test]
+fn an_item_declaring_a_default_for_every_parameter_earns_no_refusal() {
+    for (source, args) in [
+        (
+            "pub struct Both<IdType, DateType> { pub id: IdType, pub at: DateType }",
+            "default_types(IdType = String, DateType = f64)",
+        ),
+        (
+            "pub enum Tagged<IdType> { Named { id: IdType } }",
+            "default_types(IdType = String)",
+        ),
+        (
+            "pub type Boxed<ValueType> = Vec<ValueType>;",
+            "default_types(ValueType = String)",
+        ),
+        (
+            "pub struct Mixed<'label, IdType, const WIDTH: usize> { pub id: IdType }",
+            "default_types(IdType = String)",
+        ),
+        ("pub struct Plain { pub id: String }", ""),
+    ] {
+        let messages = default_types_messages(source, args);
+        assert!(messages.is_empty(), "for {source}: {messages:?}");
+    }
+}
+
+/// The refusal points at what earned it: the entry, for a name the item does not declare, and the
+/// parameter itself, for one left with no default.
+#[test]
+fn a_default_types_refusal_is_spanned_on_what_earned_it() {
+    let entry = default_types_refusals(
+        "pub struct Renamed<IdType> { pub id: IdType }",
+        "default_types(IdType = String, WrongName = String)",
+    );
+    assert_eq!(entry.len(), 1, "got: {}", entry.len());
+    assert_eq!(entry[0].span().source_text().as_deref(), Some("WrongName"));
+
+    #[cfg(feature = "jsonschema")]
+    {
+        let parameter = default_types_refusals(
+            "pub struct EcmDocument<IdType, DateType> { pub id: IdType, pub at: DateType }",
+            "default_types(IdType = String)",
+        );
+        assert_eq!(parameter.len(), 1, "got: {}", parameter.len());
+        assert_eq!(
+            parameter[0].span().source_text().as_deref(),
+            Some("DateType")
+        );
+    }
+}
+
+/// The JSON document is built from the declared default, so a parameter left without one is
+/// refused wherever that document is written — and the refusal says what the default is for, that
+/// the feature is what requires it, and the attribute to write for this item's own parameters.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_parameter_with_no_default_is_refused_where_the_json_document_is_built() {
+    let messages = default_types_messages(
+        "pub struct EcmDocument<IdType, DateType> { pub id: IdType, pub at: DateType }",
+        "",
+    );
+    assert_eq!(messages.len(), 2, "got: {messages:?}");
+    let joined = messages.join("\n");
+    for needle in [
+        "IdType",
+        "DateType",
+        "silently rejects valid payloads",
+        "`jsonschema` feature",
+        "default_types(IdType = String, DateType = String)",
+        "type `EcmDocument`",
+    ] {
+        assert!(joined.contains(needle), "{needle} missing: {joined}");
+    }
+}
+
+/// Without the feature that reads it, nothing is generated from a default type, so an item that
+/// declares none is left alone — the same item that is refused above.
+#[cfg(not(feature = "jsonschema"))]
+#[test]
+fn a_parameter_with_no_default_is_accepted_where_no_json_document_is_built() {
+    for args in ["", "default_types(IdType = String)"] {
+        let messages = default_types_messages(
+            "pub struct EcmDocument<IdType, DateType> { pub id: IdType, pub at: DateType }",
+            args,
+        );
+        assert!(messages.is_empty(), "for {args:?}: {messages:?}");
     }
 }
 
