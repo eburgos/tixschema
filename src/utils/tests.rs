@@ -327,6 +327,31 @@ fn ident_schema_module_name_is_derived_from_the_ident_alone() {
     );
 }
 
+/// A declared item's module used to be named from its export name, so the move is a move only for
+/// an item carrying an override: without one the export name *is* the ident, and both spellings
+/// land on the same module. That is what keeps every unrenamed item's published path unchanged.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn an_unrenamed_item_publishes_the_same_module_under_either_derivation() {
+    for ident in ["LaterItem", "LaterItemJson", "HTTPHeader", "A"] {
+        assert_eq!(
+            ident_schema_module_name(ident),
+            format!(
+                "{}_schema",
+                to_snake_case(&compute_item_export_name(ident, None))
+            ),
+            "for: {ident}"
+        );
+    }
+    assert_ne!(
+        ident_schema_module_name("LaterItem"),
+        format!(
+            "{}_schema",
+            to_snake_case(&compute_item_export_name("LaterItem", Some("RenamedLater")))
+        ),
+    );
+}
+
 /// Runs the `pattern` guard over `pattern` written as the literal an author would have written,
 /// which is what the guard spans its refusals on.
 fn portable(pattern: &str) -> Result<String, String> {
