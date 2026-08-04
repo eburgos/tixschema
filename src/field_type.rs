@@ -346,12 +346,29 @@ impl FieldDef {
     /// Replaces every reference to one of the enclosing item's type parameters with the opaque
     /// type.
     ///
-    /// A parameter names no type at expansion — the instantiation names one, and the schema is
-    /// written once for every instantiation. So a parameter describes as an opaque value does,
+    /// This is the one rule the two validating surfaces read a type parameter under, and the one
+    /// place they part company with TypeScript over it. A parameter names no type at expansion —
+    /// the instantiation names one, and one schema is written for every instantiation. So a
+    /// parameter describes as an opaque value does (`{}` in JSON Schema, `z.unknown()` in Zod),
     /// which leaves the shape it sits in — a tuple's arity, an array, a map's keys — described.
+    /// TypeScript needs no such rule: it is a type surface, and `export type Wrapper<T> =
+    /// Array<T>` binds `T` for real.
+    ///
+    /// Zod is why the rule cannot stop at JSON. Zod publishes *values*, and a `const` cannot be
+    /// parameterised, so a parameter left to render as the `Name$Schema` binding every unresolved
+    /// type is named after would reference a binding no emitted module declares — the consumer
+    /// pasting the output gets a `ReferenceError` before a payload is read. That is why only the
+    /// enclosing item's *own* parameters erase: a genuinely unresolved sibling type keeps its
+    /// `$Schema` reference, because the type it names does publish that binding.
+    ///
+    /// The erasure carries into what a schema surface may then claim about the value. An opaque
+    /// value takes no string checks — Zod 4's `z.unknown()` carries no `.min`/`.max`, and
+    /// `.brand()` hands back the very same instance rather than a wrapper that could — so a
+    /// branded newtype constraining one of its own parameters is refused, through the opaque arm
+    /// of `non_string_inner_shape` this erasure puts it in front of.
     ///
     /// Recurses through `SiblingType` generics, `Map` keys/values, and `Tuple` elements.
-    #[cfg(feature = "jsonschema")]
+    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     pub fn erase_type_parameters(&mut self, parameters: &[String]) {
         if let FieldDefType::SiblingType(name, _) = &self.field_type
             && parameters.iter().any(|parameter| parameter == name)
@@ -994,6 +1011,33 @@ impl FieldDef {
         } else {
             pre_result
         }
+    }
+
+    /// The members of the untagged union this field names, as the registry recorded them, and
+    /// nothing for a field that names no such union.
+    ///
+    /// A merge cannot join a union as one operand — an intersection recognizes exactly the keys its
+    /// operands name, and a `z.union` names none — so it joins one member per branch instead, and
+    /// these are the branches. The members are recorded already multiplied out, so a member that is
+    /// itself a union has already contributed its own.
+    ///
+    /// Answered only for a field whose whole Zod spelling *is* the name the registry keys — an
+    /// array level or a preprocess wrap is part of what the operand validates, and a member spliced
+    /// in the name's place would drop it. The outermost `Option` is not one of those: it is what
+    /// [`Self::zod_merged_schema`] already leaves to the merge.
+    #[cfg(feature = "zod")]
+    pub fn zod_union_members(&self) -> Vec<String> {
+        let wrapped = self
+            .model_schema_prop_meta
+            .as_ref()
+            .is_some_and(|meta| !meta.preprocess.is_empty());
+        if self.array_depth > 0 || wrapped {
+            return Vec::new();
+        }
+        let FieldDefType::SiblingType(name, _) = &self.field_type else {
+            return Vec::new();
+        };
+        lookup_alias_info(name).map_or_else(Vec::new, |info| info.zod_union_members)
     }
 }
 

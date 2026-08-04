@@ -511,6 +511,8 @@ Notes:
 - **JSON Schema** stays strict: rather than `allOf` (which cannot faithfully compose a tagged union under `additionalProperties: false`), the base properties are distributed into each branch of the flattened union, keeping every branch closed. Both spellings of a union are distributed into: a discriminated enum's `oneOf` and an untagged enum's `anyOf`. Plain-struct flattens merge into a single closed object; multiple flattened unions form a cross-product.
 - Each flattened union keeps the spelling it was written under. A discriminated enum's members are exclusive, so its branches stay a `oneOf`; an untagged enum is first-match-wins and its members may overlap (one member's keys a subset of another's, the difference optional), so its branches are an `anyOf` -- under `oneOf` the document would reject exactly what Serde writes for the narrower member, which matches both branches. An object flattening one of each nests the wrappers, the untagged `anyOf` sitting inside each branch of the discriminated `oneOf`.
 - A flattened source reached through an `Option` is a choice rather than a key set. Serde writes its members beside the object's own for a `Some` and writes the object alone for a `None`, so the **JSON Schema** offers both under an `anyOf`: one branch with the source's members merged in, one naming the object's own keys alone. Folding the members into a single object would require keys the `None` payload never carries, and dropping them from `required` would admit a base written in part -- neither is a payload Serde produces. A union reached through an `Option` keeps its own spelling inside the branch and gains the absence outside it.
+- **Zod** cannot name a choice as an operand, so it multiplies instead. An intersection recognizes exactly the keys its operands name; `z.discriminatedUnion` propagates its members' keys and is an operand like any other, while a plain `z.union` names none -- each of its branches would be asked to validate the whole payload alone and reject the keys the container and the sibling branches carry, which is every payload the object writes. So a flattened untagged enum, and a flattened source reached through an `Option`, are written as a union *of* intersections: one branch per combination, with the object's own keys bound once to `{Type}$OwnSchema` and read by every branch. A union nested inside a union contributes its leaves, the nesting writing no key of its own. With one combination there is nothing to choose between, so the object's own keys stay where they were.
+- That multiplication needs the union's members, which reach the merge through the registry -- so **an untagged enum must be declared above the object that flattens it**. Declared below, it has not expanded yet and the merge names it as one operand, the spelling that rejects every payload the object writes. Nothing at the merge tells such a source apart from a plain struct declared below, which is a spelling that works, so this is a declaration-order requirement rather than a diagnostic. It sits beside the reason the operands are deferred at all: a base is a `const` of its own, and nothing orders one type's schema against another's.
 - Only a value Serde writes as an object can be flattened -- Serde refuses the rest at run time (`can only flatten structs and maps`). Flattening a plain `#[model_schema()]` enum is rejected at expansion; any other type that turns out not to be written as an object is caught when `json_schema()` runs, naming the field's type and the remedy (write the field as a named member). A flattened union whose members are described one by one is checked the same way, member by member: a member Serde does not write as an object is refused with its branch named.
 
 ### Untagged Enums (`#[serde(untagged)]`)
@@ -753,6 +755,35 @@ export type DocumentRecord = {
 };
 ```
 
+### Type Parameters
+
+A generic alias and a generic branded newtype are the two items that can name their own type parameters, and every surface reads such a name under one rule.
+
+**TypeScript binds the parameter for real.** It is a type surface, and the declaration it emits carries the parameter list: `export type WrapperType<T> = Array<T>` is a generic type, and a use site fills `T` in.
+
+**Zod and JSON Schema erase it to the opaque value** -- `z.unknown()` and `{}`. A parameter names no type until the item is instantiated, and one schema is written for every instantiation, so the parameter admits any value while the shape around it -- an array, a map's keys, a tuple's arity -- stays described. Zod could not do otherwise even in principle: it publishes *values*, and a `const` takes no type parameters, so a parameter left to render would name a `$Schema` binding no emitted module declares, and the pasted output would throw a `ReferenceError` before reading a payload. The exported binding's annotation follows its value, taking the same opaque argument the value was composed with.
+
+```rust
+#[model_schema()]
+pub type Wrapper<T> = Vec<T>;
+```
+
+```typescript
+export type WrapperType<T> = Array<T>;
+
+const WrapperType$RawSchema = z.array(z.unknown());
+
+export const WrapperType$Schema: ZodType<WrapperType<unknown>> = WrapperType$RawSchema;
+```
+
+```json
+{ "type": "array", "items": {} }
+```
+
+Only the item's *own* parameters erase. A name the expansion cannot resolve because the type lives elsewhere keeps its `Name$Schema` reference, since that type publishes the binding.
+
+One consequence is worth stating outright: an opaque value carries no string checks, so a branded newtype cannot apply `pattern`, `minLength`, or `maxLength` to one of its own type parameters. See [Branded Newtype Validation Constraints](#branded-newtype-validation-constraints).
+
 ### Branded Newtypes
 
 `#[serde(transparent)]` tuple structs with a single public field generate branded TypeScript types. The newtype is invisible in JSON serialization but carries a distinct type identity in TypeScript, preventing accidental mixing of different ID types.
@@ -777,13 +808,19 @@ pub struct CorrelationId(pub String);
 Generated TypeScript (with `zod` feature):
 
 ```typescript
-export type UserId<ID_TYPE> = ID_TYPE & z.$brand<"UserId">;
-const UserId$RawSchema = ID_TYPE$Schema.brand<"UserId">();
+export type UserId<ID_TYPE> = ID_TYPE & $brand<"UserId">;
+const UserId$RawSchema = ID_TYPE$Schema.brand<"UserId">().meta({
+  description: "UserId",
+});
+
 export const UserId$Schema: $ZodBranded<typeof ID_TYPE$Schema, "UserId"> = UserId$RawSchema;
 
-export type CorrelationId = string & z.$brand<"CorrelationId">;
-const CorrelationId$RawSchema = z.string().brand<"CorrelationId">();
-export const CorrelationId$Schema: ZodType<CorrelationId> = CorrelationId$RawSchema;
+export type CorrelationId = string & $brand<"CorrelationId">;
+const CorrelationId$RawSchema = z.string().brand<"CorrelationId">().meta({
+  description: "CorrelationId",
+});
+
+export const CorrelationId$Schema: $ZodBranded<ZodString, "CorrelationId"> = CorrelationId$RawSchema;
 ```
 
 Generated TypeScript (without `zod` feature):
@@ -791,18 +828,16 @@ Generated TypeScript (without `zod` feature):
 ```typescript
 declare const __brand_UserId: unique symbol;
 export type UserId<ID_TYPE> = ID_TYPE & { readonly [__brand_UserId]: true };
-export function assertUserId<ID_TYPE>(value: ID_TYPE): asserts value is UserId<ID_TYPE> {}
 
 declare const __brand_CorrelationId: unique symbol;
 export type CorrelationId = string & { readonly [__brand_CorrelationId]: true };
-export function assertCorrelationId(value: string): asserts value is CorrelationId {}
 ```
 
 Notes:
 
 - If the Rust type name ends with `Json`, the suffix is stripped in the generated TypeScript (e.g., `UserIdJson` becomes `UserId`). Otherwise, the Rust name is used as-is.
-- Generic parameter names (e.g., `ID_TYPE`) are preserved exactly.
-- A brand describes what its inner writes whether or not the inner names the brand's type parameters, so `TagList<T>(pub Vec<T>)` is an array on every surface — `Array<T>`, `z.array(T$Schema)`, `$ZodBranded<ZodArray, "TagList">`, `{"type": "array", "items": {}}` — and not the bare parameter. The parameter itself carries what an uninstantiated parameter carries anywhere else: its own name in TypeScript, the `$Schema` binding named after it in Zod, and the permissive empty schema in JSON, since one schema is written for every instantiation.
+- Generic parameter names (e.g., `ID_TYPE`) are preserved exactly in the TypeScript type.
+- A brand describes what its inner writes whether or not the inner names the brand's type parameters, so `TagList<T>(pub Vec<T>)` is an array on every surface — `Array<T>`, `z.array(z.unknown())`, `$ZodBranded<ZodArray, "TagList">`, `{"type": "array", "items": {}}` — and not the bare parameter. The parameter itself carries what an uninstantiated parameter carries anywhere else, under the rule in [Type Parameters](#type-parameters).
 - Serde transparent serialization works normally -- the wrapper is invisible in JSON.
 - Use branded newtypes for opaque IDs and phantom types to prevent passing the wrong ID type across domain boundaries.
 
@@ -866,7 +901,23 @@ A generic brand carries the requirement as a `Display` bound on each type parame
 
 You can add `pattern`, `minLength`, and `maxLength` constraints directly on the `#[model_schema()]` attribute for branded newtypes. Constraints are enforced in three places: the generated Zod schema, serde deserialization, and a `validate()` method on the type.
 
-**The inner type has to be one whose schema is a string** — `String`, `PathBuf`, `ObjectId`, a chrono date/time type, another brand, or a generic parameter. A numeric, boolean, container (`Vec`, array, `HashMap`, tuple), or opaque (`serde_json::Value`) inner is rejected at expansion time, because the three constraints are string checks and each surface would read them differently: Zod's `.min`/`.max` become bounds on the value itself, JSON Schema ignores `minLength`/`maxLength`/`pattern` outside `"type": "string"`, and `validate()` measures the inner's `Display` rendering.
+**The inner type has to be one whose schema is a string** — `String`, `PathBuf`, `ObjectId`, a chrono date/time type, or another brand. A numeric, boolean, container (`Vec`, array, `HashMap`, tuple), or opaque inner is rejected at expansion time, because the three constraints are string checks and each surface would read them differently: Zod's `.min`/`.max` become bounds on the value itself, JSON Schema ignores `minLength`/`maxLength`/`pattern` outside `"type": "string"`, and `validate()` measures the inner's `Display` rendering.
+
+An opaque inner is `serde_json::Value` **or one of the brand's own type parameters**, which both validating surfaces read as the opaque value (see [Type Parameters](#type-parameters)). There is nothing there for the checks to attach to: Zod 4's `z.unknown()` carries no `.min`/`.max` at all, and `.brand()` hands back that same schema rather than a wrapper that could. Constrain a string-typed inner instead, or brand at the instantiation:
+
+```rust
+// Rejected: the checks would have to measure a value no surface has a shape for.
+#[model_schema(minLength = 3)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct GenericSlug<T>(pub T);
+
+// Accepted: the inner is a string, and the brand says so.
+#[model_schema(minLength = 3)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Slug(pub String);
+```
 
 **The inner type also has to implement `Display`,** since validation runs against `to_string()`. That holds whether or not the brand passes `no_display`: the flag drops the `Display` impl, not the requirement.
 
@@ -891,14 +942,9 @@ pub struct SlugId(pub String);
 Generated Zod:
 
 ```typescript
-const SlugId$RawSchema = z.string()
-  .min(3)
-  .max(50)
-  .check(z.regex(/^[a-z0-9_]+$/))
-  .brand<"SlugId">()
-  .meta({
-    description: "SlugId",
-  });
+const SlugId$RawSchema = z.string().min(3).max(50).check(z.regex(/^[a-z0-9_]+$/)).brand<"SlugId">().meta({
+  description: "SlugId",
+});
 
 export const SlugId$Schema: $ZodBranded<ZodString, "SlugId"> = SlugId$RawSchema;
 ```
@@ -927,9 +973,11 @@ assert!(slug.validate().is_ok());
 let bad = SlugId("ab".to_string());
 match bad.validate() {
     Ok(()) => unreachable!(),
-    Err(errors) => println!("{:?}", errors), // ["'value' is too short: minimum length is 3, got 2"]
+    Err(errors) => println!("{:?}", errors), // ["value is too short: minimum length is 3, got 2"]
 }
 ```
+
+A brand names the rejected value `value`, bare, where a struct field is named and quoted (`'username'`): a newtype has one value and no field name to quote.
 
 You can use any combination of the three constraints:
 
@@ -966,7 +1014,7 @@ error: model_schema: branded newtype `BadNum` applies string constraints (patter
   |                   ^^^
 ```
 
-An inner type the macro cannot resolve — another brand, a user type, a generic parameter — is
+An inner type the macro cannot resolve because it lives elsewhere — another brand, a user type — is
 admitted here and checked for `Display` instead, so a non-`Display` one is still reported at the
 field:
 
@@ -1013,12 +1061,12 @@ pub struct DocumentId<ID_TYPE>(pub ID_TYPE);
 Generated Zod:
 
 ```typescript
-const DocumentId$RawSchema = z.string().brand<"DocumentId">().meta({
-  description: "Generic document identifier.\n...",
+const DocumentId$RawSchema = ID_TYPE$Schema.brand<"DocumentId">().meta({
+  description: "Generic document identifier.\n- `DocumentId<String>` for API/HTTP layer\n- `DocumentId<ObjectId>` for MongoDB layer",
   example: "64de3d95ff45b119e5b53a7e",
 });
 
-export const DocumentId$Schema: $ZodBranded<ZodString, "DocumentId"> = DocumentId$RawSchema;
+export const DocumentId$Schema: $ZodBranded<typeof ID_TYPE$Schema, "DocumentId"> = DocumentId$RawSchema;
 ```
 
 ## Field Validation (`model_schema_prop`)
@@ -1143,8 +1191,8 @@ match reg.validate() {
         for e in &errors {
             println!("Error: {e}");
         }
-        // "username: too short (minimum length 3, got 2)"
-        // "age: too large (maximum 120, got 150)"
+        // "'username' is too short: minimum length is 3, got 2"
+        // "'age' is too large: maximum is 120, got 150"
     }
 }
 ```

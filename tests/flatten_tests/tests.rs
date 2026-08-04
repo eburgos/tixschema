@@ -203,6 +203,52 @@ struct FlatOverUntagged {
     own: String,
 }
 
+/// The same union reached through an `Option`, so the object writes one of the members' key sets
+/// beside its own or writes its own alone: two choices, multiplied.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatOverOptionalUntagged {
+    #[serde(flatten, skip_serializing_if = "Option::is_none", default)]
+    either: Option<FlatEither>,
+    own: String,
+}
+
+/// The same union under an alias. An alias *is* the type it names, so the object that flattens it
+/// writes exactly what the object flattening the enum writes.
+#[cfg(feature = "zod")]
+#[model_schema()]
+type FlatEitherAlias = FlatEither;
+
+#[cfg(feature = "zod")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatOverAliasedUntagged {
+    #[serde(flatten)]
+    either: FlatEitherAlias,
+    own: String,
+}
+
+/// An object that flattens a union declared *below* it. Nothing at the merge tells that source
+/// apart from a struct declared below — both are names the expansion has not seen — so the merge
+/// takes the same fallback a forward reference already takes and names the source as one operand.
+#[cfg(feature = "zod")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatOverLaterUntagged {
+    #[serde(flatten)]
+    either: LaterEither,
+    own: String,
+}
+
+#[cfg(feature = "zod")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum LaterEither {
+    First(FlatFirst),
+    Second(FlatSecond),
+}
+
 /// The same shape with one member serde writes as a string rather than an object. The union names
 /// no type of its own, so nothing before the merge can tell the two apart.
 #[model_schema()]
@@ -1564,4 +1610,175 @@ fn test_a_non_optional_flatten_schema_is_byte_identical() {
     const EXPECTED: &str = "export const MultiFlatten$Schema = z.strictObject({\n  id: z.string(),\n\n}).and(z.lazy(() => BasePart$Schema)).and(z.lazy(() => ExtraPart$Schema));";
 
     assert_eq!(MultiFlatten::zod_schema(), EXPECTED);
+}
+
+/// What serde writes for a flattened untagged enum is one key set per member, and what Zod says
+/// about it is the object multiplied over those members: a union of intersections, not an
+/// intersection with a union.
+///
+/// Read off zod 4.4.3: named as one operand, this schema rejected both payloads serde writes —
+/// `{"own":"o","a":"x"}` and `{"own":"o","b":true}` each came back `invalid_union`, one branch
+/// calling `own` an unrecognized key and the other missing the member it names. An intersection
+/// recognizes exactly the keys its operands name and a `z.union` names none, so each branch was
+/// asked to validate the whole payload alone. Multiplied out, both are accepted, and the schema
+/// still rejects `{"own":"o"}`, `{"a":"x"}`, `{"own":"o","a":"x","b":true}` and any payload
+/// carrying a key neither the object nor the matched member names.
+#[test]
+#[cfg(feature = "zod")]
+fn test_the_untagged_flatten_schema_multiplies_the_object_over_the_unions_members() {
+    #[cfg(feature = "typescript")]
+    const EXPECTED: &str = "const FlatOverUntagged$OwnSchema = z.strictObject({\n  own: z.string(),\n\n});\n\nconst FlatOverUntagged$RawSchema = z.union([\n  FlatOverUntagged$OwnSchema.and(z.lazy(() => FlatFirst$Schema)),\n  FlatOverUntagged$OwnSchema.and(z.lazy(() => FlatSecond$Schema)),\n]);\n\nexport const FlatOverUntagged$Schema: ZodType<FlatOverUntagged> = FlatOverUntagged$RawSchema;";
+    #[cfg(not(feature = "typescript"))]
+    const EXPECTED: &str = "const FlatOverUntagged$OwnSchema = z.strictObject({\n  own: z.string(),\n\n});\n\nexport const FlatOverUntagged$Schema = z.union([\n  FlatOverUntagged$OwnSchema.and(z.lazy(() => FlatFirst$Schema)),\n  FlatOverUntagged$OwnSchema.and(z.lazy(() => FlatSecond$Schema)),\n]);";
+
+    assert_eq!(FlatOverUntagged::zod_schema(), EXPECTED);
+}
+
+/// And the union itself is never an operand. Its name carries no key set, so an intersection built
+/// on it is the shape that rejected everything; the members reach the merge through the registry
+/// instead, each deferred exactly as a single base already was.
+#[test]
+#[cfg(feature = "zod")]
+fn test_the_untagged_flatten_schema_names_no_union_as_an_operand() {
+    let zod = FlatOverUntagged::zod_schema();
+    assert!(
+        !zod.contains("FlatEither"),
+        "the union is named as an operand in: {zod}"
+    );
+    assert!(
+        !zod.contains(".and(FlatFirst$Schema)") && !zod.contains(".and(FlatSecond$Schema)"),
+        "a member is read eagerly in: {zod}"
+    );
+    assert_eq!(
+        zod.matches("z.strictObject(").count(),
+        1,
+        "the object's own keys are written more than once in: {zod}"
+    );
+}
+
+/// The two choices multiply. An `Option` around the union offers the members or none of them, and
+/// the union offers one member or another, so the object writes one branch per member and one more
+/// for the absence — the same multiplication the JSON-schema document is written from.
+///
+/// Read off zod 4.4.3: this union accepts `{"own":"o","a":"x"}`, `{"own":"o","b":true}` and
+/// `{"own":"o"}`, and rejects `{"a":"x"}`, `{"own":"o","a":"x","b":true}`, `{"own":"o","extra":1}`
+/// and a bare `undefined`.
+#[test]
+#[cfg(feature = "zod")]
+fn test_an_optional_untagged_flatten_multiplies_the_members_and_the_absence() {
+    let zod = FlatOverOptionalUntagged::zod_schema();
+    assert!(
+        zod.contains(
+            "z.union([\n  FlatOverOptionalUntagged$OwnSchema.and(z.lazy(() => FlatFirst$Schema)),\n  FlatOverOptionalUntagged$OwnSchema.and(z.lazy(() => FlatSecond$Schema)),\n  FlatOverOptionalUntagged$OwnSchema,\n])"
+        ),
+        "expected every member beside the absence, got: {zod}"
+    );
+    assert!(
+        !zod.contains("z.undefined()") && !zod.contains(".optional()"),
+        "the absence is offered as a value rather than as a branch in: {zod}"
+    );
+}
+
+/// What serde writes for it: the matched member's keys beside the object's own, or the object's own
+/// alone. Both read back as the value that wrote them, so both are payloads of the type.
+#[test]
+fn test_an_optional_flattened_untagged_enum_writes_a_members_keys_or_nothing() {
+    let forms: [(Option<FlatEither>, serde_json::Value); 3] = [
+        (
+            Some(FlatEither::First(FlatFirst { a: "x".to_owned() })),
+            serde_json::json!({ "a": "x", "own": "o" }),
+        ),
+        (
+            Some(FlatEither::Second(FlatSecond { b: true })),
+            serde_json::json!({ "b": true, "own": "o" }),
+        ),
+        (None, serde_json::json!({ "own": "o" })),
+    ];
+    for (either, expected) in forms {
+        let holder = FlatOverOptionalUntagged {
+            either,
+            own: "o".to_owned(),
+        };
+        let written = serde_json::to_value(&holder).unwrap();
+        assert_eq!(written, expected);
+        let back: FlatOverOptionalUntagged = serde_json::from_value(written).unwrap();
+        assert_eq!(back, holder);
+    }
+}
+
+/// An alias is the type it names on every surface, so an object flattening the alias multiplies
+/// over exactly the members the enum's own name would have given it.
+#[test]
+#[cfg(feature = "zod")]
+fn test_an_aliased_untagged_flatten_multiplies_over_the_same_members() {
+    let zod = FlatOverAliasedUntagged::zod_schema();
+    assert!(
+        zod.contains(
+            "z.union([\n  FlatOverAliasedUntagged$OwnSchema.and(z.lazy(() => FlatFirst$Schema)),\n  FlatOverAliasedUntagged$OwnSchema.and(z.lazy(() => FlatSecond$Schema)),\n])"
+        ),
+        "expected the aliased union's members, got: {zod}"
+    );
+}
+
+/// A union nested inside a union contributes its leaves and not its name: the nesting writes no key
+/// of its own, and a name standing for a union carries no key set for the intersection to read.
+/// Where every level holds one member there is one combination, so the object's own keys stay where
+/// they were and the leaf joins them directly.
+#[test]
+#[cfg(feature = "zod")]
+fn test_a_nested_untagged_flatten_multiplies_over_the_leaf_members() {
+    let nested = NestHolder::zod_schema();
+    assert!(
+        nested.contains(
+            "z.union([\n  NestHolder$OwnSchema.and(z.lazy(() => NestPlain$Schema)),\n  NestHolder$OwnSchema.and(z.lazy(() => NestTagged$Schema)),\n])"
+        ),
+        "expected the leaves of the nesting, got: {nested}"
+    );
+    let only = NestOnlyHolder::zod_schema();
+    assert!(
+        only.contains("}).and(z.lazy(() => NestOnly$Schema));"),
+        "expected the one leaf joined directly, got: {only}"
+    );
+    assert!(
+        !only.contains("$OwnSchema") && !only.contains("z.union(["),
+        "a choice of one is written as a choice in: {only}"
+    );
+}
+
+/// A union declared below the object that flattens it is named as one operand — the spelling that
+/// rejects every payload the object writes, kept deliberately.
+///
+/// The members travel through the registry, and the registry holds what has already expanded, so a
+/// source declared below has none to offer. Nothing at the merge tells that source apart from a
+/// plain struct declared below, so a refusal would have to fire on every forward-declared base —
+/// including the two that flatten each other, which no declaration order puts both above the other
+/// and which this crate compiles today. The merge falls back instead: a union flattened by an
+/// object must be declared above that object, which is the ordering the deferred operands already
+/// document the other half of.
+#[test]
+#[cfg(feature = "zod")]
+fn test_a_union_declared_below_the_object_is_named_as_one_operand() {
+    let zod = FlatOverLaterUntagged::zod_schema();
+    assert!(
+        zod.contains("}).and(z.lazy(() => LaterEither$Schema));"),
+        "expected the union named as one operand, got: {zod}"
+    );
+    assert!(
+        !zod.contains("$OwnSchema"),
+        "a source with no members to multiply wrote a choice in: {zod}"
+    );
+}
+
+/// A base Zod does read a key set off is untouched. `z.discriminatedUnion` propagates its members'
+/// keys to the intersection, so an internally tagged base was never the shape that failed and is
+/// spelled byte for byte as it was.
+#[test]
+#[cfg(feature = "zod")]
+fn test_an_internally_tagged_flatten_schema_is_byte_identical() {
+    #[cfg(feature = "typescript")]
+    const EXPECTED: &str = "const DataElementSampleValueEntry$RawSchema = z.strictObject({\n  dataElementId: z.string(),\n\n}).and(z.lazy(() => DataElementSampleValueVariant$Schema));\n\nexport const DataElementSampleValueEntry$Schema: ZodType<DataElementSampleValueEntry> = DataElementSampleValueEntry$RawSchema;";
+    #[cfg(not(feature = "typescript"))]
+    const EXPECTED: &str = "export const DataElementSampleValueEntry$Schema = z.strictObject({\n  dataElementId: z.string(),\n\n}).and(z.lazy(() => DataElementSampleValueVariant$Schema));";
+
+    assert_eq!(DataElementSampleValueEntry::zod_schema(), EXPECTED);
 }

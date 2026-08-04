@@ -1,9 +1,14 @@
+use alloc::collections::{BTreeSet, VecDeque};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tixschema::model_schema;
 
 #[cfg(all(feature = "jsonschema", feature = "object_id"))]
 use mongodb::bson::oid::ObjectId;
+
+/// The members of `WrappedUnion`, in the order the union declares them.
+#[cfg(any(feature = "jsonschema", feature = "typescript", feature = "zod"))]
+const WRAPPED_MEMBERS: [&str; 3] = ["ids", "ordered", "queued"];
 
 // ISO-8601 date string. Branded newtype carries the regex pattern, written with `\d` and reaching
 // every surface as the members it stands for.
@@ -100,6 +105,20 @@ enum ShapedUnion {
     Pair { pair: (i64, String) },
 }
 
+// The std wrappers serde writes as a JSON array of their element, written in untagged members. Each
+// writes what a `Vec` of the same element writes, so each member has to describe as that field does
+// rather than as a schema module named after the wrapper. `LinkedList` is covered too and has no
+// member here, the crate's own lints forbidding it a value of one; it is covered by name at the
+// dispatch's own unit tests instead.
+#[model_schema()]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum WrappedUnion {
+    Ids { ids: HashSet<u32> },
+    Ordered { ordered: BTreeSet<u32> },
+    Queued { queued: VecDeque<u32> },
+}
+
 // The field-position twins: the same members written as struct fields. Field position is the
 // rendering an untagged member is held against, so it is written out rather than restated.
 #[cfg(feature = "jsonschema")]
@@ -115,6 +134,15 @@ struct KeyedFields {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ShapedFields {
     pair: (i64, String),
+}
+
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WrappedFields {
+    ids: HashSet<u32>,
+    ordered: BTreeSet<u32>,
+    queued: VecDeque<u32>,
 }
 
 // An untagged struct variant carrying a constrained member, beside the same member written in a
@@ -679,6 +707,107 @@ fn test_untagged_tuple_member_zod() {
         zod.contains("z.strictObject({ pair: z.tuple([z.number().int(), z.string()]), })"),
         "Got:\n{zod}"
     );
+}
+
+/// What serde writes for an untagged member holding a covered sequence wrapper — the capture the
+/// three surfaces are held against. Every one of them writes the JSON array a `Vec` of the same
+/// element writes, which is the whole reason the wrapper is covered.
+#[test]
+fn test_untagged_wrapper_member_wire() {
+    for value in [
+        WrappedUnion::Ids {
+            ids: HashSet::from([7_u32]),
+        },
+        WrappedUnion::Ordered {
+            ordered: BTreeSet::from([7_u32]),
+        },
+        WrappedUnion::Queued {
+            queued: VecDeque::from([7_u32]),
+        },
+    ] {
+        let wire = serde_json::to_value(&value).unwrap();
+        let (member, written) = wire.as_object().unwrap().iter().next().unwrap();
+        assert_eq!(*written, serde_json::json!([7_u32]), "for: {member}");
+        assert_eq!(
+            serde_json::from_value::<WrappedUnion>(wire.clone()).unwrap(),
+            value,
+            "for: {member}"
+        );
+    }
+}
+
+/// A member holding a covered sequence wrapper describes as the array serde writes: the element's
+/// own schema under array wrapping. Held against the struct field written from the same type, which
+/// is the rendering a member must not diverge from — and which is where the wrapper name stopped
+/// standing for a schema module of its own.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_untagged_wrapper_member_json_schema() {
+    let schema = WrappedUnion::json_schema();
+    let fields = WrappedFields::json_schema();
+    let any_of = schema["anyOf"].as_array().unwrap();
+    assert_eq!(any_of.len(), WRAPPED_MEMBERS.len(), "Got:\n{schema}");
+
+    for (branch, member) in any_of.iter().zip(WRAPPED_MEMBERS) {
+        assert_eq!(
+            branch["properties"][member],
+            serde_json::json!({ "type": "array", "items": { "type": "integer" } }),
+            "Got:\n{schema}"
+        );
+        assert_eq!(
+            branch["properties"][member], fields["properties"][member],
+            "the field-position twin must render the same member"
+        );
+        assert_eq!(branch["required"], serde_json::json!([member]));
+    }
+}
+
+/// The schema admits the wire the capture recorded: serde writes an array, and each item is what
+/// the member's `items` schema names. A member still carrying the wrapper's own name could not have
+/// described this payload at all — it named a schema module no expansion declares.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_untagged_wrapper_member_schema_admits_the_captured_wire() {
+    let queued = WrappedUnion::Queued {
+        queued: VecDeque::from([7_u32, 8_u32]),
+    };
+    let wire = serde_json::to_value(&queued).unwrap();
+    let schema = WrappedUnion::json_schema();
+    let member = &schema["anyOf"][2]["properties"]["queued"];
+    let written = wire["queued"].as_array().unwrap();
+
+    assert_eq!(member["type"], serde_json::json!("array"), "Got:\n{schema}");
+    assert_eq!(member["items"]["type"], serde_json::json!("integer"));
+    assert!(
+        written.iter().all(serde_json::Value::is_u64),
+        "Got:\n{wire}"
+    );
+}
+
+#[test]
+#[cfg(feature = "typescript")]
+fn test_untagged_wrapper_member_typescript() {
+    let ts = WrappedUnion::ts_definition();
+    for member in WRAPPED_MEMBERS {
+        assert!(
+            ts.contains(&format!("{{ {member}: Array<number> }}")),
+            "Got:\n{ts}"
+        );
+    }
+}
+
+#[test]
+#[cfg(feature = "zod")]
+fn test_untagged_wrapper_member_zod() {
+    let zod = WrappedUnion::zod_schema();
+    for member in WRAPPED_MEMBERS {
+        assert!(
+            zod.contains(&format!(
+                "z.strictObject({{ {member}: z.array(z.number().int()), }})"
+            )),
+            "Got:\n{zod}"
+        );
+    }
 }
 
 /// The member's constraint reaches Zod in the spelling the tagged twin's does. Before this, the

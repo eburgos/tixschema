@@ -296,7 +296,7 @@ fn positional_option_field_is_exempt() {
 /// Collects the untagged-path guard failures as rendered `compile_error!` token streams.
 #[cfg(feature = "serde")]
 fn untagged_guard_error_tokens(item: &mut syn::ItemEnum) -> Vec<proc_macro2::TokenStream> {
-    collect_untagged_members(item, UNTAGGED_MODULE).3
+    collect_untagged_members(item, UNTAGGED_MODULE).4
 }
 
 /// Collects the untagged-path guard failures as rendered `compile_error!` token strings.
@@ -476,7 +476,7 @@ fn untagged_member_carries_its_constraint_to_the_surfaces() {
             },
         }
     };
-    let (_, zod_parts, _, errors, _, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
+    let (_, zod_parts, _, _, errors, _, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
     assert!(errors.is_empty(), "got: {errors:?}");
     assert!(
         zod_parts[0].contains("z.string().min(2).check(z.regex(/^[a-z]+$/))"),
@@ -498,7 +498,8 @@ fn untagged_member_constraint_generates_the_validator_and_hangs_it_on_the_member
             },
         }
     };
-    let (_, _, _, errors, validation_fns, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
+    let (_, _, _, _, errors, validation_fns, _) =
+        collect_untagged_members(&mut item, UNTAGGED_MODULE);
     assert!(errors.is_empty(), "got: {errors:?}");
     assert_eq!(validation_fns.len(), 1, "got: {validation_fns:?}");
     let rendered = validation_fns[0].to_string();
@@ -532,7 +533,7 @@ fn untagged_member_constraint_generates_nothing_without_a_schema_module() {
             },
         }
     };
-    let (_, _, _, errors, validation_fns, _) = collect_untagged_members(&mut item, None);
+    let (_, _, _, _, errors, validation_fns, _) = collect_untagged_members(&mut item, None);
     assert!(errors.is_empty(), "got: {errors:?}");
     assert!(validation_fns.is_empty(), "got: {validation_fns:?}");
     let attrs = &item.variants[0].fields.iter().next().unwrap().attrs;
@@ -699,7 +700,7 @@ fn untagged_member_reaching_an_unwritable_map_key_is_refused() {
 #[cfg(all(feature = "serde", feature = "jsonschema"))]
 fn untagged_member_values(mut item: syn::ItemEnum) -> Vec<String> {
     collect_untagged_members(&mut item, UNTAGGED_MODULE)
-        .2
+        .3
         .iter()
         .map(ToString::to_string)
         .collect()
@@ -2170,12 +2171,20 @@ fn branded_json_schema_method_carries_no_cfg_attribute() {
 }
 
 /// Every shape [`super::branded_json_inner`] resolves to, so the dispatch is covered whole.
+///
+/// The `Slot` and `Chrono` shapes build their bodies through [`super::branded_slot_json_schema`]
+/// and [`super::branded_chrono_schema`], which is where a stray `cfg` attribute would land unseen,
+/// so they are walked here beside the two that render inline.
 #[cfg(feature = "jsonschema")]
 fn branded_json_inners() -> Vec<super::BrandedJsonInner> {
+    let composite: syn::Type = syn::parse_quote!(Vec<String>);
     vec![
-        super::BrandedJsonInner::Scalar("string".to_owned()),
+        #[cfg(feature = "chrono")]
+        super::BrandedJsonInner::Chrono("date-time"),
         #[cfg(feature = "object_id")]
         super::BrandedJsonInner::ObjectId,
+        super::BrandedJsonInner::Scalar("string".to_owned()),
+        super::BrandedJsonInner::Slot(Box::new(super::get_field_def("_inner", &composite, ""))),
     ]
 }
 
@@ -2184,9 +2193,34 @@ fn branded_json_inners() -> Vec<super::BrandedJsonInner> {
 fn branded_schema_example_carries_no_cfg_attribute() {
     let name: syn::Ident = syn::parse_quote!(DocumentId);
     let example = "DocumentId(\"abc\".to_string())".to_owned();
-    for is_generic in [false, true] {
-        let tokens = super::build_branded_schema_example(Some(&example), &name, is_generic);
+    for generic_params in [
+        Vec::new(),
+        vec!["A".to_owned()],
+        vec!["A".to_owned(), "B".to_owned()],
+    ] {
+        let tokens = super::build_branded_schema_example(Some(&example), &name, &generic_params);
         assert_no_cfg_attribute(&tokens, "build_branded_schema_example");
+    }
+}
+
+/// The type the example is bound at carries one argument per declared parameter, and none at all
+/// where the brand declares none — so a brand of any arity annotates a type it can be built as.
+#[cfg(feature = "zod")]
+#[test]
+fn branded_schema_example_instantiates_every_parameter() {
+    let name: syn::Ident = syn::parse_quote!(DocumentId);
+    let example = "DocumentId(\"abc\".to_string())".to_owned();
+    for (generic_params, expected) in [
+        (Vec::new(), "let value : DocumentId ="),
+        (vec!["A".to_owned()], "let value : DocumentId < String > ="),
+        (
+            vec!["A".to_owned(), "B".to_owned()],
+            "let value : DocumentId < String , String > =",
+        ),
+    ] {
+        let rendered =
+            super::build_branded_schema_example(Some(&example), &name, &generic_params).to_string();
+        assert!(rendered.contains(expected), "Got: {rendered}");
     }
 }
 
@@ -2282,6 +2316,37 @@ fn an_alias_type_parameter_is_erased_at_every_depth() {
     }
 }
 
+/// The same erasure at the same depths on the value surface, where the consequence of skipping it
+/// is louder: a Zod `const` cannot be parameterised, so a parameter left to render names a
+/// `$Schema` binding no emitted module declares and the pasted output throws before a payload is
+/// read. Asserted over the identical alias list the JSON test walks, so the two surfaces cannot
+/// erase at different depths.
+#[cfg(feature = "zod")]
+#[test]
+fn an_alias_type_parameter_is_erased_at_every_depth_on_the_value_surface() {
+    for alias_source in [
+        "pub type Holder<V> = V;",
+        "pub type Holder<V> = Vec<V>;",
+        "pub type Holder<V> = Option<V>;",
+        "pub type Holder<V> = (String, V);",
+        "pub type Holder<V> = HashMap<String, V>;",
+        "pub type Holder<V> = HashMap<String, Vec<V>>;",
+    ] {
+        let alias: syn::ItemType = syn::parse_str(alias_source).unwrap();
+        let field_def = super::get_field_def("HolderType", &alias.ty, "");
+        let tokens = super::generate_alias_zod_method(&alias, "HolderType", "Holder", &field_def)
+            .to_string();
+        assert!(
+            !tokens.contains("V$Schema"),
+            "for {alias_source}, got: {tokens}"
+        );
+        assert!(
+            tokens.contains("\"HolderType<unknown>\""),
+            "for {alias_source}, got: {tokens}"
+        );
+    }
+}
+
 /// The stub this replaced answered every alias with an object carrying a lone `warning` key, which
 /// under JSON Schema constrains nothing — every slot naming an alias accepted every payload. No
 /// emission may carry one again.
@@ -2301,9 +2366,12 @@ fn no_json_schema_emission_carries_a_warning_key() {
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn alias_zod_method_carries_no_cfg_attribute() {
+    let alias: syn::ItemType = syn::parse_quote!(
+        pub type Alias = String;
+    );
     let ty: syn::Type = syn::parse_quote!(String);
     let field_def = super::get_field_def("AliasType", &ty, "");
-    let tokens = super::generate_alias_zod_method("AliasType", "Alias", &field_def);
+    let tokens = super::generate_alias_zod_method(&alias, "AliasType", "Alias", &field_def);
     assert_no_cfg_attribute(&tokens, "generate_alias_zod_method");
 }
 
@@ -2575,10 +2643,14 @@ fn string_constraints_over_a_non_string_inner_are_rejected() {
     }
 }
 
-/// The inners that carry the constraints faithfully. A `SiblingType` — another brand, an
-/// unresolved user type, or a bare generic parameter — is admitted because expansion cannot know
-/// its shape; the constrained path's `Display` assertion is what covers it. A name carrying one
-/// argument that is not a sequence wrapper is such a name too, and stays admitted.
+/// The inners that carry the constraints faithfully. A `SiblingType` — another brand, or an
+/// unresolved user type — is admitted because expansion cannot know its shape; the constrained
+/// path's `Display` assertion is what covers it. A name carrying one argument that is not a
+/// sequence wrapper is such a name too, and stays admitted.
+///
+/// `U` is written where the brand declares no such parameter, so it is one of those unresolved
+/// names rather than a parameter: that is the whole of the line the classifier draws, and the
+/// brand's own `T` is on the other side of it in the test below.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn string_constraints_over_a_string_shaped_inner_pass() {
@@ -2587,7 +2659,7 @@ fn string_constraints_over_a_string_shaped_inner_pass() {
         "PathBuf",
         "ObjectId",
         "SomeOtherBrand",
-        "T",
+        "U",
         "SomeWrapper<String>",
     ] {
         let ty: syn::Type = syn::parse_str(inner).unwrap();
@@ -2599,6 +2671,36 @@ fn string_constraints_over_a_string_shaped_inner_pass() {
             &pattern_args(),
         );
         assert!(errors.is_empty(), "for {inner}, got: {errors:?}");
+    }
+}
+
+/// A brand constraining one of its own type parameters has nothing to hang the checks on.
+///
+/// Both validating surfaces read a parameter as the opaque value, and an opaque value takes no
+/// string checks: Zod 4's `z.unknown()` carries no `.min`/`.max`, and `.brand()` hands back that
+/// same instance rather than a wrapper that could; JSON Schema's string keywords go inert beside
+/// the `{}` a parameter describes as; and `validate()` still measures `Display`. So the parameter
+/// reaches the same refusal `serde_json::Value` reaches, through the same opaque arm — the erasure
+/// is what puts it there, and is why the guard does not have to name parameters itself.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn string_constraints_over_the_brands_own_type_parameter_are_rejected() {
+    for inner in ["T", "U"] {
+        let ty: syn::Type = syn::parse_str(inner).unwrap();
+        let errors = branded_errors_with(
+            &syn::parse_quote! {
+                #[serde(transparent)]
+                struct Branded<T, U>(pub #ty);
+            },
+            &pattern_args(),
+        );
+        assert_eq!(errors.len(), 1, "for {inner}, got: {errors:?}");
+        assert!(errors[0].contains("`Branded`"), "got: {}", errors[0]);
+        assert!(
+            errors[0].contains("opaque"),
+            "for {inner}, got: {}",
+            errors[0]
+        );
     }
 }
 
@@ -4526,6 +4628,23 @@ fn every_sequence_wrapper_describes_as_the_vec_of_its_element_in_a_slot() {
     }
 }
 
+/// And in an untagged variant's member, the third position that dispatches a value. It reads the
+/// wrappers through the seam the other positions read them through, so a member describes a covered
+/// wrapper as the `Vec` of its element too — and none of them can name a schema module after a
+/// wrapper, which is a module the expansion never declares and rustc reports at the member's type.
+#[cfg(all(feature = "jsonschema", feature = "serde"))]
+#[test]
+fn every_sequence_wrapper_describes_as_the_vec_of_its_element_in_an_untagged_member() {
+    let expected = super::field_json_schema_value(&parsed_u32_vec_value()).to_string();
+    for wrapper in SEQUENCE_WRAPPERS {
+        assert_eq!(
+            super::field_json_schema_value(&wrapped_u32_value(wrapper)).to_string(),
+            expected,
+            "for: {wrapper}"
+        );
+    }
+}
+
 /// A sibling is carried by reference in every position that holds one, so the two slot positions
 /// name one schema module and wrap it the same way — a tuple element that fell back to the open
 /// object would admit values the same type in a map member rejects.
@@ -4557,7 +4676,7 @@ fn a_sibling_slot_carries_the_schema_module_reference() {
 fn brand_json_schema_over(inner_ty: &syn::Type) -> String {
     super::build_branded_json_schema_method(
         &super::ModelSchemaArgs::default(),
-        &super::branded_json_inner(&[], inner_ty),
+        &super::branded_json_inner(&super::get_field_def("_inner", inner_ty, "")),
         "Wrapped",
     )
     .to_string()
