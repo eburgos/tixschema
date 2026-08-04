@@ -6361,12 +6361,6 @@ fn object_id_hex_json_schema() -> proc_macro2::TokenStream {
     quote! { serde_json::json!({ "type": "string", "pattern": #OBJECT_ID_HEX_PATTERN }) }
 }
 
-/// The hex string an `ObjectId`'s `$oid` member holds, where no brand narrows it further.
-#[cfg(all(feature = "jsonschema", feature = "object_id"))]
-fn object_id_hex_json_schema() -> proc_macro2::TokenStream {
-    quote! { serde_json::json!({ "type": "string", "pattern": #OBJECT_ID_HEX_PATTERN }) }
-}
-
 /// Builds the JSON schema for a `MongoDB` `ObjectId` field (`{ "$oid": string }`).
 #[cfg(all(feature = "jsonschema", feature = "object_id"))]
 fn build_object_id_field_schema(fld: &FieldDef, field_name_str: &str) -> proc_macro2::TokenStream {
