@@ -6,11 +6,12 @@ use super::{
 
 #[cfg(feature = "serde")]
 use super::{
-    ConstraintLeaf, ModelSchemaPropMeta, build_field_validation, cfg_attr_guard_error,
-    check_optional_field_serialization, collect_untagged_members, constrained_shape,
-    enum_cfg_attr_guard_errors, generate_field_validation, generate_numeric_validation_code,
-    generate_string_validation_code, helper_name_stem, internally_tagged_guard_errors,
-    needs_injected_default, parse_serde_field_attributes, parse_serde_type_attributes,
+    ConstraintLeaf, MemberAccess, ModelSchemaPropMeta, build_field_validation,
+    cfg_attr_guard_error, check_optional_field_serialization, collect_untagged_members,
+    constrained_shape, enum_cfg_attr_guard_errors, generate_field_validation,
+    generate_numeric_validation_code, generate_string_validation_code, helper_name_stem,
+    internally_tagged_guard_errors, needs_injected_default, parse_serde_field_attributes,
+    parse_serde_type_attributes,
 };
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -475,7 +476,7 @@ fn untagged_member_carries_its_constraint_to_the_surfaces() {
             },
         }
     };
-    let (_, zod_parts, _, errors, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
+    let (_, zod_parts, _, errors, _, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
     assert!(errors.is_empty(), "got: {errors:?}");
     assert!(
         zod_parts[0].contains("z.string().min(2).check(z.regex(/^[a-z]+$/))"),
@@ -497,7 +498,7 @@ fn untagged_member_constraint_generates_the_validator_and_hangs_it_on_the_member
             },
         }
     };
-    let (_, _, _, errors, validation_fns) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
+    let (_, _, _, errors, validation_fns, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
     assert!(errors.is_empty(), "got: {errors:?}");
     assert_eq!(validation_fns.len(), 1, "got: {validation_fns:?}");
     let rendered = validation_fns[0].to_string();
@@ -531,7 +532,7 @@ fn untagged_member_constraint_generates_nothing_without_a_schema_module() {
             },
         }
     };
-    let (_, _, _, errors, validation_fns) = collect_untagged_members(&mut item, None);
+    let (_, _, _, errors, validation_fns, _) = collect_untagged_members(&mut item, None);
     assert!(errors.is_empty(), "got: {errors:?}");
     assert!(validation_fns.is_empty(), "got: {validation_fns:?}");
     let attrs = &item.variants[0].fields.iter().next().unwrap().attrs;
@@ -2612,8 +2613,9 @@ fn branded_newtype_over_option_is_rejected() {
     assert!(errors[0].contains("null"), "got: {}", errors[0]);
 }
 
-/// The generic arm renders the type parameter and drops the `Option` wrapper outright, so the
-/// shape is no more representable there than in the concrete case.
+/// An inner naming a type parameter is read exactly as a concrete one is, so the `Option`
+/// collapses onto what it holds there too and the shape is no more representable than in the
+/// concrete case.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn generic_branded_newtype_over_option_is_rejected() {
@@ -4494,7 +4496,7 @@ fn a_sibling_slot_carries_the_schema_module_reference() {
 fn brand_json_schema_over(inner_ty: &syn::Type) -> String {
     super::build_branded_json_schema_method(
         &super::ModelSchemaArgs::default(),
-        &super::branded_json_inner(false, inner_ty),
+        &super::branded_json_inner(&[], inner_ty),
         "Wrapped",
     )
     .to_string()
@@ -4849,14 +4851,41 @@ fn discriminated_union_rendering_is_stable_across_runs() {
     }
 }
 
-/// The `validate()` contribution for a field spelled `spelling`, as tokens.
+/// The `validate()` contribution for a field spelled `spelling`, reached from `access`, as tokens.
 #[cfg(feature = "serde")]
-fn emitted_validation(spelling: &str) -> String {
+fn emitted_validation_from(spelling: &str, access: MemberAccess) -> String {
     let ty: syn::Type = syn::parse_str(spelling).unwrap();
     let shape = constrained_shape(&ty).unwrap();
     let field = proc_macro2::Ident::new("field", proc_macro2::Span::call_site());
     let checker = proc_macro2::Ident::new("check", proc_macro2::Span::call_site());
-    build_field_validation(&shape.wraps, &field, &checker).to_string()
+    build_field_validation(&shape.wraps, access, &field, &checker).to_string()
+}
+
+/// The `validate()` contribution for a struct's field spelled `spelling`, as tokens.
+#[cfg(feature = "serde")]
+fn emitted_validation(spelling: &str) -> String {
+    emitted_validation_from(spelling, MemberAccess::SelfField)
+}
+
+/// The two positions differ in one place and nowhere else: where the checked value is reached.
+/// Everything downstream of that — the walk through the wrappers, the check, the push — is the
+/// same body, which is what makes a variant's member answer for its bound in a struct's words.
+#[cfg(feature = "serde")]
+#[test]
+fn a_variant_member_is_reached_through_the_binding_its_arm_made() {
+    for spelling in [
+        "String",
+        "u32",
+        "Option<String>",
+        "Vec<String>",
+        "Option<Arc<[String]>>",
+    ] {
+        assert_eq!(
+            emitted_validation_from(spelling, MemberAccess::VariantBinding),
+            emitted_validation(spelling).replace("& self . field", "member_field"),
+            "spelling {spelling}"
+        );
+    }
 }
 
 /// The one spelling whose emitted body predates the reach-through and must not move: anything else
@@ -4942,9 +4971,32 @@ fn emitted_string_module(spelling: &str) -> String {
         &meta,
         &shape,
         &ty,
+        MemberAccess::SelfField,
     )
     .module_items
     .to_string()
+}
+
+/// The validator emitted for a `String` field constrained by `pattern`, as tokens — everything the
+/// schema module holds ahead of the deserializer.
+#[cfg(feature = "serde")]
+fn emitted_pattern_validator(pattern: &str) -> String {
+    let ty: syn::Type = syn::parse_str("String").unwrap();
+    let meta = ModelSchemaPropMeta {
+        pattern: Some(pattern.to_owned()),
+        ..ModelSchemaPropMeta::default()
+    };
+    let module = generate_string_validation_code(
+        "field",
+        &helper_name_stem("field", None),
+        &meta,
+        &constrained_shape(&ty).unwrap(),
+        &ty,
+        MemberAccess::SelfField,
+    )
+    .module_items
+    .to_string();
+    module[..module.find("pub fn deserialize_field").unwrap()].to_owned()
 }
 
 /// Just the deserializer of [`emitted_string_module`], which is everything after the validator.
@@ -4983,6 +5035,7 @@ fn a_bare_field_deserializes_the_constrained_value_itself() {
         &numeric_meta,
         &constrained_shape(&numeric_ty).unwrap(),
         &numeric_ty,
+        MemberAccess::SelfField,
     )
     .module_items
     .to_string();
@@ -5137,7 +5190,7 @@ fn wire_walk_of(spelling: &str) -> String {
     let shape = constrained_shape(&ty).unwrap();
     let field = proc_macro2::Ident::new("field", proc_macro2::Span::call_site());
     let checker = proc_macro2::Ident::new("validate_field_value", proc_macro2::Span::call_site());
-    build_field_validation(&shape.wraps, &field, &checker)
+    build_field_validation(&shape.wraps, MemberAccess::SelfField, &field, &checker)
         .to_string()
         .replace(
             "if let Err (e) = validate_field_value (",
@@ -5381,5 +5434,42 @@ fn a_wrapped_path_field_deserializes_its_declared_type() {
     assert_eq!(
         emitted_string_deserializer("Box<Path>"),
         emitted_string_deserializer("Box<str>").replace("Box < str >", "Box < Path >")
+    );
+}
+
+/// A `pattern` a regex engine is avoidable work for is emitted as the `str` call
+/// `clippy::trivial_regex` names for it, with a one-character needle as a `char` so the emitted
+/// call also answers `clippy::single_char_pattern`. Both lints are denied by the crates this code
+/// is written into, and neither has an edit available at the `#[model_schema]` attribute the
+/// diagnostic lands on.
+#[cfg(feature = "serde")]
+#[test]
+fn a_trivial_pattern_is_emitted_as_the_call_it_says_the_same_thing_as() {
+    assert_eq!(
+        emitted_pattern_validator("^/"),
+        "pub fn validate_field_value (value : & str) -> Result < () , String > \
+         { if ! value . starts_with ('/') { \
+         return Err (format ! (\"'{}' does not match pattern '{}'\" , \"field\" , \"^/\")) ; } Ok (()) } "
+    );
+    assert_eq!(
+        emitted_pattern_validator("^abc$"),
+        "pub fn validate_field_value (value : & str) -> Result < () , String > \
+         { if value != \"abc\" { \
+         return Err (format ! (\"'{}' does not match pattern '{}'\" , \"field\" , \"^abc$\")) ; } Ok (()) } "
+    );
+}
+
+/// A `pattern` of any real shape keeps the regex it has always been checked by, built once per
+/// process, and the words it is turned away with do not move either way.
+#[cfg(feature = "serde")]
+#[test]
+fn a_pattern_of_any_real_shape_keeps_its_regex() {
+    assert_eq!(
+        emitted_pattern_validator("^[a-z]+$"),
+        "pub fn validate_field_value (value : & str) -> Result < () , String > \
+         { { use std :: sync :: LazyLock ; \
+         static RE : LazyLock < regex :: Regex > = LazyLock :: new (|| { regex :: Regex :: new (\"^[a-z]+$\") . unwrap () }) ; \
+         if ! RE . is_match (value) { \
+         return Err (format ! (\"'{}' does not match pattern '{}'\" , \"field\" , \"^[a-z]+$\")) ; } } Ok (()) } "
     );
 }

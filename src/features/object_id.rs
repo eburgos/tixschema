@@ -35,10 +35,16 @@ pub fn get_object_id_zod_schema() -> String {
 ///
 /// String checks belong on that member and never on the object around it: `$oid` is the only
 /// string an `ObjectId` writes, and a `z.object` has no string check to take.
+///
+/// The literal carries no flags, so it constrains `$oid` by exactly what the JSON Schema `pattern`
+/// keyword beside it constrains it by. A `pattern` is a flagless ECMA-262 regex with nowhere to
+/// hold an `i`, so a flag here would be case-insensitivity granted on one surface and unobtainable
+/// on the other — from the one constant both splice, and for a member `ObjectId::to_hex()` only
+/// ever writes in lower-case.
 #[cfg(all(feature = "object_id", any(test, feature = "zod")))]
 pub fn get_object_id_zod_schema_with(hex_checks: &str) -> String {
     format!(
-        "z.object({{ $oid: z.string().regex(/{OBJECT_ID_HEX_PATTERN}/i, {{ message: \"Invalid ObjectId\" }}){hex_checks} }})"
+        "z.object({{ $oid: z.string().regex(/{OBJECT_ID_HEX_PATTERN}/, {{ message: \"Invalid ObjectId\" }}){hex_checks} }})"
     )
 }
 

@@ -1437,3 +1437,131 @@ fn test_an_optional_flattened_union_offers_every_member_and_their_absence() {
         r#"{"type":"object","anyOf":[{"type":"object","oneOf":[{"type":"object","properties":{"own":{"type":"string"},"kind":{"type":"string","const":"Left"},"left":{"type":"string"}},"required":["own","kind","left"],"additionalProperties":false},{"type":"object","properties":{"own":{"type":"string"},"kind":{"type":"string","const":"Right"},"right":{"type":"boolean"}},"required":["own","kind","right"],"additionalProperties":false}]},{"type":"object","properties":{"own":{"type":"string"}},"required":["own"],"additionalProperties":false}]}"#
     );
 }
+
+/// The same two key sets on the TypeScript surface: the object's own members beside the base's, or
+/// the object's own beside none of them. `| undefined` said something else — that the whole value
+/// may be missing — and `&` binds tighter than `|`, so it admitted neither payload the object
+/// writes for an absent base.
+///
+/// The absent branch is the base's own keys mapped to `never` rather than `{}`. Both spell the same
+/// two payloads for a base written whole, and only the mapped one keeps a base written in part out:
+/// `{}` is every object, so a payload carrying one of the base's members passes through it.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_the_optional_flatten_type_offers_the_base_and_its_absence() {
+    let ts = OptHolder::ts_definition();
+    assert!(
+        ts.contains("} & (OptBase | { [K in keyof OptBase]?: never });"),
+        "expected the base beside its absence, got: {ts}"
+    );
+    assert!(
+        !ts.contains("| undefined"),
+        "the whole value is offered as absent in: {ts}"
+    );
+}
+
+/// And when the optional source is a union, the absence joins it from outside: the members keep the
+/// spelling their own enum was written under, and the branch that carries none of them is written
+/// over the keys every member shares.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_an_optional_flattened_union_type_offers_its_members_and_their_absence() {
+    let ts = OptUnionHolder::ts_definition();
+    assert!(
+        ts.contains("} & (NestTagged | { [K in keyof NestTagged]?: never });"),
+        "expected the union beside its absence, got: {ts}"
+    );
+    assert!(
+        !ts.contains("| undefined"),
+        "the whole value is offered as absent in: {ts}"
+    );
+}
+
+/// What Zod says about the same base: a choice between the object's own keys merged with the base
+/// and the object's own keys alone. The choice is written outside the intersection because that is
+/// the only place Zod can read it — an intersection recognizes the keys its operands name, and an
+/// operand that is itself a choice leaves each branch answering for the keys the other one carries,
+/// which rejects every payload the object writes.
+#[test]
+#[cfg(feature = "zod")]
+fn test_the_optional_flatten_schema_offers_the_base_and_its_absence() {
+    let zod = OptHolder::zod_schema();
+    assert!(
+        zod.contains(
+            "z.union([\n  OptHolder$OwnSchema.and(z.lazy(() => OptBase$Schema)),\n  OptHolder$OwnSchema,\n])"
+        ),
+        "expected the base beside its absence, got: {zod}"
+    );
+    assert!(
+        !zod.contains(".and(z.lazy(() => z.union("),
+        "the choice is written inside the intersection in: {zod}"
+    );
+}
+
+/// And no branch of it admits a base written in part. The base joins a branch whole, under the name
+/// its own schema is bound to, or the branch is the object's own keys alone — so a payload carrying
+/// some of the base's members belongs to neither, and neither does a bare `undefined`.
+///
+/// Read off zod 4.4.3: this union accepts `{"left":"l","right":true,"own":"o"}` and `{"own":"o"}`,
+/// and rejects `{"left":"l","own":"o"}`, `{"right":true,"own":"o"}`, `undefined`, and any payload
+/// carrying a key neither the object nor the base names.
+#[test]
+#[cfg(feature = "zod")]
+fn test_the_optional_flatten_schema_admits_no_partial_base() {
+    let zod = OptHolder::zod_schema();
+    assert!(
+        !zod.contains("z.undefined()") && !zod.contains(".prefault("),
+        "the whole value is offered as absent in: {zod}"
+    );
+    assert!(
+        !zod.contains(".optional()"),
+        "the base's members are offered one at a time in: {zod}"
+    );
+    assert_eq!(
+        zod.matches("OptBase$Schema").count(),
+        1,
+        "the base is named more than once in: {zod}"
+    );
+}
+
+/// What the object's own keys are bound to, so each branch names them rather than repeating them:
+/// one strict object, read by both branches of the choice.
+#[test]
+#[cfg(feature = "zod")]
+fn test_the_optional_flatten_schema_binds_the_objects_own_keys_once() {
+    let zod = OptHolder::zod_schema();
+    assert!(
+        zod.contains("const OptHolder$OwnSchema = z.strictObject({\n  own: z.string(),\n\n});"),
+        "expected the object's own keys bound once, got: {zod}"
+    );
+    assert_eq!(
+        zod.matches("z.strictObject(").count(),
+        1,
+        "the object's own keys are written more than once in: {zod}"
+    );
+}
+
+/// The absence is a question about the `Option` and nothing else, so a base written without one is
+/// spelled exactly as it was before there was a second branch to spell — byte for byte, on both
+/// surfaces.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_a_non_optional_flatten_type_is_byte_identical() {
+    let ts = MultiFlatten::ts_definition();
+    let declared = &ts[ts.find("export type").unwrap()..];
+    assert_eq!(
+        declared,
+        "export type MultiFlatten = {\n  /**\n * id\n * \n**/\n  id: string;\n\n} & BasePart & ExtraPart;"
+    );
+}
+
+#[test]
+#[cfg(feature = "zod")]
+fn test_a_non_optional_flatten_schema_is_byte_identical() {
+    #[cfg(feature = "typescript")]
+    const EXPECTED: &str = "const MultiFlatten$RawSchema = z.strictObject({\n  id: z.string(),\n\n}).and(z.lazy(() => BasePart$Schema)).and(z.lazy(() => ExtraPart$Schema));\n\nexport const MultiFlatten$Schema: ZodType<MultiFlatten> = MultiFlatten$RawSchema;";
+    #[cfg(not(feature = "typescript"))]
+    const EXPECTED: &str = "export const MultiFlatten$Schema = z.strictObject({\n  id: z.string(),\n\n}).and(z.lazy(() => BasePart$Schema)).and(z.lazy(() => ExtraPart$Schema));";
+
+    assert_eq!(MultiFlatten::zod_schema(), EXPECTED);
+}
