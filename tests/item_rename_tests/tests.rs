@@ -51,6 +51,41 @@ pub struct ReferencesRenamedItems {
     pub tree: TreeUnderRustName,
 }
 
+/// Declaration order, taken both ways round. This struct names a renamed struct and a renamed enum
+/// that have not expanded yet, so the module each reference resolves to is derived from the item's
+/// Rust ident and nothing else; [`NamesRenamedItemsDeclaredEarlier`] names the same two once they
+/// are registered. Both have to reach the same modules, or one of the two orders names a module
+/// that was never emitted.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct NamesRenamedItemsDeclaredLater {
+    pub gauge: LaterRenamedGauge,
+    pub grades: Vec<LaterRenamedGrade>,
+}
+
+/// A rename moves what the item is *exported* as. It does not move the module its schema is
+/// published in — an override is not recoverable from the Rust ident, so a module named after the
+/// override would be one no forward reference could ever name.
+#[model_schema(name = "RenamedLaterGauge")]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LaterRenamedGauge {
+    pub reading: u32,
+}
+
+#[model_schema(name = "RenamedLaterGrade")]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LaterRenamedGrade {
+    High,
+    Low,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct NamesRenamedItemsDeclaredEarlier {
+    pub gauge: LaterRenamedGauge,
+    pub grades: Vec<LaterRenamedGrade>,
+}
+
 #[test]
 fn every_renamed_shape_expands_in_this_feature_combination() {
     let value = ReferencesRenamedItems {
@@ -221,23 +256,109 @@ fn a_renamed_item_names_its_json_definition_by_the_override() {
     );
 }
 
-/// The JSON reference is a Rust path to the renamed item's schema module, so this is the one
-/// surface where the override has to reach the module name as well as the exported name.
+/// The JSON reference is a Rust path to the renamed item's schema module, and that module is named
+/// after the Rust ident the reference had to go on — the override never reaches it.
 #[cfg(feature = "jsonschema")]
 #[test]
-fn the_module_a_json_reference_resolves_to_is_the_one_the_override_named() {
+fn the_module_a_json_reference_resolves_to_is_the_one_named_for_the_rust_ident() {
     let referencing = ReferencesRenamedItems::json_schema();
     let properties = referencing.get("properties").unwrap();
     assert_eq!(
         properties.get("item").unwrap(),
-        &renamed_item_schema::Schema::json_schema()
+        &item_under_rust_name_schema::Schema::json_schema()
     );
     assert_eq!(
         properties.get("slot").unwrap(),
-        &renamed_slot_schema::Schema::json_schema()
+        &slot_under_rust_name_schema::Schema::json_schema()
     );
     assert_eq!(
         properties.get("brand").unwrap(),
-        &renamed_brand_schema::Schema::json_schema()
+        &brand_under_rust_name_schema::Schema::json_schema()
     );
+}
+
+#[test]
+fn renamed_items_declared_under_their_reference_expand_in_this_feature_combination() {
+    let later = NamesRenamedItemsDeclaredLater {
+        gauge: LaterRenamedGauge { reading: 7 },
+        grades: vec![LaterRenamedGrade::High],
+    };
+    assert_eq!(later.gauge.reading, 7);
+    assert_eq!(later.grades, vec![LaterRenamedGrade::High]);
+
+    let earlier = NamesRenamedItemsDeclaredEarlier {
+        gauge: LaterRenamedGauge { reading: 8 },
+        grades: vec![LaterRenamedGrade::Low],
+    };
+    assert_eq!(earlier.gauge.reading, 8);
+    assert_eq!(earlier.grades, vec![LaterRenamedGrade::Low]);
+}
+
+/// A struct naming a renamed struct or enum declared under it used to refuse the whole crate: the
+/// reference assumed `later_renamed_gauge_schema` while the item published
+/// `renamed_later_gauge_schema`, and rustc reported an `E0433` for a module the author never
+/// wrote. One spelling now answers on both sides, so which side of the item the reference is
+/// written on changes nothing.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_item_reference_describes_the_same_on_either_side_of_the_item() {
+    assert_eq!(
+        NamesRenamedItemsDeclaredLater::json_schema(),
+        NamesRenamedItemsDeclaredEarlier::json_schema()
+    );
+}
+
+/// And what it resolves to is the renamed item's own module rather than something that merely
+/// exists: each member carries exactly what the item publishes.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_forward_item_reference_carries_what_the_item_publishes() {
+    let schema = NamesRenamedItemsDeclaredLater::json_schema();
+    let properties = schema.get("properties").unwrap();
+    assert_eq!(
+        properties.get("gauge").unwrap(),
+        &later_renamed_gauge_schema::Schema::json_schema(),
+        "in: {schema}"
+    );
+    assert_eq!(
+        properties.get("grades").unwrap().get("items").unwrap(),
+        &later_renamed_grade_schema::Schema::json_schema(),
+        "in: {schema}"
+    );
+}
+
+/// The override and the module name come apart: a forward-referenced item is exported under the
+/// name the author wrote, from the module named after its Rust ident.
+#[cfg(feature = "typescript")]
+#[test]
+fn a_forward_referenced_renamed_item_exports_under_the_override() {
+    for (ts, declared) in [
+        (
+            LaterRenamedGauge::ts_definition(),
+            "export type RenamedLaterGauge",
+        ),
+        (
+            LaterRenamedGrade::ts_definition(),
+            "export type RenamedLaterGrade",
+        ),
+    ] {
+        assert!(ts.contains(declared), "{declared} missing from: {ts}");
+    }
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn a_forward_referenced_renamed_item_publishes_its_zod_schema_under_the_override() {
+    for (zod, declared) in [
+        (
+            LaterRenamedGauge::zod_schema(),
+            "export const RenamedLaterGauge$Schema",
+        ),
+        (
+            LaterRenamedGrade::zod_schema(),
+            "export const RenamedLaterGrade$Schema",
+        ),
+    ] {
+        assert!(zod.contains(declared), "{declared} missing from: {zod}");
+    }
 }

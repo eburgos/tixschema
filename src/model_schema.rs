@@ -1459,10 +1459,13 @@ fn is_branded_newtype(item_struct: &syn::ItemStruct) -> bool {
 /// The registration carries the exported name, so a `name = "…"` override reaches every reference
 /// to the struct as well as its own surfaces — a sibling names it in Rust and resolves to the name
 /// it is exported under.
+///
+/// The module is named from the Rust ident, not from the export name, so that a type naming the
+/// struct before it has expanded assumes the module the struct goes on to publish.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn struct_module_idents(name: &syn::Ident, name_override: Option<&str>) -> (String, String, Ident) {
     let item_name = compute_item_export_name(&name.to_string(), name_override);
-    let module_name = format!("{}_schema", to_snake_case(&item_name));
+    let module_name = ident_schema_module_name(&name.to_string());
     let module_ident = Ident::new(&module_name, name.span());
     register_alias_info(
         &name.to_string(),
@@ -1473,11 +1476,12 @@ fn struct_module_idents(name: &syn::Ident, name_override: Option<&str>) -> (Stri
     (item_name, module_name, module_ident)
 }
 
-/// The enum counterpart of [`struct_module_idents`]. `kind` differs per enum shape: only a plain
-/// unit enum is given an `enum_members()`, so only it can back an enum-keyed map.
+/// The enum counterpart of [`struct_module_idents`], down to naming the module from the Rust ident.
+/// `kind` differs per enum shape: only a plain unit enum is given an `enum_members()`, so only it
+/// can back an enum-keyed map.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn enum_module_idents(name: &syn::Ident, item_name: &str, kind: AliasKind) -> (String, Ident) {
-    let module_name = format!("{}_schema", to_snake_case(item_name));
+    let module_name = ident_schema_module_name(&name.to_string());
     let module_ident = Ident::new(&module_name, name.span());
     register_alias_info(&name.to_string(), item_name, &module_name, kind);
     (module_name, module_ident)
@@ -2675,7 +2679,7 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
 
     let name = item_struct.ident.clone();
     let item_name = compute_item_export_name(&name.to_string(), args.name_override.as_deref());
-    let module_name = format!("{}_schema", to_snake_case(&item_name));
+    let module_name = ident_schema_module_name(&name.to_string());
     let module_ident = Ident::new(&module_name, name.span());
 
     register_alias_info(
@@ -5243,11 +5247,11 @@ fn nullable_slot_json_schema_value(
 
 /// The schema module a sibling type's `Schema::json_schema()` lives in.
 ///
-/// A declared item's module is named after its exported name, which a `name = "…"` override moves
-/// away from the raw ident, so the registry answers first. A name it does not hold is one this
-/// expansion has not seen — a type expanded later, or one from another crate — and takes the
-/// ident-derived naming, which is all a reference standing before the type has to go on. That
-/// naming is what a type alias publishes under, so an alias resolves in either declaration order.
+/// The registry answers first, for a name this expansion has already seen. A name it does not hold
+/// is one expanded later, or one from another crate, and takes the ident-derived naming — all a
+/// reference standing before the type has to go on. That naming is what every `#[model_schema()]`
+/// item publishes under, so a reference resolves in either declaration order however the item is
+/// renamed.
 ///
 /// The ident is spanned on where the sibling was named rather than on the attribute. Nothing the
 /// macro can read tells it whether the module will be in scope — a generated module reaches its
