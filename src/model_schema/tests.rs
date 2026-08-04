@@ -4499,6 +4499,93 @@ fn every_sequence_wrapper_describes_as_the_vec_of_its_element_in_an_untagged_mem
     }
 }
 
+/// One value per arm of the untagged-member dispatch, labelled as it was written. Built at no array
+/// level, so each holds exactly the tokens its arm emits before the array wrap sees them.
+#[cfg(all(feature = "jsonschema", feature = "serde"))]
+fn untagged_member_dispatch_values() -> Vec<(&'static str, super::FieldDef)> {
+    let parsed: [(&'static str, syn::Type); 6] = [
+        ("MetricTag", syn::parse_quote!(MetricTag)),
+        ("String", syn::parse_quote!(String)),
+        ("u32", syn::parse_quote!(u32)),
+        ("f64", syn::parse_quote!(f64)),
+        ("bool", syn::parse_quote!(bool)),
+        ("serde_json::Value", syn::parse_quote!(serde_json::Value)),
+    ];
+    let mut values: Vec<(&'static str, super::FieldDef)> = parsed
+        .iter()
+        .map(|(label, ty)| (*label, super::get_field_def("items", ty, "")))
+        .collect();
+
+    let mut bounded = super::get_field_def("items", &syn::parse_quote!(String), "");
+    bounded.model_schema_prop_meta = Some(ModelSchemaPropMeta {
+        min_length: Some(2),
+        pattern: Some("^[a-z]+$".to_owned()),
+        ..Default::default()
+    });
+    values.push(("String under a bound", bounded));
+
+    let mut literal = super::get_field_def("items", &syn::parse_quote!(String), "");
+    literal.field_type = FieldDefType::StringLiteral("north".to_owned());
+    values.push(("a string literal", literal));
+
+    values.push((
+        "HashMap<String, u32>",
+        super::get_field_def("items", &syn::parse_quote!(HashMap<String, u32>), ""),
+    ));
+    values.push((
+        "(i64, String)",
+        super::get_field_def("items", &syn::parse_quote!((i64, String)), ""),
+    ));
+    #[cfg(feature = "object_id")]
+    values.push((
+        "ObjectId",
+        super::get_field_def("items", &syn::parse_quote!(ObjectId), ""),
+    ));
+    #[cfg(feature = "chrono")]
+    values.push((
+        "NaiveDate",
+        super::get_field_def("items", &syn::parse_quote!(NaiveDate), ""),
+    ));
+
+    values
+}
+
+/// Every arm of the untagged-member dispatch hands the array wrap a value the wrap can carry. The
+/// wrap writes it into a `serde_json::json!` literal, where a value opening with a brace is read as
+/// a JSON object rather than as a Rust block and the macro dies inside its own array expansion — so
+/// an arm that opens with one is an arm no member holding it under a `Vec` can compile.
+#[cfg(all(feature = "jsonschema", feature = "serde"))]
+#[test]
+fn every_untagged_member_value_is_one_the_array_wrap_can_carry() {
+    for (label, value) in untagged_member_dispatch_values() {
+        let tokens = super::field_json_schema_value(&value);
+        let opens_a_block = matches!(
+            tokens.clone().into_iter().next(),
+            Some(proc_macro2::TokenTree::Group(group))
+                if group.delimiter() == proc_macro2::Delimiter::Brace
+        );
+        assert!(!opens_a_block, "for: {label}, got: {tokens}");
+    }
+}
+
+/// And the wrap carries each arm's own tokens through unchanged: the array level is written around
+/// the value the arm emitted, with nothing reshaped at the wrap. An arm the wrap had to special-case
+/// is one whose member rendering could drift from the field rendering built from the same tokens.
+#[cfg(all(feature = "jsonschema", feature = "serde"))]
+#[test]
+fn the_array_wrap_carries_each_untagged_member_arms_own_tokens() {
+    for (label, value) in untagged_member_dispatch_values() {
+        let item = super::field_json_schema_value(&value).to_string();
+        let mut arrayed = value.clone();
+        arrayed.array_depth = 1;
+        assert_eq!(
+            super::field_json_schema_value(&arrayed).to_string(),
+            format!("serde_json :: json ! ({{ \"type\" : \"array\" , \"items\" : {item} }})"),
+            "for: {label}"
+        );
+    }
+}
+
 /// A sibling is carried by reference in every position that holds one, so the two slot positions
 /// name one schema module and wrap it the same way — a tuple element that fell back to the open
 /// object would admit values the same type in a map member rejects.
