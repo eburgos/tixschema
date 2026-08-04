@@ -87,12 +87,7 @@ use crate::utils::{format_docs_for_ts, get_item_docs};
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::register_alias_info;
 
-#[cfg(any(
-    feature = "typescript",
-    feature = "zod",
-    feature = "jsonschema",
-    feature = "serde"
-))]
+#[cfg(feature = "serde")]
 use crate::utils::to_snake_case;
 
 use crate::rename_rule::resolve_rename_rule;
