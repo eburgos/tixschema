@@ -15,7 +15,8 @@ use super::{
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use super::{
-    AliasKind, alias_map_key_guard_error, branded_guard_errors, check_map_key, register_alias_info,
+    AliasKind, alias_map_key_guard_error, branded_guard_errors, check_map_key,
+    ident_schema_module_name, register_alias_info,
 };
 
 #[cfg(feature = "typescript")]
@@ -1334,6 +1335,45 @@ fn an_alias_targeting_a_map_key_with_no_members_is_refused() {
     assert!(error.contains("Doc"), "got: {error}");
 }
 
+/// A refused item still publishes the schema module every reference to it addresses.
+///
+/// The address is derived from the Rust ident and nothing else, so it is the same whatever became
+/// of the item — which is what lets a reference stand before it. An expansion that emitted no
+/// module left every referencing type with an `E0433` naming a module the author never wrote,
+/// sitting on top of the refusal they can act on.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_refused_item_publishes_the_module_a_reference_to_it_resolves_to() {
+    let ident = syn::Ident::new("CountsByDoc", proc_macro2::Span::call_site());
+    let module = super::refused_item_schema_module(&ident).to_string();
+    assert!(
+        module.contains(&format!(
+            "pub mod {}",
+            ident_schema_module_name("CountsByDoc")
+        )),
+        "got: {module}"
+    );
+    // The refusal is the one diagnostic the author reads, so the module adds none of its own.
+    assert!(!module.contains("compile_error"), "got: {module}");
+}
+
+/// And it publishes the call a reference emits: a sibling in field position asks the module it
+/// resolves to for `json_schema_within`, so that is the method that has to be there for the
+/// reference to compile.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_refused_items_module_answers_the_call_a_reference_emits() {
+    let span = proc_macro2::Span::call_site();
+    let ident = syn::Ident::new("CountsByRefusedDoc", span);
+    let module = super::refused_item_schema_module(&ident).to_string();
+    let addressed = super::sibling_schema_module_ident("CountsByRefusedDoc", span).to_string();
+    assert!(
+        module.contains(&format!("pub mod {addressed}")),
+        "got: {module}"
+    );
+    assert!(module.contains("json_schema_within"), "got: {module}");
+}
+
 /// The type the parser reads a field's written spelling as, rendered the way every surface receives
 /// it: one `FieldDef`, so a spelling that parses alike describes alike wherever it is dispatched.
 fn parsed_field_type(field_type: &proc_macro2::TokenStream) -> String {
@@ -1949,15 +1989,17 @@ fn branded_schema_example_carries_no_cfg_attribute() {
 #[cfg(feature = "typescript")]
 #[test]
 fn plain_enum_ts_definition_carries_no_cfg_attribute() {
-    let tokens = super::generate_plain_enum_ts_definition_method(" * Status", "Status", "  'a'");
+    let tokens =
+        super::generate_plain_enum_ts_definition_method(" * Status", "Status", "Status", "  'a'");
     assert_no_cfg_attribute(&tokens, "generate_plain_enum_ts_definition_method");
 }
 
 #[cfg(feature = "typescript")]
 #[test]
 fn discriminated_enum_ts_definition_carries_no_cfg_attribute() {
-    let tokens =
-        super::generate_discriminated_enum_ts_definition_method(" * Shape", "Shape", "  'a'");
+    let tokens = super::generate_discriminated_enum_ts_definition_method(
+        " * Shape", "Shape", "Shape", "  'a'",
+    );
     assert_no_cfg_attribute(&tokens, "generate_discriminated_enum_ts_definition_method");
 }
 
@@ -2057,7 +2099,7 @@ fn no_json_schema_emission_carries_a_warning_key() {
 fn alias_zod_method_carries_no_cfg_attribute() {
     let ty: syn::Type = syn::parse_quote!(String);
     let field_def = super::get_field_def("AliasType", &ty, "");
-    let tokens = super::generate_alias_zod_method("AliasType", &field_def);
+    let tokens = super::generate_alias_zod_method("AliasType", "Alias", &field_def);
     assert_no_cfg_attribute(&tokens, "generate_alias_zod_method");
 }
 
@@ -3217,18 +3259,29 @@ fn a_required_map_value_carries_no_nullable_wrap() {
 }
 
 /// The kind an alias registers is its *target's* answer, because a type path resolves through the
-/// alias. `Vec<Slot>` is the collection, not the enum it holds; a target this expansion has not
-/// seen registered is `Unknown`, which is not a negative.
+/// alias. A target serde writes as a bare string makes the alias one too, whatever spelling that
+/// target wears. `Vec<Slot>` is the collection, not the enum it holds; a target this expansion has
+/// not seen registered is `Unknown`, which is not a negative.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn an_alias_registers_the_kind_of_what_it_targets() {
     register_alias_info("Slot", "Slot", "slot_schema", AliasKind::EnumMembers);
     register_alias_info("Doc", "Doc", "doc_schema", AliasKind::NoEnumMembers);
+    register_alias_info(
+        "CorrelationId",
+        "CorrelationId",
+        "correlation_id_schema",
+        AliasKind::StringWire,
+    );
     for (target, expected) in [
         ("Slot", AliasKind::EnumMembers),
         ("Doc", AliasKind::NoEnumMembers),
-        ("String", AliasKind::NoEnumMembers),
+        ("String", AliasKind::StringWire),
+        ("PathBuf", AliasKind::StringWire),
+        ("CorrelationId", AliasKind::StringWire),
         ("u32", AliasKind::NoEnumMembers),
+        ("Vec<String>", AliasKind::NoEnumMembers),
+        ("Option<String>", AliasKind::NoEnumMembers),
         ("Vec<Slot>", AliasKind::NoEnumMembers),
         ("HashMap<Slot, String>", AliasKind::NoEnumMembers),
         ("Wrapper<Slot>", AliasKind::NoEnumMembers),
@@ -3238,6 +3291,133 @@ fn an_alias_registers_the_kind_of_what_it_targets() {
         let kind = super::alias_target_kind(&super::get_field_def("AliasType", &ty, ""));
         assert_eq!(kind, expected, "for alias target {target}");
     }
+}
+
+/// An alias of an alias of a string is still that bare string at the type path, so the chain carries
+/// `StringWire` through every link — and so does a chain ending at a string-wire brand.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn an_alias_chain_carries_the_string_wire_kind_to_its_end() {
+    register_alias_info(
+        "CorrelationId",
+        "CorrelationId",
+        "correlation_id_schema",
+        AliasKind::StringWire,
+    );
+    for end in ["String", "CorrelationId"] {
+        let first_target: syn::Type = syn::parse_str(end).unwrap();
+        let first = super::alias_target_kind(&super::get_field_def("FirstType", &first_target, ""));
+        assert_eq!(first, AliasKind::StringWire, "for a chain ending at {end}");
+        register_alias_info("First", "FirstType", "first_type_schema", first);
+
+        let second_target: syn::Type = syn::parse_str("First").unwrap();
+        let second =
+            super::alias_target_kind(&super::get_field_def("SecondType", &second_target, ""));
+        assert_eq!(second, AliasKind::StringWire, "for a chain ending at {end}");
+    }
+}
+
+/// [`super::branded_alias_kind`] read off the one field a brand is written with.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn brand_kind(inner: &str) -> AliasKind {
+    let inner_ty: syn::Type = syn::parse_str(inner).unwrap();
+    let item: syn::ItemStruct = syn::parse_quote! { struct Brand(#inner_ty); };
+    super::branded_alias_kind(item.fields.iter().next().unwrap())
+}
+
+/// The kind a brand registers is what serde writes for its inner, the brand being
+/// `#[serde(transparent)]` over it. A string-shaped inner is written as the bare string a JSON
+/// object key is; a plain enum's variant name is that bare string too, and the brand carries no
+/// `enum_members()` of its own to close an object over; a value serde stringifies is written as the
+/// object its bare inner writes; and an inner serde refuses as a key, or one this expansion has not
+/// classified, leaves the brand refused.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_brand_registers_what_serde_writes_for_its_inner() {
+    register_alias_info("Slot", "Slot", "slot_schema", AliasKind::EnumMembers);
+    register_alias_info("Doc", "Doc", "doc_schema", AliasKind::NoEnumMembers);
+    register_alias_info(
+        "CorrelationId",
+        "CorrelationId",
+        "correlation_id_schema",
+        AliasKind::StringWire,
+    );
+    register_alias_info("Tick", "Tick", "tick_schema", AliasKind::Stringified);
+    for (inner, expected) in [
+        ("String", AliasKind::StringWire),
+        ("PathBuf", AliasKind::StringWire),
+        ("CorrelationId", AliasKind::StringWire),
+        ("Slot", AliasKind::StringWire),
+        ("u32", AliasKind::Stringified),
+        ("bool", AliasKind::Stringified),
+        ("f64", AliasKind::Stringified),
+        ("Tick", AliasKind::Stringified),
+        ("Doc", AliasKind::NoEnumMembers),
+        ("Vec<String>", AliasKind::NoEnumMembers),
+        ("(String, String)", AliasKind::NoEnumMembers),
+        ("HashMap<String, u32>", AliasKind::NoEnumMembers),
+        ("Ghost", AliasKind::NoEnumMembers),
+    ] {
+        assert_eq!(brand_kind(inner), expected, "for brand inner {inner}");
+    }
+}
+
+/// The chrono renderings are keys serde stringifies, so a brand over one is written as the object
+/// its bare inner is written as.
+#[cfg(all(
+    feature = "chrono",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn a_brand_over_a_chrono_inner_is_stringified() {
+    for inner in ["NaiveDate", "NaiveTime", "NaiveDateTime", "DateTime<Utc>"] {
+        assert_eq!(
+            brand_kind(inner),
+            AliasKind::Stringified,
+            "for brand inner {inner}"
+        );
+    }
+}
+
+/// An `ObjectId` writes a JSON object, which serde uses as no key at all, so a brand over one stays
+/// refused where the stringifying inners are let through.
+#[cfg(all(
+    feature = "object_id",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn a_brand_over_an_object_id_stays_refused() {
+    assert_eq!(brand_kind("ObjectId"), AliasKind::NoEnumMembers);
+}
+
+/// A key the registry proves serde stringifies keeps the open object its bare inner describes as,
+/// at every depth a map is written at — and the refusals around it are untouched, a brand over a
+/// container or a struct still writing no key at all.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_stringified_key_is_left_alone_wherever_it_is_written() {
+    register_alias_info("Slot", "Slot", "slot_schema", AliasKind::EnumMembers);
+    register_alias_info("Tick", "Tick", "tick_schema", AliasKind::Stringified);
+    register_alias_info("Tags", "Tags", "tags_schema", AliasKind::NoEnumMembers);
+    for field_type in [
+        quote::quote! { HashMap<Tick, u32> },
+        quote::quote! { HashMap<String, HashMap<Tick, u32>> },
+        quote::quote! { HashMap<Slot, HashMap<Tick, u32>> },
+        quote::quote! { HashMap<Tick, HashMap<Tick, u32>> },
+        quote::quote! { Vec<HashMap<Tick, u32>> },
+        quote::quote! { (String, HashMap<Tick, u32>) },
+        quote::quote! { Wrapper<HashMap<Tick, u32>> },
+    ] {
+        let error = field_map_key_error(&field_type);
+        assert!(error.is_empty(), "for {field_type}, got: {error}");
+    }
+
+    let refused = field_map_key_error(&quote::quote! { HashMap<Tags, u32> });
+    assert!(
+        refused.contains("a map key must be a plain"),
+        "got: {refused}"
+    );
+    assert!(refused.contains("Tags"), "got: {refused}");
 }
 
 /// An alias of an alias of a plain enum is still a plain enum at the type path, so the chain

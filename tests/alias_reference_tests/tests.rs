@@ -375,6 +375,87 @@ fn a_renamed_alias_exports_under_the_override_from_the_module_named_for_its_iden
     assert!(ts.contains("RenamedLaterDeclaredCount"), "got: {ts}");
 }
 
+/// An alias is never exported under its Rust ident — it is given the `Type` suffix, or whatever an
+/// override moves it to — so a forward reference to one always writes a name the alias's own
+/// `export type` line does not. The alias answers at that name too, and every name a reference
+/// writes is defined by the emission the author collects.
+#[cfg(feature = "typescript")]
+#[test]
+fn every_name_a_forward_alias_reference_writes_is_defined_by_the_emission() {
+    let forward = NamesAliasesDeclaredLater::ts_definition();
+    let emission = [
+        forward.clone(),
+        NamesAliasesDeclaredEarlier::ts_definition(),
+        later_declared_id_schema::Schema::ts_definition(),
+        later_declared_count_schema::Schema::ts_definition(),
+    ]
+    .join("\n\n");
+    for (written, referenced) in [
+        ("counts: Array<LaterDeclaredCount>;", "LaterDeclaredCount"),
+        (
+            "ids: Partial<Record<string, LaterDeclaredId>>;",
+            "LaterDeclaredId",
+        ),
+    ] {
+        assert!(
+            forward.contains(written),
+            "{written} missing from: {forward}"
+        );
+        assert!(
+            emission.contains(&format!("export type {referenced} ")),
+            "{referenced} is referenced but never defined in: {emission}"
+        );
+    }
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn every_schema_a_forward_alias_reference_names_is_defined_by_the_emission() {
+    let forward = NamesAliasesDeclaredLater::zod_schema();
+    let emission = [
+        forward.clone(),
+        NamesAliasesDeclaredEarlier::zod_schema(),
+        later_declared_id_schema::Schema::zod_schema(),
+        later_declared_count_schema::Schema::zod_schema(),
+    ]
+    .join("\n\n");
+    for (written, referenced) in [
+        (
+            "counts: z.array(LaterDeclaredCount$Schema)",
+            "LaterDeclaredCount",
+        ),
+        (
+            "ids: z.record(z.string(), LaterDeclaredId$Schema)",
+            "LaterDeclaredId",
+        ),
+    ] {
+        assert!(
+            forward.contains(written),
+            "{written} missing from: {forward}"
+        );
+        assert!(
+            emission.contains(&format!("export const {referenced}$Schema")),
+            "{referenced} is referenced but never defined in: {emission}"
+        );
+    }
+}
+
+/// A backward reference keeps the export name it always resolved to; the re-export is a second
+/// name for the alias, never a rewrite of what names it.
+#[cfg(feature = "typescript")]
+#[test]
+fn a_backward_alias_reference_still_writes_the_export_name() {
+    let ts = NamesAliasesDeclaredEarlier::ts_definition();
+    assert!(
+        ts.contains("counts: Array<RenamedLaterDeclaredCount>;"),
+        "got: {ts}"
+    );
+    assert!(
+        ts.contains("ids: Partial<Record<string, LaterDeclaredIdType>>;"),
+        "got: {ts}"
+    );
+}
+
 #[cfg(feature = "zod")]
 #[test]
 fn a_renamed_alias_publishes_its_zod_schema_from_the_module_named_for_its_ident() {

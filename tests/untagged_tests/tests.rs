@@ -5,7 +5,8 @@ use tixschema::model_schema;
 #[cfg(all(feature = "jsonschema", feature = "object_id"))]
 use mongodb::bson::oid::ObjectId;
 
-// ISO-8601 date string. Branded newtype carries the regex pattern.
+// ISO-8601 date string. Branded newtype carries the regex pattern, written with `\d` and reaching
+// every surface as the members it stands for.
 #[model_schema(pattern = r"^\d{4}-\d{2}-\d{2}$")]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -237,7 +238,7 @@ fn test_tuple_single_union_zod() {
 fn test_date_string_branded_pattern_zod() {
     let zod = DateString::zod_schema();
     assert!(
-        zod.contains(r".check(z.regex(/^\d{4}-\d{2}-\d{2}$/))"),
+        zod.contains(".check(z.regex(/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/))"),
         "Got:\n{zod}"
     );
 }
@@ -293,7 +294,7 @@ fn test_tuple_single_union_json_schema() {
     assert_eq!(any_of.len(), 2);
     assert_eq!(any_of[0]["type"], "integer");
     assert_eq!(any_of[1]["type"], "string");
-    assert_eq!(any_of[1]["pattern"], r"^\d{4}-\d{2}-\d{2}$");
+    assert_eq!(any_of[1]["pattern"], "^[0-9]{4}-[0-9]{2}-[0-9]{2}$");
 }
 
 #[test]
@@ -337,7 +338,7 @@ fn test_flatten_end_to_end_json_schema() {
     assert_eq!(any_of.len(), 2);
     assert_eq!(any_of[0]["type"], "integer");
     assert_eq!(any_of[1]["type"], "string");
-    assert_eq!(any_of[1]["pattern"], r"^\d{4}-\d{2}-\d{2}$");
+    assert_eq!(any_of[1]["pattern"], "^[0-9]{4}-[0-9]{2}-[0-9]{2}$");
 }
 
 // ========================================================================
