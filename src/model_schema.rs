@@ -41,7 +41,7 @@ use crate::utils::{escape_js_regex_literal, extract_example_from_docs};
 use crate::features::object_id::get_object_id_zod_schema_with;
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-use crate::utils::{AliasKind, lookup_alias_info, regex_rejection};
+use crate::utils::{AliasKind, lookup_alias_info, portable_pattern};
 
 #[cfg(feature = "serde")]
 use crate::features::serde::{SerdeFieldMeta, SerdeTypeMeta, has_serde_default};
@@ -364,10 +364,14 @@ struct ModelSchemaArgs {
     /// Opt-out of the branded newtype `Display` impl (and its inner-type assertion) for brands
     /// whose inner type is a container rather than a scalar.
     no_display: bool,
+    /// `pattern` in the spelling every surface reads the same way, or as it was written when it
+    /// earned a `pattern_rejection`.
     pattern: Option<String>,
-    /// The `regex` crate's rejection of `pattern`, spanned on the literal it was written as. Only
-    /// the brand path splices the argument, and only a schema feature builds that path; without
-    /// one, a type-level constraint never reaches a surface at all.
+    /// What keeps `pattern` off the surfaces it was written for -- a regex the `regex` crate
+    /// cannot parse, or a construct a JavaScript regex literal cannot carry -- spanned on the
+    /// literal it was written as. Only the brand path splices the argument, and only a schema
+    /// feature builds that path; without one, a type-level constraint never reaches a surface at
+    /// all.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     pattern_rejection: Option<syn::Error>,
 }
@@ -448,9 +452,7 @@ fn apply_arg(result: &mut ModelSchemaArgs, meta: &Meta) -> syn::Result<()> {
     if path.is_ident("name") {
         result.name_override = Some(name_arg_value(str_arg(meta, "name")?)?);
     } else if path.is_ident("pattern") {
-        let lit_str = str_arg(meta, "pattern")?;
-        record_pattern_rejection(result, lit_str);
-        result.pattern = Some(lit_str.value());
+        record_pattern(result, str_arg(meta, "pattern")?);
     } else if path.is_ident("minLength") {
         result.min_length = Some(length_arg(meta, "minLength")?);
     } else if path.is_ident("maxLength") {
@@ -568,14 +570,28 @@ fn unknown_arg_rejection(meta: &Meta) -> syn::Error {
     )
 }
 
-/// Records the `regex` crate's verdict on a `pattern` argument, for the brand path that splices it.
+/// Records a `pattern` argument, in the spelling the brand path can splice into every surface, or
+/// as written alongside what keeps it off them.
+///
+/// A refused pattern is recorded as written: the guards that answer for what a `pattern` may sit on
+/// read that one was given, not what it says.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-fn record_pattern_rejection(result: &mut ModelSchemaArgs, lit_str: &syn::LitStr) {
-    result.pattern_rejection = regex_rejection(lit_str);
+fn record_pattern(result: &mut ModelSchemaArgs, lit_str: &syn::LitStr) {
+    match portable_pattern(lit_str) {
+        Ok(pattern) => result.pattern = Some(pattern),
+        Err(rejection) => {
+            result.pattern_rejection = Some(rejection);
+            result.pattern = Some(lit_str.value());
+        }
+    }
 }
 
+/// Without a schema feature no surface reads the argument, so it is kept as written and never
+/// judged.
 #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
-const fn record_pattern_rejection(_result: &mut ModelSchemaArgs, _lit_str: &syn::LitStr) {}
+fn record_pattern(result: &mut ModelSchemaArgs, lit_str: &syn::LitStr) {
+    result.pattern = Some(lit_str.value());
+}
 
 /// Executes the `model_schema` macro processing to generate TypeScript and Zod schema definitions.
 ///
@@ -1052,17 +1068,12 @@ fn cfg_attr_guard_error(rejection: &syn::Error, item: &str) -> proc_macro2::Toke
 /// Turns a rejected `pattern` into `compile_error!` tokens naming what carries it, keeping the
 /// literal's span so the diagnostic points at the pattern as written.
 ///
-/// The generated validator builds the pattern with `regex::Regex::new(...).unwrap()`, so accepting
-/// one the crate cannot parse only moves the failure to the first value that reaches it — as a
-/// panic, from inside a `LazyLock` the author never wrote.
+/// Why a pattern is refused is [`crate::utils::portable_pattern`]'s to say — the crate cannot parse
+/// it, or JavaScript reads it as something else — so the refusal is quoted rather than restated.
 fn pattern_guard_error(rejection: &syn::Error, subject: &str) -> proc_macro2::TokenStream {
     syn::Error::new(
         rejection.span(),
-        format!(
-            "model_schema: {subject}: `pattern` is not a regex the `regex` crate can parse. The \
-             generated validator builds it with `regex::Regex::new(...).unwrap()`, so accepting \
-             it here would turn the first validated value into a panic. {rejection}"
-        ),
+        format!("model_schema: {subject}: {rejection}"),
     )
     .to_compile_error()
 }

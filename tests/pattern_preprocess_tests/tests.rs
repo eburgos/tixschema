@@ -715,3 +715,70 @@ fn test_the_escaped_newline_literal_matches_the_value_set_the_validator_enforces
         );
     }
 }
+
+// A pattern whose named group is spelled Rust's way
+
+#[cfg(feature = "zod")]
+#[test]
+fn test_a_rust_named_group_reaches_the_zod_literal_as_javascript_spells_it() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize)]
+    pub struct RustNamedGroup {
+        #[model_schema_prop(pattern = r"^(?P<word>[a-z]+)-(?P<number>[0-9]+)$")]
+        pub tag: String,
+    }
+
+    let schema = RustNamedGroup::zod_schema();
+    assert!(
+        schema.contains("z.regex(/^(?<word>[a-z]+)-(?<number>[0-9]+)$/)"),
+        "Schema: {schema}"
+    );
+    assert!(
+        !schema.contains("(?P<"),
+        "The Rust-only spelling must not reach the literal: {schema}"
+    );
+}
+
+#[cfg(feature = "jsonschema")]
+#[test]
+fn test_a_rust_named_group_reaches_the_json_schema_as_ecma_262_spells_it() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize)]
+    pub struct RustNamedGroupJson {
+        #[model_schema_prop(pattern = "^(?P<word>[a-z]+)$")]
+        pub tag: String,
+    }
+
+    let schema_str = serde_json::to_string(&RustNamedGroupJson::json_schema()).unwrap();
+    assert!(
+        schema_str.contains(r#""pattern":"^(?<word>[a-z]+)$""#),
+        "JSON Schema `pattern` is an ECMA-262 regex: {schema_str}"
+    );
+}
+
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_the_rewritten_named_group_matches_the_value_set_the_validator_enforces() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct RustNamedGroupValidated {
+        #[model_schema_prop(pattern = r"^(?P<word>[a-z]+)-(?P<number>[0-9]+)$")]
+        pub tag: String,
+    }
+
+    serde_json::from_str::<RustNamedGroupValidated>(r#"{"tag": "abc-42"}"#).unwrap();
+    for rejected in [
+        r#"{"tag": "abc"}"#,
+        r#"{"tag": "ABC-42"}"#,
+        r#"{"tag": "-42"}"#,
+    ] {
+        let err = serde_json::from_str::<RustNamedGroupValidated>(rejected).unwrap_err();
+        assert!(
+            err.to_string().contains("does not match pattern"),
+            "Expected a pattern rejection for {rejected}: {err}"
+        );
+    }
+}

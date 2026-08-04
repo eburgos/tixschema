@@ -1,11 +1,30 @@
 use core::cell::RefCell;
 #[cfg(feature = "typescript")]
 use core::iter;
+use regex_syntax::ast::parse::Parser as PatternParser;
+use regex_syntax::ast::{
+    Assertion, AssertionKind, Ast, ClassSet, ClassSetBinaryOpKind, ClassSetItem, Flag,
+    FlagsItemKind, Group, GroupKind, HexLiteralKind, Literal, LiteralKind, SpecialLiteralKind,
+};
 use std::collections::HashMap;
 use syn::{Attribute, Expr, Field, Lit, LitStr, Meta, Variant};
 
 #[cfg(any(feature = "typescript", feature = "zod"))]
 use syn::{ItemEnum, ItemStruct};
+
+/// What a JavaScript regex literal makes of a flag the `(?...:...)` form cannot carry. ES2025's
+/// regular expression modifiers spell `i`, `m` and `s`, and the parse fails on anything else.
+const MODIFIER_GROUP_READ_AS: &str = "a group opening no JavaScript regex parses: its modifier \
+                                      groups carry `i`, `m` and `s` and nothing else";
+
+/// What a JavaScript regex literal makes of a `\p{...}` class, shared by the two places one can be
+/// written.
+const UNICODE_CLASS_READ_AS: &str = "an escaped `p` or `P` followed by a literal `{...}`, since a \
+                                     Unicode class there needs the `u` flag and a spliced literal \
+                                     carries no flags";
+
+/// A Unicode class, in the three spellings the `regex` crate reads one by.
+const UNICODE_CLASS_WRITTEN: &str = "a Unicode class -- `\\p{...}`, `\\pL` or `\\P{...}`";
 
 /// Whether a registered Rust ident, *written as a type path*, resolves to something carrying an
 /// inherent `enum_members()` — the enumeration the JSON-schema map-key expansion calls. Only a
@@ -30,6 +49,240 @@ pub struct AliasInfo {
     pub kind: AliasKind,
     #[cfg(feature = "jsonschema")]
     pub module_name: String,
+}
+
+/// The walk over a parsed `pattern` that collects the rewrites its JavaScript spelling needs and
+/// the first construct that has no JavaScript spelling at all.
+///
+/// The AST walked is the one `regex::Regex::new` is itself built on, so the guard's reading of a
+/// pattern is the crate's own reading of it. A second grammar written here would answer for the
+/// crate's while drifting from it, and it would have to tell `[--/]`, three ordinary class members,
+/// from `[+--]`, a set difference — which the bytes alone do not say.
+#[derive(Default)]
+struct JsSpelling {
+    /// Byte offsets of the `P` in each `(?P<name>` the pattern opens.
+    ///
+    /// This is the only rewrite the guard makes, and it is safe because it is local: the bytes
+    /// around a group's opening are fixed, so dropping the `P` cannot change how anything else in
+    /// the pattern parses. Escaping a class-opening `]` looks like the same kind of fix and is
+    /// not — `[]-a]` is three members and `[\]-a]` is a range — which is why that one is refused
+    /// rather than rewritten.
+    named_group_markers: Vec<usize>,
+    refusal: Option<Unportable>,
+}
+
+/// A construct the `regex` crate reads that a JavaScript regex literal has no reading for.
+struct Unportable {
+    /// What the same bytes are inside a JavaScript regex literal instead.
+    read_as: &'static str,
+    /// The construct, as the rejection names it.
+    written: &'static str,
+}
+
+impl JsSpelling {
+    fn assertion(&mut self, assertion: &Assertion) {
+        let (written, read_as) = match assertion.kind {
+            AssertionKind::StartLine
+            | AssertionKind::EndLine
+            | AssertionKind::WordBoundary
+            | AssertionKind::NotWordBoundary => return,
+            AssertionKind::StartText => (
+                "the `\\A` anchor",
+                "an escaped `A`, matching that letter; a flagless literal spells the same anchor \
+                 `^`",
+            ),
+            AssertionKind::EndText => (
+                "the `\\z` anchor",
+                "an escaped `z`, matching that letter; a flagless literal spells the same anchor \
+                 `$`",
+            ),
+            AssertionKind::WordBoundaryStart | AssertionKind::WordBoundaryEnd => (
+                "a `\\b{start}` or `\\b{end}` word boundary",
+                "a plain word boundary followed by a literal `{start}` or `{end}`",
+            ),
+            AssertionKind::WordBoundaryStartHalf | AssertionKind::WordBoundaryEndHalf => (
+                "a `\\b{start-half}` or `\\b{end-half}` word boundary",
+                "a plain word boundary followed by a literal `{start-half}` or `{end-half}`",
+            ),
+            AssertionKind::WordBoundaryStartAngle | AssertionKind::WordBoundaryEndAngle => (
+                "a `\\<` or `\\>` word boundary",
+                "an escaped `<` or `>`, matching that character",
+            ),
+        };
+        self.refuse(written, read_as);
+    }
+
+    fn ast(&mut self, ast: &Ast) {
+        match ast {
+            // `.`, `\d` and `\w` are in both grammars and differ only in whether they are
+            // Unicode-aware, which divides what they match rather than what they are.
+            Ast::Empty(_) | Ast::Dot(_) | Ast::ClassPerl(_) => {}
+            Ast::Flags(_) => self.refuse(
+                "an inline flag directive `(?...)`",
+                "a group opening no JavaScript regex parses",
+            ),
+            Ast::Literal(literal) => self.literal(literal, false),
+            Ast::Assertion(assertion) => self.assertion(assertion),
+            Ast::ClassUnicode(_) => self.refuse(UNICODE_CLASS_WRITTEN, UNICODE_CLASS_READ_AS),
+            Ast::ClassBracketed(class) => self.class_set(&class.kind),
+            Ast::Repetition(repetition) => self.ast(&repetition.ast),
+            Ast::Group(group) => self.group(group),
+            Ast::Alternation(alternation) => self.asts(&alternation.asts),
+            Ast::Concat(concat) => self.asts(&concat.asts),
+        }
+    }
+
+    fn asts(&mut self, asts: &[Ast]) {
+        for ast in asts {
+            self.ast(ast);
+        }
+    }
+
+    fn class_item(&mut self, item: &ClassSetItem) {
+        match item {
+            ClassSetItem::Empty(_) | ClassSetItem::Perl(_) => {}
+            ClassSetItem::Literal(literal) => self.literal(literal, true),
+            ClassSetItem::Range(range) => {
+                self.literal(&range.start, true);
+                self.literal(&range.end, true);
+            }
+            ClassSetItem::Ascii(_) => self.refuse(
+                "a POSIX class `[:name:]`",
+                "the characters `[`, `:` and the name, listed as members of the class",
+            ),
+            ClassSetItem::Unicode(_) => self.refuse(UNICODE_CLASS_WRITTEN, UNICODE_CLASS_READ_AS),
+            ClassSetItem::Bracketed(class) => {
+                self.refuse(
+                    "a class nested inside another class",
+                    "a literal `[` listed as a member of the outer class",
+                );
+                self.class_set(&class.kind);
+            }
+            ClassSetItem::Union(union) => {
+                for member in &union.items {
+                    self.class_item(member);
+                }
+            }
+        }
+    }
+
+    fn class_set(&mut self, set: &ClassSet) {
+        match set {
+            ClassSet::Item(item) => self.class_item(item),
+            ClassSet::BinaryOp(op) => {
+                let written = match op.kind {
+                    ClassSetBinaryOpKind::Intersection => "the `&&` class intersection",
+                    ClassSetBinaryOpKind::Difference => "the `--` class difference",
+                    ClassSetBinaryOpKind::SymmetricDifference => {
+                        "the `~~` class symmetric difference"
+                    }
+                };
+                self.refuse(
+                    written,
+                    "the operator's own characters, listed as members of the class",
+                );
+                self.class_set(&op.lhs);
+                self.class_set(&op.rhs);
+            }
+        }
+    }
+
+    fn group(&mut self, group: &Group) {
+        match &group.kind {
+            GroupKind::CaptureIndex(_) => {}
+            GroupKind::CaptureName { starts_with_p, .. } => {
+                if *starts_with_p {
+                    // `(?P<name>` and `(?<name>` are one construct under two spellings, and the
+                    // `P` that tells them apart sits two bytes into the group's span.
+                    self.named_group_markers.push(group.span.start.offset + 2);
+                }
+            }
+            GroupKind::NonCapturing(flags) => {
+                for item in &flags.items {
+                    let FlagsItemKind::Flag(flag) = &item.kind else {
+                        continue;
+                    };
+                    let written = match flag {
+                        Flag::CaseInsensitive | Flag::MultiLine | Flag::DotMatchesNewLine => {
+                            continue;
+                        }
+                        Flag::SwapGreed => "the swap-greed flag on a `(?U:...)` group",
+                        Flag::Unicode => "the Unicode flag on a `(?u:...)` group",
+                        Flag::CRLF => "the CRLF flag on a `(?R:...)` group",
+                        Flag::IgnoreWhitespace => {
+                            "the ignore-whitespace flag on a `(?x:...)` group"
+                        }
+                    };
+                    self.refuse(written, MODIFIER_GROUP_READ_AS);
+                }
+            }
+        }
+        self.ast(&group.ast);
+    }
+
+    fn literal(&mut self, literal: &Literal, in_class: bool) {
+        if in_class && literal.c == ']' && matches!(literal.kind, LiteralKind::Verbatim) {
+            self.refuse(
+                "an unescaped `]` opening a character class",
+                "the empty class `[]`, which matches nothing, followed by the rest of the class as \
+                 ordinary text; the member both grammars read is `\\]`",
+            );
+        }
+        let (written, read_as) = match literal.kind {
+            LiteralKind::Verbatim
+            | LiteralKind::Meta
+            | LiteralKind::Superfluous
+            | LiteralKind::HexFixed(HexLiteralKind::X | HexLiteralKind::UnicodeShort)
+            | LiteralKind::Special(
+                SpecialLiteralKind::FormFeed
+                | SpecialLiteralKind::Tab
+                | SpecialLiteralKind::LineFeed
+                | SpecialLiteralKind::CarriageReturn
+                | SpecialLiteralKind::VerticalTab
+                | SpecialLiteralKind::Space,
+            ) => return,
+            LiteralKind::Octal => (
+                "an octal escape",
+                "a legacy escape a JavaScript regex reads by its own rules and refuses outright \
+                 under a Unicode flag",
+            ),
+            LiteralKind::HexBrace(_) => (
+                "a braced code point escape -- `\\x{...}`, `\\u{...}` or `\\U{...}`",
+                "an escaped `x`, `u` or `U` followed by a literal `{...}`, since the one braced \
+                 form JavaScript has needs the `u` flag and a spliced literal carries no flags",
+            ),
+            LiteralKind::HexFixed(HexLiteralKind::UnicodeLong) => (
+                "the eight-digit `\\U...` code point escape",
+                "an escaped `U` followed by the digits themselves",
+            ),
+            LiteralKind::Special(SpecialLiteralKind::Bell) => (
+                "the `\\a` bell escape",
+                "an escaped `a`, matching that letter",
+            ),
+        };
+        self.refuse(written, read_as);
+    }
+
+    /// Records `written` as the pattern's refusal, keeping the first construct the walk reached.
+    fn refuse(&mut self, written: &'static str, read_as: &'static str) {
+        self.refusal.get_or_insert(Unportable { read_as, written });
+    }
+
+    /// `pattern` with every `(?P<name>` it opens rewritten to `(?<name>`.
+    fn rewritten(mut self, pattern: &str) -> String {
+        if self.named_group_markers.is_empty() {
+            return pattern.to_owned();
+        }
+        self.named_group_markers.sort_unstable();
+        let mut result = String::with_capacity(pattern.len());
+        let mut cut = 0;
+        for marker in self.named_group_markers {
+            result.push_str(&pattern[cut..marker]);
+            cut = marker + 1;
+        }
+        result.push_str(&pattern[cut..]);
+        result
+    }
 }
 
 thread_local! {
@@ -350,16 +603,61 @@ const fn js_line_terminator_escape(ch: char) -> Option<&'static str> {
     }
 }
 
-/// The `regex` crate's own rejection of a `pattern` attribute value, spanned on the literal the
-/// author wrote, or `None` when the pattern parses.
+/// A `pattern` attribute value in the spelling every surface it is spliced into reads the same
+/// way, or the rejection that keeps it off them, spanned on the literal the author wrote.
 ///
-/// Both splice points hand the string to `regex::Regex::new(...).unwrap()` inside the generated
-/// validator, so a pattern that does not parse here is a panic at the first validation there. The
-/// macro holds the string and links `regex`, so the parse happens at expansion instead.
-pub fn regex_rejection(lit: &LitStr) -> Option<syn::Error> {
-    regex::Regex::new(&lit.value())
-        .err()
-        .map(|err| syn::Error::new_spanned(lit, err))
+/// One string reaches three surfaces: the Rust validator's `regex::Regex::new(...).unwrap()`, the
+/// Zod schema's JavaScript regex literal, and the JSON Schema `pattern` keyword, which ECMA-262
+/// defines as a JavaScript regex. A pattern the `regex` crate cannot parse is a panic at the first
+/// validated value. A pattern only the `regex` crate can parse is quieter and worse: the derive
+/// expands clean and the generated JavaScript either throws where it loads or, where the two
+/// grammars disagree rather than collide, matches a different set of strings than the Rust
+/// validator it was written beside. Both verdicts are reached here, at expansion.
+///
+/// Where the grammars merely spell one construct differently the spelling is rewritten instead of
+/// refused: `(?P<name>...)` becomes `(?<name>...)`. That rewrite is the only one, and it is a
+/// spelling the `regex` crate reads too, so the one string that goes to all three surfaces still
+/// means to the validator exactly what it meant before. A `]` opening a character class looks like
+/// the same kind of fix and is not — `[]-a]` is three members and `[\]-a]` is a range — so it is
+/// refused rather than escaped.
+pub fn portable_pattern(lit: &LitStr) -> Result<String, syn::Error> {
+    let pattern = lit.value();
+    if let Err(err) = regex::Regex::new(&pattern) {
+        return Err(syn::Error::new_spanned(
+            lit,
+            format!(
+                "`pattern` is not a regex the `regex` crate can parse. The generated validator \
+                 builds it with `regex::Regex::new(...).unwrap()`, so accepting it here would turn \
+                 the first validated value into a panic. {err}"
+            ),
+        ));
+    }
+    js_spelling(&pattern).map_err(|message| syn::Error::new_spanned(lit, message))
+}
+
+/// The pattern rewritten to the spelling a JavaScript regex literal reads the same way, or the
+/// first construct in it that a JavaScript regex literal has no reading for.
+fn js_spelling(pattern: &str) -> Result<String, String> {
+    let ast = PatternParser::new().parse(pattern).map_err(|err| {
+        format!(
+            "`pattern` parses for `regex::Regex::new` but not for the grammar this guard reads it \
+             back with, so what the Zod and JSON Schema surfaces would be handed cannot be \
+             decided. {err}"
+        )
+    })?;
+    let mut walk = JsSpelling::default();
+    walk.ast(&ast);
+    if let Some(refusal) = walk.refusal.as_ref() {
+        return Err(format!(
+            "`pattern` uses {}, which the `regex` crate reads and a JavaScript regex literal does \
+             not: there the same bytes are {}. The Zod schema splices this string between `/` \
+             delimiters and the JSON Schema `pattern` keyword is an ECMA-262 regex, so the \
+             constraint would say one thing in the Rust validator and another -- or nothing at all \
+             -- on the surfaces generated beside it.",
+            refusal.written, refusal.read_as
+        ));
+    }
+    Ok(walk.rewritten(pattern))
 }
 
 /// Escapes a regex pattern for splicing between the `/` delimiters of a JavaScript regex literal.

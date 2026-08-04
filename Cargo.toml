@@ -18,6 +18,12 @@ quote = "1"
 proc-macro2 = "1"
 log = "0.4"
 regex = ">=1.10"
+# The parser `regex::Regex::new` itself is built on. The `pattern` guard reads its AST to tell a
+# construct only the `regex` crate can read from one a JavaScript regex literal carries too, which
+# no second grammar written here could do without drifting from the one that actually applies. The
+# requirement is capped below `0.9` on purpose: the AST is matched exhaustively, so a grammar that
+# grows a construct has to be classified rather than silently waved through.
+regex-syntax = "0.8"
 
 [dev-dependencies]
 mongodb = ">=3.7"
