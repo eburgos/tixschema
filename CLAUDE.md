@@ -340,7 +340,7 @@ The macro also generates into the type's schema module:
 Single-field tuple structs with `#[serde(transparent)]` are treated as branded/opaque types. If the Rust name has a `Json` suffix, it is stripped from the TypeScript name.
 
 ```rust
-#[model_schema()]
+#[model_schema(default_types(ID_TYPE = String))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct UserId<ID_TYPE>(pub ID_TYPE);
@@ -388,6 +388,28 @@ infers every field as `unknown`.
 every generated module carries once above its per-type definitions. It holds the only assertion
 anywhere in the output: a cache's value type depends on its key type, which TypeScript can declare
 but cannot construct.
+
+### Declaring a Default Type per Parameter
+
+JSON Schema has no type parameters, so a generic item's document is built from one concrete
+filling, and `default_types(IdType = String, DateType = f64)` is where an author names it — one
+`Parameter = Type` pair per type parameter, in any order, beside every other item-level argument.
+
+`default_types_guard_errors` reads the declaration against the item's own parameters at
+`exec_model_schema`, the one seam every expanded shape is dispatched from, so a struct, a tuple
+struct, a branded newtype, an enum and an alias are all answered the same way and before any of
+them is split off. It refuses in both directions:
+
+- an entry naming nothing the item declares — refused in **every** feature configuration, spanned
+  on the entry, since a misspelled parameter fills nothing while the one it was meant for keeps no
+  default;
+- a type parameter with no entry — refused only under `#[cfg(feature = "jsonschema")]`, spanned on
+  the parameter, because nothing else reads the default;
+- `default_types` on an item with no type parameter, and an empty `default_types()`, both being a
+  declaration with nothing to declare.
+
+There is no fallback filling. A guessed one produces a document that silently rejects valid
+payloads, which is what the declaration exists to prevent.
 
 ### Adding Examples to Types
 

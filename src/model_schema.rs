@@ -5,7 +5,7 @@ use core::fmt::Write as _;
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::parse::Parser as _;
+use syn::parse::{Parse, ParseStream, Parser as _};
 use syn::punctuated::Punctuated;
 use syn::{Field, Item, ItemType, Meta, Token, parse_macro_input};
 
@@ -114,7 +114,14 @@ use crate::rename_rule::resolve_rename_rule;
 ///
 /// An argument added to [`apply_arg`] belongs here too: `no_argument_the_parser_reads_is_rejected`
 /// walks this list back through the parser and fails on any name here it does not read.
-const KNOWN_ARGS: &[&str] = &["name", "pattern", "minLength", "maxLength", "no_display"];
+const KNOWN_ARGS: &[&str] = &[
+    "name",
+    "pattern",
+    "minLength",
+    "maxLength",
+    "no_display",
+    "default_types",
+];
 
 /// What every plain-enum flatten diagnostic says about its own reach, so an author who fixes the
 /// one declaration named there knows what was and was not checked around it.
@@ -468,11 +475,26 @@ enum TaggedContent {
     Unnameable(&'static str),
 }
 
+/// One `default_types(IdType = String)` entry as written: the parameter it names, and the type
+/// declared for that parameter.
+struct DefaultTypeEntry {
+    name: syn::Ident,
+    ty: syn::Type,
+}
+
 #[derive(Default, Clone)]
 struct ModelSchemaArgs {
     /// The parser's refusal of the attribute's arguments — one it does not read, or a value it
     /// cannot read — spanned on the tokens that earned it.
     arg_rejection: Option<syn::Error>,
+    /// The default type declared for each of the item's own type parameters, in the order they
+    /// were written: `default_types(IdType = String, DateType = f64)`. Read by JSON-schema
+    /// generation, which has no type parameters of its own and so has to build its document from
+    /// one concrete filling.
+    ///
+    /// The parameter is kept as the ident it was written as rather than its text, because a
+    /// refusal of an entry is spanned on it and only the ident carries that span.
+    default_types: Vec<(syn::Ident, syn::Type)>,
     max_length: Option<usize>,
     min_length: Option<usize>,
     name_override: Option<String>,
@@ -552,6 +574,15 @@ impl ModelSchemaArgs {
     }
 }
 
+impl Parse for DefaultTypeEntry {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let name = input.parse()?;
+        input.parse::<Token![=]>()?;
+        let ty = input.parse()?;
+        Ok(Self { name, ty })
+    }
+}
+
 /// Parses the arguments of a `model_schema` attribute.
 ///
 /// What the parser cannot read is recorded as [`ModelSchemaArgs::arg_rejection`] rather than
@@ -594,6 +625,8 @@ fn apply_arg(result: &mut ModelSchemaArgs, meta: &Meta) -> syn::Result<()> {
         result.max_length = Some(length_arg(meta, "maxLength")?);
     } else if path.is_ident("no_display") {
         result.no_display = flag_arg(meta, "no_display")?;
+    } else if path.is_ident("default_types") {
+        result.default_types = default_types_arg(meta)?;
     } else {
         return Err(unknown_arg_rejection(meta));
     }
@@ -663,6 +696,29 @@ fn length_arg(meta: &Meta, name: &str) -> syn::Result<usize> {
     } else {
         Err(arg_rejection(lit, name, &takes))
     }
+}
+
+/// The pairs a `default_types(…)` argument was written as, in that order.
+///
+/// A list with no pair in it is refused rather than read as an empty declaration: the argument
+/// exists to name a filling per parameter, so one that names none says nothing that leaving it off
+/// does not already say — and on an item that declares parameters it would read as a declaration
+/// while declaring nothing.
+fn default_types_arg(meta: &Meta) -> syn::Result<Vec<(syn::Ident, syn::Type)>> {
+    let takes = "a list of `Parameter = Type` pairs, written `default_types(IdType = String, \
+                 DateType = f64)`";
+    let Meta::List(list) = meta else {
+        return Err(arg_rejection(meta, "default_types", takes));
+    };
+    let entries =
+        list.parse_args_with(Punctuated::<DefaultTypeEntry, Token![,]>::parse_terminated)?;
+    if entries.is_empty() {
+        return Err(arg_rejection(list, "default_types", takes));
+    }
+    Ok(entries
+        .into_iter()
+        .map(|entry| (entry.name, entry.ty))
+        .collect())
 }
 
 /// Whether a flag argument is set: it stands alone, or takes the boolean literal that says which
@@ -743,6 +799,16 @@ pub fn exec_model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
             &[attr_guard_error(rejection, &item_label(&item))],
         )
     {
+        return output;
+    }
+    // A `default_types` declaration is read against the item's own parameters, which the parser
+    // never sees, so both directions are answered here — ahead of every shape, and of the branded
+    // split inside the struct path.
+    if let Some(output) = guard_failure_output(
+        &item,
+        item_schema_ident(&item),
+        &default_types_guard_errors(&item, &parsed_args),
+    ) {
         return output;
     }
     if let Item::Struct(item_struct) = item {
@@ -1573,6 +1639,135 @@ const fn item_schema_ident(item: &Item) -> Option<&syn::Ident> {
     } else {
         None
     }
+}
+
+/// The parameters an item declares — the three shapes `model_schema` expands each bind their own;
+/// anything else binds none this expansion can read.
+const fn item_generics(item: &Item) -> Option<&syn::Generics> {
+    if let Item::Struct(item_struct) = item {
+        Some(&item_struct.generics)
+    } else if let Item::Enum(item_enum) = item {
+        Some(&item_enum.generics)
+    } else if let Item::Type(item_type) = item {
+        Some(&item_type.generics)
+    } else {
+        None
+    }
+}
+
+/// The `compile_error!` tokens a `default_types` declaration earns against the item it was written
+/// on, checked in both directions: an entry naming nothing the item declares, and — where a JSON
+/// document is generated — a parameter the declaration left out.
+///
+/// The comparison is the item's to make, not the parser's: the parser reads the attribute alone and
+/// never sees the declaration the entries are held against. It is made at the one seam every
+/// expanded shape is dispatched from, so a struct, an enum and an alias cannot come to answer
+/// differently, and a branded newtype is answered before the struct path splits it off.
+///
+/// Only the missing-entry direction is gated. An entry that names nothing declares a filling no
+/// reader will ever find a parameter for, in any build; a parameter with no entry is only short of
+/// something where something is generated from the default.
+fn default_types_guard_errors(
+    item: &Item,
+    args: &ModelSchemaArgs,
+) -> Vec<proc_macro2::TokenStream> {
+    let Some(generics) = item_generics(item) else {
+        return Vec::new();
+    };
+    let declared: Vec<&syn::Ident> = generics
+        .params
+        .iter()
+        .filter_map(|param| match param {
+            syn::GenericParam::Type(type_param) => Some(&type_param.ident),
+            syn::GenericParam::Const(_) | syn::GenericParam::Lifetime(_) => None,
+        })
+        .collect();
+
+    #[cfg(feature = "jsonschema")]
+    let mut rejections = entries_naming_no_parameter(args, &declared);
+    #[cfg(not(feature = "jsonschema"))]
+    let rejections = entries_naming_no_parameter(args, &declared);
+    #[cfg(feature = "jsonschema")]
+    rejections.extend(parameters_left_without_a_default(args, &declared));
+
+    rejections
+        .iter()
+        .map(|rejection| attr_guard_error(rejection, &item_label(item)))
+        .collect()
+}
+
+/// The refusal every `default_types` entry that names no type parameter of the item earns, spanned
+/// on the entry as written.
+fn entries_naming_no_parameter(
+    args: &ModelSchemaArgs,
+    declared: &[&syn::Ident],
+) -> Vec<syn::Error> {
+    args.default_types
+        .iter()
+        .filter(|(name, _)| !declared.contains(&name))
+        .map(|(name, _)| syn::Error::new_spanned(name, undeclared_entry_message(name, declared)))
+        .collect()
+}
+
+/// Why an entry naming nothing is refused, in the two spellings the item earns: one that declares
+/// parameters names them back, and one that declares none says so.
+fn undeclared_entry_message(name: &syn::Ident, declared: &[&syn::Ident]) -> String {
+    if declared.is_empty() {
+        return format!(
+            "`default_types` entry `{name}` names a type parameter, but this item declares none. A \
+             default type is the concrete filling a parameter is described from, so an item with \
+             no type parameter has nothing for one to fill."
+        );
+    }
+    let names = declared
+        .iter()
+        .map(|declared_name| format!("`{declared_name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "`default_types` entry `{name}` names no type parameter of this item. An entry declares \
+         the filling for the parameter it names, so one that names none fills nothing while the \
+         parameter it was meant for is left with no default at all. Type parameters of this item: \
+         {names}."
+    )
+}
+
+/// The refusal every type parameter the declaration left out earns, spanned on the parameter.
+#[cfg(feature = "jsonschema")]
+fn parameters_left_without_a_default(
+    args: &ModelSchemaArgs,
+    declared: &[&syn::Ident],
+) -> Vec<syn::Error> {
+    declared
+        .iter()
+        .filter(|name| {
+            !args
+                .default_types
+                .iter()
+                .any(|(written, _)| written == **name)
+        })
+        .map(|name| syn::Error::new_spanned(name, missing_default_message(name, declared)))
+        .collect()
+}
+
+/// Why a parameter with no default is refused: what the default is for, what the feature has to do
+/// with it, and the declaration to write for this item's own parameters.
+#[cfg(feature = "jsonschema")]
+fn missing_default_message(name: &syn::Ident, declared: &[&syn::Ident]) -> String {
+    let sample = declared
+        .iter()
+        .map(|parameter| format!("{parameter} = String"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "`#[model_schema]` requires a default type for every type parameter, and `{name}` has \
+         none. The default type is what the JSON-schema document is generated from: JSON Schema \
+         has no type parameters, so without a declared default the macro would have to guess — and \
+         a wrong guess produces a document that silently rejects valid payloads. This is required \
+         because the `jsonschema` feature is enabled. Declare one for every parameter of this item, \
+         each with the type its document should be generated from: \
+         `#[model_schema(default_types({sample}))]`."
+    )
 }
 
 /// The `compile_error!` tokens for every `cfg_attr`-wrapped serde attribute an enum carries: on the
