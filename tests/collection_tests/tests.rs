@@ -1397,7 +1397,7 @@ fn test_string_keyed_alias_value_maps_constructible() {
 #[test]
 #[cfg(feature = "jsonschema")]
 fn test_string_keyed_alias_value_maps_resolve_the_registered_module() {
-    let alias_schema = metric_sample_ref_type_schema::Schema::json_schema();
+    let alias_schema = metric_sample_ref_schema::Schema::json_schema();
     let schema = StringKeyedAliasValueMaps::json_schema();
     let properties = schema["properties"].as_object().unwrap();
 
@@ -2356,20 +2356,19 @@ fn test_an_alias_of_a_nested_sequence_publishes_its_depth() {
 
     #[cfg(feature = "typescript")]
     assert!(
-        metric_grid_type_schema::Schema::ts_definition().contains("Array<Array<number>>"),
+        metric_grid_schema::Schema::ts_definition().contains("Array<Array<number>>"),
         "Got: {}",
-        metric_grid_type_schema::Schema::ts_definition()
+        metric_grid_schema::Schema::ts_definition()
     );
     #[cfg(feature = "zod")]
     assert!(
-        metric_grid_type_schema::Schema::zod_schema()
-            .contains("z.array(z.array(z.number().int()))"),
+        metric_grid_schema::Schema::zod_schema().contains("z.array(z.array(z.number().int()))"),
         "Got: {}",
-        metric_grid_type_schema::Schema::zod_schema()
+        metric_grid_schema::Schema::zod_schema()
     );
     #[cfg(feature = "jsonschema")]
     assert_eq!(
-        metric_grid_type_schema::Schema::json_schema(),
+        metric_grid_schema::Schema::json_schema(),
         serde_json::json!({
             "type": "array",
             "items": { "type": "array", "items": { "type": "integer" } }

@@ -57,6 +57,33 @@ pub type DocumentIdsByName = HashMap<String, ReferencedDocumentId>;
 #[model_schema()]
 pub type DocumentIdsBySlot = HashMap<DocumentSlot, ReferencedDocumentId>;
 
+/// Declaration order, taken both ways round. This struct names aliases that have not expanded yet,
+/// so the module each reference resolves to is derived from the alias's Rust ident and nothing
+/// else; [`NamesAliasesDeclaredEarlier`] names the same two once they are registered. Both have to
+/// reach the same modules, or one of the two orders names a module that was never emitted.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct NamesAliasesDeclaredLater {
+    pub counts: Vec<LaterDeclaredCount>,
+    pub ids: HashMap<String, LaterDeclaredId>,
+}
+
+#[model_schema()]
+pub type LaterDeclaredId = String;
+
+/// A rename moves what the alias is *exported* as. It does not move the module its schema is
+/// published in — an override is not recoverable from the Rust ident, so a module named after the
+/// override would be one no forward reference could ever name.
+#[model_schema(name = "RenamedLaterDeclaredCount")]
+pub type LaterDeclaredCount = u64;
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct NamesAliasesDeclaredEarlier {
+    pub counts: Vec<LaterDeclaredCount>,
+    pub ids: HashMap<String, LaterDeclaredId>,
+}
+
 #[test]
 fn struct_referencing_an_alias_expands_in_this_feature_combination() {
     let value = UsesAliasByValue {
@@ -117,7 +144,7 @@ fn alias_module_backs_the_reference_emitted_by_the_referencing_struct() {
     assert!(properties.get("id").is_some());
     assert_eq!(
         properties.get("id").unwrap(),
-        &referenced_document_id_type_schema::Schema::json_schema()
+        &referenced_document_id_schema::Schema::json_schema()
     );
 }
 
@@ -126,7 +153,7 @@ fn alias_module_backs_the_reference_emitted_by_the_referencing_struct() {
 fn alias_module_backs_the_map_value_reference() {
     let schema = UsesAliasAsMapValue::json_schema();
     let by_slot = schema.get("properties").unwrap().get("by_slot").unwrap();
-    let alias_schema = referenced_document_id_type_schema::Schema::json_schema();
+    let alias_schema = referenced_document_id_schema::Schema::json_schema();
     for slot in DocumentSlot::enum_members() {
         assert_eq!(
             by_slot.get("properties").unwrap().get(&slot).unwrap(),
@@ -143,7 +170,7 @@ fn alias_module_backs_the_map_value_reference() {
 fn alias_keyed_map_enumerates_the_members_of_the_aliased_enum() {
     let schema = UsesAliasAsMapKey::json_schema();
     let properties = schema.get("properties").unwrap();
-    let alias_schema = referenced_document_id_type_schema::Schema::json_schema();
+    let alias_schema = referenced_document_id_schema::Schema::json_schema();
     for field in ["by_slot", "by_chained_slot"] {
         let keyed = properties.get(field).unwrap().get("properties").unwrap();
         for slot in DocumentSlot::enum_members() {
@@ -163,7 +190,7 @@ fn alias_keyed_map_enumerates_the_members_of_the_aliased_enum() {
 #[test]
 fn an_aliased_scalar_publishes_the_targets_schema() {
     assert_eq!(
-        referenced_document_id_type_schema::Schema::json_schema(),
+        referenced_document_id_schema::Schema::json_schema(),
         serde_json::json!({ "type": "string" })
     );
 }
@@ -174,7 +201,7 @@ fn an_aliased_scalar_publishes_the_targets_schema() {
 #[test]
 fn an_aliased_sibling_publishes_the_siblings_own_schema() {
     assert_eq!(
-        document_slot_alias_type_schema::Schema::json_schema(),
+        document_slot_alias_schema::Schema::json_schema(),
         document_slot_schema::Schema::json_schema()
     );
 }
@@ -185,7 +212,7 @@ fn an_aliased_sibling_publishes_the_siblings_own_schema() {
 #[test]
 fn an_alias_of_an_alias_resolves_to_the_type_at_the_end_of_the_chain() {
     assert_eq!(
-        document_slot_alias_chain_type_schema::Schema::json_schema(),
+        document_slot_alias_chain_schema::Schema::json_schema(),
         document_slot_schema::Schema::json_schema()
     );
 }
@@ -194,10 +221,10 @@ fn an_alias_of_an_alias_resolves_to_the_type_at_the_end_of_the_chain() {
 #[test]
 fn an_aliased_sequence_publishes_the_array_of_its_element() {
     assert_eq!(
-        referenced_document_ids_type_schema::Schema::json_schema(),
+        referenced_document_ids_schema::Schema::json_schema(),
         serde_json::json!({
             "type": "array",
-            "items": referenced_document_id_type_schema::Schema::json_schema()
+            "items": referenced_document_id_schema::Schema::json_schema()
         })
     );
 }
@@ -207,13 +234,13 @@ fn an_aliased_sequence_publishes_the_array_of_its_element() {
 #[cfg(feature = "jsonschema")]
 #[test]
 fn an_aliased_map_publishes_the_object_its_key_and_value_describe() {
-    let member = referenced_document_id_type_schema::Schema::json_schema();
+    let member = referenced_document_id_schema::Schema::json_schema();
     assert_eq!(
-        document_ids_by_name_type_schema::Schema::json_schema(),
+        document_ids_by_name_schema::Schema::json_schema(),
         serde_json::json!({ "type": "object", "additionalProperties": member })
     );
 
-    let by_slot = document_ids_by_slot_type_schema::Schema::json_schema();
+    let by_slot = document_ids_by_slot_schema::Schema::json_schema();
     let properties = by_slot.get("properties").unwrap();
     for slot in DocumentSlot::enum_members() {
         assert_eq!(properties.get(&slot).unwrap(), &member, "in: {by_slot}");
@@ -232,12 +259,12 @@ fn an_aliased_map_publishes_the_object_its_key_and_value_describe() {
 #[test]
 fn no_alias_publishes_a_schema_that_validates_nothing() {
     for schema in [
-        referenced_document_id_type_schema::Schema::json_schema(),
-        referenced_document_ids_type_schema::Schema::json_schema(),
-        document_slot_alias_type_schema::Schema::json_schema(),
-        document_slot_alias_chain_type_schema::Schema::json_schema(),
-        document_ids_by_name_type_schema::Schema::json_schema(),
-        document_ids_by_slot_type_schema::Schema::json_schema(),
+        referenced_document_id_schema::Schema::json_schema(),
+        referenced_document_ids_schema::Schema::json_schema(),
+        document_slot_alias_schema::Schema::json_schema(),
+        document_slot_alias_chain_schema::Schema::json_schema(),
+        document_ids_by_name_schema::Schema::json_schema(),
+        document_ids_by_slot_schema::Schema::json_schema(),
     ] {
         assert!(schema.get("warning").is_none(), "got: {schema}");
         assert!(schema.get("type").is_some(), "got: {schema}");
@@ -274,7 +301,7 @@ fn alias_map_value_zod_schema_name_matches_the_registered_export() {
 #[cfg(feature = "zod")]
 #[test]
 fn alias_zod_schema_name_matches_the_reference_emitted_by_the_struct() {
-    let alias_zod = referenced_document_id_type_schema::Schema::zod_schema();
+    let alias_zod = referenced_document_id_schema::Schema::zod_schema();
     assert!(
         alias_zod.contains("ReferencedDocumentIdType$Schema"),
         "got: {alias_zod}"
@@ -283,5 +310,77 @@ fn alias_zod_schema_name_matches_the_reference_emitted_by_the_struct() {
     assert!(
         struct_zod.contains("ReferencedDocumentIdType$Schema"),
         "got: {struct_zod}"
+    );
+}
+
+#[test]
+fn aliases_declared_under_their_reference_expand_in_this_feature_combination() {
+    let later = NamesAliasesDeclaredLater {
+        counts: vec![9_u64],
+        ids: HashMap::from([("n".to_owned(), "doc-8".to_owned())]),
+    };
+    assert_eq!(later.ids.get("n"), Some(&"doc-8".to_owned()));
+    assert_eq!(later.counts, vec![9_u64]);
+
+    let earlier = NamesAliasesDeclaredEarlier {
+        counts: vec![10_u64],
+        ids: HashMap::new(),
+    };
+    assert!(earlier.ids.is_empty());
+    assert_eq!(earlier.counts, vec![10_u64]);
+}
+
+/// A struct naming an alias declared under it used to refuse the whole crate: the reference
+/// assumed `later_declared_id_schema` while the alias published `later_declared_id_type_schema`,
+/// and rustc reported an `E0433` for a module the author never wrote. One spelling now answers on
+/// both sides, so which side of the alias the reference is written on changes nothing.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_alias_reference_describes_the_same_on_either_side_of_the_alias() {
+    assert_eq!(
+        NamesAliasesDeclaredLater::json_schema(),
+        NamesAliasesDeclaredEarlier::json_schema()
+    );
+}
+
+/// And what it resolves to is the alias's own module rather than something that merely exists:
+/// each member carries exactly what the alias publishes, the renamed one included.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_forward_alias_reference_carries_what_the_alias_publishes() {
+    let schema = NamesAliasesDeclaredLater::json_schema();
+    let properties = schema.get("properties").unwrap();
+    assert_eq!(
+        properties
+            .get("ids")
+            .unwrap()
+            .get("additionalProperties")
+            .unwrap(),
+        &later_declared_id_schema::Schema::json_schema(),
+        "in: {schema}"
+    );
+    assert_eq!(
+        properties.get("counts").unwrap().get("items").unwrap(),
+        &later_declared_count_schema::Schema::json_schema(),
+        "in: {schema}"
+    );
+}
+
+/// The override and the module name come apart: the alias is exported under the name the author
+/// wrote, from the module named after the Rust ident.
+#[cfg(feature = "typescript")]
+#[test]
+fn a_renamed_alias_exports_under_the_override_from_the_module_named_for_its_ident() {
+    let ts = later_declared_count_schema::Schema::ts_definition();
+    assert!(ts.contains("RenamedLaterDeclaredCount"), "got: {ts}");
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn a_renamed_alias_publishes_its_zod_schema_from_the_module_named_for_its_ident() {
+    let zod = later_declared_count_schema::Schema::zod_schema();
+    assert!(
+        zod.contains("RenamedLaterDeclaredCount$Schema"),
+        "got: {zod}"
     );
 }
