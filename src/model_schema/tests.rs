@@ -11,7 +11,7 @@ use super::{
     collect_untagged_members, constrained_shape, enum_cfg_attr_guard_errors,
     generate_field_validation, generate_numeric_validation_code, generate_string_validation_code,
     has_serde_default, helper_name_stem, internally_tagged_guard_errors, needs_injected_default,
-    parse_serde_field_attributes, parse_serde_type_attributes,
+    parse_serde_field_attributes, parse_serde_type_attributes, render_untagged_variant,
 };
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -35,7 +35,11 @@ use super::tuple_struct_zod_body;
 use super::tuple_struct_json_body;
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-use super::{check_slot_wire_is_readable, parse_serde_key_omission, tuple_struct_shape};
+use super::{check_slot_wire_is_readable, tuple_struct_shape};
+
+use super::{
+    VariantKind, check_variant_slot_wire_is_readable, parse_serde_key_omission, variant_wire_kind,
+};
 
 use syn::spanned::Spanned as _;
 
@@ -85,7 +89,8 @@ const UNPORTABLE_PROBE_PATTERNS: [(&str, &str); 6] = [
 /// Every slot spelling the refusal reads, beside whether it is refused. A slot dropped from one of
 /// serde's directions and not the other is; the pair that drops both is the wire the description
 /// already answers for, and everything else is a slot written in its place.
-#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+///
+/// Ungated because the variant seam reads the same list in every build.
 const SLOT_OMISSION_SPELLINGS: [(&str, bool); 6] = [
     ("skip_serializing", true),
     ("skip_serializing_if = \"Option::is_none\"", true),
@@ -6669,6 +6674,159 @@ fn a_lone_slot_is_refused_for_no_spelling() {
     for (spelling, _) in SLOT_OMISSION_SPELLINGS {
         assert_eq!(slot_refusal(spelling, 1), None, "for: {spelling}");
     }
+}
+
+/// The variant a declaration's first (and here only) variant parses to.
+fn declared_variant(declaration: &str) -> syn::Variant {
+    let item: syn::ItemEnum = syn::parse_str(declaration).unwrap();
+    item.variants.into_iter().next().unwrap()
+}
+
+/// Every refusal that declaration's variant earns, one per slot that earns one.
+fn variant_slot_refusals(declaration: &str) -> Vec<String> {
+    let variant = declared_variant(declaration);
+    let variant_name = variant.ident.to_string();
+    variant
+        .fields
+        .iter()
+        .enumerate()
+        .filter_map(|(index, field)| {
+            check_variant_slot_wire_is_readable(
+                field,
+                index,
+                &variant_name,
+                "Wire",
+                parse_serde_key_omission(&field.attrs),
+            )
+            .err()
+            .map(|err| err.to_string())
+        })
+        .collect()
+}
+
+/// Captured from serde on `enum E { One(#[serde(...)] String, u32) }`: `skip_serializing` alone
+/// writes `{"One":[7]}` and reads only `{"One":["s",7]}`, `skip_deserializing` alone writes
+/// `{"One":["s",7]}` and reads only `{"One":[7]}`. What serde writes is not what serde reads, and
+/// a slot has no optional spelling to describe both, so the declaration is refused.
+#[test]
+fn a_variant_slot_dropped_from_one_direction_only_is_refused() {
+    for (spelling, refused) in SLOT_OMISSION_SPELLINGS {
+        let refusals = variant_slot_refusals(&format!(
+            "enum Wire {{ One(#[serde({spelling})] Option<String>, u32) }}"
+        ));
+        assert_eq!(
+            refusals.len(),
+            usize::from(refused),
+            "{spelling}: {refusals:?}"
+        );
+        for message in refusals {
+            assert!(message.contains("slot 0"), "{spelling}: {message}");
+            assert!(message.contains("`One`"), "{spelling}: {message}");
+            assert!(message.contains("`Wire`"), "{spelling}: {message}");
+        }
+    }
+}
+
+/// A named member of a struct variant is left alone by the same walk: its key is absent from one
+/// payload and present in the other, which an optional key describes.
+#[test]
+fn a_named_variant_member_is_refused_for_no_spelling() {
+    for (spelling, _) in SLOT_OMISSION_SPELLINGS {
+        let refusals = variant_slot_refusals(&format!(
+            "enum Wire {{ One {{ #[serde({spelling})] a: Option<String> }} }}"
+        ));
+        assert!(refusals.is_empty(), "{spelling}: {refusals:?}");
+    }
+}
+
+/// The lone slot of a variant is asked the same question, which is where this seam parts from the
+/// tuple-struct one. Captured: `One(#[serde(skip_serializing)] String)` writes the bare name
+/// `"One"` and reads only `{"One":"s"}`, so the halves split a variant at every declared arity
+/// where a newtype struct ignored them outright.
+#[test]
+fn a_lone_variant_slot_is_refused_for_the_same_spellings() {
+    for (spelling, refused) in SLOT_OMISSION_SPELLINGS {
+        let refusals = variant_slot_refusals(&format!(
+            "enum Wire {{ One(#[serde({spelling})] Option<String>) }}"
+        ));
+        assert_eq!(
+            refusals.len(),
+            usize::from(refused),
+            "{spelling}: {refusals:?}"
+        );
+    }
+}
+
+/// Captured from serde: a variant declaring one slot and taking it off the wire is written as a
+/// unit variant — `"One"` externally, `{"type":"One"}` under a tag, `null` untagged — which are the
+/// payloads a declared unit variant writes in the same three places.
+#[test]
+fn a_variant_taking_its_lone_slot_off_the_wire_publishes_a_unit() {
+    for spelling in ["skip", "skip_serializing, skip_deserializing"] {
+        let variant =
+            declared_variant(&format!("enum Wire {{ One(#[serde({spelling})] String) }}"));
+        assert_eq!(variant_wire_kind(&variant), VariantKind::Unit, "{spelling}");
+    }
+}
+
+/// Every other declared arity keeps the kind it declared. Captured: a two-slot variant with one
+/// slot off the wire writes `{"One":[7]}` and with both off writes `{"One":[]}` — a shorter array
+/// and then an empty one, never the bare name a unit writes.
+#[test]
+fn every_other_declared_arity_keeps_the_kind_it_declared() {
+    for (declaration, expected) in [
+        (
+            "enum Wire { One(#[serde(skip)] String, u32) }",
+            VariantKind::TupleMultiple,
+        ),
+        (
+            "enum Wire { One(#[serde(skip)] String, #[serde(skip)] u32) }",
+            VariantKind::TupleMultiple,
+        ),
+        ("enum Wire { One(String) }", VariantKind::TupleSingle),
+        (
+            "enum Wire { One { #[serde(skip)] a: String } }",
+            VariantKind::Named,
+        ),
+        ("enum Wire { One }", VariantKind::Unit),
+    ] {
+        assert_eq!(
+            variant_wire_kind(&declared_variant(declaration)),
+            expected,
+            "for: {declaration}"
+        );
+    }
+}
+
+/// The member spelling an untagged variant is refused with, run over the kind it publishes.
+#[cfg(feature = "serde")]
+fn untagged_refusal(declaration: &str, members: &[super::FieldDef]) -> String {
+    let variant = declared_variant(declaration);
+    render_untagged_variant(&variant_wire_kind(&variant), &variant, members, "Wire")
+        .map_or_else(|err| err.to_string(), |_| String::new())
+}
+
+/// Captured from serde: an untagged variant whose lone slot is off the wire writes and reads `null`
+/// — the payload a declared unit variant writes there — so it takes the refusal a unit variant
+/// takes rather than describing the value nothing carries.
+#[cfg(feature = "serde")]
+#[test]
+fn an_untagged_variant_whose_lone_slot_is_dropped_is_refused_as_a_unit() {
+    let refusal = untagged_refusal("enum Wire { One(#[serde(skip)] String) }", &[]);
+    assert!(refusal.contains("is a unit variant"), "Got: {refusal}");
+}
+
+/// A refused tuple variant is named by the arity the author declared, not by the slots that reached
+/// the wire: a slot dropped from the description is still a slot the union has no spelling for.
+#[cfg(feature = "serde")]
+#[test]
+fn a_refused_untagged_tuple_variant_is_named_by_its_declared_arity() {
+    let carried = get_field_def("_1", &syn::parse_str::<syn::Type>("u32").unwrap(), "");
+    let refusal = untagged_refusal("enum Wire { One(#[serde(skip)] String, u32) }", &[carried]);
+    assert!(
+        refusal.contains("a tuple variant with 2 fields"),
+        "Got: {refusal}"
+    );
 }
 
 /// A path writes a string on the wire, which is the value the rendered constraint describes, so
