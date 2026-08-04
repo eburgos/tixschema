@@ -15,7 +15,7 @@ fn test_parse_as_type() {
     let attr: Attribute = parse_quote! { #[model_schema_prop(as = String)] };
     let meta = parse_model_schema_prop_attributes(&[attr]);
     assert!(meta.as_type.is_some());
-    assert_eq!(meta.as_type.unwrap(), "String");
+    assert_eq!(meta.as_type.unwrap(), parse_quote!(String));
     assert!(meta.literal.is_none());
     assert!(meta.min_length.is_none());
 }
@@ -35,7 +35,7 @@ fn test_parse_both_as_and_literal() {
     let attr: Attribute = parse_quote! { #[model_schema_prop(as = String, literal = "Tixena")] };
     let meta = parse_model_schema_prop_attributes(&[attr]);
     assert!(meta.as_type.is_some());
-    assert_eq!(meta.as_type.unwrap(), "String");
+    assert_eq!(meta.as_type.unwrap(), parse_quote!(String));
     assert!(meta.literal.is_some());
     assert_eq!(meta.literal.unwrap(), "Tixena");
     assert!(meta.min_length.is_none());
@@ -56,7 +56,7 @@ fn test_parse_as_and_min_length() {
     let attr: Attribute = parse_quote! { #[model_schema_prop(as = String, minLength = 5)] };
     let meta = parse_model_schema_prop_attributes(&[attr]);
     assert!(meta.as_type.is_some());
-    assert_eq!(meta.as_type.unwrap(), "String");
+    assert_eq!(meta.as_type.unwrap(), parse_quote!(String));
     assert!(meta.literal.is_none());
     assert!(meta.min_length.is_some());
     assert_eq!(meta.min_length.unwrap(), 5);
@@ -76,7 +76,7 @@ fn test_parse_both_as_and_ts_optional() {
     let attr: Attribute = parse_quote! { #[model_schema_prop(as = SomeBrand, ts_optional)] };
     let meta = parse_model_schema_prop_attributes(&[attr]);
     assert!(meta.as_type.is_some());
-    assert_eq!(meta.as_type.unwrap(), "SomeBrand");
+    assert_eq!(meta.as_type.unwrap(), parse_quote!(SomeBrand));
     assert!(meta.ts_optional);
 }
 
@@ -93,7 +93,7 @@ fn test_parse_all_attributes() {
         parse_quote! { #[model_schema_prop(as = String, literal = "test", minLength = 3)] };
     let meta = parse_model_schema_prop_attributes(&[attr]);
     assert!(meta.as_type.is_some());
-    assert_eq!(meta.as_type.unwrap(), "String");
+    assert_eq!(meta.as_type.unwrap(), parse_quote!(String));
     assert!(meta.literal.is_some());
     assert_eq!(meta.literal.unwrap(), "test");
     assert!(meta.min_length.is_some());

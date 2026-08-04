@@ -1,7 +1,9 @@
 use alloc::collections::{BTreeSet, BinaryHeap, VecDeque};
+use core::hash::BuildHasher;
 use core::iter::once;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::hash::DefaultHasher;
 use tixschema::model_schema;
 
 /// The covered wrappers by the name a generated surface could leak. `Vec` is covered too but
@@ -124,6 +126,40 @@ struct NestedEnumKeyedMapValues {
     optional: HashMap<String, Option<HashMap<MetricBucket, u64>>>,
     siblings: HashMap<MetricSlot, HashMap<MetricBucket, MetricSample>>,
     string_keyed_outer: HashMap<String, HashMap<MetricBucket, u64>>,
+}
+
+/// A `#[serde(transparent)]` brand over a `String`: serde writes it as the bare string its inner
+/// is, which is exactly what a JSON object key is.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+struct CorrelationId(String);
+
+/// A brand over such a brand. The wire form is the same bare string at every link of the chain.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+struct TraceId(CorrelationId);
+
+// A brand key is the open case wearing a name: serde writes the brand as the bare string its inner
+// is, so the map is an object keyed by arbitrary strings — held below against the `String`-keyed
+// twin, which is what the map describes as once the brand's name is spent.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct BrandKeyedMaps {
+    chained: HashMap<TraceId, u64>,
+    counts: HashMap<CorrelationId, u64>,
+    nested: HashMap<CorrelationId, HashMap<CorrelationId, u64>>,
+    samples: HashMap<CorrelationId, MetricSample>,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct StringKeyedBrandTwin {
+    chained: HashMap<String, u64>,
+    counts: HashMap<String, u64>,
+    nested: HashMap<String, HashMap<String, u64>>,
+    samples: HashMap<String, MetricSample>,
 }
 
 // A String key enumerates nothing, so one `additionalProperties` schema stands for every member —
@@ -271,6 +307,44 @@ struct VecElementFields {
     preprocessed_labels: Vec<String>,
     sibling_tags: Vec<MetricTag>,
     small_ids: Vec<u32>,
+}
+
+/// A `BuildHasher` written where std implies one, so a field can name the hasher parameter both
+/// `HashMap` and `HashSet` carry past the types they write. What it hashes with is beside the
+/// point — serde writes the same bytes whichever hasher a container is built with, which is why the
+/// argument is not part of the wire form the surfaces render.
+#[derive(Clone, Default)]
+struct NamedHasher;
+
+impl BuildHasher for NamedHasher {
+    type Hasher = DefaultHasher;
+
+    fn build_hasher(&self) -> Self::Hasher {
+        DefaultHasher::new()
+    }
+}
+
+// The twin pair the hasher is read through: the same containers at the same element and key types,
+// one spelling naming the hasher parameter and one leaving it implied. Every surface holds the two
+// against each other, the way the sequence wrappers are held against their `Vec` spelling.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct HasherNamedFields {
+    counts: HashMap<String, u32, NamedHasher>,
+    enum_keyed_counts: HashMap<MetricSlot, u32, NamedHasher>,
+    nested_ids: HashMap<String, HashSet<u32, NamedHasher>>,
+    small_ids: HashSet<u32, NamedHasher>,
+    tags: HashSet<MetricTag, NamedHasher>,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct HasherImpliedFields {
+    counts: HashMap<String, u32>,
+    enum_keyed_counts: HashMap<MetricSlot, u32>,
+    nested_ids: HashMap<String, HashSet<u32>>,
+    small_ids: HashSet<u32>,
+    tags: HashSet<MetricTag>,
 }
 
 // A slot — a map member, a tuple element — cannot be dropped the way an object key can, so it
@@ -1377,6 +1451,119 @@ fn test_string_keyed_sibling_value_maps_typescript_generation() {
     );
 }
 
+/// A brand key clears the derive under every feature set that reads one, none of them excepted:
+/// the key is read off the field all three surfaces render from, so the same source cannot be a
+/// schema under one toggle and a refusal under another.
+#[test]
+fn test_brand_keyed_maps_constructible() {
+    let key = CorrelationId("abc".to_owned());
+    let maps = BrandKeyedMaps {
+        chained: HashMap::from([(TraceId(key.clone()), 2)]),
+        counts: HashMap::from([(key.clone(), 1)]),
+        nested: HashMap::from([(key.clone(), HashMap::from([(key.clone(), 3)]))]),
+        samples: HashMap::from([(
+            key.clone(),
+            MetricSample {
+                label: "s".to_owned(),
+            },
+        )]),
+    };
+    assert_eq!(maps.counts[&key], 1);
+    assert_eq!(maps.nested[&key][&key], 3);
+
+    let twin = StringKeyedBrandTwin {
+        chained: HashMap::from([("abc".to_owned(), 2)]),
+        counts: HashMap::from([("abc".to_owned(), 1)]),
+        nested: HashMap::from([("abc".to_owned(), HashMap::from([("abc".to_owned(), 3)]))]),
+        samples: HashMap::new(),
+    };
+    assert_eq!(twin.counts["abc"], maps.counts[&key]);
+}
+
+/// A brand key builds the same object a `String` key builds. The JSON schema is the structural
+/// surface and has no brand to say, so it describes the open object outright — field for field the
+/// `String`-keyed twin's.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_brand_keyed_maps_describe_as_their_string_keyed_twin() {
+    assert_eq!(
+        BrandKeyedMaps::json_schema()["properties"],
+        StringKeyedBrandTwin::json_schema()["properties"]
+    );
+}
+
+/// The nominal surfaces keep the brand's own spelling as the key type, the way the enum-key path
+/// keeps the enum's — a `Record` and a `z.record` keyed by the brand, not by bare `string`.
+#[test]
+#[cfg(all(feature = "typescript", feature = "zod"))]
+fn test_brand_keyed_maps_name_the_brand_as_the_key_type() {
+    let ts_definition = BrandKeyedMaps::ts_definition();
+    for expected in [
+        "counts: Partial<Record<CorrelationId, number>>;",
+        "chained: Partial<Record<TraceId, number>>;",
+        "samples: Partial<Record<CorrelationId, MetricSample>>;",
+        "nested: Partial<Record<CorrelationId, Partial<Record<CorrelationId, number>>>>;",
+    ] {
+        assert!(
+            ts_definition.contains(expected),
+            "{expected} missing: {ts_definition}"
+        );
+    }
+
+    let zod_schema = BrandKeyedMaps::zod_schema();
+    for expected in [
+        "counts: z.record(CorrelationId$Schema, z.number().int())",
+        "chained: z.record(TraceId$Schema, z.number().int())",
+        "samples: z.record(CorrelationId$Schema, MetricSample$Schema)",
+        "nested: z.record(CorrelationId$Schema, z.record(CorrelationId$Schema, z.number().int()))",
+    ] {
+        assert!(
+            zod_schema.contains(expected),
+            "{expected} missing: {zod_schema}"
+        );
+    }
+}
+
+/// The whole reason the brand keys a map: serde writes it as the bare string, so what the schema
+/// describes as an open object is the object the value actually writes — and reads back.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_brand_keyed_maps_match_the_serialized_form() {
+    let key = CorrelationId("abc".to_owned());
+    let maps = BrandKeyedMaps {
+        chained: HashMap::from([(TraceId(key.clone()), 2)]),
+        counts: HashMap::from([(key.clone(), 1)]),
+        nested: HashMap::from([(key.clone(), HashMap::from([(key.clone(), 3)]))]),
+        samples: HashMap::from([(
+            key,
+            MetricSample {
+                label: "s".to_owned(),
+            },
+        )]),
+    };
+    let payload = serde_json::to_value(&maps).unwrap();
+    assert_eq!(payload["counts"], serde_json::json!({ "abc": 1_u64 }));
+    assert_eq!(payload["chained"], serde_json::json!({ "abc": 2_u64 }));
+    assert_eq!(
+        payload["nested"],
+        serde_json::json!({ "abc": { "abc": 3_u64 } })
+    );
+
+    let schema = BrandKeyedMaps::json_schema();
+    for field_name in ["counts", "chained", "nested", "samples"] {
+        let field = &schema["properties"][field_name];
+        assert_eq!(field["type"], json_type_name(&payload[field_name]));
+        assert!(field["additionalProperties"].is_object(), "in: {field}");
+    }
+    assert_eq!(
+        schema["properties"]["samples"]["additionalProperties"],
+        MetricSample::json_schema()
+    );
+
+    let read_back: BrandKeyedMaps = serde_json::from_value(payload).unwrap();
+    assert_eq!(read_back, maps);
+}
+
 #[test]
 fn test_string_keyed_alias_value_maps_constructible() {
     let maps = StringKeyedAliasValueMaps {
@@ -1767,6 +1954,89 @@ fn test_set_element_json_schema() {
         MetricTag::json_schema(),
         "in: {}",
         properties["sibling_tags"]
+    );
+}
+
+/// The twin values the hasher pair is read off: the same members holding the same things, one built
+/// with the hasher named and one with it implied.
+fn hasher_named_fields() -> HasherNamedFields {
+    HasherNamedFields {
+        counts: once(("alpha".to_owned(), 1)).collect(),
+        enum_keyed_counts: once((MetricSlot::Daily, 2)).collect(),
+        nested_ids: once(("beta".to_owned(), once(3).collect())).collect(),
+        small_ids: once(4).collect(),
+        tags: once(MetricTag {
+            label: "gamma".to_owned(),
+        })
+        .collect(),
+    }
+}
+
+fn hasher_implied_fields() -> HasherImpliedFields {
+    HasherImpliedFields {
+        counts: once(("alpha".to_owned(), 1)).collect(),
+        enum_keyed_counts: once((MetricSlot::Daily, 2)).collect(),
+        nested_ids: once(("beta".to_owned(), once(3).collect())).collect(),
+        small_ids: once(4).collect(),
+        tags: once(MetricTag {
+            label: "gamma".to_owned(),
+        })
+        .collect(),
+    }
+}
+
+/// The whole reason a named hasher may be held against the implied one: serde writes the same bytes
+/// either way, the hasher deciding only the order of a bucket the wire form never exposes. Read off
+/// what serde actually produces, so the claim answers to the wire rather than to a name.
+#[test]
+fn test_a_named_hasher_writes_what_the_implied_hasher_writes() {
+    assert_eq!(
+        serde_json::to_value(hasher_named_fields()).unwrap(),
+        serde_json::to_value(hasher_implied_fields()).unwrap()
+    );
+}
+
+/// The reported failure: naming the hasher carried an argument more than the container arms claimed,
+/// so the type fell through to the sibling rendering and each surface published a name nothing
+/// emits — a `HashMap<…>` TypeScript type, the same string as a Zod schema, and a schema module the
+/// expansion never writes. Writing the same bytes, the two spellings describe the same.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_hasher_named_fields_describe_as_the_implied_spelling() {
+    let named = HasherNamedFields::json_schema();
+    let implied = HasherImpliedFields::json_schema();
+
+    assert_eq!(named["properties"], implied["properties"]);
+    assert_eq!(named["required"], implied["required"]);
+}
+
+/// The same holding on the TypeScript surface, with the fixture's own name set aside: no container
+/// name and no hasher name reached the output.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_hasher_named_fields_type_as_the_implied_spelling() {
+    let named = HasherNamedFields::ts_definition();
+    for leaked in ["NamedHasher", "HashMap<", "HashSet<"] {
+        assert!(!named.contains(leaked), "{leaked} reached: {named}");
+    }
+    assert_eq!(
+        named.replace("HasherNamedFields", "HasherImpliedFields"),
+        HasherImpliedFields::ts_definition()
+    );
+}
+
+/// And on the Zod surface, where the sibling rendering published a bare type name that is not a
+/// schema expression at all.
+#[test]
+#[cfg(feature = "zod")]
+fn test_hasher_named_fields_validate_as_the_implied_spelling() {
+    let named = HasherNamedFields::zod_schema();
+    for leaked in ["NamedHasher", "HashMap<", "HashSet<"] {
+        assert!(!named.contains(leaked), "{leaked} reached: {named}");
+    }
+    assert_eq!(
+        named.replace("HasherNamedFields", "HasherImpliedFields"),
+        HasherImpliedFields::zod_schema()
     );
 }
 

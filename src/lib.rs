@@ -336,7 +336,9 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 ///
 /// ## Type Overrides
 ///
-/// - `as = Type` — override the TypeScript/Zod type for this field
+/// - `as = Type` — name the type this field renders. The target must be the field's own type or
+///   the value under its wrappers; naming any other type is a compile error, since every surface
+///   is written from the declared type and the expansion has no second reading of the wire.
 /// - `literal = "value"` — emit as a string literal type in TypeScript and Zod
 ///
 /// ```rust

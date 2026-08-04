@@ -402,6 +402,16 @@ mod objectid_branded_surface_tests {
     #[serde(transparent)]
     pub struct HexObjectId(pub ObjectId);
 
+    /// A brand whose pattern is wider than the hex the type holds — the shape that tells layering
+    /// from replacement, since a surface holding only the brand's admits strings no `ObjectId` can
+    /// ever be. Spelled as a class rather than with `.`, which the pattern guard refuses for its
+    /// cross-engine divergence; `[a-z0-9]` still admits every lowercase letter, so the `zzz…` probe
+    /// passes the brand's pattern and only the hex turns it away.
+    #[model_schema(pattern = "^[a-z0-9]{24}$")]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct WideObjectId(pub ObjectId);
+
     #[model_schema(no_display)]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
@@ -444,6 +454,11 @@ mod objectid_branded_surface_tests {
     /// A brand's string constraints measure the inner's `Display` — the bare hex — which on the
     /// wire is the `$oid` member, so both schema surfaces carry them there. Zod has no string
     /// check to apply to the object itself.
+    ///
+    /// The brand's own `pattern` is layered rather than written over the hex the type always
+    /// holds: one JSON Schema string carries one `pattern`, and writing the brand's into that slot
+    /// dropped the type's — which is how a brand wider than the hex came to admit, on this surface
+    /// alone, strings an `ObjectId` can never hold.
     #[test]
     fn a_constrained_objectid_brand_carries_its_constraints_on_the_oid_member() {
         let zod = HexObjectId::zod_schema();
@@ -466,7 +481,11 @@ mod objectid_branded_surface_tests {
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "$oid": { "type": "string", "pattern": "^[0-9a-fA-F]{24}$" }
+                    "$oid": {
+                        "type": "string",
+                        "pattern": r"^[a-f\d]{24}$",
+                        "allOf": [{ "pattern": "^[0-9a-fA-F]{24}$" }]
+                    }
                 },
                 "required": ["$oid"],
                 "additionalProperties": false
@@ -482,6 +501,50 @@ mod objectid_branded_surface_tests {
             PlainObjectId::json_schema(),
             HoldsObjectId::json_schema()["properties"]["id"]
         );
+    }
+
+    /// Every `pattern` the `$oid` member states, applied: the member's own and the one each `allOf`
+    /// branch adds. A payload has to match all of them, which is what a single `pattern` keyword
+    /// cannot say and so what tells a layered brand pattern from one written over the type's.
+    fn admits_oid(schema: &serde_json::Value, hex: &str) -> bool {
+        let member = &schema["properties"]["$oid"];
+        member["pattern"]
+            .as_str()
+            .into_iter()
+            .chain(
+                member["allOf"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|branch| branch["pattern"].as_str()),
+            )
+            .all(|pattern| regex::Regex::new(pattern).unwrap().is_match(hex))
+    }
+
+    /// The two surfaces read the same probe payloads the same way. A brand pattern wider than the
+    /// hex is where they came apart: Zod ran the type's own regex before the brand's check, while
+    /// the JSON schema had only the brand's left and admitted a `$oid` of 24 arbitrary characters.
+    #[test]
+    fn a_brand_pattern_wider_than_the_hex_still_narrows_to_the_hex_on_both_surfaces() {
+        let zod = WideObjectId::zod_schema();
+        assert!(zod.contains(OID_ZOD_BASE), "Got:\n{zod}");
+        assert!(
+            zod.contains(".check(z.regex(/^[a-z0-9]{24}$/))"),
+            "Got:\n{zod}"
+        );
+
+        let schema = WideObjectId::json_schema();
+        for (hex, admitted) in [
+            ("507f1f77bcf86cd799439011", true),
+            ("zzzzzzzzzzzzzzzzzzzzzzzz", false),
+            ("507f1f77bcf86cd79943901", false),
+        ] {
+            assert_eq!(
+                admits_oid(&schema, hex),
+                admitted,
+                "for {hex}, schema: {schema}"
+            );
+        }
     }
 
     /// An arrayed `ObjectId` writes the array around the `$oid` object, which is a container and
@@ -769,7 +832,10 @@ mod branded_constrained_json_schema_tests {
         assert_eq!(schema["type"], "string", "Got: {schema}");
         assert_eq!(schema["minLength"], 24_i64, "Got: {schema}");
         assert_eq!(schema["maxLength"], 24_i64, "Got: {schema}");
-        assert_eq!(schema["pattern"], "^[a-f\\d]{24}$", "Got: {schema}");
+        // The `\d` the brand is declared with reaches the schema as the members it stands for: a
+        // JSON Schema `pattern` is an ECMA-262 regex, which reads `\d` as ASCII, while the Rust
+        // validator beside it reads the Unicode class. Written out, both read the one set.
+        assert_eq!(schema["pattern"], "^[a-f0-9]{24}$", "Got: {schema}");
     }
 
     #[test]
@@ -1170,6 +1236,308 @@ mod branded_composite_inner_tests {
         assert_eq!(LabelList::json_schema(), holder["properties"]["labels"]);
         assert_eq!(LabelPair::json_schema(), holder["properties"]["pair"]);
         assert_eq!(WeightMap::json_schema(), holder["properties"]["weights"]);
+    }
+}
+
+/// The four surfaces of a brand whose inner names another type, pinned against what serde writes
+/// for it.
+///
+/// `#[serde(transparent)]` puts the named type on the wire by itself, so an object inner writes
+/// that object — never a string. The TypeScript type and the Zod value already deferred to the
+/// name; the JSON schema and the Zod type annotation are pinned here beside them, so a consumer
+/// type-checking the exported binding and one validating a payload read the same shape.
+#[cfg(all(
+    feature = "jsonschema",
+    feature = "serde",
+    feature = "typescript",
+    feature = "zod"
+))]
+mod branded_sibling_inner_tests {
+    use super::*;
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Part {
+        pub a: String,
+        pub b: u32,
+    }
+
+    #[model_schema(no_display)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct WrappedPart(pub Part);
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct HoldsPart {
+        pub part: Part,
+    }
+
+    // Written before the type it names, which is what a reference has to survive.
+    #[model_schema(no_display)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct WrappedTail(pub Tail);
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Tail {
+        pub z: String,
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Chain {
+        pub name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub next: Option<Box<ChainRef>>,
+    }
+
+    #[model_schema(no_display)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct ChainRef(pub Chain);
+
+    // A string-shaped sibling: the one a constrained brand can be written over, the constrained
+    // path asserting `Display` on the inner.
+    #[model_schema(maxLength = 10)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct Slug(pub String);
+
+    #[model_schema(minLength = 3)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct ShortSlug(pub Slug);
+
+    #[test]
+    fn a_sibling_brand_writes_the_object_its_inner_writes() {
+        let part = Part {
+            a: "a".to_owned(),
+            b: 1,
+        };
+        assert_eq!(
+            serde_json::to_string(&WrappedPart(part.clone())).unwrap(),
+            r#"{"a":"a","b":1}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&part).unwrap(),
+            serde_json::to_string(&WrappedPart(part)).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_sibling_brand_describes_the_named_type_on_every_surface() {
+        assert_eq!(
+            WrappedPart::ts_definition(),
+            r#"export type WrappedPart = Part & $brand<"WrappedPart">;"#
+        );
+        let zod = WrappedPart::zod_schema();
+        assert!(
+            zod.contains(r#"const WrappedPart$RawSchema = Part$Schema.brand<"WrappedPart">()"#),
+            "Got:\n{zod}"
+        );
+        assert!(
+            zod.contains(r#"WrappedPart$Schema: $ZodBranded<typeof Part$Schema, "WrappedPart">"#),
+            "Got:\n{zod}"
+        );
+        assert_eq!(WrappedPart::json_schema(), Part::json_schema());
+    }
+
+    /// A transparent brand is nothing on the wire, so it describes exactly what its inner
+    /// describes where that inner is named directly.
+    #[test]
+    fn a_sibling_brand_describes_what_the_field_position_describes() {
+        assert_eq!(
+            WrappedPart::json_schema(),
+            HoldsPart::json_schema()["properties"]["part"]
+        );
+    }
+
+    /// A reference resolves in either declaration order, so a brand standing before the type it
+    /// names carries that type's own schema all the same.
+    #[test]
+    fn a_forward_declared_sibling_brand_carries_the_named_types_schema() {
+        assert_eq!(WrappedTail::json_schema(), Tail::json_schema());
+        assert!(
+            WrappedTail::zod_schema()
+                .contains(r#"WrappedTail$Schema: $ZodBranded<typeof Tail$Schema, "WrappedTail">"#),
+            "Got:\n{}",
+            WrappedTail::zod_schema()
+        );
+    }
+
+    /// A cycle closed through a brand defers exactly as one closed through a field does: the name
+    /// re-entered while still being written becomes a reference, and its body is hoisted to the
+    /// root that reference resolves against.
+    #[test]
+    fn a_recursive_sibling_brand_defers_rather_than_inlining() {
+        assert_eq!(
+            ChainRef::json_schema(),
+            serde_json::json!({
+                "$defs": {
+                    "ChainRef": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "name": { "type": "string" },
+                            "next": { "$ref": "#/$defs/ChainRef" }
+                        },
+                        "required": ["name"]
+                    }
+                },
+                "$ref": "#/$defs/ChainRef"
+            })
+        );
+    }
+
+    /// A brand over a string-shaped sibling keeps its own constraints, layered around the named
+    /// type's schema rather than written in place of it — which is how the Zod value already
+    /// composes them, the named schema first and the brand's checks after it.
+    #[test]
+    fn a_constrained_sibling_brand_layers_its_constraints_over_the_named_schema() {
+        assert_eq!(
+            ShortSlug::json_schema(),
+            serde_json::json!({
+                "allOf": [{ "type": "string", "maxLength": 10_u32 }, { "minLength": 3_u32 }]
+            })
+        );
+        let zod = ShortSlug::zod_schema();
+        assert!(
+            zod.contains(r#"const ShortSlug$RawSchema = Slug$Schema.min(3).brand<"ShortSlug">()"#),
+            "Got:\n{zod}"
+        );
+        assert!(
+            zod.contains(r#"ShortSlug$Schema: $ZodBranded<typeof Slug$Schema, "ShortSlug">"#),
+            "Got:\n{zod}"
+        );
+    }
+}
+
+/// The surfaces of a brand whose inner is a chrono type, pinned against what serde writes for it.
+///
+/// `#[serde(transparent)]` puts the chrono value on the wire by itself, so the brand writes the
+/// same string a field of that type writes — and carries the same `"format"` keyword saying which
+/// instant the string spells. Reaching the string through the TypeScript name every chrono type
+/// shares with `String` is what dropped the keyword.
+#[cfg(all(feature = "chrono", feature = "jsonschema", feature = "serde"))]
+mod branded_chrono_inner_tests {
+    use super::*;
+    use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct Stamp(pub NaiveDate);
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct Clock(pub NaiveTime);
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct Moment(pub NaiveDateTime);
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct Instant(pub DateTime<Utc>);
+
+    #[model_schema(minLength = 10, maxLength = 10, pattern = r"^\d{4}-\d{2}-\d{2}$")]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct IsoStamp(pub NaiveDate);
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct HoldsChrono {
+        pub clock: NaiveTime,
+        pub instant: DateTime<Utc>,
+        pub moment: NaiveDateTime,
+        pub stamp: NaiveDate,
+    }
+
+    #[test]
+    fn a_chrono_brand_writes_the_string_its_inner_writes() {
+        let date = NaiveDate::from_ymd_opt(2020, 1, 2).unwrap();
+        assert_eq!(
+            serde_json::to_string(&Stamp(date)).unwrap(),
+            r#""2020-01-02""#
+        );
+        assert_eq!(
+            serde_json::to_string(&date).unwrap(),
+            serde_json::to_string(&Stamp(date)).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_chrono_brand_carries_the_format_keyword() {
+        assert_eq!(
+            Stamp::json_schema(),
+            serde_json::json!({ "type": "string", "format": "date" })
+        );
+        assert_eq!(
+            Clock::json_schema(),
+            serde_json::json!({ "type": "string", "format": "time" })
+        );
+        assert_eq!(
+            Moment::json_schema(),
+            serde_json::json!({ "type": "string", "format": "date-time" })
+        );
+        assert_eq!(
+            Instant::json_schema(),
+            serde_json::json!({ "type": "string", "format": "date-time" })
+        );
+    }
+
+    /// A transparent brand is nothing on the wire, so it describes exactly what its inner
+    /// describes where that inner is named directly.
+    #[test]
+    fn a_chrono_brand_describes_what_the_field_position_describes() {
+        let holder = HoldsChrono::json_schema();
+        assert_eq!(Stamp::json_schema(), holder["properties"]["stamp"]);
+        assert_eq!(Clock::json_schema(), holder["properties"]["clock"]);
+        assert_eq!(Moment::json_schema(), holder["properties"]["moment"]);
+        assert_eq!(Instant::json_schema(), holder["properties"]["instant"]);
+    }
+
+    /// The wire is a string, so the brand's own constraints stay legal — and sit beside `type` and
+    /// `format` the way they sit beside `type` alone. The `\d` the brand was declared with reaches
+    /// the schema as the members it stands for, per the pattern guard's cross-engine translation.
+    #[test]
+    fn a_constrained_chrono_brand_carries_its_constraints_beside_the_format() {
+        assert_eq!(
+            IsoStamp::json_schema(),
+            serde_json::json!({
+                "type": "string",
+                "format": "date",
+                "minLength": 10_u32,
+                "maxLength": 10_u32,
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+            })
+        );
+    }
+
+    /// The Zod value already emitted the same `z.iso.*` schema field position emits, and the
+    /// annotation is the class zod gives it; only the JSON schema moved.
+    #[cfg(all(feature = "typescript", feature = "zod"))]
+    #[test]
+    fn the_zod_surfaces_of_a_chrono_brand_are_unchanged() {
+        let zod = Stamp::zod_schema();
+        assert!(
+            zod.contains(r#"const Stamp$RawSchema = z.iso.date().brand<"Stamp">()"#),
+            "Got:\n{zod}"
+        );
+        assert!(
+            zod.contains(r#"Stamp$Schema: $ZodBranded<ZodString, "Stamp">"#),
+            "Got:\n{zod}"
+        );
+        assert_eq!(
+            Stamp::ts_definition(),
+            r#"export type Stamp = string & $brand<"Stamp">;"#
+        );
     }
 }
 

@@ -165,6 +165,13 @@ pub struct SuffixedBrandJson(pub String);
 #[serde(transparent)]
 pub struct BrandUnderRustName(pub String);
 
+// The one shape with no surface name of its own: an alias is exported under the `Type` suffix, and
+// falls back to that exported name the way every declared item falls back to its own. Commented
+// with `//`, since a `///` line here would be the fixture's docs and the fallback would not fire.
+#[cfg(feature = "typescript")]
+#[model_schema()]
+pub type PlainAlias = u32;
+
 #[cfg(feature = "typescript")]
 fn assert_jsdoc_opens_with(ts: &str, expected: &str) {
     let header = format!("/**\n * {expected}\n");
@@ -185,6 +192,24 @@ fn without_ident_reexport(surface: &str, ident: &str, exported: &str) -> String 
             &format!("\n\nexport const {ident}$Schema = {exported}$Schema;"),
             "",
         )
+/// The ` * ` lines a definition's `JSDoc` block is written from, with the block's own delimiters and
+/// the surrounding indentation set aside — what every shape spells from one body, and the one part
+/// of the emitted `TypeScript` the shapes may be held against each other over.
+///
+/// The rendered JSON schema an item publishes under `jsonschema` is appended after that body rather
+/// than written from it, so it is read as the end of the body and not as part of it.
+#[cfg(feature = "typescript")]
+fn jsdoc_body_lines(ts: &str) -> Vec<String> {
+    let (block, _) = ts
+        .strip_prefix("/**\n")
+        .and_then(|rest| rest.split_once("**/"))
+        .unwrap();
+    block
+        .lines()
+        .map(|line| line.trim().to_owned())
+        .take_while(|line| line != "* JSON Schema:")
+        .filter(|line| line.starts_with('*'))
+        .collect()
 }
 
 #[cfg(feature = "typescript")]
@@ -285,6 +310,37 @@ fn an_item_exported_under_its_rust_ident_keeps_the_header_it_had() {
         (PlainEither::ts_definition(), "PlainEither"),
     ] {
         assert_jsdoc_opens_with(&ts, declared);
+    }
+}
+
+/// The reported failure: an undocumented alias closed its `JSDoc` on a second blank ` * ` line,
+/// where every declared item closes on the first. Nothing about a shape decides how a name is
+/// written under `/**`, so the seven shapes that publish a header write the same two lines.
+#[cfg(feature = "typescript")]
+#[test]
+fn every_undocumented_shape_writes_the_same_two_jsdoc_lines() {
+    // The alias publishes `ts_definition` from its own module rather than from the alias, so naming
+    // the type here is what keeps the fixture from being pruned as unused.
+    let aliased: PlainAlias = 3;
+    assert_eq!(aliased, 3);
+
+    for (ts, exported) in [
+        (PlainStruct::ts_definition(), "PlainStruct"),
+        (PlainTuple::ts_definition(), "PlainTuple"),
+        (PlainSlot::ts_definition(), "PlainSlot"),
+        (PlainShape::ts_definition(), "PlainShape"),
+        (PlainAdjacent::ts_definition(), "PlainAdjacent"),
+        (PlainEither::ts_definition(), "PlainEither"),
+        (
+            plain_alias_schema::Schema::ts_definition(),
+            "PlainAliasType",
+        ),
+    ] {
+        assert_eq!(
+            jsdoc_body_lines(&ts),
+            vec![format!("* {exported}"), "*".to_owned()],
+            "for {exported}: {ts}"
+        );
     }
 }
 

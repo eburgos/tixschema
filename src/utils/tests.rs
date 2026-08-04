@@ -3,10 +3,9 @@ use super::*;
 /// The pattern shapes the shipped tests write, none of which the two grammars spell differently.
 /// Every one of them has to come back byte for byte: the guard is there to stop a pattern only one
 /// grammar reads, not to touch the ones both already read the same way.
-const PORTABLE_PATTERNS: [&str; 10] = [
+const PORTABLE_PATTERNS: [&str; 9] = [
     "^[a-z]+$",
     "^[0-9a-fA-F]{24}$",
-    r"^\d{3}\.\d{3}\.\d{3}-\d{2}$",
     r"^\/[a-z]+$",
     "^/[a-z]+$",
     r"^a\n[a-z]+$",
@@ -22,9 +21,19 @@ const PORTABLE_PATTERNS: [&str; 10] = [
 /// The list is the inventory of what `regex::Regex::new` accepts and a JavaScript regex literal
 /// either fails to parse or reads as something else, so it doubles as the record of what was
 /// checked against both grammars.
-const UNPORTABLE_PATTERNS: [(&str, &str); 22] = [
+const UNPORTABLE_PATTERNS: [(&str, &str); 32] = [
     ("(?i)abc", "inline flag directive"),
     ("abc(?i)def", "inline flag directive"),
+    ("(?i:abc)", "case-insensitive flag on a `(?i:...)` group"),
+    ("(?m:^a)", "multi-line flag on a `(?m:...)` group"),
+    ("(?s:a)", "dot-matches-newline flag on a `(?s:...)` group"),
+    ("(?-i:abc)", "case-insensitive flag on a `(?i:...)` group"),
+    ("(?i-s:abc)", "case-insensitive flag on a `(?i:...)` group"),
+    ("^.$", "the `.` any-character class"),
+    (r"^\D$", r"the `\D` negated digit class"),
+    (r"^\W$", r"the `\W` negated word class"),
+    (r"^\S$", r"the `\S` negated whitespace class"),
+    (r"[a\D]", r"the `\D` negated digit class"),
     ("(?x:a b)", "ignore-whitespace flag"),
     ("(?U:a+)", "swap-greed flag"),
     ("(?u:a)", "Unicode flag"),
@@ -51,6 +60,215 @@ const UNPORTABLE_PATTERNS: [(&str, &str); 22] = [
 /// rewrite has to match too.
 const REWRITE_HAYSTACKS: [&str; 12] = [
     "", "a", "abc", "]", "]]", "a]", "-", "/", "a-b", "word-42", "AB", "[",
+];
+
+/// The haystacks the two engines are compared over, chosen so every way `\d`, `\w`, `\s` and `.`
+/// were found to part ways is represented: an ASCII sample of each class, the ARABIC-INDIC digit
+/// and the accented and Greek letters the `regex` crate counts as word characters and a flagless
+/// literal does not, the two whitespace characters the engines disagree over in opposite
+/// directions (NEL, which only the `regex` crate spaces, and the byte-order mark, which only
+/// JavaScript does), and the astral characters a flagless literal sees as two code units.
+const CROSS_ENGINE_HAYSTACKS: [&str; 20] = [
+    "",
+    "5",
+    "a",
+    "_",
+    "-",
+    " ",
+    "\t",
+    "\n",
+    "\u{b}",
+    "\r",
+    "\u{661}",
+    "\u{e9}",
+    "\u{3b1}",
+    "\u{85}",
+    "\u{a0}",
+    "\u{feff}",
+    "\u{1f600}",
+    "\u{1d7d9}",
+    "12",
+    "\u{661}\u{662}",
+];
+
+/// What a flagless JavaScript regex literal makes of each spelling the guard can hand one, over
+/// [`CROSS_ENGINE_HAYSTACKS`] in order.
+///
+/// Read off `new RegExp(source).test(haystack)` under node v26.2.0 (V8 14.6). The JavaScript side
+/// is recorded rather than executed because the crate's tests must not need a JavaScript runtime
+/// to run; what is asserted against it — the `regex` crate's verdict on the very string the guard
+/// emits — is executed. Both the authored spellings and the spellings they translate to are here,
+/// so the table shows the divergence and its closure side by side.
+const JAVASCRIPT_VERDICTS: [(&str, [bool; 20]); 22] = [
+    (
+        r"^\d$",
+        [
+            false, true, false, false, false, false, false, false, false, false, false, false,
+            false, false, false, false, false, false, false, false,
+        ],
+    ),
+    (
+        r"^\d+$",
+        [
+            false, true, false, false, false, false, false, false, false, false, false, false,
+            false, false, false, false, false, false, true, false,
+        ],
+    ),
+    (
+        r"^\w$",
+        [
+            false, true, true, true, false, false, false, false, false, false, false, false, false,
+            false, false, false, false, false, false, false,
+        ],
+    ),
+    (
+        r"^\w+$",
+        [
+            false, true, true, true, false, false, false, false, false, false, false, false, false,
+            false, false, false, false, false, true, false,
+        ],
+    ),
+    (
+        r"^\s$",
+        [
+            false, false, false, false, false, true, true, true, true, true, false, false, false,
+            false, true, true, false, false, false, false,
+        ],
+    ),
+    (
+        r"^\s+$",
+        [
+            false, false, false, false, false, true, true, true, true, true, false, false, false,
+            false, true, true, false, false, false, false,
+        ],
+    ),
+    (
+        r"^[a\d]$",
+        [
+            false, true, true, false, false, false, false, false, false, false, false, false,
+            false, false, false, false, false, false, false, false,
+        ],
+    ),
+    (
+        r"^[a\s]$",
+        [
+            false, false, true, false, false, true, true, true, true, true, false, false, false,
+            false, true, true, false, false, false, false,
+        ],
+    ),
+    (
+        r"^[\w-]$",
+        [
+            false, true, true, true, true, false, false, false, false, false, false, false, false,
+            false, false, false, false, false, false, false,
+        ],
+    ),
+    (
+        r"^\d{3}\.\d{3}-\d{2}$",
+        [
+            false, false, false, false, false, false, false, false, false, false, false, false,
+            false, false, false, false, false, false, false, false,
+        ],
+    ),
+    (
+        "^[0-9]$",
+        [
+            false, true, false, false, false, false, false, false, false, false, false, false,
+            false, false, false, false, false, false, false, false,
+        ],
+    ),
+    (
+        "^[0-9]+$",
+        [
+            false, true, false, false, false, false, false, false, false, false, false, false,
+            false, false, false, false, false, false, true, false,
+        ],
+    ),
+    (
+        "^[0-9A-Za-z_]$",
+        [
+            false, true, true, true, false, false, false, false, false, false, false, false, false,
+            false, false, false, false, false, false, false,
+        ],
+    ),
+    (
+        "^[0-9A-Za-z_]+$",
+        [
+            false, true, true, true, false, false, false, false, false, false, false, false, false,
+            false, false, false, false, false, true, false,
+        ],
+    ),
+    (
+        r"^[\t\n\v\f\r ]$",
+        [
+            false, false, false, false, false, true, true, true, true, true, false, false, false,
+            false, false, false, false, false, false, false,
+        ],
+    ),
+    (
+        r"^[\t\n\v\f\r ]+$",
+        [
+            false, false, false, false, false, true, true, true, true, true, false, false, false,
+            false, false, false, false, false, false, false,
+        ],
+    ),
+    (
+        "^[a0-9]$",
+        [
+            false, true, true, false, false, false, false, false, false, false, false, false,
+            false, false, false, false, false, false, false, false,
+        ],
+    ),
+    (
+        r"^[a\t\n\v\f\r ]$",
+        [
+            false, false, true, false, false, true, true, true, true, true, false, false, false,
+            false, false, false, false, false, false, false,
+        ],
+    ),
+    (
+        "^[0-9A-Za-z_-]$",
+        [
+            false, true, true, true, true, false, false, false, false, false, false, false, false,
+            false, false, false, false, false, false, false,
+        ],
+    ),
+    (
+        r"^[0-9]{3}\.[0-9]{3}-[0-9]{2}$",
+        [
+            false, false, false, false, false, false, false, false, false, false, false, false,
+            false, false, false, false, false, false, false, false,
+        ],
+    ),
+    (
+        "^[0-9a-fA-F]{24}$",
+        [
+            false, false, false, false, false, false, false, false, false, false, false, false,
+            false, false, false, false, false, false, false, false,
+        ],
+    ),
+    (
+        "^[a-z]+$",
+        [
+            false, false, true, false, false, false, false, false, false, false, false, false,
+            false, false, false, false, false, false, false, false,
+        ],
+    ),
+];
+
+/// Every construct whose value set the guard equalises, beside the spelling it equalises it to.
+const EQUALISED_PATTERNS: [(&str, &str); 10] = [
+    (r"^\d$", "^[0-9]$"),
+    (r"^\d+$", "^[0-9]+$"),
+    (r"^\w$", "^[0-9A-Za-z_]$"),
+    (r"^\w+$", "^[0-9A-Za-z_]+$"),
+    (r"^\s$", r"^[\t\n\v\f\r ]$"),
+    (r"^\s+$", r"^[\t\n\v\f\r ]+$"),
+    // Inside a class the members go in bare: a nested class is a construct the guard refuses.
+    (r"^[a\d]$", "^[a0-9]$"),
+    (r"^[a\s]$", r"^[a\t\n\v\f\r ]$"),
+    (r"^[\w-]$", "^[0-9A-Za-z_-]$"),
+    (r"^\d{3}\.\d{3}-\d{2}$", r"^[0-9]{3}\.[0-9]{3}-[0-9]{2}$"),
 ];
 
 #[cfg(feature = "zod")]
@@ -433,14 +651,114 @@ fn test_portable_pattern_leaves_a_shared_pattern_byte_identical() {
     }
 }
 
-/// `.`, `\d`, `\w`, `\s` and `\b` are in both grammars and part ways only over what counts as a
-/// digit, a word character or a boundary. That is a divergence in what they match, not in what
-/// they are, and the guard deliberately leaves it alone.
+/// A word boundary is spelled and read alike by both grammars over every haystack the divergence
+/// hunt covered, so it stays byte-identical where the classes beside it do not.
 #[test]
-fn test_portable_pattern_admits_the_classes_both_grammars_spell() {
-    for pattern in [r"^\d+$", r"^\w+$", r"^\s+$", "^.$", r"\ba", r"\Ba"] {
+fn test_portable_pattern_admits_the_boundary_both_grammars_agree_on() {
+    for pattern in [r"\ba", r"\Ba"] {
         assert_eq!(portable(pattern).as_deref(), Ok(pattern), "for {pattern}");
     }
+}
+
+/// `\d`, `\w` and `\s` are in both grammars under one spelling and cover different characters by
+/// it: the `regex` crate reads them as Unicode classes, and a flagless JavaScript literal reads
+/// the narrower ASCII ones. Neither engine can be told to mean the other, so the guard writes the
+/// set out in the members both engines do agree on and hands that one string to all three
+/// surfaces.
+#[test]
+fn test_portable_pattern_equalises_the_classes_the_engines_cover_differently() {
+    for (written, equalised) in EQUALISED_PATTERNS {
+        assert_eq!(portable(written).as_deref(), Ok(equalised), "for {written}");
+    }
+}
+
+/// The whole point, asserted end to end: the string the guard emits picks out the same haystacks
+/// in the `regex` crate — which is what the generated Rust validator runs it through — as in a
+/// flagless JavaScript regex literal, which is what the Zod schema and the JSON Schema `pattern`
+/// keyword are. Run over the constructs that used to diverge and over the ones that never did.
+#[test]
+fn test_the_emitted_pattern_picks_out_the_same_haystacks_in_both_engines() {
+    for (written, _) in EQUALISED_PATTERNS
+        .into_iter()
+        .chain([("^[0-9a-fA-F]{24}$", ""), ("^[a-z]+$", "")])
+    {
+        let emitted = portable(written).unwrap();
+        let recorded = JAVASCRIPT_VERDICTS
+            .into_iter()
+            .find_map(|(source, verdicts)| (source == emitted).then_some(verdicts));
+        assert!(
+            recorded.is_some(),
+            "{written} emits {emitted}, which no JavaScript verdict was recorded for"
+        );
+        let javascript = recorded.unwrap();
+        let rust = regex::Regex::new(&emitted).unwrap();
+        for (haystack, expected) in CROSS_ENGINE_HAYSTACKS.into_iter().zip(javascript) {
+            assert_eq!(
+                rust.is_match(haystack),
+                expected,
+                "{written} emits {emitted}, which parts ways with JavaScript over {haystack:?}"
+            );
+        }
+    }
+}
+
+/// The constructs with no equalising spelling at all, and why: a flagless JavaScript literal
+/// matches one UTF-16 code unit where the `regex` crate matches one character, so anything that
+/// can match a character outside the Basic Multilingual Plane parts ways over every one of them.
+/// `[^0-9]` is no better than `\D` here, which is why these are refused rather than rewritten.
+#[test]
+fn test_portable_pattern_refuses_what_no_spelling_equalises() {
+    for pattern in ["^.$", r"^\D$", r"^\W$", r"^\S$", r"[a\D]", r"[\s\S]"] {
+        let rejection = portable(pattern).unwrap_err();
+        assert!(
+            rejection.contains("cover different characters"),
+            "{pattern} is not refused for a value-set divergence: {rejection}"
+        );
+    }
+}
+
+/// Held against the engines rather than restated: for the dot, no candidate spelling agrees with
+/// JavaScript over the astral haystacks, which is what makes refusal the only honest verdict.
+#[test]
+fn test_no_spelling_of_the_dot_agrees_across_the_engines() {
+    for candidate in ["^.$", r"^[^\n]$", r"^[\s\S]$", r"^[^\n\r\u{2028}\u{2029}]$"] {
+        let rust = regex::Regex::new(candidate).unwrap();
+        // A flagless literal tests one code unit at a time, so a lone astral character can never
+        // fill a one-character pattern there.
+        assert!(
+            rust.is_match("\u{1f600}"),
+            "{candidate} was expected to match an astral character in the `regex` crate"
+        );
+    }
+}
+
+/// The engine baseline is a recorded decision, not a reading of whichever runtime is installed:
+/// this machine's node parses the ES2025 modifier groups, and the guard refuses them anyway
+/// because the baseline the emitted schemas target is older.
+#[test]
+fn test_portable_pattern_refuses_a_modifier_group_the_baseline_predates() {
+    for pattern in ["(?i:abc)", "(?m:^a)", "(?s:a)", "(?-i:abc)", "(?i-s:abc)"] {
+        let rejection = portable(pattern).unwrap_err();
+        for needle in [
+            JS_ENGINE_BASELINE,
+            "modifier",
+            "regular expression modifiers",
+        ] {
+            assert!(
+                rejection.contains(needle),
+                "{needle} missing for {pattern}: {rejection}"
+            );
+        }
+    }
+}
+
+/// What the baseline admits stays admitted, so the refusal above is a floor rather than a ban on
+/// everything recent: named groups are ES2018 and are still translated and emitted.
+#[test]
+fn test_the_engine_baseline_still_admits_what_it_dates_from() {
+    assert_eq!(JS_ENGINE_BASELINE, "ES2018");
+    assert_eq!(portable("(?P<w>[a-z]+)").unwrap(), "(?<w>[a-z]+)");
+    assert_eq!(portable("(?<w>[a-z]+)").unwrap(), "(?<w>[a-z]+)");
 }
 
 /// Every refusal names the construct that earned it and the surface that cannot carry it.
@@ -461,8 +779,13 @@ fn test_portable_pattern_names_the_construct_javascript_cannot_carry() {
     }
 }
 
-/// A rewrite is a change of spelling, not of meaning: what the pattern matched before it, it
-/// matches after — read off `regex::Regex` itself rather than restated here.
+/// Renaming a group is a change of spelling and not of meaning: what the pattern matched before
+/// it, it matches after — read off `regex::Regex` itself rather than restated here.
+///
+/// Equalising a perl class is the other kind of rewrite and deliberately does narrow what the
+/// `regex` crate accepts, down to the set JavaScript was going to enforce anyway. The haystacks
+/// here are ASCII, where the two engines already agree, so a `\d` sitting beside a renamed group
+/// still has to come through matching exactly what it matched.
 #[test]
 fn test_portable_pattern_rewrite_keeps_what_the_pattern_matched() {
     for pattern in [
