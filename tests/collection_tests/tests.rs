@@ -290,6 +290,67 @@ struct ChronoKeyedBrandTwin {
     by_day: HashMap<NaiveDate, u64>,
 }
 
+/// An alias of a stringifying scalar. A type path resolves straight through it, so serde writes a
+/// key spelled this way as the number its target is — `{"7": …}`, the bare-keyed map's own wire.
+#[model_schema()]
+type TickKey = u32;
+
+/// An alias of that alias, and an alias of a stringifying brand: every link of either chain carries
+/// the same stringified number.
+#[model_schema()]
+type TickKeyRef = TickKey;
+
+#[model_schema()]
+type TickBrandKey = Tick;
+
+#[model_schema()]
+type EnabledKey = bool;
+
+// An alias of a stringifying scalar keys the open object its bare target keys, under the alias's own
+// exported name — held below against the bare-keyed twin, which is what the map describes as once
+// the alias's name is spent.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct ScalarAliasKeyedMaps {
+    branded: HashMap<TickBrandKey, u64>,
+    by_enabled: HashMap<EnabledKey, u64>,
+    by_tick: HashMap<TickKey, u64>,
+    chained: HashMap<TickKeyRef, u64>,
+    nested: HashMap<TickKey, HashMap<EnabledKey, u64>>,
+    samples: HashMap<TickKey, MetricSample>,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct ScalarKeyedAliasTwin {
+    branded: HashMap<Tick, u64>,
+    by_enabled: HashMap<bool, u64>,
+    by_tick: HashMap<u32, u64>,
+    chained: HashMap<u32, u64>,
+    nested: HashMap<u32, HashMap<bool, u64>>,
+    samples: HashMap<u32, MetricSample>,
+}
+
+/// An alias of a chrono value: serde renders the target into the key exactly as the bare chrono key
+/// renders, so the alias keys the same open object.
+#[cfg(feature = "chrono")]
+#[model_schema()]
+type DayKey = NaiveDate;
+
+#[cfg(feature = "chrono")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct ChronoAliasKeyedMaps {
+    by_day: HashMap<DayKey, u64>,
+}
+
+#[cfg(feature = "chrono")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct ChronoKeyedAliasTwin {
+    by_day: HashMap<NaiveDate, u64>,
+}
+
 // A String key enumerates nothing, so one `additionalProperties` schema stands for every member —
 // and it is the value type's own, which is what the enum-keyed twin above spells out per key.
 #[model_schema()]
@@ -2045,6 +2106,191 @@ fn test_chrono_brand_keyed_maps_name_the_brand_as_the_key_type() {
     let zod_schema = ChronoBrandKeyedMaps::zod_schema();
     assert!(
         zod_schema.contains("by_day: z.record(Day$Schema, z.number().int())"),
+        "got: {zod_schema}"
+    );
+}
+
+/// An alias key clears the derive under every feature set that reads one, as the brand key does:
+/// the key is read off the field all three surfaces render from, so the same source cannot be a
+/// schema under one toggle and a refusal under another.
+#[test]
+fn test_scalar_alias_keyed_maps_constructible() {
+    let tick: TickKey = 7;
+    let maps = ScalarAliasKeyedMaps {
+        branded: HashMap::from([(Tick(tick), 4)]),
+        by_enabled: HashMap::from([(true, 5)]),
+        by_tick: HashMap::from([(tick, 1)]),
+        chained: HashMap::from([(tick, 2)]),
+        nested: HashMap::from([(tick, HashMap::from([(true, 3)]))]),
+        samples: HashMap::from([(
+            tick,
+            MetricSample {
+                label: "s".to_owned(),
+            },
+        )]),
+    };
+    assert_eq!(maps.by_tick[&tick], 1);
+    assert_eq!(maps.nested[&tick][&true], 3);
+
+    let twin = ScalarKeyedAliasTwin {
+        branded: HashMap::from([(Tick(7), 4)]),
+        by_enabled: HashMap::from([(true, 5)]),
+        by_tick: HashMap::from([(7, 1)]),
+        chained: HashMap::from([(7, 2)]),
+        nested: HashMap::from([(7, HashMap::from([(true, 3)]))]),
+        samples: HashMap::new(),
+    };
+    assert_eq!(twin.by_tick[&7], maps.by_tick[&tick]);
+}
+
+/// An alias is the type it names, so a map keyed by an alias of a value serde stringifies builds the
+/// object the bare target builds — field for field the bare-keyed twin's, at every depth and through
+/// either chain, the alias's name being spent on the nominal surfaces and having nothing to say on
+/// the structural one.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_scalar_alias_keyed_maps_describe_as_their_bare_target_twin() {
+    assert_eq!(
+        ScalarAliasKeyedMaps::json_schema()["properties"],
+        ScalarKeyedAliasTwin::json_schema()["properties"]
+    );
+    assert_eq!(
+        ScalarAliasKeyedMaps::json_schema()["properties"]["by_tick"],
+        serde_json::json!({ "type": "object", "additionalProperties": true })
+    );
+}
+
+/// The nominal surfaces keep the alias's own exported name as the key type, the way they keep a
+/// brand's — a `Record` and a `z.record` keyed by the alias, not by bare `number`.
+#[test]
+#[cfg(all(feature = "typescript", feature = "zod"))]
+fn test_scalar_alias_keyed_maps_name_the_alias_as_the_key_type() {
+    let ts_definition = ScalarAliasKeyedMaps::ts_definition();
+    for expected in [
+        "branded: Partial<Record<TickBrandKeyType, number>>;",
+        "by_enabled: Partial<Record<EnabledKeyType, number>>;",
+        "by_tick: Partial<Record<TickKeyType, number>>;",
+        "chained: Partial<Record<TickKeyRefType, number>>;",
+        "nested: Partial<Record<TickKeyType, Partial<Record<EnabledKeyType, number>>>>;",
+        "samples: Partial<Record<TickKeyType, MetricSample>>;",
+    ] {
+        assert!(
+            ts_definition.contains(expected),
+            "{expected} missing: {ts_definition}"
+        );
+    }
+
+    let zod_schema = ScalarAliasKeyedMaps::zod_schema();
+    for expected in [
+        "branded: z.record(TickBrandKeyType$Schema, z.number().int())",
+        "by_enabled: z.record(EnabledKeyType$Schema, z.number().int())",
+        "by_tick: z.record(TickKeyType$Schema, z.number().int())",
+        "chained: z.record(TickKeyRefType$Schema, z.number().int())",
+        "nested: z.record(TickKeyType$Schema, z.record(EnabledKeyType$Schema, z.number().int()))",
+        "samples: z.record(TickKeyType$Schema, MetricSample$Schema)",
+    ] {
+        assert!(
+            zod_schema.contains(expected),
+            "{expected} missing: {zod_schema}"
+        );
+    }
+}
+
+/// The premise the classification rests on, read off the alias spelling: serde stringifies the
+/// target into the key, so the object the schema describes is the object the value writes, and it
+/// reads back.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_scalar_alias_keyed_maps_match_the_serialized_form() {
+    let tick: TickKey = 7;
+    let maps = ScalarAliasKeyedMaps {
+        branded: HashMap::from([(Tick(tick), 4)]),
+        by_enabled: HashMap::from([(true, 5)]),
+        by_tick: HashMap::from([(tick, 1)]),
+        chained: HashMap::from([(tick, 2)]),
+        nested: HashMap::from([(tick, HashMap::from([(true, 3)]))]),
+        samples: HashMap::from([(
+            tick,
+            MetricSample {
+                label: "s".to_owned(),
+            },
+        )]),
+    };
+    let payload = serde_json::to_value(&maps).unwrap();
+    assert_eq!(payload["by_tick"], serde_json::json!({ "7": 1_u64 }));
+    assert_eq!(payload["chained"], serde_json::json!({ "7": 2_u64 }));
+    assert_eq!(payload["branded"], serde_json::json!({ "7": 4_u64 }));
+    assert_eq!(payload["by_enabled"], serde_json::json!({ "true": 5_u64 }));
+    assert_eq!(
+        payload["nested"],
+        serde_json::json!({ "7": { "true": 3_u64 } })
+    );
+
+    let schema = ScalarAliasKeyedMaps::json_schema();
+    for field_name in [
+        "branded",
+        "by_enabled",
+        "by_tick",
+        "chained",
+        "nested",
+        "samples",
+    ] {
+        let field = &schema["properties"][field_name];
+        assert_eq!(field["type"], json_type_name(&payload[field_name]));
+    }
+
+    let read_back: ScalarAliasKeyedMaps = serde_json::from_value(payload).unwrap();
+    assert_eq!(read_back, maps);
+}
+
+/// A chrono value is stringified into a key by its own rendering, and an alias of one carries that
+/// rendering unchanged — the same twin equality the numeric aliases keep.
+#[test]
+#[cfg(all(feature = "chrono", feature = "jsonschema"))]
+fn test_chrono_alias_keyed_maps_describe_as_their_bare_target_twin() {
+    assert_eq!(
+        ChronoAliasKeyedMaps::json_schema()["properties"],
+        ChronoKeyedAliasTwin::json_schema()["properties"]
+    );
+
+    let day = NaiveDate::from_ymd_opt(2020, 1, 2).unwrap();
+    let maps = ChronoAliasKeyedMaps {
+        by_day: HashMap::from([(day, 1)]),
+    };
+    let payload = serde_json::to_value(&maps).unwrap();
+    assert_eq!(
+        payload["by_day"],
+        serde_json::json!({ "2020-01-02": 1_u64 })
+    );
+
+    let read_back: ChronoAliasKeyedMaps = serde_json::from_value(payload).unwrap();
+    assert_eq!(read_back, maps);
+}
+
+#[cfg(feature = "chrono")]
+#[test]
+fn test_chrono_alias_keyed_maps_constructible() {
+    let day: DayKey = NaiveDate::from_ymd_opt(2020, 1, 2).unwrap();
+    let maps = ChronoAliasKeyedMaps {
+        by_day: HashMap::from([(day, 1)]),
+    };
+    let twin = ChronoKeyedAliasTwin {
+        by_day: HashMap::from([(day, 1)]),
+    };
+    assert_eq!(twin.by_day[&day], maps.by_day[&day]);
+}
+
+#[test]
+#[cfg(all(feature = "chrono", feature = "typescript", feature = "zod"))]
+fn test_chrono_alias_keyed_maps_name_the_alias_as_the_key_type() {
+    let ts_definition = ChronoAliasKeyedMaps::ts_definition();
+    assert!(
+        ts_definition.contains("by_day: Partial<Record<DayKeyType, number>>;"),
+        "got: {ts_definition}"
+    );
+    let zod_schema = ChronoAliasKeyedMaps::zod_schema();
+    assert!(
+        zod_schema.contains("by_day: z.record(DayKeyType$Schema, z.number().int())"),
         "got: {zod_schema}"
     );
 }

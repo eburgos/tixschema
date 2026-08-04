@@ -582,6 +582,8 @@ Untagged enums compose with `#[serde(flatten)]`: a flattened variant carrying `V
 
 A member of an untagged variant carries `#[model_schema_prop(...)]` exactly as the same field written in a tagged variant does: the constraint reaches the Zod schema and the JSON Schema, and every guard the attribute earns is reported at the member. The one difference is the Rust side -- an untagged enum generates no per-field validators, so a constrained member has no `validate()` contribution and no deserialization check.
 
+A member holding a map or a tuple describes as the struct field written from the same type does, on every surface. A map is dispatched on the classification its key earns -- enumerated properties for a key whose members the expansion knows, `additionalProperties` for an open one -- and a key no surface can write is refused at the member, at whatever depth the map sits at. A tuple is the fixed-arity array Serde writes, `prefixItems` and the arity bounds included. A member the parser could not classify at all is the one shape that stays permissive: it carries no type name to narrow with, so it admits any value, exactly as the same field does.
+
 **Unsupported variants:** unit variants and multi-field tuple variants in an untagged enum produce a compile-time error.
 
 ### Nested Types
@@ -757,8 +759,8 @@ Generated TypeScript (with `zod` feature):
 
 ```typescript
 export type UserId<ID_TYPE> = ID_TYPE & z.$brand<"UserId">;
-const UserId$RawSchema = z.string().brand<"UserId">();
-export const UserId$Schema: ZodType<UserId<string>> = UserId$RawSchema;
+const UserId$RawSchema = ID_TYPE$Schema.brand<"UserId">();
+export const UserId$Schema: $ZodBranded<typeof ID_TYPE$Schema, "UserId"> = UserId$RawSchema;
 
 export type CorrelationId = string & z.$brand<"CorrelationId">;
 const CorrelationId$RawSchema = z.string().brand<"CorrelationId">();
@@ -781,8 +783,39 @@ Notes:
 
 - If the Rust type name ends with `Json`, the suffix is stripped in the generated TypeScript (e.g., `UserIdJson` becomes `UserId`). Otherwise, the Rust name is used as-is.
 - Generic parameter names (e.g., `ID_TYPE`) are preserved exactly.
+- A brand describes what its inner writes whether or not the inner names the brand's type parameters, so `TagList<T>(pub Vec<T>)` is an array on every surface — `Array<T>`, `z.array(T$Schema)`, `$ZodBranded<ZodArray, "TagList">`, `{"type": "array", "items": {}}` — and not the bare parameter. The parameter itself carries what an uninstantiated parameter carries anywhere else: its own name in TypeScript, the `$Schema` binding named after it in Zod, and the permissive empty schema in JSON, since one schema is written for every instantiation.
 - Serde transparent serialization works normally -- the wrapper is invisible in JSON.
 - Use branded newtypes for opaque IDs and phantom types to prevent passing the wrong ID type across domain boundaries.
+
+#### A Named Inner Must Carry `#[model_schema()]`
+
+**Error:** `cannot find module or crate <type>_schema in this scope` (`E0433`), reported at the inner type.
+
+A brand carries its inner's wire form and adds a name to it, so it describes as that inner describes — by reference, through the schema module the inner's own `#[model_schema()]` publishes. A named inner declared without the attribute publishes no such module, and the reference names one that was never emitted. This is the same requirement a field naming that type lives under, reported the same way and at the same place:
+
+```rust
+// Wrong: `Foreign` carries no `#[model_schema()]`, so no `foreign_schema` module exists
+#[derive(Serialize, Deserialize)]
+pub struct Foreign(pub String);
+
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+pub struct HoldsForeign {
+    pub id: Foreign, // E0433: cannot find module or crate `foreign_schema` in this scope
+}
+
+#[model_schema(no_display)]
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Wrapped(pub Foreign); // E0433: the same module, named in brand position
+```
+
+The remedy is either of two:
+
+- **Annotate the inner.** Put `#[model_schema()]` on `Foreign`, and both spellings resolve — the brand describing as whatever `Foreign` describes as.
+- **Brand the wire form instead.** Where the inner is a foreign scalar this crate cannot annotate -- `uuid::Uuid`, `rust_decimal::Decimal` -- brand the type it is written as: `pub struct Wrapped(pub String)`, with `pattern` on the brand where the format is worth pinning.
+
+A type this crate describes must be one it can read. The alternative -- letting a name it cannot resolve fall back to `{"type": "string"}` -- describes a struct as a string whenever the inner turns out to be one, which is the failure the brand's schema path exists to rule out.
 
 #### The `Display` Requirement and `no_display`
 
