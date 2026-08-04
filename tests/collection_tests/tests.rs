@@ -1,7 +1,9 @@
 use alloc::collections::{BTreeSet, BinaryHeap, VecDeque};
+use core::hash::BuildHasher;
 use core::iter::once;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::hash::DefaultHasher;
 use tixschema::model_schema;
 
 /// The covered wrappers by the name a generated surface could leak. `Vec` is covered too but
@@ -305,6 +307,44 @@ struct VecElementFields {
     preprocessed_labels: Vec<String>,
     sibling_tags: Vec<MetricTag>,
     small_ids: Vec<u32>,
+}
+
+/// A `BuildHasher` written where std implies one, so a field can name the hasher parameter both
+/// `HashMap` and `HashSet` carry past the types they write. What it hashes with is beside the
+/// point — serde writes the same bytes whichever hasher a container is built with, which is why the
+/// argument is not part of the wire form the surfaces render.
+#[derive(Clone, Default)]
+struct NamedHasher;
+
+impl BuildHasher for NamedHasher {
+    type Hasher = DefaultHasher;
+
+    fn build_hasher(&self) -> Self::Hasher {
+        DefaultHasher::new()
+    }
+}
+
+// The twin pair the hasher is read through: the same containers at the same element and key types,
+// one spelling naming the hasher parameter and one leaving it implied. Every surface holds the two
+// against each other, the way the sequence wrappers are held against their `Vec` spelling.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct HasherNamedFields {
+    counts: HashMap<String, u32, NamedHasher>,
+    enum_keyed_counts: HashMap<MetricSlot, u32, NamedHasher>,
+    nested_ids: HashMap<String, HashSet<u32, NamedHasher>>,
+    small_ids: HashSet<u32, NamedHasher>,
+    tags: HashSet<MetricTag, NamedHasher>,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct HasherImpliedFields {
+    counts: HashMap<String, u32>,
+    enum_keyed_counts: HashMap<MetricSlot, u32>,
+    nested_ids: HashMap<String, HashSet<u32>>,
+    small_ids: HashSet<u32>,
+    tags: HashSet<MetricTag>,
 }
 
 // A slot — a map member, a tuple element — cannot be dropped the way an object key can, so it
@@ -1914,6 +1954,89 @@ fn test_set_element_json_schema() {
         MetricTag::json_schema(),
         "in: {}",
         properties["sibling_tags"]
+    );
+}
+
+/// The twin values the hasher pair is read off: the same members holding the same things, one built
+/// with the hasher named and one with it implied.
+fn hasher_named_fields() -> HasherNamedFields {
+    HasherNamedFields {
+        counts: once(("alpha".to_owned(), 1)).collect(),
+        enum_keyed_counts: once((MetricSlot::Daily, 2)).collect(),
+        nested_ids: once(("beta".to_owned(), once(3).collect())).collect(),
+        small_ids: once(4).collect(),
+        tags: once(MetricTag {
+            label: "gamma".to_owned(),
+        })
+        .collect(),
+    }
+}
+
+fn hasher_implied_fields() -> HasherImpliedFields {
+    HasherImpliedFields {
+        counts: once(("alpha".to_owned(), 1)).collect(),
+        enum_keyed_counts: once((MetricSlot::Daily, 2)).collect(),
+        nested_ids: once(("beta".to_owned(), once(3).collect())).collect(),
+        small_ids: once(4).collect(),
+        tags: once(MetricTag {
+            label: "gamma".to_owned(),
+        })
+        .collect(),
+    }
+}
+
+/// The whole reason a named hasher may be held against the implied one: serde writes the same bytes
+/// either way, the hasher deciding only the order of a bucket the wire form never exposes. Read off
+/// what serde actually produces, so the claim answers to the wire rather than to a name.
+#[test]
+fn test_a_named_hasher_writes_what_the_implied_hasher_writes() {
+    assert_eq!(
+        serde_json::to_value(hasher_named_fields()).unwrap(),
+        serde_json::to_value(hasher_implied_fields()).unwrap()
+    );
+}
+
+/// The reported failure: naming the hasher carried an argument more than the container arms claimed,
+/// so the type fell through to the sibling rendering and each surface published a name nothing
+/// emits — a `HashMap<…>` TypeScript type, the same string as a Zod schema, and a schema module the
+/// expansion never writes. Writing the same bytes, the two spellings describe the same.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_hasher_named_fields_describe_as_the_implied_spelling() {
+    let named = HasherNamedFields::json_schema();
+    let implied = HasherImpliedFields::json_schema();
+
+    assert_eq!(named["properties"], implied["properties"]);
+    assert_eq!(named["required"], implied["required"]);
+}
+
+/// The same holding on the TypeScript surface, with the fixture's own name set aside: no container
+/// name and no hasher name reached the output.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_hasher_named_fields_type_as_the_implied_spelling() {
+    let named = HasherNamedFields::ts_definition();
+    for leaked in ["NamedHasher", "HashMap<", "HashSet<"] {
+        assert!(!named.contains(leaked), "{leaked} reached: {named}");
+    }
+    assert_eq!(
+        named.replace("HasherNamedFields", "HasherImpliedFields"),
+        HasherImpliedFields::ts_definition()
+    );
+}
+
+/// And on the Zod surface, where the sibling rendering published a bare type name that is not a
+/// schema expression at all.
+#[test]
+#[cfg(feature = "zod")]
+fn test_hasher_named_fields_validate_as_the_implied_spelling() {
+    let named = HasherNamedFields::zod_schema();
+    for leaked in ["NamedHasher", "HashMap<", "HashSet<"] {
+        assert!(!named.contains(leaked), "{leaked} reached: {named}");
+    }
+    assert_eq!(
+        named.replace("HasherNamedFields", "HasherImpliedFields"),
+        HasherImpliedFields::zod_schema()
     );
 }
 
