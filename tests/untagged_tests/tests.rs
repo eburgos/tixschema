@@ -92,6 +92,7 @@ enum KeyedUnion {
 
 // An untagged struct variant carrying a constrained member, beside the same member written in a
 // tagged enum. The two must render the same constrained value.
+#[cfg(any(feature = "zod", feature = "jsonschema"))]
 #[model_schema()]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -102,6 +103,7 @@ enum ConstrainedUnion {
     },
 }
 
+#[cfg(any(feature = "zod", feature = "jsonschema"))]
 #[model_schema()]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
