@@ -2916,8 +2916,8 @@ fn a_map_never_parses_as_a_sibling_named_after_its_container() {
     }
 }
 
-/// An alias's schema module is named after its registered export name, which the raw ident does
-/// not reproduce — the reference has to come from the registry or it names a module that was never
+/// A renamed item's schema module is named after its exported name, which the raw ident does not
+/// reproduce — the reference has to come from the registry or it names a module that was never
 /// emitted.
 #[cfg(feature = "jsonschema")]
 #[test]

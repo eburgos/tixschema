@@ -251,3 +251,25 @@ fn test_escape_js_regex_literal_rewrites_an_identity_escaped_line_terminator() {
     assert_eq!(escape_js_regex_literal("^a\\\nb$"), r"^a\nb$");
     assert_eq!(escape_js_regex_literal("^a\\\\\nb$"), r"^a\\\nb$");
 }
+
+/// The module name a reference assumes for a name it has not seen and the one an alias goes on to
+/// publish are the same call, so nothing the alias is written with can pull them apart: the `Type`
+/// suffix an alias exports under and a `name = "…"` override both land on the export name only.
+/// The `Json` suffix is still read through, that being what every reference already spells.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn ident_schema_module_name_is_derived_from_the_ident_alone() {
+    assert_eq!(ident_schema_module_name("LaterAlias"), "later_alias_schema");
+    assert_eq!(
+        ident_schema_module_name("LaterAliasJson"),
+        "later_alias_schema"
+    );
+    assert_eq!(
+        compute_alias_export_name("LaterAlias", None),
+        "LaterAliasType"
+    );
+    assert_eq!(
+        compute_alias_export_name("LaterAlias", Some("Renamed")),
+        "Renamed"
+    );
+}
