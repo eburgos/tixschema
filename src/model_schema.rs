@@ -40,6 +40,12 @@ use crate::utils::{escape_js_regex_literal, extract_example_from_docs};
 #[cfg(all(feature = "zod", feature = "object_id"))]
 use crate::features::object_id::get_object_id_zod_schema_with;
 
+// The 24-character hex an `ObjectId`'s `$oid` member holds, as a JSON-schema `pattern`. Read from
+// the `ObjectId` feature module, which is where the Zod literal reads it from too, so the two
+// surfaces cannot drift into describing the same string different ways.
+#[cfg(all(feature = "jsonschema", feature = "object_id"))]
+use crate::features::object_id::OBJECT_ID_HEX_PATTERN;
+
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::{AliasKind, lookup_alias_info, portable_pattern};
 
@@ -114,11 +120,6 @@ const FLATTENED_PLAIN_ENUM_SCOPE: &str = "Only a type the registry has already c
 const WRITTEN_AS_ARRAY: &str = "a JSON array";
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 const WRITTEN_AS_OBJECT: &str = "a JSON object";
-
-/// The 24-character hex an `ObjectId`'s `$oid` member holds, as a JSON-schema `pattern`. Written
-/// once so no position can describe the same string a different way.
-#[cfg(all(feature = "jsonschema", feature = "object_id"))]
-const OBJECT_ID_HEX_PATTERN: &str = r"^[a-f\d]{24}$";
 
 /// One variant of a discriminated enum, carrying everything its union member is rendered from.
 struct DiscriminatedVariant {

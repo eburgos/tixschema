@@ -89,7 +89,7 @@ fn test_real_objectid_basic_types() {
 
     // Zod schema should use the MongoDB ObjectId structure with regex validation - now in separate method
     let zod_schema = RealUser::zod_schema();
-    assert!(zod_schema.contains("id: z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) }),"));
+    assert!(zod_schema.contains("id: z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/i, { message: \"Invalid ObjectId\" }) }),"));
     assert!(zod_schema.contains("name: z.string(),"));
     assert!(
         zod_schema.contains("email: z.union([z.string(), z.undefined()]).prefault(undefined),")
@@ -182,7 +182,7 @@ fn test_real_objectid_complex_structures() {
 
     // Zod schema should handle all ObjectId variations with regex validation - now in separate method
     let zod_schema = RealDocument::zod_schema();
-    let regex_pattern = "z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" })";
+    let regex_pattern = "z.string().regex(/^[a-f0-9]{24}$/i, { message: \"Invalid ObjectId\" })";
     assert!(zod_schema.contains(&format!("id: z.object({{ $oid: {regex_pattern} }}),")));
     assert!(zod_schema.contains(&format!(
         "author_id: z.object({{ $oid: {regex_pattern} }}),"
@@ -340,7 +340,7 @@ fn test_nested_objectid_map_json_schema() {
 fn unified_oid_object() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
-        "properties": { "$oid": { "type": "string", "pattern": r"^[a-f\d]{24}$" } },
+        "properties": { "$oid": { "type": "string", "pattern": "^[a-f0-9]{24}$" } },
         "required": ["$oid"],
         "additionalProperties": false
     })
@@ -485,8 +485,8 @@ fn test_real_objectid_validation_compatibility() {
     // Should be exactly 24 characters
     assert_eq!(hex_string.len(), 24);
 
-    // Should match our regex pattern: /^[a-f\d]{24}$/i
-    let regex = regex::Regex::new(r"^[a-f\d]{24}$").unwrap();
+    // Should match our regex pattern: /^[a-f0-9]{24}$/i
+    let regex = regex::Regex::new("^[a-f0-9]{24}$").unwrap();
     assert!(
         regex.is_match(&hex_string),
         "Real ObjectId hex '{hex_string}' should match our validation regex"
