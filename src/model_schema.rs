@@ -59,6 +59,10 @@ use crate::utils::{TrivialPattern, trivial_pattern};
 #[cfg(feature = "serde")]
 use crate::features::serde::{SerdeFieldMeta, SerdeTypeMeta};
 use crate::features::serde::{has_serde_default, parse_serde_key_omission};
+// The type is named only where a slot's own omission is read, which is where a surface describes
+// the tuple that slot sits in.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+use crate::features::serde::SerdeKeyOmission;
 
 #[cfg(feature = "serde")]
 use crate::field_type::{parse_serde_field_attributes, parse_serde_type_attributes};
@@ -560,6 +564,23 @@ struct Surface {
 enum RecordedWire {
     Leaves(Vec<WireLeaf>),
     Named(Option<&'static str>),
+}
+
+/// What a tuple struct publishes, which is not always the tuple of its declared slots.
+///
+/// serde writes a struct declaring exactly one slot as that slot's value alone, with nothing around
+/// it, and every other arity as an array of the slots it still carries. The two are separated here,
+/// at the one place that knows both how many slots were declared and which of them reach the wire,
+/// so no renderer downstream has to guess which shape a slot list stands for — a distinction the
+/// list alone cannot carry, since a two-slot struct with one slot off the wire writes a one-element
+/// array while a one-slot struct writes a bare value.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+enum TupleStructShape {
+    /// The fixed-arity array serde writes for every other declared arity, holding the slots the
+    /// wire carries.
+    Array(Vec<FieldDef>),
+    /// The bare value serde writes for a struct declaring exactly one slot.
+    BareValue(Box<FieldDef>),
 }
 
 /// What the item around a field says about it: everything [`process_field`] needs that is not the
@@ -2807,13 +2828,79 @@ const fn is_tuple_struct(item_struct: &syn::ItemStruct) -> bool {
     matches!(item_struct.fields, syn::Fields::Unnamed(_))
 }
 
-/// Walks a tuple struct's slots, returning their field defs in declaration order and the
-/// `compile_error!` tokens of every guard a slot violates.
+/// Whether the slot at `index` of a tuple struct declaring `declared_slots` slots carries serde
+/// attributes the wire answers for.
+///
+/// Captured from serde: a struct declaring exactly one slot writes and reads that slot's value
+/// whatever `skip`, `skip_serializing` or `skip_deserializing` says about it — a one-slot
+/// `#[serde(skip)]` struct holding `"s"` writes `"s"` and reads `"s"` back. So the slot spellings
+/// below are read only where serde reads them, which is a struct declaring more than one.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+const fn slot_attributes_reach_the_wire(declared_slots: usize) -> bool {
+    declared_slots > 1
+}
+
+/// Rejects a tuple-struct slot whose serde attributes drop it out of one of serde's two directions
+/// and not the other.
+///
+/// Captured from serde, on `struct S(#[serde(...)] Option<String>, String)` holding
+/// `(Some("s"), "x")`:
+/// - `skip_serializing` alone writes `["x"]` and reads only `["s","x"]`, refusing `["x"]` as
+///   `invalid length 1, expected tuple struct S with 2 elements`;
+/// - `skip_deserializing` alone writes `["s","x"]` and reads only `["x"]`, refusing `["s","x"]` as
+///   `trailing characters`;
+/// - `skip_serializing_if` writes `["s","x"]` or `["x"]` as its predicate decides, and reads only
+///   `["s","x"]`.
+///
+/// In each of them the array serde writes is not an array serde reads. A named field in the same
+/// position is describable — the key is simply absent from one payload and present in the other,
+/// which an optional key covers — but a slot is written by its place, so the two payloads differ in
+/// their arity and no fixed-arity tuple describes both. The declaration is refused rather than
+/// described, the way the named field whose omitted key serde cannot read back already is.
+///
+/// Not gated on the `serde` feature, and neither is the drop this stands beside: both read only the
+/// omission walk, which every build performs, and a toggle that changed the answer would leave one
+/// declaration refused in one build and described in another.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn check_slot_wire_is_readable(
+    field: &Field,
+    index: usize,
+    declared_slots: usize,
+    type_name: &str,
+    omission: SerdeKeyOmission,
+) -> Result<(), syn::Error> {
+    if !slot_attributes_reach_the_wire(declared_slots) || !omission.drops_one_direction_only() {
+        return Ok(());
+    }
+    Err(syn::Error::new_spanned(
+        field,
+        format!(
+            "model_schema: slot {index} of tuple struct `{type_name}` carries a serde attribute \
+             that drops it from only one of serde's two directions, so the array serde writes is \
+             not an array serde reads — one of them carries the slot and the other does not. A \
+             slot is written by its place rather than under a key, so there is no optional \
+             spelling to describe both and no schema can be written for the pair. Use \
+             #[serde(skip)] to take the slot off the wire in both directions, or drop the \
+             attribute so the slot is written and read in its place."
+        ),
+    ))
+}
+
+/// Walks a tuple struct's slots, returning the shape they publish and the `compile_error!` tokens
+/// of every guard a slot violates.
 ///
 /// Unlike [`collect_struct_fields`] the walk does not split on `#[serde(flatten)]`: a positional
 /// slot has no key for a flattened member to merge into, and dropping one here would silently
 /// change the arity the surfaces describe. The per-slot validators are dropped because a
 /// positional slot cannot carry a constraint — the guard that says so is what comes back instead.
+///
+/// A slot serde carries in neither direction is the one thing that does leave the walk. Captured:
+/// `struct S(#[serde(skip)] Option<String>, String)` holding `(Some("s"), "x")` writes `["x"]` and
+/// reads `["x"]` back, refusing `["s","x"]` as `trailing characters` — the slot is absent from the
+/// array in both directions, and the slots after it move up. So the described tuple is the slots
+/// that remain, which shrinks its arity, its `prefixItems` and its element types together. Every
+/// slot's def is still built before that decision, so a slot leaves the wire without taking the
+/// guards it violates with it.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn collect_tuple_slots(
     fields: &mut syn::Fields,
@@ -2822,12 +2909,19 @@ fn collect_tuple_slots(
     type_name: &str,
     generics: &syn::Generics,
     container_defaulted: bool,
-) -> (Vec<FieldDef>, Vec<proc_macro2::TokenStream>) {
+) -> (TupleStructShape, Vec<proc_macro2::TokenStream>) {
+    let declared_slots = fields.len();
     let type_parameters = type_parameters_in_scope(generics);
     let mut slots: Vec<FieldDef> = Vec::new();
     let mut guard_errors: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut deferred_attrs: Vec<Vec<syn::Attribute>> = Vec::new();
-    for field in fields.iter_mut() {
+    for (index, field) in fields.iter_mut().enumerate() {
+        let omission = parse_serde_key_omission(&field.attrs);
+        if let Err(rejection) =
+            check_slot_wire_is_readable(field, index, declared_slots, type_name, omission)
+        {
+            guard_errors.push(rejection.to_compile_error());
+        }
         let (slot, _, _, slot_guard_errors) = process_field(
             &FieldContext {
                 container_defaulted,
@@ -2841,59 +2935,74 @@ fn collect_tuple_slots(
             &mut deferred_attrs,
         );
         guard_errors.extend(slot_guard_errors);
+        if slot_attributes_reach_the_wire(declared_slots) && omission.absent_from_wire() {
+            continue;
+        }
         slots.push(slot);
     }
     if guard_errors.is_empty() {
         apply_deferred_field_attrs(fields.iter_mut(), deferred_attrs);
     }
-    (slots, guard_errors)
+    (tuple_struct_shape(declared_slots, slots), guard_errors)
+}
+
+/// The shape a tuple struct's declared arity and described slots amount to.
+///
+/// The bare value is keyed on the *declared* arity, not on how many slots came back described: a
+/// struct declaring two slots with one of them off the wire writes a one-element array, and reading
+/// the described count would collapse it to the bare value serde does not write there.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn tuple_struct_shape(declared_slots: usize, mut slots: Vec<FieldDef>) -> TupleStructShape {
+    if declared_slots == 1 && slots.len() == 1 {
+        return TupleStructShape::BareValue(Box::new(slots.remove(0)));
+    }
+    TupleStructShape::Array(slots)
 }
 
 /// The TypeScript type a tuple struct describes as.
 ///
-/// A single slot is the slot's own type: serde writes a newtype struct as that value alone, with
-/// nothing around it. Every other arity — the empty one included, which writes `[]` — is the fixed
-/// tuple the same slots describe as when they are written as a tuple field.
+/// The bare value is the slot's own type: serde writes a newtype struct as that value alone, with
+/// nothing around it. Every array — the empty one included, which writes `[]` — is the fixed tuple
+/// the slots on the wire describe as when they are written as a tuple field.
 #[cfg(feature = "typescript")]
-fn tuple_struct_ts_body(slots: &[FieldDef]) -> String {
-    if let [slot] = slots {
-        return slot.typescript_slot_typename();
+fn tuple_struct_ts_body(shape: &TupleStructShape) -> String {
+    match shape {
+        TupleStructShape::Array(slots) => format!(
+            "[{}]",
+            slots
+                .iter()
+                .map(FieldDef::typescript_slot_typename)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        TupleStructShape::BareValue(slot) => slot.typescript_slot_typename(),
     }
-    format!(
-        "[{}]",
-        slots
-            .iter()
-            .map(FieldDef::typescript_slot_typename)
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
 }
 
 /// [`tuple_struct_ts_body`] for the Zod surface.
 #[cfg(feature = "zod")]
-fn tuple_struct_zod_body(slots: &[FieldDef]) -> String {
-    if let [slot] = slots {
-        return slot.zod_slot_type();
+fn tuple_struct_zod_body(shape: &TupleStructShape) -> String {
+    match shape {
+        TupleStructShape::Array(slots) => format!(
+            "z.tuple([{}])",
+            slots
+                .iter()
+                .map(FieldDef::zod_slot_type)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        TupleStructShape::BareValue(slot) => slot.zod_slot_type(),
     }
-    format!(
-        "z.tuple([{}])",
-        slots
-            .iter()
-            .map(FieldDef::zod_slot_type)
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
 }
 
 /// [`tuple_struct_ts_body`] for the JSON-schema surface, as a standalone `serde_json::Value`
 /// expression, or the diagnostic naming the type when a slot holds a value the dispatch cannot
 /// render.
 #[cfg(feature = "jsonschema")]
-fn tuple_struct_json_body(item_name: &str, slots: &[FieldDef]) -> proc_macro2::TokenStream {
-    let described = if let [slot] = slots {
-        build_tuple_element_json_schema(slot)
-    } else {
-        tuple_json_schema_value(slots)
+fn tuple_struct_json_body(item_name: &str, shape: &TupleStructShape) -> proc_macro2::TokenStream {
+    let described = match shape {
+        TupleStructShape::Array(slots) => tuple_json_schema_value(slots),
+        TupleStructShape::BareValue(slot) => build_tuple_element_json_schema(slot),
     };
     match described {
         Ok(value) => value,
@@ -2980,7 +3089,7 @@ fn process_tuple_struct(
         tuple_struct_surface(&item_struct.fields),
     );
 
-    let (slots, guard_errors) = collect_tuple_slots(
+    let (shape, guard_errors) = collect_tuple_slots(
         &mut item_struct.fields,
         rename_all,
         &module_name,
@@ -3002,21 +3111,21 @@ fn process_tuple_struct(
 
     let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![
         #[cfg(feature = "jsonschema")]
-        json_schema_methods(&item_name, &tuple_struct_json_body(&item_name, &slots)),
+        json_schema_methods(&item_name, &tuple_struct_json_body(&item_name, &shape)),
         #[cfg(feature = "typescript")]
         build_tuple_struct_ts_definition_method(
             &build_jsdoc_body(docs_and_example.0.as_deref(), &item_name),
             &item_name,
             &name.to_string(),
             &ts_generic_params(&item_struct.generics),
-            &tuple_struct_ts_body(&slots),
+            &tuple_struct_ts_body(&shape),
         ),
         #[cfg(feature = "zod")]
         build_tuple_struct_zod_schema_method(
             &item_name,
             &name.to_string(),
             &type_parameters_in_scope(&item_struct.generics),
-            &tuple_struct_zod_body(&slots),
+            &tuple_struct_zod_body(&shape),
         ),
     ];
 
@@ -9002,7 +9111,7 @@ fn field_ident_string(field: &Field) -> String {
 fn apply_serde_key_omission(field_def: &mut FieldDef, field: &Field) {
     let omission = parse_serde_key_omission(&field.attrs);
     field_def.omits_value = field.ident.is_some() && omission.omits_key;
-    field_def.absent_from_wire = field_def.omits_value && omission.skips_deserializing;
+    field_def.absent_from_wire = field.ident.is_some() && omission.absent_from_wire();
 }
 
 /// Adds the field to the list every surface is built from, unless the wire carries its key in
