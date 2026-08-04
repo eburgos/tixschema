@@ -5122,6 +5122,13 @@ fn untagged_named_json_value(field_defs: &[FieldDef]) -> proc_macro2::TokenStrea
 
 /// Builds the `{ "type": "string", ... }` JSON-schema value token for a `String` field, including
 /// any `pattern` / `minLength` / `maxLength` constraints from its `model_schema_prop` metadata.
+///
+/// The constraints are written as insertions, so the value is a block — and the block is
+/// parenthesized, which is what lets it be a value at all. Its caller hands the result to the array
+/// wrap, which writes it into a `serde_json::json!` literal, where a leading brace opens a JSON
+/// object rather than a Rust block and the macro dies inside its own array expansion. The parens
+/// are the same ones an enum-keyed map's `properties` block is written under, for the same reason:
+/// they are what makes a block an expression the literal can carry.
 #[cfg(all(feature = "serde", feature = "jsonschema"))]
 fn string_field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
     let meta = fld.model_schema_prop_meta.as_ref();
@@ -5152,7 +5159,7 @@ fn string_field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
         }
     });
     quote! {
-        {
+        ({
             let mut string_schema = serde_json::Map::new();
             string_schema.insert(
                 "type".to_string(),
@@ -5162,7 +5169,7 @@ fn string_field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
             #min_insert
             #max_insert
             serde_json::Value::Object(string_schema)
-        }
+        })
     }
 }
 
@@ -5978,7 +5985,9 @@ fn write_tuple_multiple_variant_fields(
 /// refuses to deserialize is refused here too.
 ///
 /// `item_schema` is a `serde_json::Value` expression, as is the result. Callers holding a literal
-/// fragment want [`arrayed_json_schema_fragment`].
+/// fragment want [`arrayed_json_schema_fragment`]. It is written into a `serde_json::json!`
+/// literal, where a value that opens with a brace reads as a JSON object rather than as a Rust
+/// block, so a caller whose value is a block hands it over parenthesized.
 #[cfg(feature = "jsonschema")]
 fn arrayed_json_schema_value(
     fld: &FieldDef,
