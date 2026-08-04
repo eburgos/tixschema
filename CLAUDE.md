@@ -147,7 +147,14 @@ item, computed expression) records nothing and describes as an unbounded array.
 **FieldDefType** (type categories):
 - Primitives: `Boolean`, `String`, `U8-U64`, `I8-I64`, `F32`, `F64`, `Usize`, `Isize`
 - Complex: `SiblingType` (custom types), `Map` (HashMap), `Tuple`
-- Special: `ObjectId` (MongoDB, feature-gated), `StringLiteral`, `Unknown`
+- Special: `ObjectId` (MongoDB, feature-gated), `StringLiteral`, `TypeParam`, `Unknown`
+
+`TypeParam` is one of the enclosing item's own type parameters, which `erase_type_parameters`
+rewrites a written name into. The three surfaces answer for it differently: TypeScript renders the
+name it was written with, JSON Schema describes it as `{}`, and Zod composes the argument the
+enclosing factory binds for it (`idType` for `IdType`). A surface with no factory to bind an
+argument — an alias, a branded newtype — calls `with_opaque_type_parameters` first and writes
+`z.unknown()`.
 
 ### Feature Flag System
 
@@ -355,8 +362,32 @@ export type UserId<ID_TYPE> = ID_TYPE & { readonly [__brand_UserId]: true };
 Rules:
 - Generic parameter names are preserved exactly (`ID_TYPE` stays `ID_TYPE` in TypeScript)
 - Non-generic: `struct CorrelationId(pub String)` generates `string & z.$brand<"CorrelationId">`
-- Generic newtypes always use `z.string()` as the Zod base (inner type cannot be resolved at macro-expansion time)
+- A brand publishes a `const`, so a parameter in its inner has no argument to name and renders as
+  the opaque `z.unknown()`
 - Serde transparent serialization works normally — the newtype is invisible in JSON
+
+### Generic Types and Zod Factories
+
+A Zod schema is a runtime value and TypeScript generics do not exist at runtime, so a generic
+struct, tuple struct or enum has no one schema to publish. It exports `X$SchemaFactory` instead —
+a function taking one required schema argument per parameter — while a type that binds no type
+parameter keeps exporting `X$Schema` exactly as before. `zod_binding_suffix` is the one seam that
+decides which, and `zod_published_binding` the one seam that writes either.
+
+Each factory memoizes on the identity of its arguments, one cache level per parameter, so two
+calls with the same argument objects return the identical schema and no two argument lists
+collide. The levels are written out to the exact depth the type declares rather than looped over:
+a loop needs a key type it cannot name and a value it cannot type, which means `unknown` and a
+cast at every level, while the written-out form comes back already typed.
+
+Every parameter is a real TypeScript type parameter (`<IdType extends ZodType>`), never a bare
+`ZodType` annotation — `ZodType` defaults its own parameters, so an argument annotated with it
+infers every field as `unknown`.
+
+`typescript_preamble!()` returns the one helper the factories share, `createSchemaCache`, which
+every generated module carries once above its per-type definitions. It holds the only assertion
+anywhere in the output: a cache's value type depends on its key type, which TypeScript can declare
+but cannot construct.
 
 ### Adding Examples to Types
 

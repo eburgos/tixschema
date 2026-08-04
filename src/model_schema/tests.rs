@@ -1814,19 +1814,29 @@ fn a_container_short_of_its_wire_arity_still_falls_through_as_a_sibling() {
 /// Runs the field walk the way [`super::process_field`] does and renders the guard failures its
 /// `model_schema_prop` attributes earn, so a refused key and an unparseable `pattern` are read off
 /// the same channel that carries them to the emitted item.
-fn field_prop_guard_errors(item: &syn::ItemStruct) -> Vec<String> {
+///
+/// `parameters` names what the enclosing item declares, which is what decides whether a name the
+/// field is written with is a reference to another type or one of the item's own parameters — the
+/// same list [`super::process_field`] hands the walk.
+fn field_prop_guard_errors_in_scope(item: &syn::ItemStruct, parameters: &[String]) -> Vec<String> {
     let field = item.fields.iter().next().unwrap();
     let name = field
         .ident
         .as_ref()
         .map(ToString::to_string)
         .unwrap_or_default();
-    let field_def = get_field_def(&name, &field.ty, "");
+    let written = get_field_def(&name, &field.ty, "");
+    let mut rendered = written.clone();
+    rendered.erase_type_parameters(parameters);
     let meta = super::parse_model_schema_prop_attributes(&field.attrs);
-    super::collect_field_guard_errors(field, &field_def, &name, &meta, Vec::new())
+    super::collect_field_guard_errors(field, &rendered, &written, &name, &meta, Vec::new())
         .iter()
         .map(ToString::to_string)
         .collect()
+}
+
+fn field_prop_guard_errors(item: &syn::ItemStruct) -> Vec<String> {
+    field_prop_guard_errors_in_scope(item, &[])
 }
 
 /// The guard's verdict is the `regex` crate's verdict: the parse the generated validator's
@@ -2165,8 +2175,91 @@ fn a_map_or_tuple_field_without_a_bound_is_left_alone() {
     }
 }
 
-/// The docs a field's meta earns, read off the walk that writes them.
-fn field_docs_after_meta(item: &syn::ItemStruct) -> String {
+/// A parameter names no type until the item is instantiated, so a bound written on a field typed
+/// with one is held by nothing at all: the two validating surfaces describe the value as opaque,
+/// which takes no length, no pattern and no range, and the generated validator and serde read
+/// whatever type the instantiation supplied. That is the map's and the tuple's loss under another
+/// spelling, and it is refused where it is written for the same reason — at every depth the
+/// parameter can be reached through, the wrappers collapsing onto the value a bound would measure.
+#[test]
+fn a_bound_on_a_parameter_typed_field_is_refused() {
+    for (constraint, key) in [
+        (quote::quote! { minLength = 30 }, "minLength"),
+        (quote::quote! { maxLength = 30 }, "maxLength"),
+        (quote::quote! { pattern = "^[a-z]+$" }, "pattern"),
+        (quote::quote! { minimum = 5 }, "minimum"),
+        (quote::quote! { maximum = 5 }, "maximum"),
+    ] {
+        for field_type in [
+            quote::quote! { IdType },
+            quote::quote! { Option<IdType> },
+            quote::quote! { Vec<IdType> },
+            quote::quote! { Option<Vec<IdType>> },
+        ] {
+            let errors = field_prop_guard_errors_in_scope(
+                &syn::parse_quote! {
+                    struct Report {
+                        #[model_schema_prop(#constraint)]
+                        labels: #field_type,
+                    }
+                },
+                &["IdType".to_owned()],
+            );
+            assert_eq!(errors.len(), 1, "for {key} on {field_type}: {errors:?}");
+            for needle in [
+                "compile_error",
+                "field `labels`",
+                key,
+                "type parameter",
+                "IdType",
+                "brand",
+            ] {
+                assert!(
+                    errors[0].contains(needle),
+                    "{needle} missing for {key} on {field_type}: {}",
+                    errors[0]
+                );
+            }
+        }
+    }
+}
+
+/// The refusal turns on the bound and on the name being the item's own, so a parameter-typed field
+/// carrying none clears it — and so does the same bound on a concrete field standing beside the
+/// parameter, which every surface still reads it for. A name the item does not declare is a
+/// reference to another type and keeps whatever that type's own rendering earns.
+#[test]
+fn a_parameter_in_scope_only_refuses_the_field_that_carries_a_bound() {
+    for (field, parameters) in [
+        (quote::quote! { labels: IdType }, &["IdType".to_owned()][..]),
+        (
+            quote::quote! { #[model_schema_prop(preprocess = ["trim"])] labels: IdType },
+            &["IdType".to_owned()][..],
+        ),
+        (
+            quote::quote! { #[model_schema_prop(minLength = 30)] labels: String },
+            &["IdType".to_owned()][..],
+        ),
+        (
+            quote::quote! { #[model_schema_prop(minLength = 30)] labels: IdType },
+            &[][..],
+        ),
+    ] {
+        let errors = field_prop_guard_errors_in_scope(
+            &syn::parse_quote! {
+                struct Report {
+                    #field
+                }
+            },
+            parameters,
+        );
+        assert!(errors.is_empty(), "for {field}: {errors:?}");
+    }
+}
+
+/// The docs a field's meta earns, read off the walk that writes them, inside an item declaring
+/// `parameters`.
+fn field_docs_after_meta_in_scope(item: &syn::ItemStruct, parameters: &[String]) -> String {
     let field = item.fields.iter().next().unwrap();
     let name = field
         .ident
@@ -2174,9 +2267,14 @@ fn field_docs_after_meta(item: &syn::ItemStruct) -> String {
         .map(ToString::to_string)
         .unwrap_or_default();
     let mut field_def = get_field_def(&name, &field.ty, "");
+    field_def.erase_type_parameters(parameters);
     let meta = super::parse_model_schema_prop_attributes(&field.attrs);
     super::apply_model_schema_prop_meta(&mut field_def, meta, &name);
     field_def.docs
+}
+
+fn field_docs_after_meta(item: &syn::ItemStruct) -> String {
+    field_docs_after_meta_in_scope(item, &[])
 }
 
 /// The `JSDoc` states the bound as a rule the value is held to, so it is written only where
@@ -2205,6 +2303,43 @@ fn the_constraint_docs_are_written_only_where_the_bound_is_kept() {
         });
         assert!(docs.is_empty(), "for {field}, got: {docs}");
     }
+}
+
+/// The `JSDoc` was the one place a bound on a parameter-typed field appeared at all — every gate it
+/// named was silent — so the sentence goes where the refusal does, off the same question both are
+/// written from. A concrete field standing in the same generic item keeps its own.
+#[test]
+fn the_constraint_docs_are_silent_for_a_parameter_typed_field() {
+    let parameters = ["IdType".to_owned()];
+    for field in [
+        quote::quote! { #[model_schema_prop(minLength = 30)] id: IdType },
+        quote::quote! { #[model_schema_prop(maximum = 5)] id: Option<IdType> },
+        quote::quote! { #[model_schema_prop(minimum = 5)] id: Vec<IdType> },
+    ] {
+        let docs = field_docs_after_meta_in_scope(
+            &syn::parse_quote! {
+                struct Report {
+                    #field
+                }
+            },
+            &parameters,
+        );
+        assert!(docs.is_empty(), "for {field}, got: {docs}");
+    }
+
+    assert!(
+        field_docs_after_meta_in_scope(
+            &syn::parse_quote! {
+                struct Report {
+                    #[model_schema_prop(minLength = 30)]
+                    id: String,
+                }
+            },
+            &parameters,
+        )
+        .contains("Minimum length: 30"),
+        "a bound the surfaces render says so in the docs, parameters in scope or not"
+    );
 }
 
 /// `as` names the type the field already renders or it names nothing the expansion can honor: the
@@ -6243,6 +6378,253 @@ fn recorded_union_flatten_error(
     );
     record_zod_union_members(rust_ident, &merge_parts);
     flattened_union_member_guard_error(field, "Host").map(|error| error.to_string())
+}
+
+/// The branch trails one untagged enum's members are recorded at, beside what each is proved to
+/// write, in declaration order.
+#[cfg(all(feature = "serde", feature = "zod"))]
+fn recorded_member_trails(mut item: syn::ItemEnum) -> Vec<(String, Option<&'static str>)> {
+    let (_, _, merge_parts, _, errors, _, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
+    assert!(errors.is_empty(), "got: {errors:?}");
+    merge_parts
+        .iter()
+        .map(|member| (member.branch_path(), member.non_object))
+        .collect()
+}
+
+/// Registers a name carrying both answers a `#[model_schema()]` item's own expansion records for
+/// it: what serde writes it as, and what it published as a value.
+#[cfg(all(feature = "serde", feature = "zod"))]
+fn seed_registered_wire(rust_ident: &str, kind: AliasKind, shape: Option<&'static str>) {
+    register_alias_info(
+        rust_ident,
+        rust_ident,
+        &ident_schema_module_name(rust_ident),
+        kind,
+    );
+    record_value_shape(rust_ident, shape);
+}
+
+/// A member reached through an `Option` is two choices and not one: serde writes the value's own
+/// wire or writes nothing, and the JSON-schema merge descends into both — naming the value `n.1`
+/// and the absence `n.2`. The recording carries the same two, so the merge that reads it names a
+/// member by the position the other surface names the same member by.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn an_optional_union_member_is_recorded_as_its_value_beside_the_absence() {
+    assert_eq!(
+        recorded_member_trails(syn::parse_quote! {
+            enum Choice {
+                Obj(Holder),
+                Maybe(Option<Holder>),
+                Text(Option<String>),
+            }
+        }),
+        vec![
+            ("1".to_owned(), None),
+            ("2.1".to_owned(), None),
+            ("2.2".to_owned(), Some("null")),
+            ("3.1".to_owned(), Some("string")),
+            ("3.2".to_owned(), Some("null")),
+        ]
+    );
+}
+
+/// A member serde writes as an object is recorded exactly as it was: one entry at its own position,
+/// with no level below it. The `Option` is what adds a level, and nothing else does.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_member_written_without_an_option_keeps_the_one_position_it_had() {
+    assert_eq!(
+        recorded_member_trails(syn::parse_quote! {
+            enum Choice {
+                Obj(Holder),
+                Other(Second),
+            }
+        }),
+        vec![("1".to_owned(), None), ("2".to_owned(), None)]
+    );
+}
+
+/// So an object flattening a union with an optional member is refused where the field was written,
+/// naming the null leaf in the words the JSON-schema merge names it with. The absence is no key
+/// set: serde writes the object's own keys alone for it and then refuses to read those same keys
+/// back, so no branch a multiplication could write describes the type.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn flattening_a_union_with_an_optional_member_is_refused_naming_the_null_leaf() {
+    let error = recorded_union_flatten_error(
+        "NullableChoice",
+        syn::parse_quote! {
+            enum NullableChoice {
+                Obj(Holder),
+                Maybe(Option<Holder>),
+            }
+        },
+        &syn::parse_quote! { #[serde(flatten)] either: NullableChoice },
+    )
+    .unwrap();
+    assert!(
+        error.contains(
+            "`#[serde(flatten)]` of `NullableChoice` writes a union member that is not an object"
+        ),
+        "got: {error}"
+    );
+    assert!(
+        error.contains("its branch 2.2 describes a `null`"),
+        "got: {error}"
+    );
+}
+
+/// And an optional member whose value serde already writes as a scalar is named at the value's own
+/// trail — the choice below the `Option`, which is where the merge descending the same document
+/// stops first.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn an_optional_scalar_union_member_is_refused_below_the_option_it_was_written_under() {
+    let error = recorded_union_flatten_error(
+        "NullableScalarChoice",
+        syn::parse_quote! {
+            enum NullableScalarChoice {
+                Obj(Holder),
+                Maybe(Option<String>),
+            }
+        },
+        &syn::parse_quote! { #[serde(flatten)] either: NullableScalarChoice },
+    )
+    .unwrap();
+    assert!(
+        error.contains("its branch 2.1 describes a `string`"),
+        "got: {error}"
+    );
+}
+
+/// A member that names another item is asked of the registry rather than left unanswered: the
+/// named item recorded what serde writes it as and what it published as a value, and between them
+/// they name the JSON type keyword the other surface writes for the same member.
+///
+/// `numeric` is not among them on purpose — see the guard's own note — and a name the registry
+/// cannot rule out keeps the emission it has always had.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_union_member_naming_a_registered_non_object_wire_is_recorded_as_that_wire() {
+    seed_registered_wire("StringBrand", AliasKind::StringWire, None);
+    seed_registered_wire("SwitchBrand", AliasKind::Stringified, Some("boolean"));
+    seed_registered_wire("PlainEnum", AliasKind::EnumMembers, Some("enumerated"));
+    seed_registered_wire("NamedStruct", AliasKind::NoEnumMembers, Some("object"));
+    seed_registered_wire("TaggedEnum", AliasKind::NoEnumMembers, Some("union"));
+    seed_registered_wire("CountBrand", AliasKind::Stringified, Some("numeric"));
+    assert_eq!(
+        recorded_member_trails(syn::parse_quote! {
+            enum Choice {
+                Named(NamedStruct),
+                Slug(StringBrand),
+                Switch(SwitchBrand),
+                Hue(PlainEnum),
+                Tagged(TaggedEnum),
+                Count(CountBrand),
+                Foreign(NeverRegistered),
+            }
+        }),
+        vec![
+            ("1".to_owned(), None),
+            ("2".to_owned(), Some("string")),
+            ("3".to_owned(), Some("boolean")),
+            ("4".to_owned(), Some("string")),
+            ("5".to_owned(), None),
+            ("6".to_owned(), None),
+            ("7".to_owned(), None),
+        ]
+    );
+}
+
+/// So flattening a union whose member names a brand over a string is refused in the branch-naming
+/// words, where before it emitted the object intersected with that brand — a branch no payload
+/// satisfies, and one serde refuses to write for the same reason it refuses a directly flattened
+/// brand.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn flattening_a_union_with_a_named_string_wire_member_is_refused_naming_the_branch() {
+    seed_registered_wire("Slug", AliasKind::StringWire, None);
+    let error = recorded_union_flatten_error(
+        "SlugChoice",
+        syn::parse_quote! {
+            enum SlugChoice {
+                Obj(Holder),
+                Slug(Slug),
+            }
+        },
+        &syn::parse_quote! { #[serde(flatten)] either: SlugChoice },
+    )
+    .unwrap();
+    assert!(
+        error.contains("its branch 2 describes a `string`"),
+        "got: {error}"
+    );
+}
+
+/// The same for a brand serde stringifies and for a plain unit enum, each named by the keyword its
+/// own published document carries: a brand over a `bool` describes as a `boolean`, and a unit enum
+/// describes as the `string` its member name is written as.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn flattening_a_union_with_a_named_stringified_or_enumerated_member_is_refused() {
+    seed_registered_wire("Switch", AliasKind::Stringified, Some("boolean"));
+    let switch = recorded_union_flatten_error(
+        "SwitchChoice",
+        syn::parse_quote! {
+            enum SwitchChoice {
+                Obj(Holder),
+                Switch(Switch),
+            }
+        },
+        &syn::parse_quote! { #[serde(flatten)] either: SwitchChoice },
+    )
+    .unwrap();
+    assert!(
+        switch.contains("its branch 2 describes a `boolean`"),
+        "got: {switch}"
+    );
+
+    seed_registered_wire("Hue", AliasKind::EnumMembers, Some("enumerated"));
+    let hue = recorded_union_flatten_error(
+        "HueChoice",
+        syn::parse_quote! {
+            enum HueChoice {
+                Obj(Holder),
+                Hue(Hue),
+            }
+        },
+        &syn::parse_quote! { #[serde(flatten)] either: HueChoice },
+    )
+    .unwrap();
+    assert!(
+        hue.contains("its branch 2 describes a `string`"),
+        "got: {hue}"
+    );
+}
+
+/// A member naming an item the registry says publishes an object, and one naming a type the
+/// registry has never seen, are both left alone — the second being the declaration-order fallback,
+/// which answers for a name written above the union no differently than for a foreign type.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_union_member_naming_an_object_or_an_unregistered_type_stays_admitted() {
+    seed_registered_wire("Doc", AliasKind::NoEnumMembers, Some("object"));
+    assert!(
+        recorded_union_flatten_error(
+            "NamedChoice",
+            syn::parse_quote! {
+                enum NamedChoice {
+                    Obj(Holder),
+                    Doc(Doc),
+                    Foreign(NeverRegistered),
+                }
+            },
+            &syn::parse_quote! { #[serde(flatten)] either: NamedChoice },
+        )
+        .is_none()
+    );
 }
 
 /// `^$` is the empty-string check, not a degenerate pattern: it pins both ends of the value to one
