@@ -11,12 +11,12 @@ use super::{
     collect_untagged_members, constrained_shape, enum_cfg_attr_guard_errors,
     generate_field_validation, generate_numeric_validation_code, generate_string_validation_code,
     has_serde_default, helper_name_stem, internally_tagged_guard_errors, needs_injected_default,
-    parse_serde_field_attributes, parse_serde_type_attributes,
+    parse_serde_field_attributes, parse_serde_type_attributes, render_untagged_variant,
 };
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use super::{
-    AliasKind, alias_map_key_guard_error, branded_guard_errors, check_map_key,
+    AliasKind, PublishedShape, alias_map_key_guard_error, branded_guard_errors, check_map_key,
     ident_schema_module_name, record_value_shape, register_alias_info,
 };
 
@@ -33,7 +33,11 @@ use super::tuple_struct_zod_body;
 use super::tuple_struct_json_body;
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-use super::{check_slot_wire_is_readable, parse_serde_key_omission, tuple_struct_shape};
+use super::{check_slot_wire_is_readable, tuple_struct_shape};
+
+use super::{
+    VariantKind, check_variant_slot_wire_is_readable, parse_serde_key_omission, variant_wire_kind,
+};
 
 use syn::spanned::Spanned as _;
 
@@ -83,7 +87,8 @@ const UNPORTABLE_PROBE_PATTERNS: [(&str, &str); 6] = [
 /// Every slot spelling the refusal reads, beside whether it is refused. A slot dropped from one of
 /// serde's directions and not the other is; the pair that drops both is the wire the description
 /// already answers for, and everything else is a slot written in its place.
-#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+///
+/// Ungated because the variant seam reads the same list in every build.
 const SLOT_OMISSION_SPELLINGS: [(&str, bool); 6] = [
     ("skip_serializing", true),
     ("skip_serializing_if = \"Option::is_none\"", true),
@@ -3189,6 +3194,13 @@ fn string_constraints_over_a_string_shaped_inner_pass() {
 /// have recorded for it, standing in for that expansion.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn seed_value_shape(rust_ident: &str, shape: Option<&'static str>) {
+    seed_published_shape(rust_ident, PublishedShape::Flat(shape));
+}
+
+/// The same, for a name whose own target is one of its parameters and which therefore records a
+/// position rather than a word.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn seed_published_shape(rust_ident: &str, shape: PublishedShape) {
     register_alias_info(
         rust_ident,
         rust_ident,
@@ -3383,12 +3395,99 @@ fn a_brand_records_the_value_surface_its_inner_publishes() {
             #[serde(transparent)]
             struct Branded(pub #ty);
         };
-        let surface = super::Surface::written(&super::branded_inner_value_surface(
-            &item.generics,
-            item.fields.iter().next().unwrap(),
-        ));
-        assert_eq!(surface.shape, expected, "for {inner}");
+        assert_eq!(
+            brand_surface(&item).shape,
+            PublishedShape::Flat(expected),
+            "for {inner}"
+        );
     }
+}
+
+/// A brand whose inner *is* one of its own parameters records that parameter's position, not a
+/// word: what it publishes is settled by the argument a reference writes, and no word available at
+/// the declaration says that. A parameter reached under a wrapper keeps the wrapper's own shape,
+/// which no filling changes.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_brand_over_its_own_parameter_records_the_position_it_publishes() {
+    for (inner, expected) in [
+        ("TagType", PublishedShape::Parameter(0)),
+        ("ValueType", PublishedShape::Parameter(1)),
+        ("Vec<TagType>", PublishedShape::Flat(Some("container"))),
+        (
+            "HashMap<String, ValueType>",
+            PublishedShape::Flat(Some("container")),
+        ),
+        (
+            "(TagType, ValueType)",
+            PublishedShape::Flat(Some("container")),
+        ),
+        ("Option<TagType>", PublishedShape::Flat(Some("nullable"))),
+        ("String", PublishedShape::Flat(None)),
+    ] {
+        let ty: syn::Type = syn::parse_str(inner).unwrap();
+        let item: syn::ItemStruct = syn::parse_quote! {
+            #[serde(transparent)]
+            struct Branded<TagType, ValueType>(pub #ty);
+        };
+        assert_eq!(brand_surface(&item).shape, expected, "for {inner}");
+    }
+}
+
+/// The surface a brand's own registration records, built the way `register_branded_newtype` builds
+/// it.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn brand_surface(item: &syn::ItemStruct) -> super::Surface {
+    super::Surface::written(
+        &super::branded_inner_value_surface(&item.generics, item.fields.iter().next().unwrap()),
+        &super::type_parameters_in_scope(&item.generics),
+    )
+}
+
+/// A recorded position is filled with the argument the reference writes, so one declaration answers
+/// per instantiation: the checks compose onto that argument's schema, and the guard names the shape
+/// the argument resolves to rather than the opaque one the declaration alone could say.
+///
+/// The same answer whichever way the two declarations are written — the record is the same record —
+/// which is what takes the guard's verdict off declaration order for every reference that reaches
+/// it at all.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn string_constraints_over_a_parameter_publisher_read_the_argument_written_for_it() {
+    seed_published_shape("PublishesItsParameter", PublishedShape::Parameter(0));
+    let admitted = brand_over_named_inner_errors("PublishesItsParameter<String>");
+    assert!(admitted.is_empty(), "got: {admitted:?}");
+
+    for (inner, shape) in [
+        ("PublishesItsParameter<u32>", "numeric"),
+        ("PublishesItsParameter<bool>", "boolean"),
+        ("PublishesItsParameter<Vec<String>>", "container"),
+        ("PublishesItsParameter<serde_json::Value>", "opaque"),
+    ] {
+        let errors = brand_over_named_inner_errors(inner);
+        assert_eq!(errors.len(), 1, "for {inner}, got: {errors:?}");
+        assert!(errors[0].contains("`Branded`"), "got: {}", errors[0]);
+        assert!(
+            errors[0].contains("PublishesItsParameter"),
+            "for {inner}, got: {}",
+            errors[0]
+        );
+        assert!(errors[0].contains(shape), "for {inner}, got: {}", errors[0]);
+    }
+}
+
+/// A position the reference writes no argument at, and one a second parameter is published at, are
+/// both read off the same list the declaration numbered.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_recorded_position_is_read_off_the_arguments_the_reference_writes() {
+    seed_published_shape("PublishesItsSecond", PublishedShape::Parameter(1));
+    let errors = brand_over_named_inner_errors("PublishesItsSecond<String, u32>");
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(errors[0].contains("numeric"), "got: {}", errors[0]);
+
+    let unwritten = brand_over_named_inner_errors("PublishesItsSecond<String>");
+    assert!(unwritten.is_empty(), "got: {unwritten:?}");
 }
 
 /// What a tuple struct records: serde writes one slot as that slot's value alone, so the schema is
@@ -3399,16 +3498,37 @@ fn a_brand_records_the_value_surface_its_inner_publishes() {
 #[test]
 fn a_tuple_struct_records_the_value_surface_its_slots_publish() {
     for (decl, expected) in [
-        ("struct Slots(pub String);", None),
-        ("struct Slots(pub Option<String>);", Some("nullable")),
-        ("struct Slots(pub u32);", Some("numeric")),
-        ("struct Slots(pub Vec<String>);", Some("container")),
-        ("struct Slots(pub String, pub u32);", Some("container")),
-        ("struct Slots();", Some("container")),
+        ("struct Slots(pub String);", PublishedShape::Flat(None)),
+        (
+            "struct Slots(pub Option<String>);",
+            PublishedShape::Flat(Some("nullable")),
+        ),
+        (
+            "struct Slots(pub u32);",
+            PublishedShape::Flat(Some("numeric")),
+        ),
+        (
+            "struct Slots(pub Vec<String>);",
+            PublishedShape::Flat(Some("container")),
+        ),
+        (
+            "struct Slots(pub String, pub u32);",
+            PublishedShape::Flat(Some("container")),
+        ),
+        ("struct Slots();", PublishedShape::Flat(Some("container"))),
+        ("struct Slots<T>(pub T);", PublishedShape::Parameter(0)),
+        (
+            "struct Slots<T>(pub Vec<T>);",
+            PublishedShape::Flat(Some("container")),
+        ),
     ] {
         let item: syn::ItemStruct = syn::parse_str(decl).unwrap();
         assert_eq!(
-            super::tuple_struct_surface(&item.fields).shape,
+            super::tuple_struct_surface(
+                &item.fields,
+                &super::type_parameters_in_scope(&item.generics)
+            )
+            .shape,
             expected,
             "for {decl}"
         );
@@ -4046,6 +4166,231 @@ fn a_parameter_with_no_default_is_accepted_where_no_json_document_is_built() {
             args,
         );
         assert!(messages.is_empty(), "for {args:?}: {messages:?}");
+    }
+}
+
+/// The bound checks `args` earns on `source`. Both are parsed from text so the emitted tokens carry
+/// file locations and the span each check hands the compiler can be read back as the source it was
+/// written as.
+fn filling_bound_checks(source: &str, args: &str) -> Vec<proc_macro2::TokenStream> {
+    let item: syn::Item = syn::parse_str(source).unwrap();
+    let parsed = super::parse_model_schema_args(syn::parse_str(args).unwrap());
+    assert_eq!(
+        parsed.arg_rejection.as_ref().map(ToString::to_string),
+        None,
+        "for {args}"
+    );
+    super::default_types_bound_checks(&item, &parsed)
+}
+
+/// The checks `args` earns on `source`, rendered.
+fn filling_bound_check_text(source: &str, args: &str) -> Vec<String> {
+    filling_bound_checks(source, args)
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// Whether any token of `tokens`, at any depth, was written as `written` in the source it was
+/// parsed from. A token the expansion synthesised was written nowhere and answers `None`.
+fn some_token_was_written_as(tokens: &proc_macro2::TokenStream, written: &str) -> bool {
+    tokens.clone().into_iter().any(|tree| match tree {
+        proc_macro2::TokenTree::Group(group) => some_token_was_written_as(&group.stream(), written),
+        leaf @ (proc_macro2::TokenTree::Ident(_)
+        | proc_macro2::TokenTree::Punct(_)
+        | proc_macro2::TokenTree::Literal(_)) => {
+            leaf.span().source_text().as_deref() == Some(written)
+        }
+    })
+}
+
+/// Whether a filling satisfies the bounds its parameter declares is a question about trait impls,
+/// which the macro cannot answer — so it hands the filling to a function carrying those bounds and
+/// lets the compiler answer. The parameter keeps the ident it was declared under, so a bound
+/// written in terms of it still reads.
+#[test]
+fn a_bounded_parameters_filling_is_handed_to_a_function_carrying_that_bound() {
+    let checks = filling_bound_check_text(
+        "pub struct Counted<CountType: Copy> { pub count: CountType }",
+        "default_types(CountType = String)",
+    );
+    assert_eq!(checks.len(), 1, "got: {checks:?}");
+    for needle in [
+        "fn default_type_filling < CountType : Copy > ()",
+        "default_type_filling :: < String > ()",
+    ] {
+        assert!(
+            checks[0].contains(needle),
+            "{needle} missing: {}",
+            checks[0]
+        );
+    }
+    assert!(
+        !checks[0].contains("compile_error"),
+        "the compiler answers this, not the macro: {}",
+        checks[0]
+    );
+}
+
+/// The bound and the filling keep the spans they were written at, so the compiler points at the
+/// entry that earned the refusal and at the declaration that required it — neither at anything the
+/// expansion synthesised.
+#[test]
+fn a_bound_check_carries_the_spans_the_entry_and_the_bound_were_written_at() {
+    let checks = filling_bound_checks(
+        "pub struct Counted<CountType: Copy> { pub count: CountType }",
+        "default_types(CountType = String)",
+    );
+    assert_eq!(checks.len(), 1, "got: {}", checks.len());
+    for written in ["String", "Copy", "CountType"] {
+        assert!(
+            some_token_was_written_as(&checks[0], written),
+            "{written} was not carried at the span it was written at: {}",
+            checks[0]
+        );
+    }
+}
+
+/// A parameter declares its bounds in either of two places, and a filling answers for both alike.
+#[test]
+fn a_bound_written_in_the_where_clause_is_read_like_one_written_beside_the_parameter() {
+    let beside = filling_bound_check_text(
+        "pub struct Counted<CountType: Copy> { pub count: CountType }",
+        "default_types(CountType = String)",
+    );
+    let clause = filling_bound_check_text(
+        "pub struct Counted<CountType> where CountType: Copy { pub count: CountType }",
+        "default_types(CountType = String)",
+    );
+    assert_eq!(clause.len(), 1, "got: {clause:?}");
+    assert_eq!(clause, beside);
+}
+
+/// A parameter bounded in both places is checked against every bound at once, so a filling has to
+/// answer for all of them.
+#[test]
+fn a_parameter_bounded_in_both_places_is_checked_against_every_bound() {
+    let checks = filling_bound_check_text(
+        "pub struct Counted<CountType: Copy> where CountType: Clone { pub count: CountType }",
+        "default_types(CountType = String)",
+    );
+    assert_eq!(checks.len(), 1, "got: {checks:?}");
+    assert!(
+        checks[0].contains("fn default_type_filling < CountType : Copy + Clone > ()"),
+        "got: {}",
+        checks[0]
+    );
+}
+
+/// A parameter declaring no bound admits every filling, so there is nothing to ask and the
+/// expansion is left exactly as it was — in every shape the attribute expands, and beside the
+/// lifetimes and consts that name no type.
+#[test]
+fn an_unbounded_parameter_earns_no_check() {
+    for (source, args) in [
+        (
+            "pub struct Both<IdType, DateType> { pub id: IdType, pub at: DateType }",
+            "default_types(IdType = String, DateType = f64)",
+        ),
+        (
+            "pub enum Tagged<IdType> { Named { id: IdType } }",
+            "default_types(IdType = String)",
+        ),
+        (
+            "pub type Boxed<ValueType> = Vec<ValueType>;",
+            "default_types(ValueType = String)",
+        ),
+        (
+            "pub struct Mixed<'label, IdType, const WIDTH: usize> { pub id: IdType }",
+            "default_types(IdType = String)",
+        ),
+        ("pub struct Plain { pub id: String }", ""),
+    ] {
+        let checks = filling_bound_check_text(source, args);
+        assert!(checks.is_empty(), "for {source}: {checks:?}");
+    }
+}
+
+/// A bound naming another parameter of the item holds only where that one is filled too, which is a
+/// joint statement this per-filling check does not make — and the neighbour's name reproduced
+/// beside a single filling would resolve to nothing. So the bound is left to the item's own use
+/// sites, whether it names a type parameter, a lifetime or a const.
+#[test]
+fn a_bound_naming_another_parameter_of_the_item_earns_no_check() {
+    for (source, args) in [
+        (
+            "pub struct Pair<AType: From<BType>, BType> { pub a: AType, pub b: BType }",
+            "default_types(AType = String, BType = char)",
+        ),
+        (
+            "pub struct Held<'label, ValueType: Into<&'label str>> { pub held: ValueType }",
+            "default_types(ValueType = String)",
+        ),
+        (
+            "pub struct Bounded<ValueType: Fits<WIDTH>, const WIDTH: usize> { pub held: ValueType }",
+            "default_types(ValueType = String)",
+        ),
+    ] {
+        let checks = filling_bound_check_text(source, args);
+        assert!(checks.is_empty(), "for {source}: {checks:?}");
+    }
+}
+
+/// A bound written in terms of the parameter it bounds names no neighbour, so it is checked like
+/// any other.
+#[test]
+fn a_bound_naming_only_the_parameter_it_bounds_is_still_checked() {
+    let checks = filling_bound_check_text(
+        "pub struct Held<ValueType: Iterator<Item = ValueType>> { pub held: ValueType }",
+        "default_types(ValueType = String)",
+    );
+    assert_eq!(checks.len(), 1, "got: {checks:?}");
+    assert!(
+        checks[0].contains("Iterator < Item = ValueType >"),
+        "got: {}",
+        checks[0]
+    );
+}
+
+/// One check per bounded filling, in the order the entries were written, and none for the unbounded
+/// parameters beside them.
+#[test]
+fn every_bounded_filling_earns_its_own_check() {
+    let checks = filling_bound_check_text(
+        "pub struct Trio<AType: Copy, BType, CType: Clone> { pub a: AType, pub b: BType, pub c: CType }",
+        "default_types(AType = u8, BType = String, CType = String)",
+    );
+    assert_eq!(checks.len(), 2, "got: {checks:?}");
+    assert!(
+        checks[0].contains("Copy") && checks[0].contains("u8"),
+        "got: {}",
+        checks[0]
+    );
+    assert!(
+        checks[1].contains("Clone") && checks[1].contains("String"),
+        "got: {}",
+        checks[1]
+    );
+}
+
+/// The three shapes the attribute expands answer alike: the check is read off the item's own
+/// parameters, which every one of them binds the same way.
+#[test]
+fn every_expanded_shape_checks_its_fillings_alike() {
+    let expected = filling_bound_check_text(
+        "pub struct Held<ValueType: Copy> { pub held: ValueType }",
+        "default_types(ValueType = String)",
+    );
+    assert_eq!(expected.len(), 1, "got: {expected:?}");
+    for source in [
+        "pub enum Held<ValueType: Copy> { Named { held: ValueType } }",
+        "pub type Held<ValueType: Copy> = Vec<ValueType>;",
+    ] {
+        assert_eq!(
+            filling_bound_check_text(source, "default_types(ValueType = String)"),
+            expected,
+            "for {source}"
+        );
     }
 }
 
@@ -6860,6 +7205,159 @@ fn a_lone_slot_is_refused_for_no_spelling() {
     }
 }
 
+/// The variant a declaration's first (and here only) variant parses to.
+fn declared_variant(declaration: &str) -> syn::Variant {
+    let item: syn::ItemEnum = syn::parse_str(declaration).unwrap();
+    item.variants.into_iter().next().unwrap()
+}
+
+/// Every refusal that declaration's variant earns, one per slot that earns one.
+fn variant_slot_refusals(declaration: &str) -> Vec<String> {
+    let variant = declared_variant(declaration);
+    let variant_name = variant.ident.to_string();
+    variant
+        .fields
+        .iter()
+        .enumerate()
+        .filter_map(|(index, field)| {
+            check_variant_slot_wire_is_readable(
+                field,
+                index,
+                &variant_name,
+                "Wire",
+                parse_serde_key_omission(&field.attrs),
+            )
+            .err()
+            .map(|err| err.to_string())
+        })
+        .collect()
+}
+
+/// Captured from serde on `enum E { One(#[serde(...)] String, u32) }`: `skip_serializing` alone
+/// writes `{"One":[7]}` and reads only `{"One":["s",7]}`, `skip_deserializing` alone writes
+/// `{"One":["s",7]}` and reads only `{"One":[7]}`. What serde writes is not what serde reads, and
+/// a slot has no optional spelling to describe both, so the declaration is refused.
+#[test]
+fn a_variant_slot_dropped_from_one_direction_only_is_refused() {
+    for (spelling, refused) in SLOT_OMISSION_SPELLINGS {
+        let refusals = variant_slot_refusals(&format!(
+            "enum Wire {{ One(#[serde({spelling})] Option<String>, u32) }}"
+        ));
+        assert_eq!(
+            refusals.len(),
+            usize::from(refused),
+            "{spelling}: {refusals:?}"
+        );
+        for message in refusals {
+            assert!(message.contains("slot 0"), "{spelling}: {message}");
+            assert!(message.contains("`One`"), "{spelling}: {message}");
+            assert!(message.contains("`Wire`"), "{spelling}: {message}");
+        }
+    }
+}
+
+/// A named member of a struct variant is left alone by the same walk: its key is absent from one
+/// payload and present in the other, which an optional key describes.
+#[test]
+fn a_named_variant_member_is_refused_for_no_spelling() {
+    for (spelling, _) in SLOT_OMISSION_SPELLINGS {
+        let refusals = variant_slot_refusals(&format!(
+            "enum Wire {{ One {{ #[serde({spelling})] a: Option<String> }} }}"
+        ));
+        assert!(refusals.is_empty(), "{spelling}: {refusals:?}");
+    }
+}
+
+/// The lone slot of a variant is asked the same question, which is where this seam parts from the
+/// tuple-struct one. Captured: `One(#[serde(skip_serializing)] String)` writes the bare name
+/// `"One"` and reads only `{"One":"s"}`, so the halves split a variant at every declared arity
+/// where a newtype struct ignored them outright.
+#[test]
+fn a_lone_variant_slot_is_refused_for_the_same_spellings() {
+    for (spelling, refused) in SLOT_OMISSION_SPELLINGS {
+        let refusals = variant_slot_refusals(&format!(
+            "enum Wire {{ One(#[serde({spelling})] Option<String>) }}"
+        ));
+        assert_eq!(
+            refusals.len(),
+            usize::from(refused),
+            "{spelling}: {refusals:?}"
+        );
+    }
+}
+
+/// Captured from serde: a variant declaring one slot and taking it off the wire is written as a
+/// unit variant — `"One"` externally, `{"type":"One"}` under a tag, `null` untagged — which are the
+/// payloads a declared unit variant writes in the same three places.
+#[test]
+fn a_variant_taking_its_lone_slot_off_the_wire_publishes_a_unit() {
+    for spelling in ["skip", "skip_serializing, skip_deserializing"] {
+        let variant =
+            declared_variant(&format!("enum Wire {{ One(#[serde({spelling})] String) }}"));
+        assert_eq!(variant_wire_kind(&variant), VariantKind::Unit, "{spelling}");
+    }
+}
+
+/// Every other declared arity keeps the kind it declared. Captured: a two-slot variant with one
+/// slot off the wire writes `{"One":[7]}` and with both off writes `{"One":[]}` — a shorter array
+/// and then an empty one, never the bare name a unit writes.
+#[test]
+fn every_other_declared_arity_keeps_the_kind_it_declared() {
+    for (declaration, expected) in [
+        (
+            "enum Wire { One(#[serde(skip)] String, u32) }",
+            VariantKind::TupleMultiple,
+        ),
+        (
+            "enum Wire { One(#[serde(skip)] String, #[serde(skip)] u32) }",
+            VariantKind::TupleMultiple,
+        ),
+        ("enum Wire { One(String) }", VariantKind::TupleSingle),
+        (
+            "enum Wire { One { #[serde(skip)] a: String } }",
+            VariantKind::Named,
+        ),
+        ("enum Wire { One }", VariantKind::Unit),
+    ] {
+        assert_eq!(
+            variant_wire_kind(&declared_variant(declaration)),
+            expected,
+            "for: {declaration}"
+        );
+    }
+}
+
+/// The member spelling an untagged variant is refused with, run over the kind it publishes.
+#[cfg(feature = "serde")]
+fn untagged_refusal(declaration: &str, members: &[super::FieldDef]) -> String {
+    let variant = declared_variant(declaration);
+    render_untagged_variant(&variant_wire_kind(&variant), &variant, members, "Wire")
+        .map_or_else(|err| err.to_string(), |_| String::new())
+}
+
+/// Captured from serde: an untagged variant whose lone slot is off the wire writes and reads `null`
+/// — the payload a declared unit variant writes there — so it takes the refusal a unit variant
+/// takes rather than describing the value nothing carries.
+#[cfg(feature = "serde")]
+#[test]
+fn an_untagged_variant_whose_lone_slot_is_dropped_is_refused_as_a_unit() {
+    let refusal = untagged_refusal("enum Wire { One(#[serde(skip)] String) }", &[]);
+    assert!(refusal.contains("is a unit variant"), "Got: {refusal}");
+}
+
+/// A refused tuple variant is named by the arity the author declared, not by the slots that reached
+/// the wire: a slot dropped from the description is still a slot the union has no spelling for.
+#[cfg(feature = "serde")]
+#[test]
+fn a_refused_untagged_tuple_variant_is_named_by_its_declared_arity() {
+    let carried = get_field_def("_1", &syn::parse_str::<syn::Type>("u32").unwrap(), "");
+    let refusal = untagged_refusal("enum Wire { One(#[serde(skip)] String, u32) }", &[carried]);
+    assert!(
+        refusal.contains("a tuple variant with 2 fields"),
+        "Got: {refusal}"
+    );
+}
+
 /// A path writes a string on the wire, which is the value the rendered constraint describes, so
 /// every spelling of one reaches a leaf the checks can land on — the borrowed form included.
 #[cfg(feature = "serde")]
@@ -7529,8 +8027,14 @@ fn a_direct_flatten_of_a_nullable_object_registration_stays_admitted() {
 /// name is what a declaration put there rather than a word written by hand.
 #[cfg(all(feature = "serde", feature = "zod"))]
 fn seed_slot_registration(item: &syn::ItemStruct) {
-    let _: (String, String, syn::Ident) =
-        super::struct_module_idents(&item.ident, None, super::tuple_struct_surface(&item.fields));
+    let _: (String, String, syn::Ident) = super::struct_module_idents(
+        &item.ident,
+        None,
+        super::tuple_struct_surface(
+            &item.fields,
+            &super::type_parameters_in_scope(&item.generics),
+        ),
+    );
 }
 
 /// The same for a branded newtype, whose wire is its inner's.

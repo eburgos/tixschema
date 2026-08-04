@@ -1,6 +1,5 @@
 mod features;
 mod field_type;
-mod generation;
 mod model_schema;
 mod rename_rule;
 mod utils;
@@ -532,6 +531,15 @@ export const Document$Schema: ZodType<Document> = Document$RawSchema;
 /// nothing else reading the default — without that feature the same item compiles untouched.
 /// `default_types` on an item that declares no type parameter is refused, there being nothing for a
 /// filling to fill; a lifetime and a const parameter name no type, so neither takes an entry.
+///
+/// A filling is also held against the bounds its parameter declares. Whether one satisfies them is
+/// a question about trait impls, which a macro cannot answer, so the filling is handed to a
+/// generated function carrying those bounds and the compiler answers — spanned on the entry as
+/// written, in every feature configuration. So `default_types(CountType = String)` on
+/// `struct Counted<CountType: Copy>` is refused: no value of the item can be held at that filling,
+/// and a document built from it would describe nothing. A parameter with no bounds admits every
+/// filling; a bound naming another parameter of the item holds only where that one is filled too,
+/// so it is left to the item's own use sites.
 ///
 /// There is no fallback filling. A guessed one produces a document that silently rejects valid
 /// payloads, which is the failure the declaration exists to prevent.
