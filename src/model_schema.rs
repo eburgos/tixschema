@@ -28,10 +28,10 @@ use crate::{
     utils::{get_field_docs, get_variant_docs},
 };
 
-// The item paths take their exported name from `compute_item_export_name`, which applies this
-// itself; what is left is the naming a reference falls back to for a type this expansion never saw,
-// and the parameter list a generic alias writes.
-#[cfg(any(feature = "typescript", feature = "jsonschema"))]
+// The item paths take their exported name from `compute_item_export_name` and their module name
+// from `ident_schema_module_name`, both of which apply this themselves; what is left is the
+// parameter list a generic alias writes.
+#[cfg(feature = "typescript")]
 use crate::utils::safe_type_name;
 
 #[cfg(feature = "zod")]
@@ -41,7 +41,7 @@ use crate::utils::{escape_js_regex_literal, extract_example_from_docs};
 use crate::features::object_id::get_object_id_zod_schema_with;
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-use crate::utils::{AliasKind, lookup_alias_info, regex_rejection};
+use crate::utils::{AliasKind, lookup_alias_info, portable_pattern};
 
 #[cfg(feature = "serde")]
 use crate::features::serde::{SerdeFieldMeta, SerdeTypeMeta, has_serde_default};
@@ -77,7 +77,7 @@ use crate::features::jsonschema::{MergeDiagnostic, merged_object_value};
 use crate::utils::{get_enum_docs, get_struct_docs, strip_examples_from_docs};
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-use crate::utils::compute_alias_export_name;
+use crate::utils::{compute_alias_export_name, ident_schema_module_name};
 
 use crate::utils::compute_item_export_name;
 
@@ -364,10 +364,14 @@ struct ModelSchemaArgs {
     /// Opt-out of the branded newtype `Display` impl (and its inner-type assertion) for brands
     /// whose inner type is a container rather than a scalar.
     no_display: bool,
+    /// `pattern` in the spelling every surface reads the same way, or as it was written when it
+    /// earned a `pattern_rejection`.
     pattern: Option<String>,
-    /// The `regex` crate's rejection of `pattern`, spanned on the literal it was written as. Only
-    /// the brand path splices the argument, and only a schema feature builds that path; without
-    /// one, a type-level constraint never reaches a surface at all.
+    /// What keeps `pattern` off the surfaces it was written for -- a regex the `regex` crate
+    /// cannot parse, or a construct a JavaScript regex literal cannot carry -- spanned on the
+    /// literal it was written as. Only the brand path splices the argument, and only a schema
+    /// feature builds that path; without one, a type-level constraint never reaches a surface at
+    /// all.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     pattern_rejection: Option<syn::Error>,
 }
@@ -448,9 +452,7 @@ fn apply_arg(result: &mut ModelSchemaArgs, meta: &Meta) -> syn::Result<()> {
     if path.is_ident("name") {
         result.name_override = Some(name_arg_value(str_arg(meta, "name")?)?);
     } else if path.is_ident("pattern") {
-        let lit_str = str_arg(meta, "pattern")?;
-        record_pattern_rejection(result, lit_str);
-        result.pattern = Some(lit_str.value());
+        record_pattern(result, str_arg(meta, "pattern")?);
     } else if path.is_ident("minLength") {
         result.min_length = Some(length_arg(meta, "minLength")?);
     } else if path.is_ident("maxLength") {
@@ -568,14 +570,28 @@ fn unknown_arg_rejection(meta: &Meta) -> syn::Error {
     )
 }
 
-/// Records the `regex` crate's verdict on a `pattern` argument, for the brand path that splices it.
+/// Records a `pattern` argument, in the spelling the brand path can splice into every surface, or
+/// as written alongside what keeps it off them.
+///
+/// A refused pattern is recorded as written: the guards that answer for what a `pattern` may sit on
+/// read that one was given, not what it says.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-fn record_pattern_rejection(result: &mut ModelSchemaArgs, lit_str: &syn::LitStr) {
-    result.pattern_rejection = regex_rejection(lit_str);
+fn record_pattern(result: &mut ModelSchemaArgs, lit_str: &syn::LitStr) {
+    match portable_pattern(lit_str) {
+        Ok(pattern) => result.pattern = Some(pattern),
+        Err(rejection) => {
+            result.pattern_rejection = Some(rejection);
+            result.pattern = Some(lit_str.value());
+        }
+    }
 }
 
+/// Without a schema feature no surface reads the argument, so it is kept as written and never
+/// judged.
 #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
-const fn record_pattern_rejection(_result: &mut ModelSchemaArgs, _lit_str: &syn::LitStr) {}
+fn record_pattern(result: &mut ModelSchemaArgs, lit_str: &syn::LitStr) {
+    result.pattern = Some(lit_str.value());
+}
 
 /// Executes the `model_schema` macro processing to generate TypeScript and Zod schema definitions.
 ///
@@ -663,6 +679,9 @@ fn flattened_plain_enum(inner: &FieldDef) -> Option<&str> {
 /// `#module_ident::Schema::json_schema()`. So the module and its `register_alias_info` call are
 /// driven by the union: gating them on `typescript` alone left the jsonschema references
 /// dangling. The module's *contents* are chosen per feature while building the tokens.
+///
+/// The module is named from the Rust ident, not from the export name, so that a type naming the
+/// alias before it has expanded assumes the module the alias goes on to publish.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn process_type_alias(item_type: ItemType, args: &ModelSchemaArgs) -> TokenStream {
     let mut alias = item_type;
@@ -673,7 +692,7 @@ fn process_type_alias(item_type: ItemType, args: &ModelSchemaArgs) -> TokenStrea
     let rust_ident = alias.ident.clone();
     let rust_ident_str = rust_ident.to_string();
     let export_name = compute_alias_export_name(&rust_ident_str, args.name_override.as_deref());
-    let module_name = format!("{}_schema", to_snake_case(&export_name));
+    let module_name = ident_schema_module_name(&rust_ident_str);
     let module_ident = Ident::new(&module_name, rust_ident.span());
 
     // Registered only once the target has been classified: the alias's own expansion is the only
@@ -1049,17 +1068,12 @@ fn cfg_attr_guard_error(rejection: &syn::Error, item: &str) -> proc_macro2::Toke
 /// Turns a rejected `pattern` into `compile_error!` tokens naming what carries it, keeping the
 /// literal's span so the diagnostic points at the pattern as written.
 ///
-/// The generated validator builds the pattern with `regex::Regex::new(...).unwrap()`, so accepting
-/// one the crate cannot parse only moves the failure to the first value that reaches it — as a
-/// panic, from inside a `LazyLock` the author never wrote.
+/// Why a pattern is refused is [`crate::utils::portable_pattern`]'s to say — the crate cannot parse
+/// it, or JavaScript reads it as something else — so the refusal is quoted rather than restated.
 fn pattern_guard_error(rejection: &syn::Error, subject: &str) -> proc_macro2::TokenStream {
     syn::Error::new(
         rejection.span(),
-        format!(
-            "model_schema: {subject}: `pattern` is not a regex the `regex` crate can parse. The \
-             generated validator builds it with `regex::Regex::new(...).unwrap()`, so accepting \
-             it here would turn the first validated value into a panic. {rejection}"
-        ),
+        format!("model_schema: {subject}: {rejection}"),
     )
     .to_compile_error()
 }
@@ -5228,10 +5242,11 @@ fn nullable_slot_json_schema_value(
 
 /// The schema module a sibling type's `Schema::json_schema()` lives in.
 ///
-/// An alias's module is named after its registered export name, which the raw ident does not
-/// reproduce, so the registry answers first. A name it does not hold is one this expansion has not
-/// seen — a type expanded later, or one from another crate — and takes the naming every
-/// `#[model_schema()]` type follows.
+/// A declared item's module is named after its exported name, which a `name = "…"` override moves
+/// away from the raw ident, so the registry answers first. A name it does not hold is one this
+/// expansion has not seen — a type expanded later, or one from another crate — and takes the
+/// ident-derived naming, which is all a reference standing before the type has to go on. That
+/// naming is what a type alias publishes under, so an alias resolves in either declaration order.
 ///
 /// The ident is spanned on where the sibling was named rather than on the attribute. Nothing the
 /// macro can read tells it whether the module will be in scope — a generated module reaches its
@@ -5242,7 +5257,7 @@ fn nullable_slot_json_schema_value(
 fn sibling_schema_module_ident(name: &str, span: proc_macro2::Span) -> Ident {
     let module_name = match lookup_alias_info(name) {
         Some(alias) => alias.module_name,
-        None => format!("{}_schema", to_snake_case(&safe_type_name(name))),
+        None => ident_schema_module_name(name),
     };
     Ident::new(module_name.as_str(), span)
 }

@@ -6,7 +6,7 @@
 use syn::meta::ParseNestedMeta;
 use syn::{Attribute, LitStr, Type};
 
-use crate::utils::regex_rejection;
+use crate::utils::portable_pattern;
 
 /// Every key the parser reads, in the order it tries them, as the unknown-key rejection names them.
 ///
@@ -31,7 +31,9 @@ const KNOWN_KEYS: &[&str] = &[
 ///
 /// ## String constraints
 ///
-/// - `pattern = "regex"` — validates the string matches the regex pattern.
+/// - `pattern = "regex"` — validates the string matches the regex pattern. Must be a regex all
+///   three engines read the same way; see [`crate::utils::portable_pattern`] for what that rules
+///   out and what it rewrites.
 ///   - Zod: `.check(z.regex(/regex/))`
 ///   - JSON Schema: `"pattern"`
 ///   - Rust: auto-generates a `deserialize_{field}` serde hook and a `validate_{field}_value()` static function
@@ -100,8 +102,12 @@ pub struct ModelSchemaPropMeta {
     pub maximum: Option<f64>,    // e.g., 100.0 from maximum = 100
     pub min_length: Option<usize>, // e.g., 1 from minLength = 1
     pub minimum: Option<f64>,    // e.g., 0.0 from minimum = 0
+    /// `pattern` in the spelling every surface reads the same way, or as it was written when it
+    /// earned a [`Self::pattern_rejection`].
     pub pattern: Option<String>, // e.g., "^[0-9a-fA-F]{24}$" from pattern = "^[0-9a-fA-F]{24}$"
-    /// The `regex` crate's rejection of `pattern`, spanned on the literal it was written as.
+    /// What keeps `pattern` off the surfaces it was written for -- a regex the `regex` crate
+    /// cannot parse, or a construct a JavaScript regex literal cannot carry -- spanned on the
+    /// literal it was written as.
     pub pattern_rejection: Option<syn::Error>,
     pub preprocess: Vec<String>, // e.g., ["epoch_to_date", "trim"] from preprocess = ["epoch_to_date", "trim"]
     pub ts_optional: bool,
@@ -146,8 +152,15 @@ fn parse_prop_key(nested: &ParseNestedMeta, meta: &mut ModelSchemaPropMeta) -> s
         meta.maximum = Some(numeric_bound(nested, "maximum")?);
     } else if nested.path.is_ident("pattern") {
         let lit: LitStr = nested.value()?.parse()?;
-        meta.pattern_rejection = regex_rejection(&lit);
-        meta.pattern = Some(lit.value());
+        // A refused pattern is recorded as written: the guards that answer for what a `pattern`
+        // may sit on read that one was given, not what it says.
+        match portable_pattern(&lit) {
+            Ok(pattern) => meta.pattern = Some(pattern),
+            Err(rejection) => {
+                meta.pattern_rejection = Some(rejection);
+                meta.pattern = Some(lit.value());
+            }
+        }
     } else if nested.path.is_ident("preprocess") {
         let arr: syn::ExprArray = nested.value()?.parse()?;
         meta.preprocess = arr

@@ -48,6 +48,21 @@ const PROBE_PATTERNS: [&str; 10] = [
     r"^\/[a-z]+$",
 ];
 
+/// Patterns the `regex` crate parses that no JavaScript regex literal carries, one per family the
+/// guard sorts them into, beside the words the refusal names each by. Both splice points reach the
+/// Zod literal and the JSON Schema `pattern`, so both have to answer for them.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+const UNPORTABLE_PROBE_PATTERNS: [(&str, &str); 6] = [
+    ("(?i)abc", "inline flag directive"),
+    (r"^\p{L}+$", "Unicode class"),
+    // The needle is doubled because the guard error is read back off rendered `compile_error!`
+    // tokens, where the string literal's own escaping is still in place.
+    (r"\Aabc", r"`\\A` anchor"),
+    ("^[[:alpha:]]+$", "POSIX class"),
+    (r"[\w&&\d]", "`&&` class intersection"),
+    (r"\x{41}", "braced code point escape"),
+];
+
 /// The covered wrappers, under the names a dispatch reads them by.
 #[cfg(any(feature = "jsonschema", feature = "serde"))]
 const SEQUENCE_WRAPPERS: [&str; 6] = [
@@ -944,6 +959,47 @@ fn a_field_pattern_the_regex_crate_rejects_names_the_field_and_quotes_the_parse_
     }
 }
 
+/// A pattern the `regex` crate parses is still refused when no JavaScript regex literal carries
+/// it: the field's Zod schema and JSON Schema are generated from the same string the validator
+/// gets, so a construct only one of the two grammars reads reaches a surface that cannot say it.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_field_pattern_javascript_cannot_carry_names_the_field_and_the_construct() {
+    for (pattern, construct) in UNPORTABLE_PROBE_PATTERNS {
+        assert!(
+            regex::Regex::new(pattern).is_ok(),
+            "{pattern} is not a pattern the `regex` crate accepts, so it probes nothing"
+        );
+        let errors = field_prop_guard_errors(&syn::parse_quote! {
+            struct Report {
+                #[model_schema_prop(pattern = #pattern)]
+                name: String,
+            }
+        });
+        assert_eq!(errors.len(), 1, "for {pattern}, got: {errors:?}");
+        for needle in ["compile_error", "field `name`", construct] {
+            assert!(
+                errors[0].contains(needle),
+                "{needle} missing for {pattern}: {}",
+                errors[0]
+            );
+        }
+    }
+}
+
+/// `(?P<name>...)` is the one construct the two grammars merely spell differently, so it clears the
+/// guard rather than tripping it.
+#[test]
+fn a_field_pattern_naming_a_group_the_rust_way_clears_the_guard() {
+    let errors = field_prop_guard_errors(&syn::parse_quote! {
+        struct Report {
+            #[model_schema_prop(pattern = r"^(?P<word>[a-z]+)$")]
+            name: String,
+        }
+    });
+    assert!(errors.is_empty(), "got: {errors:?}");
+}
+
 /// A field carrying no `pattern` at all must not acquire one of these errors.
 #[test]
 fn an_unpatterned_field_is_left_alone() {
@@ -1319,6 +1375,31 @@ fn a_brand_pattern_the_regex_crate_rejects_names_the_type_and_quotes_the_parse_e
             errors[0]
         );
     }
+}
+
+/// The brand splices the same string into the Zod literal and the JSON Schema `pattern` that the
+/// field splice does, so the portability verdict has to reach it too.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_brand_pattern_javascript_cannot_carry_names_the_type_and_the_construct() {
+    for (pattern, construct) in UNPORTABLE_PROBE_PATTERNS {
+        let errors = brand_pattern_errors(pattern);
+        assert_eq!(errors.len(), 1, "for {pattern}, got: {errors:?}");
+        for needle in ["compile_error", "type `UserId`", construct] {
+            assert!(
+                errors[0].contains(needle),
+                "{needle} missing for {pattern}: {}",
+                errors[0]
+            );
+        }
+    }
+}
+
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_brand_pattern_naming_a_group_the_rust_way_clears_the_guard() {
+    let errors = brand_pattern_errors("^(?P<word>[a-z]+)$");
+    assert!(errors.is_empty(), "got: {errors:?}");
 }
 
 /// Every constraint the guard reacts to, applied one at a time: `has_string_constraints` is an
@@ -2916,8 +2997,8 @@ fn a_map_never_parses_as_a_sibling_named_after_its_container() {
     }
 }
 
-/// An alias's schema module is named after its registered export name, which the raw ident does
-/// not reproduce — the reference has to come from the registry or it names a module that was never
+/// A renamed item's schema module is named after its exported name, which the raw ident does not
+/// reproduce — the reference has to come from the registry or it names a module that was never
 /// emitted.
 #[cfg(feature = "jsonschema")]
 #[test]
