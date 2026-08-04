@@ -732,7 +732,7 @@ use std::collections::{HashMap, HashSet};
 
 #[cfg(all(feature = "chrono", feature = "object_id"))]
 use chrono::{DateTime, Utc};
-#[cfg(feature = "object_id")]
+#[cfg(all(feature = "chrono", feature = "object_id"))]
 use mongodb::bson::oid::ObjectId;
 use serde::{Deserialize, Serialize};
 use tixschema::model_schema;
