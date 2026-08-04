@@ -2266,25 +2266,16 @@ fn struct_cfg_attr_guard_output(
         &[cfg_attr_guard_error(rejection?, &format!("type `{ident}`"))],
     )
 }
-/// The struct's own `rename_all`, or the `cfg_attr` refusal that pre-empts reading anything —
-/// serde's attributes are the one place a rename can be written, so without that feature there is
-/// nothing to read and nothing to refuse.
+/// The struct's own `rename_all`, or the `cfg_attr` refusal that pre-empts reading anything.
+#[cfg(feature = "serde")]
 fn struct_rename_all(item_struct: &syn::ItemStruct) -> Result<Option<String>, TokenStream> {
-    #[cfg(feature = "serde")]
+    let serde_type_meta = parse_serde_type_attributes(&item_struct.attrs);
+    if let Some(output) =
+        struct_cfg_attr_guard_output(item_struct, serde_type_meta.cfg_attr_rejection.as_ref())
     {
-        let serde_type_meta = parse_serde_type_attributes(&item_struct.attrs);
-        if let Some(output) =
-            struct_cfg_attr_guard_output(item_struct, serde_type_meta.cfg_attr_rejection.as_ref())
-        {
-            return Err(output);
-        }
-        Ok(serde_type_meta.rename_all)
+        return Err(output);
     }
-    #[cfg(not(feature = "serde"))]
-    {
-        let _: &_ = &item_struct;
-        Ok(None)
-    }
+    Ok(serde_type_meta.rename_all)
 }
 
 fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> TokenStream {
@@ -2300,10 +2291,13 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
     let name = item_struct.ident.clone();
     let rust_ident = name.to_string();
 
+    #[cfg(feature = "serde")]
     let rename_all = match struct_rename_all(&item_struct) {
         Ok(rename_all) => rename_all,
         Err(output) => return output,
     };
+    #[cfg(not(feature = "serde"))]
+    let rename_all: Option<String> = None;
 
     // A `default` on the container answers a missing key for every field under it, which is one of
     // the things that makes a dropped key readable.
