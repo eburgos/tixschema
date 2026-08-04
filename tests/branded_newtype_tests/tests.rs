@@ -404,8 +404,10 @@ mod objectid_branded_surface_tests {
 
     /// A brand whose pattern is wider than the hex the type holds — the shape that tells layering
     /// from replacement, since a surface holding only the brand's admits strings no `ObjectId` can
-    /// ever be.
-    #[model_schema(pattern = "^.{24}$")]
+    /// ever be. Spelled as a class rather than with `.`, which the pattern guard refuses for its
+    /// cross-engine divergence; `[a-z0-9]` still admits every lowercase letter, so the `zzz…` probe
+    /// passes the brand's pattern and only the hex turns it away.
+    #[model_schema(pattern = "^[a-z0-9]{24}$")]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct WideObjectId(pub ObjectId);
@@ -526,7 +528,10 @@ mod objectid_branded_surface_tests {
     fn a_brand_pattern_wider_than_the_hex_still_narrows_to_the_hex_on_both_surfaces() {
         let zod = WideObjectId::zod_schema();
         assert!(zod.contains(OID_ZOD_BASE), "Got:\n{zod}");
-        assert!(zod.contains(".check(z.regex(/^.{24}$/))"), "Got:\n{zod}");
+        assert!(
+            zod.contains(".check(z.regex(/^[a-z0-9]{24}$/))"),
+            "Got:\n{zod}"
+        );
 
         let schema = WideObjectId::json_schema();
         for (hex, admitted) in [
