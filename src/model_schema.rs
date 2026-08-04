@@ -28,6 +28,8 @@ use crate::{
 #[cfg(feature = "typescript")]
 use crate::utils::ts_generic_params;
 use crate::utils::type_parameters_in_scope;
+#[cfg(feature = "serde")]
+use crate::utils::written_type;
 
 #[cfg(all(feature = "zod", feature = "typescript"))]
 use core::iter::once;
@@ -806,6 +808,9 @@ fn length_arg(meta: &Meta, name: &str) -> syn::Result<usize> {
 /// exists to name a filling per parameter, so one that names none says nothing that leaving it off
 /// does not already say — and on an item that declares parameters it would read as a declaration
 /// while declaring nothing.
+///
+/// A parameter named twice is refused for the mirror reason: the argument names one filling per
+/// parameter, and a second entry names a filling nothing can read.
 fn default_types_arg(meta: &Meta) -> syn::Result<Vec<(syn::Ident, syn::Type)>> {
     let takes = "a list of `Parameter = Type` pairs, written `default_types(IdType = String, \
                  DateType = f64)`";
@@ -817,10 +822,40 @@ fn default_types_arg(meta: &Meta) -> syn::Result<Vec<(syn::Ident, syn::Type)>> {
     if entries.is_empty() {
         return Err(arg_rejection(list, "default_types", takes));
     }
-    Ok(entries
-        .into_iter()
-        .map(|entry| (entry.name, entry.ty))
-        .collect())
+    let mut read: Vec<(syn::Ident, syn::Type)> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if let Some((_, declared)) = read.iter().find(|(name, _)| *name == entry.name) {
+            return Err(repeated_entry_rejection(&entry.name, declared, &entry.ty));
+        }
+        read.push((entry.name, entry.ty));
+    }
+    Ok(read)
+}
+
+/// The refusal a second entry for one parameter earns, spanned on the name as the repeat spelled
+/// it — the first entry declares what its author meant, and it is the second that leaves the
+/// declaration with two answers.
+///
+/// Both fillings are named: a reader told only that the parameter repeats still has to go back to
+/// the list to see which one was dropped.
+fn repeated_entry_rejection(
+    name: &syn::Ident,
+    declared: &syn::Type,
+    repeated: &syn::Type,
+) -> syn::Error {
+    let first = quote!(#declared);
+    let second = quote!(#repeated);
+    syn::Error::new(
+        name.span(),
+        format!(
+            "`model_schema` argument `default_types` declares `{name}` twice, first as \
+             `{first}` and then as `{second}`. A parameter is described from one filling: the \
+             JSON-schema document is generated from it, so a second entry would leave which of the \
+             two that document describes to whichever way the list happens to be read, and the \
+             other silently dropped. Declare `{name}` once, with the type its document should be \
+             generated from."
+        ),
+    )
 }
 
 /// Whether a flag argument is set: it stands alone, or takes the boolean literal that says which
@@ -8809,12 +8844,16 @@ fn generate_numeric_validation_code(
 /// on the innermost value however it was written; this is what lets the Rust validator land it in
 /// the same place. Anything else — a sibling type, a map, a tuple, a multi-argument generic — has no
 /// value for a length or a range to apply to and yields nothing.
+///
+/// Each level is read as written before it is matched: a `macro_rules!` substitution arrives
+/// grouped, and the walk descends into types that may be substituted in turn.
 #[cfg(feature = "serde")]
 fn constrained_shape(ty: &syn::Type) -> Option<ConstrainedShape> {
     let mut wraps = Vec::new();
     let mut lifetimes: Vec<syn::Lifetime> = Vec::new();
     let mut current = ty;
     loop {
+        current = written_type(current);
         if let syn::Type::Array(array) = current {
             wraps.push(ConstraintWrap::Sequence);
             current = &array.elem;

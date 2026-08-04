@@ -9,7 +9,7 @@ use syn::spanned::Spanned as _;
 use syn::Attribute;
 
 use crate::features::model_schema_prop::ModelSchemaPropMeta;
-use crate::utils::{lookup_alias_info, safe_type_name};
+use crate::utils::{lookup_alias_info, safe_type_name, written_type};
 
 #[cfg(feature = "zod")]
 use crate::utils::{ZodUnionMember, escape_js_regex_literal, zod_factory_argument};
@@ -1551,17 +1551,24 @@ fn literal_array_length(len: &syn::Expr) -> Option<usize> {
 }
 
 /// Debug logging: Set `RUST_LOG=trace` to see HashMap/SiblingType creation.
+///
+/// The arms below classify by the shape they are handed, so what they are handed is the type as
+/// written: a `macro_rules!` substitution arrives grouped, and the grouping is read off before any
+/// arm looks. Everything reached from here comes back through this function, so a substitution
+/// nested inside a written shape — `Vec<$t>`, `&$t`, `($a, $b)` — is read through on its own way
+/// down.
 pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
     let safe_name = safe_type_name(name);
-    if let Type::Path(type_path) = ty {
+    let written = written_type(ty);
+    if let Type::Path(type_path) = written {
         get_field_def_from_type_path(type_path, safe_name, field_docs)
-    } else if let Type::Reference(type_ref) = ty {
+    } else if let Type::Reference(type_ref) = written {
         // let lifetime = type_ref
         //     .lifetime
         //     .as_ref()
         //     .map_or("".to_string(), |l| format!("'{}", l.ident));
         get_field_def(name, type_ref.elem.as_ref(), field_docs)
-    } else if let Type::Array(type_array) = ty {
+    } else if let Type::Array(type_array) = written {
         let mut def = get_field_def(name, &type_array.elem, field_docs);
         // The array this spelling adds is the level the element's own depth counts up to, and the
         // length is that level's — not the field's, which may sit under further wrappers.
@@ -1571,11 +1578,11 @@ pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
             def.mark_fixed_length_at(level, length);
         }
         def
-    } else if let Type::Slice(type_slice) = ty {
+    } else if let Type::Slice(type_slice) = written {
         let mut def = get_field_def(name, &type_slice.elem, field_docs);
         def.array_depth = def.array_depth.saturating_add(1);
         def
-    } else if let Type::Tuple(type_tuple) = ty {
+    } else if let Type::Tuple(type_tuple) = written {
         let elements: Vec<FieldDef> = type_tuple
             .elems
             .iter()
@@ -1592,7 +1599,7 @@ pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
             nullable_levels: Vec::new(),
             omits_value: false,
             #[cfg(feature = "jsonschema")]
-            type_span: ty.span(),
+            type_span: written.span(),
         }
     } else {
         // Fallback for BareFn, ImplTrait, etc.
@@ -1606,7 +1613,7 @@ pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
             nullable_levels: Vec::new(),
             omits_value: false,
             #[cfg(feature = "jsonschema")]
-            type_span: ty.span(),
+            type_span: written.span(),
         }
     }
 }

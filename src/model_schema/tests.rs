@@ -3590,6 +3590,73 @@ fn a_default_types_shape_the_parser_cannot_read_is_refused() {
     }
 }
 
+/// A parameter named twice is refused as written, and the refusal names the parameter and both
+/// fillings — a reader shown only that there is a duplicate still has to go and find the other
+/// entry to know what was dropped.
+#[test]
+fn a_parameter_declared_twice_is_refused() {
+    let rejection = args_rejection(quote::quote! {
+        default_types(IdType = String, IdType = f64)
+    })
+    .unwrap();
+    for needle in ["default_types", "IdType", "String", "f64"] {
+        assert!(rejection.contains(needle), "{needle} missing: {rejection}");
+    }
+}
+
+/// The duplicate is refused whatever surrounds it: the second of two identical entries says no
+/// more than the second of two different ones, and a repeat past the first pair is still a repeat.
+#[test]
+fn a_repeated_parameter_is_refused_wherever_it_is_written() {
+    let probes: [proc_macro2::TokenStream; 3] = [
+        quote::quote! { default_types(IdType = String, IdType = String) },
+        quote::quote! { default_types(IdType = String, DateType = f64, IdType = u8) },
+        quote::quote! { default_types(IdType = String, DateType = f64, DateType = f64) },
+    ];
+    for probe in probes {
+        let rendered = probe.to_string();
+        assert!(args_rejection(probe).is_some(), "for {rendered}");
+    }
+}
+
+/// The refusal points at the entry that earned it — the second spelling of the name, not the first,
+/// which on its own declares exactly what the author meant.
+#[test]
+fn a_duplicate_entry_refusal_is_spanned_on_the_second_spelling() {
+    let source = "default_types(IdType = String, DateType = f64, IdType = u8)";
+    let args: proc_macro2::TokenStream = syn::parse_str(source).unwrap();
+    let rejection = super::parse_model_schema_args(args).arg_rejection.unwrap();
+    let span = rejection.span();
+    assert_eq!(span.source_text().as_deref(), Some("IdType"));
+    assert_eq!(span.start().column, source.rfind("IdType").unwrap());
+    assert_ne!(span.start().column, source.find("IdType").unwrap());
+}
+
+/// A list that names each parameter once is read exactly as before, however many entries it
+/// carries and whatever the fillings are — the duplicate check costs a distinct declaration
+/// nothing.
+#[test]
+fn distinct_entries_are_read_unchanged() {
+    let args = super::parse_model_schema_args(quote::quote! {
+        default_types(AType = u32, BType = String, CType = u32, DType = Vec<Option<u8>>)
+    });
+    assert_eq!(args.arg_rejection.as_ref().map(ToString::to_string), None);
+    let read: Vec<(String, String)> = args
+        .default_types
+        .iter()
+        .map(|(name, ty)| (name.to_string(), quote::quote!(#ty).to_string()))
+        .collect();
+    assert_eq!(
+        read,
+        vec![
+            ("AType".to_owned(), "u32".to_owned()),
+            ("BType".to_owned(), "String".to_owned()),
+            ("CType".to_owned(), "u32".to_owned()),
+            ("DType".to_owned(), "Vec < Option < u8 > >".to_owned()),
+        ]
+    );
+}
+
 /// The argument shares the list with the string constraints and the name override, and reading it
 /// costs none of them. This is the only place the coexistence can be asked: a type-level string
 /// constraint is a brand's alone, and a brand over a type parameter is already refused at its
