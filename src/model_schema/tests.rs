@@ -1226,6 +1226,8 @@ fn a_refused_items_module_answers_the_call_a_reference_emits() {
         "got: {module}"
     );
     assert!(module.contains("json_schema_within"), "got: {module}");
+}
+
 /// The type the parser reads a field's written spelling as, rendered the way every surface receives
 /// it: one `FieldDef`, so a spelling that parses alike describes alike wherever it is dispatched.
 fn parsed_field_type(field_type: &proc_macro2::TokenStream) -> String {

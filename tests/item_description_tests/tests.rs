@@ -192,6 +192,8 @@ fn without_ident_reexport(surface: &str, ident: &str, exported: &str) -> String 
             &format!("\n\nexport const {ident}$Schema = {exported}$Schema;"),
             "",
         )
+}
+
 /// The ` * ` lines a definition's `JSDoc` block is written from, with the block's own delimiters and
 /// the surrounding indentation set aside — what every shape spells from one body, and the one part
 /// of the emitted `TypeScript` the shapes may be held against each other over.
