@@ -1602,6 +1602,28 @@ pub struct Config {
 
 Declaration order decides only which of the two diagnostics is reported. A plain enum key works wherever it is declared.
 
+#### Sequence-Wrapped Map Keys
+
+**Error:** *a map key must be a value serde writes as a string ... this key is a sequence of `<type>`*, reported at the field.
+
+A JSON object key is a string. A sequence writes a JSON array, so `serde_json` refuses to serialize a map keyed by one at all — `key must be a string`, raised at serialization time, with no object and no array-of-pairs fallback. There is no wire form for a schema to describe, so the spelling is refused rather than described:
+
+```rust
+// Wrong: the key writes an array, which serde will not use as an object key
+#[model_schema()]
+pub struct BadCounts {
+    pub counts: HashMap<Vec<Slot>, u32>,
+}
+
+// Correct: the key is the element itself, whose members become the object's keys
+#[model_schema()]
+pub struct Counts {
+    pub counts: HashMap<Slot, u32>,
+}
+```
+
+Every sequence spelling earns this — `Vec`, `[T; N]`, and the sets — the wrapper being what serde writes as an array. The message names the element rather than the wrapper, the parser having already collapsed those spellings onto their array levels. A sequence in the map's *value* is untouched: only the key has to be a string.
+
 #### Function-Local Types
 
 **Error:** `cannot find module or crate <type>_schema in this scope` (`E0433`), reported at the field's type.

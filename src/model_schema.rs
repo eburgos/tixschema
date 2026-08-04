@@ -49,7 +49,12 @@ use crate::features::serde::{SerdeFieldMeta, SerdeTypeMeta, has_serde_default};
 #[cfg(feature = "serde")]
 use crate::field_type::{parse_serde_field_attributes, parse_serde_type_attributes};
 
-#[cfg(any(feature = "jsonschema", feature = "serde"))]
+#[cfg(any(
+    feature = "typescript",
+    feature = "zod",
+    feature = "jsonschema",
+    feature = "serde"
+))]
 use crate::field_type::is_sequence_wrapper;
 
 #[cfg(feature = "serde")]
@@ -278,11 +283,13 @@ enum MapMemberItem {
 enum MapMemberRejection {
     /// A map key the registry proves carries no `enum_members()`, named so the author can act on it.
     NonEnumKey(String),
+    /// A map key written under a sequence wrapper, named by the element it holds.
+    SequencedKey(String),
     Tuple,
 }
 
-/// What a map key opens: one open member set, the members it enumerates, or nothing this expansion
-/// can narrow.
+/// What a map key opens: one open member set, the members it enumerates, nothing this expansion can
+/// narrow, or no object at all.
 ///
 /// Every position a map is written in reads its key through this one classification, so a key
 /// cannot enumerate its members in field position and stay open in a slot.
@@ -292,8 +299,22 @@ enum MapKeyPath<'key> {
     Enumerated(&'key str),
     /// A `String` key, which enumerates nothing — one schema stands for every member.
     Open,
+    /// A key written under a sequence wrapper, which serde writes as a JSON array. A JSON object
+    /// key is a string, so serde refuses such a map outright rather than writing an object — there
+    /// is no wire form here for any surface to describe.
+    Sequenced,
     /// A key this expansion cannot narrow, leaving the members unconstrained.
     Unnarrowed,
+}
+
+/// Why a map key a field reaches has no rendering. Both reasons carry the name the author can act
+/// on, and both stand on every surface, the key being read off the field all three render from.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+enum MapKeyRejection {
+    /// The registry proves the key type carries no `enum_members()`.
+    NoEnumMembers(String),
+    /// The key is written under a sequence wrapper, named by the element it holds.
+    Sequenced(String),
 }
 
 /// What a newtype variant's inner value is when the tag is written beside it rather than around
@@ -587,8 +608,8 @@ fn alias_map_key_guard_error(
     export_name: &str,
     alias_field_def: &FieldDef,
 ) -> Option<proc_macro2::TokenStream> {
-    let key_type_name = non_enum_map_key(alias_field_def)?;
-    let message = non_enum_map_key_message(&format!("type alias `{export_name}`"), key_type_name);
+    let rejection = map_key_rejection(alias_field_def)?;
+    let message = map_key_rejection_message(&format!("type alias `{export_name}`"), &rejection);
     Some(syn::Error::new_spanned(&alias.ty, message).to_compile_error())
 }
 
@@ -4379,7 +4400,7 @@ fn collect_untagged_members(item_enum: &mut syn::ItemEnum) -> UntaggedMemberData
                 guard_errors.push(err.to_compile_error());
             }
             #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-            if let Err(err) = check_non_enum_map_key(field, &field_def, &field_label(&field_name)) {
+            if let Err(err) = check_map_key(field, &field_def, &field_label(&field_name)) {
                 guard_errors.push(err.to_compile_error());
             }
             let serde_field_meta = parse_serde_field_attributes(&field.attrs);
@@ -5180,12 +5201,36 @@ fn tuple_json_schema_value(
     })
 }
 
+/// What a sequence-spelled type holds, and `None` for everything else.
+///
+/// A sequence reaches a key in either of the two forms the parser leaves: the array levels it
+/// collapses a `Vec` or a `[T; N]` onto, and the wrapper name it keeps for every other spelling,
+/// which each surface normalizes onto its element at render time. Both write the same JSON array,
+/// so the classification below reads them the same way.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn sequence_wrapper_element(fld: &FieldDef) -> Option<&FieldDef> {
+    let FieldDefType::SiblingType(wrapper_name, wrapper_args) = &fld.field_type else {
+        return None;
+    };
+    let [element] = wrapper_args.as_slice() else {
+        return None;
+    };
+    is_sequence_wrapper(wrapper_name).then_some(element)
+}
+
 /// The classification every position reads a map key through.
 ///
-/// Only a bare type path can name an enum: a generic spelling is a type this expansion has no
-/// `enum_members()` for, and every other type names keys the schema cannot enumerate.
+/// The sequence spellings come first: they are the key as written, and what they write is a JSON
+/// array, which serde never puts in an object key. Reading past one would answer for the element
+/// instead — enumerating an enum's members as keys the map cannot hold.
+///
+/// Below them, only a bare type path can name an enum: a generic spelling is a type this expansion
+/// has no `enum_members()` for, and every other type names keys the schema cannot enumerate.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-const fn map_key_path(key: &FieldDef) -> MapKeyPath<'_> {
+fn map_key_path(key: &FieldDef) -> MapKeyPath<'_> {
+    if key.array_depth > 0 || sequence_wrapper_element(key).is_some() {
+        return MapKeyPath::Sequenced;
+    }
     match &key.field_type {
         FieldDefType::String => MapKeyPath::Open,
         FieldDefType::SiblingType(key_type_name, args) if args.is_empty() => {
@@ -5219,18 +5264,64 @@ const fn map_key_path(key: &FieldDef) -> MapKeyPath<'_> {
     }
 }
 
-/// The name a map key carries when the registry proves it has no `enum_members()`, and `None` for
-/// every key that may still have them.
+/// Why this key has no rendering, and `None` for every key that may still have one.
 ///
-/// Only a target the registry positively rules out is named: an unregistered name — a foreign
-/// type, or one expanded after the type that writes the map — cannot be ruled out at this
-/// expansion, and is left alone.
+/// A sequence-wrapped key is ruled out by its own spelling: serde writes it as a JSON array, which
+/// is no object key at all. Below that, only a target the registry positively rules out is named —
+/// an unregistered name, a foreign type or one expanded after the type that writes the map, cannot
+/// be ruled out at this expansion and is left alone.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-fn key_without_enum_members(key: &FieldDef) -> Option<&str> {
-    let MapKeyPath::Enumerated(key_type_name) = map_key_path(key) else {
-        return None;
-    };
-    proves_no_enum_members(key_type_name).then_some(key_type_name)
+fn key_rejection(key: &FieldDef) -> Option<MapKeyRejection> {
+    match map_key_path(key) {
+        MapKeyPath::Sequenced => Some(MapKeyRejection::Sequenced(map_key_element_name(key))),
+        MapKeyPath::Enumerated(key_type_name) => proves_no_enum_members(key_type_name)
+            .then(|| MapKeyRejection::NoEnumMembers(key_type_name.to_owned())),
+        MapKeyPath::Open | MapKeyPath::Unnarrowed => None,
+    }
+}
+
+/// The Rust spelling of what a map key holds, for the diagnostic a key with no rendering earns.
+///
+/// The sequence wrapper itself is not named: a `Vec` or a `[T; N]` reaches here as the array levels
+/// the parser collapsed it onto, so naming one spelling would name a spelling the author may not
+/// have written. The element survives that, so it is what the message says — by its own name where
+/// it has one, and by the shape it is written as where it has none, the arity of a tuple key not
+/// being what the refusal turns on.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn map_key_element_name(key: &FieldDef) -> String {
+    if let Some(element) = sequence_wrapper_element(key) {
+        return map_key_element_name(element);
+    }
+    match &key.field_type {
+        FieldDefType::SiblingType(key_type_name, _) => key_type_name.clone(),
+        FieldDefType::String | FieldDefType::StringLiteral(_) => "String".to_owned(),
+        FieldDefType::Boolean => "bool".to_owned(),
+        FieldDefType::U8 => "u8".to_owned(),
+        FieldDefType::U16 => "u16".to_owned(),
+        FieldDefType::U32 => "u32".to_owned(),
+        FieldDefType::U64 => "u64".to_owned(),
+        FieldDefType::I8 => "i8".to_owned(),
+        FieldDefType::I16 => "i16".to_owned(),
+        FieldDefType::I32 => "i32".to_owned(),
+        FieldDefType::I64 => "i64".to_owned(),
+        FieldDefType::Usize => "usize".to_owned(),
+        FieldDefType::Isize => "isize".to_owned(),
+        FieldDefType::F32 => "f32".to_owned(),
+        FieldDefType::F64 => "f64".to_owned(),
+        FieldDefType::Map(..) => "HashMap<_, _>".to_owned(),
+        FieldDefType::Tuple(..) => "(_, _)".to_owned(),
+        FieldDefType::Unknown => "_".to_owned(),
+        #[cfg(feature = "object_id")]
+        FieldDefType::ObjectId => "ObjectId".to_owned(),
+        #[cfg(feature = "chrono")]
+        FieldDefType::DateTime => "DateTime".to_owned(),
+        #[cfg(feature = "chrono")]
+        FieldDefType::NaiveDate => "NaiveDate".to_owned(),
+        #[cfg(feature = "chrono")]
+        FieldDefType::NaiveDateTime => "NaiveDateTime".to_owned(),
+        #[cfg(feature = "chrono")]
+        FieldDefType::NaiveTime => "NaiveTime".to_owned(),
+    }
 }
 
 /// Whether the registry rules the named type out as a source of `enum_members()`. `false` covers
@@ -5241,25 +5332,24 @@ fn proves_no_enum_members(key_type_name: &str) -> bool {
         .is_some_and(|key_alias| key_alias.kind == AliasKind::NoEnumMembers)
 }
 
-/// The name of the first map key this field reaches, at any depth, that the registry proves has no
-/// `enum_members()`.
+/// Why the first map key this field reaches, at any depth, has no rendering.
 ///
-/// Every surface names such a key: TypeScript writes it as a `Record`'s key type, Zod as a
+/// Every surface renders such a key: TypeScript writes it as a `Record`'s key type, Zod as a
 /// `z.record` key schema, and the JSON schema calls `enum_members()` on it to spell the object's
 /// properties. So the key is answered for once, off the field all three render from, rather than
 /// by whichever of them a build happens to enable.
 ///
 /// Recurses through `SiblingType` generics, `Map` keys/values, and `Tuple` elements — the walk
 /// [`FieldDef::os_string_name`] makes. What position the map sits in is not what decides whether
-/// its key can enumerate.
+/// its key can be written.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-fn non_enum_map_key(fld: &FieldDef) -> Option<&str> {
+fn map_key_rejection(fld: &FieldDef) -> Option<MapKeyRejection> {
     match &fld.field_type {
-        FieldDefType::Map(key, value) => key_without_enum_members(key)
-            .or_else(|| non_enum_map_key(key))
-            .or_else(|| non_enum_map_key(value)),
-        FieldDefType::SiblingType(_, generics) => generics.iter().find_map(non_enum_map_key),
-        FieldDefType::Tuple(elements) => elements.iter().find_map(non_enum_map_key),
+        FieldDefType::Map(key, value) => key_rejection(key)
+            .or_else(|| map_key_rejection(key))
+            .or_else(|| map_key_rejection(value)),
+        FieldDefType::SiblingType(_, generics) => generics.iter().find_map(map_key_rejection),
+        FieldDefType::Tuple(elements) => elements.iter().find_map(map_key_rejection),
         FieldDefType::Unknown
         | FieldDefType::StringLiteral(_)
         | FieldDefType::Boolean
@@ -5295,25 +5385,52 @@ fn non_enum_map_key_message(subject: &str, key_type_name: &str) -> String {
     )
 }
 
-/// Rejects a field reaching a map key the registry proves carries no `enum_members()`.
+/// What a sequence-wrapped key is reported as, worded like its sibling above and carrying the same
+/// `subject`.
 ///
-/// Those members are what every surface writes the map's keys from, so a key that has none leaves
-/// each of them describing an object whose keys nothing can supply — and leaves the JSON schema
-/// calling a method the author never wrote, which rustc blames `#[model_schema()]` for. The key is
-/// written as a *type path*, which resolves through any alias, so an alias of a non-enum is named
-/// here as the alias the author wrote.
+/// serde is the whole reason: it writes a JSON object key as a string, a sequence writes an array,
+/// and rather than falling back to any other form it refuses the map outright — so there is no wire
+/// here to describe, not a wire described badly. The element is named because the wrapper cannot
+/// be: the parser has already collapsed every sequence spelling onto array levels.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-fn check_non_enum_map_key(
-    field: &Field,
-    field_def: &FieldDef,
-    label: &str,
-) -> Result<(), syn::Error> {
-    let Some(key_type_name) = non_enum_map_key(field_def) else {
+fn sequenced_map_key_message(subject: &str, element_name: &str) -> String {
+    format!(
+        "{subject}: a map key must be a value serde writes as a string, which is what a JSON object key is — this key is a sequence of `{element_name}`, and serde refuses to serialize a map keyed by one at all"
+    )
+}
+
+/// What a map key with no rendering is reported as, whichever reason it has.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn map_key_rejection_message(subject: &str, rejection: &MapKeyRejection) -> String {
+    match rejection {
+        MapKeyRejection::NoEnumMembers(key_type_name) => {
+            non_enum_map_key_message(subject, key_type_name)
+        }
+        MapKeyRejection::Sequenced(element_name) => {
+            sequenced_map_key_message(subject, element_name)
+        }
+    }
+}
+
+/// Rejects a field reaching a map key no surface can write.
+///
+/// A key the registry proves carries no `enum_members()` is one such: those members are what every
+/// surface writes the map's keys from, so a key that has none leaves each of them describing an
+/// object whose keys nothing can supply — and leaves the JSON schema calling a method the author
+/// never wrote, which rustc blames `#[model_schema()]` for. The key is written as a *type path*,
+/// which resolves through any alias, so an alias of a non-enum is named here as the alias the
+/// author wrote.
+///
+/// A sequence-wrapped key is the other: serde writes no object for it at all, so every surface
+/// would be describing a shape the map can never take.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn check_map_key(field: &Field, field_def: &FieldDef, label: &str) -> Result<(), syn::Error> {
+    let Some(rejection) = map_key_rejection(field_def) else {
         return Ok(());
     };
     Err(syn::Error::new_spanned(
         field,
-        non_enum_map_key_message(label, key_type_name),
+        map_key_rejection_message(label, &rejection),
     ))
 }
 
@@ -5355,6 +5472,11 @@ fn build_nested_map_member_item(
             )
         }
         MapKeyPath::Unnarrowed => MapMemberItem::Fragment(unnarrowed_key_map_json_schema_item()),
+        MapKeyPath::Sequenced => {
+            return Err(MapMemberRejection::SequencedKey(map_key_element_name(
+                inner_key,
+            )));
+        }
     })
 }
 
@@ -5495,6 +5617,9 @@ fn map_member_rejection_message(subject: &str, rejection: &MapMemberRejection) -
         MapMemberRejection::NonEnumKey(key_type_name) => {
             non_enum_map_key_message(subject, key_type_name)
         }
+        MapMemberRejection::SequencedKey(element_name) => {
+            sequenced_map_key_message(subject, element_name)
+        }
         MapMemberRejection::Tuple => format!(
             "{subject}: a tuple is not supported as a map value — give the value a `#[model_schema()]` struct instead"
         ),
@@ -5624,6 +5749,7 @@ fn build_map_field_schema(
         }
         MapKeyPath::Open => string_key_map_json_schema_value(value),
         MapKeyPath::Unnarrowed => Ok(unnarrowed_key_map_json_schema_value(key)),
+        MapKeyPath::Sequenced => Err(MapMemberRejection::SequencedKey(map_key_element_name(key))),
     };
     match rendered {
         Ok(map_schema) => {
@@ -6567,7 +6693,7 @@ fn collect_field_guard_errors(
     let label = field_label(raw_field_ident);
 
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    let map_key_error = check_non_enum_map_key(field, field_def, &label)
+    let map_key_error = check_map_key(field, field_def, &label)
         .err()
         .map(|err| err.to_compile_error());
     #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
