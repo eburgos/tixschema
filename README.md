@@ -444,12 +444,13 @@ Generated Zod:
 export const DataElementSampleValueEntry$Schema: ZodType<DataElementSampleValueEntry> =
   z.strictObject({
     dataElementId: z.string(),
-  }).and(DataElementSampleValueVariant$Schema);
+  }).and(z.lazy(() => DataElementSampleValueVariant$Schema));
 ```
 
 Notes:
 
-- Multiple `#[serde(flatten)]` fields chain: `{ ... } & BasePart & ExtraPart` in TypeScript and `z.strictObject({ ... }).and(BasePart$Schema).and(ExtraPart$Schema)` in Zod.
+- The flattened base joins the intersection under `z.lazy`. A base is a `const` of its own and nothing orders one type's schema against another's, so reading the name while the intersection's `const` initializes would fail for any base declared below -- and for two bases that flatten each other, no order puts each above the other. Deferred, every module loads whatever order it is assembled in, and a pair that does flatten each other fails when asked to validate rather than at import.
+- Multiple `#[serde(flatten)]` fields chain: `{ ... } & BasePart & ExtraPart` in TypeScript and `z.strictObject({ ... }).and(z.lazy(() => BasePart$Schema)).and(z.lazy(() => ExtraPart$Schema))` in Zod.
 - A struct whose only field is flattened becomes a plain alias (e.g. `export type FlattenOnly = DataElementSampleValueVariant;`).
 - **JSON Schema** stays strict: rather than `allOf` (which cannot faithfully compose a tagged union under `additionalProperties: false`), the base properties are distributed into each branch of the flattened union, keeping every branch closed. Both spellings of a union are distributed into: a discriminated enum's `oneOf` and an untagged enum's `anyOf`. Plain-struct flattens merge into a single closed object; multiple flattened unions form a cross-product.
 - Each flattened union keeps the spelling it was written under. A discriminated enum's members are exclusive, so its branches stay a `oneOf`; an untagged enum is first-match-wins and its members may overlap (one member's keys a subset of another's, the difference optional), so its branches are an `anyOf` -- under `oneOf` the document would reject exactly what Serde writes for the narrower member, which matches both branches. An object flattening one of each nests the wrappers, the untagged `anyOf` sitting inside each branch of the discriminated `oneOf`.

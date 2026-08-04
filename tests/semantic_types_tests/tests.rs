@@ -660,7 +660,7 @@ fn test_complex_alias_usage() {
 fn test_name_override() {
     let some: SomeType = String::new();
     assert!(some.is_empty());
-    let ts = custom_name_schema::Schema::ts_definition();
+    let ts = some_type_schema::Schema::ts_definition();
 
     assert!(
         ts.contains("export type CustomName = string;"),

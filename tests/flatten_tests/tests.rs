@@ -36,7 +36,7 @@ enum DataElementSampleValueVariant {
 
 /// Two bases that flatten each other: neither body exists when the other's merge asks for it, and
 /// no finite value inhabits either type.
-#[cfg(feature = "jsonschema")]
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct CycleFirst {
@@ -45,7 +45,7 @@ struct CycleFirst {
     second: CycleSecond,
 }
 
-#[cfg(feature = "jsonschema")]
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct CycleSecond {
@@ -533,7 +533,7 @@ fn test_flatten_zod_intersection() {
     let zod = DataElementSampleValueEntry::zod_schema();
     assert!(zod.contains("z.strictObject({"));
     assert!(zod.contains("dataElementId:"));
-    assert!(zod.contains("}).and(DataElementSampleValueVariant$Schema);"));
+    assert!(zod.contains("}).and(z.lazy(() => DataElementSampleValueVariant$Schema));"));
     assert!(!zod.contains("variant:"));
 }
 
@@ -541,7 +541,9 @@ fn test_flatten_zod_intersection() {
 #[cfg(feature = "zod")]
 fn test_flatten_zod_multiple_chained() {
     let zod = MultiFlatten::zod_schema();
-    assert!(zod.contains("}).and(BasePart$Schema).and(ExtraPart$Schema);"));
+    assert!(
+        zod.contains("}).and(z.lazy(() => BasePart$Schema)).and(z.lazy(() => ExtraPart$Schema));")
+    );
 }
 
 #[test]
@@ -550,6 +552,54 @@ fn test_no_flatten_zod_unchanged() {
     let zod = NoFlatten::zod_schema();
     assert!(zod.contains("z.strictObject({"));
     assert!(!zod.contains(".and("));
+}
+
+/// A base's schema is a `const` the emitted module reads, and nothing orders one type's module
+/// against another's. A flattened base named straight into the intersection would be read while
+/// the const initializer runs, which fails outright for any base declared below the type that
+/// flattens it — so the operand is the deferred form and the read happens when something validates.
+#[test]
+#[cfg(feature = "zod")]
+fn test_a_flattened_base_is_never_read_while_the_const_initializes() {
+    for zod in [
+        DataElementSampleValueEntry::zod_schema(),
+        MultiFlatten::zod_schema(),
+        FlattenOnly::zod_schema(),
+    ] {
+        for name in ["DataElementSampleValueVariant", "BasePart", "ExtraPart"] {
+            assert!(
+                !zod.contains(&format!(".and({name}$Schema)")),
+                "`{name}$Schema` is read eagerly in: {zod}"
+            );
+        }
+    }
+}
+
+/// Two bases that flatten each other name each other's `const`, and no declaration order puts both
+/// above the other. Deferring each read is what makes the pair's modules load at all; the cycle is
+/// then reached only by asking the schema to validate, never by importing it.
+#[test]
+#[cfg(feature = "zod")]
+fn test_a_flatten_cycle_defers_both_sides_of_the_pair() {
+    let first = CycleFirst::zod_schema();
+    let second = CycleSecond::zod_schema();
+
+    assert!(
+        first.contains("}).and(z.lazy(() => CycleSecond$Schema));"),
+        "expected a deferred base, got: {first}"
+    );
+    assert!(
+        second.contains("}).and(z.lazy(() => CycleFirst$Schema));"),
+        "expected a deferred base, got: {second}"
+    );
+    assert!(
+        !first.contains(".and(CycleSecond$Schema)"),
+        "`CycleSecond$Schema` is read eagerly in: {first}"
+    );
+    assert!(
+        !second.contains(".and(CycleFirst$Schema)"),
+        "`CycleFirst$Schema` is read eagerly in: {second}"
+    );
 }
 
 // ========================================================================

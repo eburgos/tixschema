@@ -28,10 +28,10 @@ use crate::{
     utils::{get_field_docs, get_variant_docs},
 };
 
-// The item paths take their exported name from `compute_item_export_name`, which applies this
-// itself; what is left is the naming a reference falls back to for a type this expansion never saw,
-// and the parameter list a generic alias writes.
-#[cfg(any(feature = "typescript", feature = "jsonschema"))]
+// The item paths take their exported name from `compute_item_export_name` and their module name
+// from `ident_schema_module_name`, both of which apply this themselves; what is left is the
+// parameter list a generic alias writes.
+#[cfg(feature = "typescript")]
 use crate::utils::safe_type_name;
 
 #[cfg(feature = "zod")]
@@ -77,7 +77,7 @@ use crate::features::jsonschema::{MergeDiagnostic, merged_object_value};
 use crate::utils::{get_enum_docs, get_struct_docs, strip_examples_from_docs};
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-use crate::utils::compute_alias_export_name;
+use crate::utils::{compute_alias_export_name, ident_schema_module_name};
 
 use crate::utils::compute_item_export_name;
 
@@ -679,6 +679,9 @@ fn flattened_plain_enum(inner: &FieldDef) -> Option<&str> {
 /// `#module_ident::Schema::json_schema()`. So the module and its `register_alias_info` call are
 /// driven by the union: gating them on `typescript` alone left the jsonschema references
 /// dangling. The module's *contents* are chosen per feature while building the tokens.
+///
+/// The module is named from the Rust ident, not from the export name, so that a type naming the
+/// alias before it has expanded assumes the module the alias goes on to publish.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn process_type_alias(item_type: ItemType, args: &ModelSchemaArgs) -> TokenStream {
     let mut alias = item_type;
@@ -689,7 +692,7 @@ fn process_type_alias(item_type: ItemType, args: &ModelSchemaArgs) -> TokenStrea
     let rust_ident = alias.ident.clone();
     let rust_ident_str = rust_ident.to_string();
     let export_name = compute_alias_export_name(&rust_ident_str, args.name_override.as_deref());
-    let module_name = format!("{}_schema", to_snake_case(&export_name));
+    let module_name = ident_schema_module_name(&rust_ident_str);
     let module_ident = Ident::new(&module_name, rust_ident.span());
 
     // Registered only once the target has been classified: the alias's own expansion is the only
@@ -5240,10 +5243,11 @@ fn nullable_slot_json_schema_value(
 
 /// The schema module a sibling type's `Schema::json_schema()` lives in.
 ///
-/// An alias's module is named after its registered export name, which the raw ident does not
-/// reproduce, so the registry answers first. A name it does not hold is one this expansion has not
-/// seen — a type expanded later, or one from another crate — and takes the naming every
-/// `#[model_schema()]` type follows.
+/// A declared item's module is named after its exported name, which a `name = "…"` override moves
+/// away from the raw ident, so the registry answers first. A name it does not hold is one this
+/// expansion has not seen — a type expanded later, or one from another crate — and takes the
+/// ident-derived naming, which is all a reference standing before the type has to go on. That
+/// naming is what a type alias publishes under, so an alias resolves in either declaration order.
 ///
 /// The ident is spanned on where the sibling was named rather than on the attribute. Nothing the
 /// macro can read tells it whether the module will be in scope — a generated module reaches its
@@ -5254,7 +5258,7 @@ fn nullable_slot_json_schema_value(
 fn sibling_schema_module_ident(name: &str, span: proc_macro2::Span) -> Ident {
     let module_name = match lookup_alias_info(name) {
         Some(alias) => alias.module_name,
-        None => format!("{}_schema", to_snake_case(&safe_type_name(name))),
+        None => ident_schema_module_name(name),
     };
     Ident::new(module_name.as_str(), span)
 }
@@ -7307,8 +7311,26 @@ fn generate_ts_definition_method(
     }
 }
 
+/// A schema an intersection is built from, written so the name it carries is read when the
+/// intersection is used rather than while the `const` holding it is being initialized.
+///
+/// A flattened base is rendered as the base's own exported `const`. Spliced in as it stands, that
+/// name is read the moment the containing `const`'s initializer runs — which fails outright when
+/// the base is declared below, and no declaration order puts each of two bases that flatten each
+/// other above the other. Deferring the read is what makes every emitted module load whatever
+/// order they are assembled in; a pair that does flatten each other then fails when something asks
+/// it to validate, rather than at the import of everything declared alongside it.
+#[cfg(feature = "zod")]
+fn deferred_zod_operand(schema: &str) -> String {
+    format!("z.lazy(() => {schema})")
+}
+
 #[cfg(feature = "zod")]
 /// Generates the Zod schema method (Zod schemas only, no TypeScript types).
+///
+/// Each flattened base joins the intersection through [`deferred_zod_operand`]: a base names a
+/// `const` of its own, and one macro invocation sees one type, so nothing here can know whether
+/// that `const` is declared above the module this writes or below it.
 fn generate_zod_schema_method(
     item_name: &str,
     schema_code: &str,
@@ -7317,7 +7339,7 @@ fn generate_zod_schema_method(
 ) -> proc_macro2::TokenStream {
     #[cfg_attr(not(feature = "zod"), allow(unused_variables))]
     let and_suffix: String = flatten_schemas.iter().fold(String::new(), |mut acc, s| {
-        let _ = write!(acc, ".and({s})");
+        let _ = write!(acc, ".and({})", deferred_zod_operand(s));
         acc
     });
 
