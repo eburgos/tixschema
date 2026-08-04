@@ -1050,8 +1050,20 @@ fn struct_schema_example_carries_no_cfg_attribute() {
 #[test]
 fn branded_json_schema_method_carries_no_cfg_attribute() {
     let args = super::ModelSchemaArgs::default();
-    let tokens = super::build_branded_json_schema_method(&args, "string", "DocumentId");
-    assert_no_cfg_attribute(&tokens, "build_branded_json_schema_method");
+    for inner in branded_json_inners() {
+        let tokens = super::build_branded_json_schema_method(&args, &inner, "DocumentId");
+        assert_no_cfg_attribute(&tokens, "build_branded_json_schema_method");
+    }
+}
+
+/// Every shape [`super::branded_json_inner`] resolves to, so the dispatch is covered whole.
+#[cfg(feature = "jsonschema")]
+fn branded_json_inners() -> Vec<super::BrandedJsonInner> {
+    vec![
+        super::BrandedJsonInner::Scalar("string".to_owned()),
+        #[cfg(feature = "object_id")]
+        super::BrandedJsonInner::ObjectId,
+    ]
 }
 
 #[cfg(feature = "zod")]
