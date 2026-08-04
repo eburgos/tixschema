@@ -388,6 +388,92 @@ fn untagged_member_reaching_a_map_key_with_no_members_is_refused() {
     }
 }
 
+/// A member's `model_schema_prop` reaches the surfaces exactly as the same field written in a
+/// tagged variant does — the constraint was previously refused by rustc as an attribute that does
+/// not exist, the untagged walk never having read or stripped it.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn untagged_member_carries_its_constraint_to_the_surfaces() {
+    let mut item: syn::ItemEnum = syn::parse_quote! {
+        enum Choice {
+            Named {
+                #[model_schema_prop(minLength = 2, pattern = "^[a-z]+$")]
+                name: String,
+            },
+        }
+    };
+    let (_, zod_parts, _, errors) = collect_untagged_members(&mut item);
+    assert!(errors.is_empty(), "got: {errors:?}");
+    assert!(
+        zod_parts[0].contains("z.string().min(2).check(z.regex(/^[a-z]+$/))"),
+        "got: {}",
+        zod_parts[0]
+    );
+}
+
+/// The attribute is stripped off the member the way [`super::process_field`] strips it off a struct
+/// field: it is this crate's own and inert to every derive, so a copy left on the emitted item is
+/// one rustc reports as an attribute that does not exist.
+#[cfg(feature = "serde")]
+#[test]
+fn untagged_member_prop_attribute_is_stripped_from_the_emitted_item() {
+    let mut item: syn::ItemEnum = syn::parse_quote! {
+        enum Choice {
+            Named {
+                #[model_schema_prop(minLength = 2)]
+                #[serde(rename = "label")]
+                name: String,
+            },
+        }
+    };
+    collect_untagged_members(&mut item);
+    let attrs = &item.variants[0].fields.iter().next().unwrap().attrs;
+    assert!(
+        !attrs
+            .iter()
+            .any(|attr| attr.path().is_ident("model_schema_prop")),
+        "got: {}",
+        quote::quote!(#(#attrs)*)
+    );
+    assert!(
+        attrs.iter().any(|attr| attr.path().is_ident("serde")),
+        "the serde attribute must survive the strip"
+    );
+}
+
+/// The whole `model_schema_prop` guard chain reaches this position too, so a member's misspelled
+/// key is named where it was written instead of emitting an unconstrained member.
+#[cfg(feature = "serde")]
+#[test]
+fn untagged_member_prop_guards_apply() {
+    for (member, needle) in [
+        (
+            quote::quote! { #[model_schema_prop(patern = "^[a-z]+$")] name: String },
+            "patern",
+        ),
+        (
+            quote::quote! { #[model_schema_prop(ts_optional)] name: String },
+            "requires an Option<T> field",
+        ),
+        (
+            quote::quote! { #[model_schema_prop(as = String)] name: u64 },
+            "as = String",
+        ),
+    ] {
+        let errors = untagged_guard_errors(syn::parse_quote! {
+            enum Choice {
+                Named { #member },
+            }
+        });
+        assert_eq!(errors.len(), 1, "for {member}: {errors:?}");
+        assert!(
+            errors[0].contains(needle),
+            "{needle} missing for {member}: {}",
+            errors[0]
+        );
+    }
+}
+
 /// The guard turns away only what the registry proves has no members: a member keyed by a plain
 /// enum, or by a `String`, keeps the variant it had.
 #[cfg(all(
@@ -849,9 +935,194 @@ fn a_sequence_wrapped_map_key_is_refused_wherever_it_is_written() {
     }
 }
 
+/// A key whose own type writes a JSON array or a JSON object earns the same refusal a
+/// sequence-wrapped one does, and for the same reason: serde raises `key must be a string` and
+/// refuses the whole map, so there is no object for any surface to describe. The key is named by the
+/// shape it was written as, and what serde writes for it is named beside it.
+///
+/// Every depth is covered, the position a map sits in not being what decides whether its key can be
+/// written.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn assert_unwritable_map_key(field_type: &proc_macro2::TokenStream, key_name: &str) {
+    let error = field_map_key_error(field_type);
+    assert!(error.contains("compile_error"), "for {field_type}: {error}");
+    assert!(
+        error.contains("field `counts`"),
+        "for {field_type}: {error}"
+    );
+    assert!(
+        error.contains("a map key must be a value serde writes as a string"),
+        "for {field_type}: {error}"
+    );
+    assert!(error.contains(key_name), "for {field_type}: {error}");
+    assert!(
+        error.contains("refuses to serialize a map keyed by one"),
+        "for {field_type}: {error}"
+    );
+}
+
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_map_key_serde_refuses_to_write_is_refused_wherever_it_is_written() {
+    register_alias_info("Slot", "Slot", "slot_schema", AliasKind::EnumMembers);
+    for (field_type, key_name) in [
+        (quote::quote! { HashMap<(Slot, Slot), u32> }, "(_, _)"),
+        (quote::quote! { HashMap<(String, u32), u32> }, "(_, _)"),
+        (
+            quote::quote! { HashMap<HashMap<String, u32>, u32> },
+            "HashMap<_, _>",
+        ),
+        (
+            quote::quote! { HashMap<BTreeMap<String, u32>, u32> },
+            "HashMap<_, _>",
+        ),
+        (
+            quote::quote! { HashMap<String, HashMap<(Slot, Slot), u32>> },
+            "(_, _)",
+        ),
+        (
+            quote::quote! { HashMap<Slot, HashMap<(Slot, Slot), u32>> },
+            "(_, _)",
+        ),
+        (quote::quote! { Vec<HashMap<(Slot, Slot), u32>> }, "(_, _)"),
+        (
+            quote::quote! { Option<HashMap<(Slot, Slot), u32>> },
+            "(_, _)",
+        ),
+        (
+            quote::quote! { (String, HashMap<(Slot, Slot), u32>) },
+            "(_, _)",
+        ),
+        (
+            quote::quote! { Wrapper<HashMap<(Slot, Slot), u32>> },
+            "(_, _)",
+        ),
+    ] {
+        assert_unwritable_map_key(&field_type, key_name);
+    }
+}
+
+/// An `ObjectId` writes a `{"$oid": ...}` object, so it joins the tuple and the nested map: serde
+/// refuses a map keyed by one exactly as it refuses those.
+#[cfg(all(
+    feature = "object_id",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn an_object_id_map_key_is_refused_wherever_it_is_written() {
+    register_alias_info("Slot", "Slot", "slot_schema", AliasKind::EnumMembers);
+    for field_type in [
+        quote::quote! { HashMap<ObjectId, u32> },
+        quote::quote! { HashMap<String, HashMap<ObjectId, u32>> },
+        quote::quote! { HashMap<Slot, HashMap<ObjectId, u32>> },
+        quote::quote! { Vec<HashMap<ObjectId, u32>> },
+        quote::quote! { (String, HashMap<ObjectId, u32>) },
+        quote::quote! { Wrapper<HashMap<ObjectId, u32>> },
+    ] {
+        assert_unwritable_map_key(&field_type, "ObjectId");
+    }
+}
+
+/// An `Option`-wrapped key writes what its inner writes for a `Some` and nothing a key can be for a
+/// `None` — serde refuses the whole map the moment one is present — so the map is refused rather
+/// than described by the half that serializes. The inner is named, that being the remedy.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn an_optional_map_key_is_refused_wherever_it_is_written() {
+    register_alias_info("Slot", "Slot", "slot_schema", AliasKind::EnumMembers);
+    for (field_type, inner) in [
+        (quote::quote! { HashMap<Option<Slot>, u32> }, "Slot"),
+        (quote::quote! { HashMap<Option<String>, u32> }, "String"),
+        (quote::quote! { HashMap<Option<u32>, u64> }, "u32"),
+        (
+            quote::quote! { HashMap<String, HashMap<Option<Slot>, u32>> },
+            "Slot",
+        ),
+        (
+            quote::quote! { HashMap<Slot, HashMap<Option<Slot>, u32>> },
+            "Slot",
+        ),
+        (quote::quote! { Vec<HashMap<Option<Slot>, u32>> }, "Slot"),
+        (quote::quote! { Option<HashMap<Option<Slot>, u32>> }, "Slot"),
+        (
+            quote::quote! { (String, HashMap<Option<Slot>, u32>) },
+            "Slot",
+        ),
+        (
+            quote::quote! { Wrapper<HashMap<Option<Slot>, u32>> },
+            "Slot",
+        ),
+    ] {
+        let error = field_map_key_error(&field_type);
+        assert!(error.contains("compile_error"), "for {field_type}: {error}");
+        assert!(
+            error.contains("field `counts`"),
+            "for {field_type}: {error}"
+        );
+        assert!(
+            error.contains("a map key must be a value serde writes as a string"),
+            "for {field_type}: {error}"
+        );
+        assert!(
+            error.contains(&format!("Option<{inner}>")),
+            "for {field_type}: {error}"
+        );
+    }
+}
+
+/// The wrapper spellings answer in the order they were written, so a key wearing both keeps the
+/// diagnostic of its outermost one: an optional sequence is still refused as the sequence its array
+/// levels make it, and only a key whose outermost wrapper is the `Option` earns the `None`-key
+/// wording.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_key_wrapped_twice_is_named_by_its_outermost_wrapper() {
+    register_alias_info("Slot", "Slot", "slot_schema", AliasKind::EnumMembers);
+    let sequenced = field_map_key_error(&quote::quote! { HashMap<Option<Vec<Slot>>, u32> });
+    assert!(sequenced.contains("is a sequence of"), "got: {sequenced}");
+    let optional = field_map_key_error(&quote::quote! { HashMap<Option<(Slot, Slot)>, u32> });
+    assert!(optional.contains("Option<(_, _)>"), "got: {optional}");
+}
+
+/// A brand is `#[serde(transparent)]`, so a brand over a string writes the bare string a JSON object
+/// key is — it keys a map exactly as `String` does and is left alone, at every depth. A brand over
+/// anything else keeps the refusal it had: its wire is no key.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_string_wire_brand_keys_a_map_the_way_a_string_does() {
+    register_alias_info("Slot", "Slot", "slot_schema", AliasKind::EnumMembers);
+    register_alias_info(
+        "CorrelationId",
+        "CorrelationId",
+        "correlation_id_schema",
+        AliasKind::StringWire,
+    );
+    register_alias_info("Tick", "Tick", "tick_schema", AliasKind::NoEnumMembers);
+    for field_type in [
+        quote::quote! { HashMap<CorrelationId, u32> },
+        quote::quote! { HashMap<String, HashMap<CorrelationId, u32>> },
+        quote::quote! { HashMap<Slot, HashMap<CorrelationId, u32>> },
+        quote::quote! { HashMap<CorrelationId, HashMap<CorrelationId, u32>> },
+        quote::quote! { Vec<HashMap<CorrelationId, u32>> },
+        quote::quote! { (String, HashMap<CorrelationId, u32>) },
+        quote::quote! { Wrapper<HashMap<CorrelationId, u32>> },
+    ] {
+        let error = field_map_key_error(&field_type);
+        assert!(error.is_empty(), "for {field_type}, got: {error}");
+    }
+
+    let refused = field_map_key_error(&quote::quote! { HashMap<Tick, u32> });
+    assert!(
+        refused.contains("a map key must be a plain"),
+        "got: {refused}"
+    );
+    assert!(refused.contains("Tick"), "got: {refused}");
+}
+
 /// The guard is a filter, never a rewrite: a key the registry names as a plain enum, one it never
 /// saw registered, and one no position enumerates all keep the field they had. A sequence in the
-/// *value* is no key at all, so the sequence refusal does not reach across the map to it.
+/// *value* is no key at all, so the sequence refusal does not reach across the map to it — nor does
+/// any of its siblings, an `Option` value and a tuple value being ordinary members.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn a_map_key_that_may_have_enum_members_is_left_alone() {
@@ -861,10 +1132,33 @@ fn a_map_key_that_may_have_enum_members_is_left_alone() {
         quote::quote! { HashMap<String, u32> },
         quote::quote! { HashMap<Ghost, u32> },
         quote::quote! { HashMap<u32, u64> },
+        quote::quote! { HashMap<bool, u64> },
         quote::quote! { HashMap<String, HashMap<Slot, u32>> },
         quote::quote! { HashMap<Slot, Vec<u32>> },
         quote::quote! { HashMap<String, Vec<Slot>> },
+        quote::quote! { HashMap<String, Option<Slot>> },
+        quote::quote! { HashMap<String, (Slot, Slot)> },
+        quote::quote! { HashMap<String, HashMap<String, u32>> },
         quote::quote! { Vec<HashMap<Slot, u32>> },
+    ] {
+        let error = field_map_key_error(&field_type);
+        assert!(error.is_empty(), "for {field_type}, got: {error}");
+    }
+}
+
+/// Every key serde stringifies for the author keeps the open object it has always described as: the
+/// rule is refuse-what-serde-refuses, never refuse-what-is-not-a-`String`.
+#[cfg(all(
+    feature = "chrono",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn a_chrono_map_key_is_left_alone() {
+    for field_type in [
+        quote::quote! { HashMap<NaiveDate, u32> },
+        quote::quote! { HashMap<NaiveTime, u32> },
+        quote::quote! { HashMap<NaiveDateTime, u32> },
+        quote::quote! { HashMap<DateTime<Utc>, u32> },
     ] {
         let error = field_map_key_error(&field_type);
         assert!(error.is_empty(), "for {field_type}, got: {error}");
@@ -1064,6 +1358,181 @@ fn a_refused_key_and_an_unparseable_pattern_are_both_reported() {
         "got: {}",
         errors[1]
     );
+}
+
+/// The types whose schema this crate writes whole read no bound off the meta, on any surface, so a
+/// bound written on one is refused where it is written instead of accepted and dropped.
+#[cfg(feature = "chrono")]
+#[test]
+fn a_bound_on_a_chrono_field_is_refused() {
+    for (constraint, key) in [
+        (quote::quote! { minLength = 30 }, "minLength"),
+        (quote::quote! { maxLength = 30 }, "maxLength"),
+        (quote::quote! { pattern = "^[0-9-]+$" }, "pattern"),
+        (quote::quote! { minimum = 5 }, "minimum"),
+        (quote::quote! { maximum = 5 }, "maximum"),
+    ] {
+        for field_type in [
+            quote::quote! { chrono::NaiveDate },
+            quote::quote! { Option<chrono::NaiveTime> },
+            quote::quote! { Vec<chrono::NaiveDateTime> },
+            quote::quote! { chrono::DateTime<chrono::Utc> },
+        ] {
+            let errors = field_prop_guard_errors(&syn::parse_quote! {
+                struct Report {
+                    #[model_schema_prop(#constraint)]
+                    when: #field_type,
+                }
+            });
+            assert_eq!(errors.len(), 1, "for {key} on {field_type}: {errors:?}");
+            for needle in ["compile_error", "field `when`", key, "chrono::"] {
+                assert!(
+                    errors[0].contains(needle),
+                    "{needle} missing for {key} on {field_type}: {}",
+                    errors[0]
+                );
+            }
+        }
+    }
+}
+
+/// An `ObjectId` writes an object, not the string a length or a pattern measures, so it answers as
+/// the chrono types do.
+#[cfg(feature = "object_id")]
+#[test]
+fn a_bound_on_an_object_id_field_is_refused() {
+    let errors = field_prop_guard_errors(&syn::parse_quote! {
+        struct Report {
+            #[model_schema_prop(minLength = 30, pattern = "^[a-f]+$")]
+            id: ObjectId,
+        }
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    for needle in [
+        "compile_error",
+        "field `id`",
+        "minLength",
+        "pattern",
+        "ObjectId",
+    ] {
+        assert!(
+            errors[0].contains(needle),
+            "{needle} missing: {}",
+            errors[0]
+        );
+    }
+}
+
+/// A chrono or `ObjectId` field carrying no bound must not acquire one of these errors, and neither
+/// must the keys that name the type rather than constrain the value.
+#[cfg(all(feature = "chrono", feature = "object_id"))]
+#[test]
+fn a_fixed_shape_field_without_a_bound_is_left_alone() {
+    for field in [
+        quote::quote! { when: chrono::NaiveDate },
+        quote::quote! { #[model_schema_prop(as_number)] when: chrono::DateTime<chrono::Utc> },
+        quote::quote! { #[model_schema_prop(preprocess = ["trim"])] when: chrono::NaiveDate },
+        quote::quote! { id: ObjectId },
+    ] {
+        let errors = field_prop_guard_errors(&syn::parse_quote! {
+            struct Report {
+                #field
+            }
+        });
+        assert!(errors.is_empty(), "for {field}: {errors:?}");
+    }
+}
+
+/// `as` names the type the field already renders or it names nothing the expansion can honor: the
+/// surfaces are written from the declared type, and no second reading of the wire exists here.
+#[test]
+fn an_as_naming_another_type_is_refused() {
+    let errors = field_prop_guard_errors(&syn::parse_quote! {
+        struct Report {
+            #[model_schema_prop(as = String)]
+            id: u64,
+        }
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    for needle in ["compile_error", "field `id`", "as = String", "u64"] {
+        assert!(
+            errors[0].contains(needle),
+            "{needle} missing: {}",
+            errors[0]
+        );
+    }
+}
+
+/// The target may name the field itself or the value under its wrappers — the two readings the
+/// shipped uses of the key are written in — and neither is an override of anything.
+#[test]
+fn an_as_naming_the_rendered_type_is_accepted() {
+    for field in [
+        quote::quote! { #[model_schema_prop(as = String)] name: String },
+        quote::quote! { #[model_schema_prop(as = String)] name: Option<String> },
+        quote::quote! { #[model_schema_prop(as = String)] name: Vec<String> },
+        quote::quote! { #[model_schema_prop(as = Vec<String>)] name: Vec<String> },
+        quote::quote! { #[model_schema_prop(as = Inner)] name: Option<Inner> },
+        quote::quote! { #[model_schema_prop(as = String)] name: PathBuf },
+    ] {
+        let errors = field_prop_guard_errors(&syn::parse_quote! {
+            struct Report {
+                #field
+            }
+        });
+        assert!(errors.is_empty(), "for {field}: {errors:?}");
+    }
+}
+
+/// The three misuses that aborted expansion with `custom attribute panicked`, spanned on the field
+/// that carries them and carrying the message their validator already spelled.
+#[test]
+fn the_field_prop_misuses_leave_by_the_guard_channel() {
+    for (field, needle) in [
+        (
+            quote::quote! { #[model_schema_prop(ts_optional)] name: String },
+            "requires an Option<T> field",
+        ),
+        (
+            quote::quote! { #[model_schema_prop(as_number)] name: u32 },
+            "requires a chrono DateTime<Tz> field",
+        ),
+        (
+            quote::quote! { #[model_schema_prop(as = String, preprocess = ["trim"])] name: String },
+            "cannot be written on the same field",
+        ),
+    ] {
+        let errors = field_prop_guard_errors(&syn::parse_quote! {
+            struct Report {
+                #field
+            }
+        });
+        assert_eq!(errors.len(), 1, "for {field}: {errors:?}");
+        for expected in ["compile_error", "field `name`", needle] {
+            assert!(
+                errors[0].contains(expected),
+                "{expected} missing for {field}: {}",
+                errors[0]
+            );
+        }
+    }
+}
+
+/// The valid spellings of the same three keys stay valid.
+#[test]
+fn the_field_prop_flags_on_the_shapes_they_fit_are_accepted() {
+    for field in [
+        quote::quote! { #[model_schema_prop(ts_optional)] name: Option<String> },
+        quote::quote! { #[model_schema_prop(preprocess = ["trim"])] name: String },
+        quote::quote! { #[model_schema_prop(as = String, minLength = 1)] name: String },
+    ] {
+        let errors = field_prop_guard_errors(&syn::parse_quote! {
+            struct Report {
+                #field
+            }
+        });
+        assert!(errors.is_empty(), "for {field}: {errors:?}");
+    }
 }
 
 #[cfg(feature = "serde")]
@@ -1400,6 +1869,69 @@ fn a_brand_pattern_javascript_cannot_carry_names_the_type_and_the_construct() {
 fn a_brand_pattern_naming_a_group_the_rust_way_clears_the_guard() {
     let errors = brand_pattern_errors("^(?P<word>[a-z]+)$");
     assert!(errors.is_empty(), "got: {errors:?}");
+}
+
+/// The brand renders its inner into the brand rather than walking it as a field, so the map-key
+/// guard has to be run here or the inner escapes it entirely — leaving TypeScript to write a
+/// `Record` keyed by a type that supplies no keys. The brand earns the same diagnostic a field of
+/// the inner's type earns, whichever reason the key has.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_brand_over_a_map_with_an_unwritable_key_is_refused() {
+    register_alias_info("Doc", "Doc", "doc_schema", AliasKind::NoEnumMembers);
+    for (inner, needle) in [
+        (
+            quote::quote! { HashMap<Doc, u32> },
+            "a map key must be a plain",
+        ),
+        (quote::quote! { HashMap<Vec<Doc>, u32> }, "is a sequence of"),
+        (
+            quote::quote! { HashMap<(String, u32), u32> },
+            "serde writes `(_, _)`",
+        ),
+        (quote::quote! { HashMap<Option<Doc>, u32> }, "Option<Doc>"),
+        (
+            quote::quote! { Vec<HashMap<Doc, u32>> },
+            "a map key must be a plain",
+        ),
+    ] {
+        let errors = branded_errors(&syn::parse_quote! {
+            #[serde(transparent)]
+            struct Wrap(pub #inner);
+        });
+        assert_eq!(errors.len(), 1, "for {inner}, got: {errors:?}");
+        assert!(
+            errors[0].contains("compile_error"),
+            "for {inner}: {}",
+            errors[0]
+        );
+        assert!(
+            errors[0].contains("type `Wrap`"),
+            "for {inner}: {}",
+            errors[0]
+        );
+        assert!(errors[0].contains(needle), "for {inner}: {}", errors[0]);
+    }
+}
+
+/// The guard is a filter here too: a brand over a map whose key can be written, and a brand over no
+/// map at all, keep the brand they had.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_brand_over_a_writable_map_key_clears_the_guard() {
+    register_alias_info("Slot", "Slot", "slot_schema", AliasKind::EnumMembers);
+    for inner in [
+        quote::quote! { String },
+        quote::quote! { HashMap<String, u32> },
+        quote::quote! { HashMap<Slot, u32> },
+        quote::quote! { Vec<HashMap<String, u32>> },
+    ] {
+        let errors = branded_errors(&syn::parse_quote! {
+            #[serde(transparent)]
+            struct Wrap(pub #inner);
+        });
+        assert!(errors.is_empty(), "for {inner}, got: {errors:?}");
+    }
 }
 
 /// Every constraint the guard reacts to, applied one at a time: `has_string_constraints` is an
@@ -2299,16 +2831,15 @@ fn a_chrono_enum_keyed_map_value_keeps_its_format() {
     }
 }
 
-/// An `ObjectId` is the one value the two key paths spell differently: a `String`-keyed member
-/// carries a closed, unpatterned `$oid` object where an enum-keyed member carries the field-position
-/// form. Pinned so the divergence stays a decision rather than a drift.
+/// An enum-keyed member binds the one `$oid` object every position spells — the same one a
+/// `String`-keyed member carries. Pinned so neither key path can grow a spelling of its own.
 #[cfg(all(feature = "object_id", feature = "jsonschema"))]
 #[test]
-fn an_object_id_enum_keyed_map_value_keeps_the_field_position_oid_object() {
+fn an_object_id_enum_keyed_map_value_binds_the_one_oid_object() {
     let tokens = enum_key_map_value_binding(FieldDefType::ObjectId);
     assert!(
         tokens.contains(
-            r#"let value_schema = serde_json :: json ! ({ "type" : "object" , "properties" : { "$oid" : { "type" : "string" , "pattern" : "^[a-f\\d]{24}$" } } , "required" : ["$oid"] }) ;"#
+            r#"let value_schema = serde_json :: json ! ({ "type" : "object" , "properties" : { "$oid" : (serde_json :: json ! ({ "type" : "string" , "pattern" : "^[a-f\\d]{24}$" })) } , "required" : ["$oid"] , "additionalProperties" : false }) ;"#
         ),
         "got: {tokens}"
     );
@@ -2708,11 +3239,11 @@ fn a_nested_string_literal_map_value_keeps_its_const() {
     );
 }
 
-/// A nested `ObjectId` member carries the closed `$oid` object the outer member carries.
+/// A nested `ObjectId` member carries the `$oid` object the outer member carries.
 #[cfg(all(feature = "object_id", feature = "jsonschema"))]
 #[test]
 fn a_nested_object_id_map_value_keeps_its_oid_object() {
-    let inner_member = r#"{ "type" : "object" , "additionalProperties" : { "type" : "object" , "properties" : { "$oid" : { "type" : "string" } } , "required" : ["$oid"] , "additionalProperties" : false } }"#;
+    let inner_member = r#"{ "type" : "object" , "additionalProperties" : { "type" : "object" , "properties" : { "$oid" : (serde_json :: json ! ({ "type" : "string" , "pattern" : "^[a-f\\d]{24}$" })) } , "required" : ["$oid"] , "additionalProperties" : false } }"#;
     let bare = nested_string_key_map_value_schema(FieldDefType::ObjectId, 0);
     assert!(
         bare.contains(&format!(r#""additionalProperties" : {inner_member}"#)),
@@ -3380,18 +3911,17 @@ fn an_unwrapped_map_field_keeps_the_object_it_has_always_described_as() {
     );
 }
 
-/// The `ObjectId` divergence is frozen by position, so routing the tuple element through the map
-/// path's dispatch must not migrate it onto the `String`-keyed member's closed, unpatterned `$oid`
-/// object: the element keeps the patterned, open field-position form it has always carried.
+/// A tuple element is a slot, and a slot spells the `$oid` object the way every other position
+/// spells it. Pinned so the element cannot be handed a rendering of its own again.
 #[cfg(all(feature = "object_id", feature = "jsonschema"))]
 #[test]
-fn an_object_id_tuple_element_keeps_the_field_position_oid_object() {
+fn an_object_id_tuple_element_spells_the_one_oid_object() {
     let parsed = super::get_field_def("id", &syn::parse_quote!(ObjectId), "");
     assert_eq!(
         super::build_tuple_element_json_schema(&parsed)
             .unwrap()
             .to_string(),
-        r#"serde_json :: json ! ({ "type" : "object" , "properties" : { "$oid" : { "type" : "string" , "pattern" : "^[a-f\\d]{24}$" } } , "required" : ["$oid"] })"#
+        r#"serde_json :: json ! ({ "type" : "object" , "properties" : { "$oid" : (serde_json :: json ! ({ "type" : "string" , "pattern" : "^[a-f\\d]{24}$" })) } , "required" : ["$oid"] , "additionalProperties" : false })"#
     );
 }
 

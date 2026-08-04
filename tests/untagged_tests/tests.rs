@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tixschema::model_schema;
 
+#[cfg(all(feature = "jsonschema", feature = "object_id"))]
+use mongodb::bson::oid::ObjectId;
+
 // ISO-8601 date string. Branded newtype carries the regex pattern.
 #[model_schema(pattern = r"^\d{4}-\d{2}-\d{2}$")]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +88,40 @@ enum Bucket {
 enum KeyedUnion {
     Counts { counts: HashMap<Bucket, u32> },
     Labels { labels: HashMap<String, String> },
+}
+
+// An untagged struct variant carrying a constrained member, beside the same member written in a
+// tagged enum. The two must render the same constrained value.
+#[cfg(any(feature = "zod", feature = "jsonschema"))]
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum ConstrainedUnion {
+    Slug {
+        #[model_schema_prop(minLength = 2, pattern = "^[a-z]+$")]
+        slug: String,
+    },
+}
+
+#[cfg(any(feature = "zod", feature = "jsonschema"))]
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+enum ConstrainedTagged {
+    Slug {
+        #[model_schema_prop(minLength = 2, pattern = "^[a-z]+$")]
+        slug: String,
+    },
+}
+
+// An untagged member is written by a dispatch of its own, so it is a position an `ObjectId` can be
+// spelled in.
+#[cfg(all(feature = "jsonschema", feature = "object_id"))]
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum OidUnion {
+    One { one: ObjectId },
 }
 
 #[test]
@@ -417,4 +454,55 @@ fn test_untagged_map_member_keys_json_schema() {
         assert_eq!(branch["properties"][member], serde_json::json!({}));
         assert_eq!(branch["required"], serde_json::json!([member]));
     }
+}
+
+/// The member's constraint reaches Zod in the spelling the tagged twin's does. Before this, the
+/// attribute never reached the macro at all: the untagged walk left it on the emitted item and
+/// rustc refused it as an attribute that does not exist.
+#[test]
+#[cfg(feature = "zod")]
+fn test_untagged_member_constraint_zod() {
+    let expected = "slug: z.string().min(2).check(z.regex(/^[a-z]+$/)),";
+    let untagged = ConstrainedUnion::zod_schema();
+    assert!(untagged.contains(expected), "Got:\n{untagged}");
+    assert!(
+        ConstrainedTagged::zod_schema().contains(expected),
+        "the tagged twin must render the same member"
+    );
+}
+
+/// The same constraint in the JSON schema, keyword for keyword with the tagged twin's.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_untagged_member_constraint_json_schema() {
+    let untagged = ConstrainedUnion::json_schema();
+    let member = &untagged["anyOf"][0]["properties"]["slug"];
+    assert_eq!(
+        *member,
+        serde_json::json!({ "type": "string", "minLength": 2_i32, "pattern": "^[a-z]+$" }),
+        "Got:\n{untagged}"
+    );
+    let tagged = ConstrainedTagged::json_schema();
+    assert_eq!(
+        tagged["oneOf"][0]["properties"]["slug"], *member,
+        "the tagged twin must render the same member"
+    );
+}
+
+/// An untagged member spells the `$oid` object the way every other position spells it — a member is
+/// written by its own dispatch, which is one more place the object could have drifted.
+#[test]
+#[cfg(all(feature = "jsonschema", feature = "object_id"))]
+fn test_untagged_objectid_member_spells_the_one_oid_object() {
+    let schema = OidUnion::json_schema();
+    assert_eq!(
+        schema["anyOf"][0]["properties"]["one"],
+        serde_json::json!({
+            "type": "object",
+            "properties": { "$oid": { "type": "string", "pattern": r"^[a-f\d]{24}$" } },
+            "required": ["$oid"],
+            "additionalProperties": false
+        }),
+        "Got:\n{schema}"
+    );
 }

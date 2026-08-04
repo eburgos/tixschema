@@ -544,9 +544,8 @@ mod objectid_branded_surface_tests {
 
     /// An arrayed `ObjectId` writes the array around the `$oid` object, which is a container and
     /// so is described by the slot dispatch — the same rendering the unbranded tuple struct over
-    /// the same `Vec` publishes, hex pattern and open object included. Slot position and field
-    /// position spell the `$oid` object differently; the brand follows the slot it is
-    /// rendered through.
+    /// the same `Vec` publishes. Every position reads one builder, so the item here is the object
+    /// field position carries too.
     #[test]
     fn an_arrayed_objectid_brand_describes_the_array_of_oid_objects() {
         let zod = ObjectIdList::zod_schema();
@@ -566,10 +565,15 @@ mod objectid_branded_surface_tests {
                 "type": "array",
                 "items": {
                     "type": "object",
-                    "properties": { "$oid": { "type": "string", "pattern": "^[a-f\\d]{24}$" } },
-                    "required": ["$oid"]
+                    "properties": { "$oid": { "type": "string", "pattern": r"^[a-f\d]{24}$" } },
+                    "required": ["$oid"],
+                    "additionalProperties": false
                 }
             })
+        );
+        assert_eq!(
+            ObjectIdList::json_schema()["items"],
+            PlainObjectId::json_schema()
         );
     }
 }
