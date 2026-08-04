@@ -773,11 +773,95 @@ export type DocumentRecord = {
 
 ### Type Parameters
 
-A generic alias and a generic branded newtype are the two items that can name their own type parameters, and every surface reads such a name under one rule.
+A struct, a tuple struct, an enum, an alias and a branded newtype can each name their own type parameters, and every surface reads such a name under one rule.
 
-**TypeScript binds the parameter for real.** It is a type surface, and the declaration it emits carries the parameter list: `export type WrapperType<T> = Array<T>` is a generic type, and a use site fills `T` in.
+**TypeScript binds the parameter for real.** It is a type surface, and the declaration it emits carries the parameter list: `export type Wrapper<T> = { id: T }` is a generic type, and a use site fills `T` in.
 
-**Zod and JSON Schema erase it to the opaque value** -- `z.unknown()` and `{}`. A parameter names no type until the item is instantiated, and one schema is written for every instantiation, so the parameter admits any value while the shape around it -- an array, a map's keys, a tuple's arity -- stays described. Zod could not do otherwise even in principle: it publishes *values*, and a `const` takes no type parameters, so a parameter left to render would name a `$Schema` binding no emitted module declares, and the pasted output would throw a `ReferenceError` before reading a payload. The exported binding's annotation follows its value, taking the same opaque argument the value was composed with.
+**JSON Schema describes it as the open schema** -- `{}`. A parameter names no type until the item is instantiated, and one JSON schema is written for every instantiation, so the parameter admits any value while the shape around it -- an array, a map's keys, a tuple's arity -- stays described.
+
+**Zod publishes a factory rather than a schema.** A Zod schema is a runtime value and TypeScript generics do not exist at runtime, so there is no one value a generic type could publish: the caller has to say what fills each parameter before anything can validate. A generic type therefore exports `X$SchemaFactory`, a function taking one required schema argument per parameter, and a field written with a parameter composes the argument bound for it.
+
+```rust
+#[model_schema()]
+pub struct Wrapper<IdType> {
+    pub children: Vec<IdType>,
+    pub id: IdType,
+    pub name: String,
+}
+```
+
+```typescript
+export type Wrapper<IdType> = {
+  children: Array<IdType>;
+  id: IdType;
+  name: string;
+};
+
+const buildWrapper$Schema = <IdType extends ZodType>(
+  idType: IdType,
+) =>
+  z.strictObject({
+  children: z.array(idType),
+  id: idType,
+  name: z.string(),
+
+});
+
+type Wrapper$SchemaOf<IdType extends ZodType> = ReturnType<
+  typeof buildWrapper$Schema<IdType>
+>;
+
+interface Wrapper$SchemaFactoryCache {
+  get<IdType extends ZodType>(key: IdType): Wrapper$SchemaOf<IdType> | undefined;
+  set<IdType extends ZodType>(key: IdType, value: Wrapper$SchemaOf<IdType>): this;
+}
+
+const Wrapper$SchemaFactoryCache = createSchemaCache<Wrapper$SchemaFactoryCache>();
+
+export const Wrapper$SchemaFactory = <IdType extends ZodType>(
+  idType: IdType,
+): Wrapper$SchemaOf<IdType> => {
+  const hit = Wrapper$SchemaFactoryCache.get(idType);
+  if (hit) return hit;
+
+  const schema = buildWrapper$Schema(idType);
+  Wrapper$SchemaFactoryCache.set(idType, schema);
+  return schema;
+};
+```
+
+Every parameter is a real TypeScript type parameter, never a bare `ZodType` annotation: `ZodType` defaults its own parameters, so an argument annotated with it would infer every field it validates as `unknown` and the caller would learn nothing from the schema handed back. Arguments are required -- a default would let a call site say nothing about a filling and still be handed a schema, which is exactly the silent mis-validation the factory exists to prevent.
+
+Each factory memoizes on the *identity* of the arguments it was handed, one cache level per parameter. Two calls with the same argument objects return the identical schema, and no two argument lists collide -- a change in the first argument and a change in the last each key a different level:
+
+```typescript
+const wireDocument = EcmDocument$SchemaFactory(z.string(), z.number());
+const storedDocument = EcmDocument$SchemaFactory(objectIdSchema, z.date());
+
+EcmDocument$SchemaFactory(z.string(), z.number()) === wireDocument;  // false -- fresh arguments, new key
+```
+
+A generic type that also flattens keeps the deferred read of its base, so declaration order stays irrelevant: `.and(z.lazy(() => Envelope$Schema))` composes inside the factory unchanged.
+
+#### The module preamble
+
+The factories share one helper, which every generated module carries once above its per-type definitions:
+
+```rust
+use tixschema::typescript_preamble;
+
+const PREAMBLE: &str = typescript_preamble!();
+```
+
+```typescript
+const createSchemaCache = <Cache extends object>(): Cache => new WeakMap() as unknown as Cache;
+```
+
+A cache maps an argument to the schema built from *that* argument, so its value type depends on its key type. TypeScript can declare that dependency -- each factory writes it out, one interface per parameter -- but cannot construct a map that satisfies it, since a `WeakMap` fixes both of its own parameters at construction. So the dependency is declared where it does the work and asserted exactly once, in the preamble: that line is the only assertion anywhere in the output. A module holding no generic type needs no preamble; one holding any needs it exactly once.
+
+#### The two items that still publish a `const`
+
+A generic alias and a generic branded newtype publish a plain `const`, so a parameter inside either has no argument to name and still renders as the opaque value -- `z.unknown()`, the same answer JSON Schema gives:
 
 ```rust
 #[model_schema()]
@@ -792,11 +876,7 @@ const WrapperType$RawSchema = z.array(z.unknown());
 export const WrapperType$Schema: ZodType<WrapperType<unknown>> = WrapperType$RawSchema;
 ```
 
-```json
-{ "type": "array", "items": {} }
-```
-
-Only the item's *own* parameters erase. A name the expansion cannot resolve because the type lives elsewhere keeps its `Name$Schema` reference, since that type publishes the binding.
+Only the item's *own* parameters are read this way. A name the expansion cannot resolve because the type lives elsewhere keeps its `Name$Schema` reference, since that type publishes the binding.
 
 One consequence is worth stating outright: an opaque value carries no string checks, so a branded newtype cannot apply `pattern`, `minLength`, or `maxLength` to one of its own type parameters. See [Branded Newtype Validation Constraints](#branded-newtype-validation-constraints).
 

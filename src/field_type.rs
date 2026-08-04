@@ -12,7 +12,7 @@ use crate::features::model_schema_prop::ModelSchemaPropMeta;
 use crate::utils::{lookup_alias_info, safe_type_name};
 
 #[cfg(feature = "zod")]
-use crate::utils::{ZodUnionMember, escape_js_regex_literal};
+use crate::utils::{ZodUnionMember, escape_js_regex_literal, zod_factory_argument};
 
 #[cfg(feature = "chrono")]
 use crate::features::chrono;
@@ -400,46 +400,8 @@ impl FieldDef {
             self.field_type = FieldDefType::TypeParam(name.clone());
             return;
         }
-        match &mut self.field_type {
-            FieldDefType::SiblingType(_, generics) => {
-                for generic in generics.iter_mut() {
-                    generic.erase_type_parameters(parameters);
-                }
-            }
-            FieldDefType::Map(key, value) => {
-                key.erase_type_parameters(parameters);
-                value.erase_type_parameters(parameters);
-            }
-            FieldDefType::Tuple(elements) => {
-                for element in elements.iter_mut() {
-                    element.erase_type_parameters(parameters);
-                }
-            }
-            // Leaf types name no parameter.
-            FieldDefType::TypeParam(_)
-            | FieldDefType::Unknown
-            | FieldDefType::StringLiteral(_)
-            | FieldDefType::Boolean
-            | FieldDefType::String
-            | FieldDefType::U8
-            | FieldDefType::U16
-            | FieldDefType::U32
-            | FieldDefType::U64
-            | FieldDefType::I8
-            | FieldDefType::I16
-            | FieldDefType::I32
-            | FieldDefType::I64
-            | FieldDefType::Usize
-            | FieldDefType::Isize
-            | FieldDefType::F32
-            | FieldDefType::F64 => {}
-            #[cfg(feature = "object_id")]
-            FieldDefType::ObjectId => {}
-            #[cfg(feature = "chrono")]
-            FieldDefType::NaiveDate
-            | FieldDefType::NaiveTime
-            | FieldDefType::NaiveDateTime
-            | FieldDefType::DateTime => {}
+        for nested in self.nested_type_positions() {
+            nested.erase_type_parameters(parameters);
         }
     }
 
@@ -557,6 +519,56 @@ impl FieldDef {
     fn mark_nullable_at(&mut self, level: u8) {
         if !self.nullable_levels.contains(&level) {
             self.nullable_levels.push(level);
+        }
+    }
+
+    /// The defs written inside this one, which is every position a type parameter can be reached
+    /// at below the top: a `SiblingType`'s generic arguments, a `Map`'s key and value, a `Tuple`'s
+    /// elements. Every other variant names a type outright and holds no def.
+    ///
+    /// Listed exhaustively and in one place, so a variant that grows a nested position has to be
+    /// classified here rather than silently escaping every walk that reads a parameter.
+    fn nested_type_positions(&mut self) -> Vec<&mut Self> {
+        match &mut self.field_type {
+            FieldDefType::SiblingType(_, generics) => generics.iter_mut().collect(),
+            FieldDefType::Map(key, value) => vec![key, value],
+            FieldDefType::Tuple(elements) => elements.iter_mut().collect(),
+            // Leaf types hold no def.
+            FieldDefType::TypeParam(_)
+            | FieldDefType::Unknown
+            | FieldDefType::StringLiteral(_)
+            | FieldDefType::Boolean
+            | FieldDefType::String
+            | FieldDefType::U8
+            | FieldDefType::U16
+            | FieldDefType::U32
+            | FieldDefType::U64
+            | FieldDefType::I8
+            | FieldDefType::I16
+            | FieldDefType::I32
+            | FieldDefType::I64
+            | FieldDefType::Usize
+            | FieldDefType::Isize
+            | FieldDefType::F32
+            | FieldDefType::F64 => Vec::new(),
+            #[cfg(feature = "object_id")]
+            FieldDefType::ObjectId => Vec::new(),
+            #[cfg(feature = "chrono")]
+            FieldDefType::NaiveDate
+            | FieldDefType::NaiveTime
+            | FieldDefType::NaiveDateTime
+            | FieldDefType::DateTime => Vec::new(),
+        }
+    }
+
+    #[cfg(feature = "zod")]
+    fn opaque_type_parameters(&mut self) {
+        if matches!(self.field_type, FieldDefType::TypeParam(_)) {
+            self.field_type = FieldDefType::Unknown;
+            return;
+        }
+        for nested in self.nested_type_positions() {
+            nested.opaque_type_parameters();
         }
     }
 
@@ -851,6 +863,20 @@ impl FieldDef {
         value
     }
 
+    /// The same def with every [`FieldDefType::TypeParam`] written back as the opaque value.
+    ///
+    /// Zod names a parameter through the argument the enclosing factory binds for it, which only a
+    /// type that publishes a factory has. An alias and a branded newtype publish a plain `const`,
+    /// so there is no argument for a parameter inside either to name and the opaque value is still
+    /// all either can write — the answer [`Self::erase_type_parameters`] describes, kept for the
+    /// two surfaces that have not moved off it.
+    #[cfg(feature = "zod")]
+    #[must_use]
+    pub fn with_opaque_type_parameters(mut self) -> Self {
+        self.opaque_type_parameters();
+        self
+    }
+
     /// The type match plus one `z.array(…)` per array level, each carrying the `z.nullable(…)` of
     /// the level it wraps and the `.length(N)` of a level written as a fixed-size `[T; N]`, before
     /// the preprocess wrap.
@@ -865,9 +891,12 @@ impl FieldDef {
     #[cfg(feature = "zod")]
     fn zod_array_base(&self) -> String {
         let result = match &self.field_type {
-            // A `const` cannot be parameterised, so the value a parameter composes into is the
-            // opaque one — see [`FieldDef::erase_type_parameters`].
-            FieldDefType::TypeParam(_) | FieldDefType::Unknown => "z.unknown()".to_owned(),
+            FieldDefType::Unknown => "z.unknown()".to_owned(),
+            // A `const` cannot be parameterised, so a generic type publishes a factory and a
+            // parameter composes the argument that factory binds for it — see
+            // [`zod_factory_argument`]. A surface with no factory to bind one opaques the
+            // parameter first, through [`FieldDef::with_opaque_type_parameters`].
+            FieldDefType::TypeParam(name) => zod_factory_argument(name),
             FieldDefType::Tuple(lst) => {
                 let elements = lst
                     .iter()

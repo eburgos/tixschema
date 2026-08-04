@@ -747,10 +747,28 @@ pub fn ident_reexport_ts(rust_ident: &str, export_name: &str, ts_generics: &str)
 /// The zod counterpart of [`ident_reexport_ts`] — a binding, not a second schema, so the two names
 /// carry the one schema the item published. It is written unannotated because a zod-only build has
 /// no `ZodType` to annotate it with, and the binding's own type is the exported schema's.
+///
+/// `binding_suffix` is what the item's own binding is named with, and the two names have to agree
+/// on it: a generic type publishes a factory rather than a schema, so both spellings end in
+/// `$SchemaFactory` there and in `$Schema` everywhere else.
 #[cfg(feature = "zod")]
-pub fn ident_reexport_zod(rust_ident: &str, export_name: &str) -> String {
+pub fn ident_reexport_zod(rust_ident: &str, export_name: &str, binding_suffix: &str) -> String {
     ident_reexport_name(rust_ident, export_name).map_or_else(String::new, |referenced| {
-        format!("\n\nexport const {referenced}$Schema = {export_name}$Schema;")
+        format!("\n\nexport const {referenced}{binding_suffix} = {export_name}{binding_suffix};")
+    })
+}
+
+/// The identifier a factory binds one type parameter's schema argument to — `idType` for `IdType`.
+///
+/// A Zod schema is a value and a `const` cannot be parameterised, so a generic type publishes a
+/// function of one argument per parameter rather than a schema, and a field written with a
+/// parameter composes that argument. Lower-camel of the declared name, so the argument reads as
+/// the parameter it fills while staying a name of its own beside it.
+#[cfg(feature = "zod")]
+pub fn zod_factory_argument(parameter: &str) -> String {
+    let mut characters = parameter.chars();
+    characters.next().map_or_else(String::new, |first| {
+        format!("{}{}", first.to_lowercase(), characters.as_str())
     })
 }
 
