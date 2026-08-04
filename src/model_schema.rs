@@ -428,6 +428,20 @@ struct ModelSchemaArgs {
     pattern_rejection: Option<syn::Error>,
 }
 
+/// One `#[serde(flatten)]` source as a surface writes it: the spelling of what its members are, and
+/// whether the object writes them at all.
+///
+/// The two travel together for the reason the JSON-schema surface keeps them together in
+/// `MergedSource`. What the `Option` around a source says is not what an `Option` on any other
+/// field says — a merged source has no key to leave out, so the absence is every one of its keys at
+/// once, and the payloads the object writes are its own keys merged with the source's or its own
+/// keys alone. Where that choice is spelled is each surface's to answer.
+#[cfg(any(feature = "typescript", feature = "zod"))]
+struct MergedOperand {
+    optional: bool,
+    spelling: String,
+}
+
 /// Mutable output buffers shared by the discriminated-enum variant writers. Bundled so each writer
 /// takes a single always-mutated `&mut`, keeping its conditionally-written fields (Zod schema, JSON
 /// fields) from tripping `needless_pass_by_ref_mut` under feature subsets.
@@ -1026,19 +1040,36 @@ fn build_struct_validate_method(
 }
 
 /// Computes the TypeScript types and Zod schemas contributed by a struct's `#[serde(flatten)]`
-/// fields (an empty vector for either disabled output feature).
+/// fields, each beside the answer for whether the object writes those members at all (an empty
+/// vector for either disabled output feature).
+///
+/// The `Option` around a source is read here and spent by the surfaces rather than folded into the
+/// spelling: `typescript_typename` and `zod_type` answer the question a field with a key of its own
+/// asks, and a merged source has no key to leave out. It is the same `Option` the JSON-schema
+/// surface reads in `flatten_merged_source`.
 #[cfg(any(feature = "typescript", feature = "zod"))]
-fn compute_flatten_outputs(flattened_fields: &[FieldDef]) -> (Vec<String>, Vec<String>) {
+fn compute_flatten_outputs(
+    flattened_fields: &[FieldDef],
+) -> (Vec<MergedOperand>, Vec<MergedOperand>) {
     #[cfg(feature = "typescript")]
     let ts_types = flattened_fields
         .iter()
-        .map(FieldDef::typescript_typename)
+        .map(|fld| MergedOperand {
+            optional: fld.is_optional(),
+            spelling: fld.typescript_merged_typename(),
+        })
         .collect();
     #[cfg(not(feature = "typescript"))]
     let ts_types = Vec::new();
 
     #[cfg(feature = "zod")]
-    let zod_schemas = flattened_fields.iter().map(FieldDef::zod_type).collect();
+    let zod_schemas = flattened_fields
+        .iter()
+        .map(|fld| MergedOperand {
+            optional: fld.is_optional(),
+            spelling: fld.zod_merged_schema(),
+        })
+        .collect();
     #[cfg(not(feature = "zod"))]
     let zod_schemas = Vec::new();
 
@@ -8120,6 +8151,23 @@ fn flatten_merged_source(fld: &FieldDef) -> MergedSource {
     }
 }
 
+/// What one merged source is written as inside the intersection.
+///
+/// A source reached through an `Option` writes all of its members or none of them, so what it
+/// contributes is a choice: the source itself, or an object carrying no member of it. The second
+/// branch is the source's own keys mapped to `never`, which is the spelling that excludes a source
+/// written in part — `{}` is every object, so a payload carrying some of the source's members
+/// passes through it, and that payload is one the object never writes.
+#[cfg(feature = "typescript")]
+fn ts_merged_operand(operand: &MergedOperand) -> String {
+    let MergedOperand { optional, spelling } = operand;
+    if *optional {
+        format!("({spelling} | {{ [K in keyof {spelling}]?: never }})")
+    } else {
+        spelling.clone()
+    }
+}
+
 #[cfg(feature = "typescript")]
 /// Generates the TypeScript definition method (TypeScript types only, no Zod schema).
 fn generate_ts_definition_method(
@@ -8128,12 +8176,13 @@ fn generate_ts_definition_method(
     rust_ident: &str,
     type_code: &str,
     fields_empty: bool,
-    flatten_types: &[String],
+    flatten_types: &[MergedOperand],
 ) -> proc_macro2::TokenStream {
     let reexport = ident_reexport_ts(rust_ident, item_name, "");
     let has_flatten = !flatten_types.is_empty();
-    let intersection_only = flatten_types.join(" & ");
-    let intersection_suffix: String = flatten_types.iter().fold(String::new(), |mut acc, t| {
+    let operands: Vec<String> = flatten_types.iter().map(ts_merged_operand).collect();
+    let intersection_only = operands.join(" & ");
+    let intersection_suffix: String = operands.iter().fold(String::new(), |mut acc, t| {
         let _ = write!(acc, " & {t}");
         acc
     });
@@ -8190,52 +8239,97 @@ fn deferred_zod_operand(schema: &str) -> String {
     format!("z.lazy(() => {schema})")
 }
 
+/// What the object's schema is written as: the statements bound ahead of it, and the expression
+/// itself.
+///
+/// A source reached through an `Option` contributes its members or contributes nothing, and every
+/// other source contributes always, so what the object writes is one intersection per combination
+/// of the sources it merges — the multiplication the JSON-schema document is written from, in the
+/// order that document writes it. Zod can only say that as a union around the intersections: an
+/// intersection recognizes exactly the keys its operands name, and an operand that is itself a
+/// choice leaves each of its branches answering for the keys the other branch carries — which
+/// rejects every payload the object writes rather than admitting two of them.
+///
+/// With no absence to offer there is one intersection and no choice to write, so the object's own
+/// keys stay where they were. With one, they are bound to a name the branches read: they are the
+/// same keys in every branch, and a branch says what it adds to them rather than repeating them.
+#[cfg(feature = "zod")]
+fn zod_merged_statements(
+    item_name: &str,
+    own: &str,
+    operands: &[MergedOperand],
+) -> (String, String) {
+    let joined = |acc: &mut String, operand: &MergedOperand| {
+        let _ = write!(acc, ".and({})", deferred_zod_operand(&operand.spelling));
+    };
+    if !operands.iter().any(|operand| operand.optional) {
+        let mut expression = own.to_owned();
+        for operand in operands {
+            joined(&mut expression, operand);
+        }
+        return (String::new(), expression);
+    }
+
+    let own_name = format!("{item_name}$OwnSchema");
+    let mut branches = vec![own_name.clone()];
+    for operand in operands {
+        branches = branches
+            .into_iter()
+            .flat_map(|branch| {
+                let mut present = branch.clone();
+                joined(&mut present, operand);
+                if operand.optional {
+                    vec![present, branch]
+                } else {
+                    vec![present]
+                }
+            })
+            .collect();
+    }
+    let written = branches.iter().fold(String::new(), |mut acc, branch| {
+        let _ = writeln!(acc, "  {branch},");
+        acc
+    });
+    (
+        format!("const {own_name} = {own};\n\n"),
+        format!("z.union([\n{written}])"),
+    )
+}
+
 #[cfg(feature = "zod")]
 /// Generates the Zod schema method (Zod schemas only, no TypeScript types).
 ///
-/// Each flattened base joins the intersection through [`deferred_zod_operand`]: a base names a
+/// Each flattened base joins an intersection through [`deferred_zod_operand`]: a base names a
 /// `const` of its own, and one macro invocation sees one type, so nothing here can know whether
-/// that `const` is declared above the module this writes or below it.
+/// that `const` is declared above the module this writes or below it. How many intersections there
+/// are, and what is bound ahead of them, is [`zod_merged_statements`]'.
 fn generate_zod_schema_method(
     item_name: &str,
     rust_ident: &str,
     schema_code: &str,
     show_opts: &str,
-    flatten_schemas: &[String],
+    flatten_schemas: &[MergedOperand],
 ) -> proc_macro2::TokenStream {
-    #[cfg_attr(not(feature = "zod"), allow(unused_variables))]
-    let and_suffix: String = flatten_schemas.iter().fold(String::new(), |mut acc, s| {
-        let _ = write!(acc, ".and({})", deferred_zod_operand(s));
-        acc
-    });
-
     #[cfg(feature = "zod")]
     {
         let reexport = ident_reexport_zod(rust_ident, item_name);
+        let own = format!("z.strictObject({{\n{schema_code}\n}}){show_opts}");
+        let (preamble, expression) = zod_merged_statements(item_name, &own, flatten_schemas);
         // When typescript feature is enabled, generate TypeScript-style Zod schema
         // Note: Example injection is handled by the delegating method on the type itself
         #[cfg(feature = "typescript")]
-        {
-            quote::quote! {
-                pub fn zod_schema() -> String {
-                    format!(r#"const {}$RawSchema = z.strictObject({{
-{}
-}}){}{};
-
-export const {}$Schema: ZodType<{}> = {}$RawSchema;{}"#, #item_name, #schema_code, #show_opts, #and_suffix, #item_name, #item_name, #item_name, #reexport)
-                }
-            }
-        }
+        let body = format!(
+            "{preamble}const {item_name}$RawSchema = {expression};\n\nexport const \
+             {item_name}$Schema: ZodType<{item_name}> = {item_name}$RawSchema;{reexport}"
+        );
 
         // When typescript feature is disabled, generate JavaScript-style Zod schema
         #[cfg(not(feature = "typescript"))]
-        {
-            quote::quote! {
-                pub fn zod_schema() -> String {
-                    format!(r#"export const {}$Schema = z.strictObject({{
-{}
-}}){}{};{}"#, #item_name, #schema_code, #show_opts, #and_suffix, #reexport)
-                }
+        let body = format!("{preamble}export const {item_name}$Schema = {expression};{reexport}");
+
+        quote::quote! {
+            pub fn zod_schema() -> String {
+                #body.to_owned()
             }
         }
     }
