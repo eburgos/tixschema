@@ -15,7 +15,8 @@ use super::{
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use super::{
-    AliasKind, alias_map_key_guard_error, branded_guard_errors, check_map_key, register_alias_info,
+    AliasKind, alias_map_key_guard_error, branded_guard_errors, check_map_key,
+    ident_schema_module_name, register_alias_info,
 };
 
 #[cfg(feature = "typescript")]
@@ -73,6 +74,11 @@ const SEQUENCE_WRAPPERS: [&str; 6] = [
     "Vec",
     "VecDeque",
 ];
+
+/// The module name a generated hook is written against, standing in for the one the enum's own
+/// expansion registers.
+#[cfg(feature = "serde")]
+const UNTAGGED_MODULE: Option<&str> = Some("choice_schema");
 
 #[test]
 fn ts_optional_ok_on_option_field() {
@@ -286,11 +292,16 @@ fn positional_option_field_is_exempt() {
     guard_result(&item).unwrap();
 }
 
+/// Collects the untagged-path guard failures as rendered `compile_error!` token streams.
+#[cfg(feature = "serde")]
+fn untagged_guard_error_tokens(item: &mut syn::ItemEnum) -> Vec<proc_macro2::TokenStream> {
+    collect_untagged_members(item, UNTAGGED_MODULE).3
+}
+
 /// Collects the untagged-path guard failures as rendered `compile_error!` token strings.
 #[cfg(feature = "serde")]
 fn untagged_guard_errors(mut item: syn::ItemEnum) -> Vec<String> {
-    collect_untagged_members(&mut item)
-        .3
+    untagged_guard_error_tokens(&mut item)
         .iter()
         .map(ToString::to_string)
         .collect()
@@ -334,6 +345,68 @@ fn untagged_tuple_variant_option_is_exempt() {
     let errors = untagged_guard_errors(syn::parse_quote! {
         enum Choice {
             Maybe(Option<i64>),
+        }
+    });
+    assert!(errors.is_empty(), "got: {errors:?}");
+}
+
+/// Every shape the untagged rendering has no member spelling for is refused the way every other
+/// misuse is — as an error the enum reports for each offender, rather than a panic that stops the
+/// expansion at the first one and demotes its sentence to a `help:` note.
+#[cfg(feature = "serde")]
+#[test]
+fn untagged_unsupported_variant_shapes_are_all_reported() {
+    let errors = untagged_guard_errors(syn::parse_quote! {
+        enum Choice {
+            Bare,
+            Pair(String, String),
+            Note { id: String },
+            Empty(),
+        }
+    });
+    assert_eq!(errors.len(), 3, "got: {errors:?}");
+    for (error, needles) in errors.iter().zip([
+        ["`Bare`", "a unit variant"],
+        ["`Pair`", "a tuple variant with 2 fields"],
+        ["`Empty`", "a unit variant"],
+    ]) {
+        assert!(error.contains("compile_error"), "got: {error}");
+        for needle in needles {
+            assert!(error.contains(needle), "got: {error}");
+        }
+        assert!(
+            error.contains("supports newtype (`V(T)`) and struct"),
+            "got: {error}"
+        );
+    }
+}
+
+/// The refusal points at the variant it is about, not at the attribute on the enum: an enum with
+/// many variants otherwise sends its author to the wrong line.
+#[cfg(feature = "serde")]
+#[test]
+fn untagged_unsupported_variant_refusal_points_at_the_variant() {
+    use syn::spanned::Spanned as _;
+
+    let mut item: syn::ItemEnum =
+        syn::parse_str("enum Choice { Note { id: String }, Pair(String, String) }").unwrap();
+    let errors = untagged_guard_error_tokens(&mut item);
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert_eq!(
+        errors[0].span().source_text().as_deref(),
+        Some("Pair(String, String)")
+    );
+}
+
+/// The supported shapes are untouched: a newtype and a struct variant still render, and neither
+/// earns a word from the shape guard.
+#[cfg(feature = "serde")]
+#[test]
+fn untagged_supported_variant_shapes_are_left_alone() {
+    let errors = untagged_guard_errors(syn::parse_quote! {
+        enum Choice {
+            Note { id: String },
+            Plain(i64),
         }
     });
     assert!(errors.is_empty(), "got: {errors:?}");
@@ -402,12 +475,86 @@ fn untagged_member_carries_its_constraint_to_the_surfaces() {
             },
         }
     };
-    let (_, zod_parts, _, errors) = collect_untagged_members(&mut item);
+    let (_, zod_parts, _, errors, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
     assert!(errors.is_empty(), "got: {errors:?}");
     assert!(
         zod_parts[0].contains("z.string().min(2).check(z.regex(/^[a-z]+$/))"),
         "got: {}",
         zod_parts[0]
+    );
+}
+
+/// The same member reaches the Rust side through the generation the tagged twin uses: the validator
+/// and its deserializer, named for the variant, hung on the member by the injected attribute.
+#[cfg(feature = "serde")]
+#[test]
+fn untagged_member_constraint_generates_the_validator_and_hangs_it_on_the_member() {
+    let mut item: syn::ItemEnum = syn::parse_quote! {
+        enum Choice {
+            Named {
+                #[model_schema_prop(minLength = 2)]
+                name: String,
+            },
+        }
+    };
+    let (_, _, _, errors, validation_fns) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
+    assert!(errors.is_empty(), "got: {errors:?}");
+    assert_eq!(validation_fns.len(), 1, "got: {validation_fns:?}");
+    let rendered = validation_fns[0].to_string();
+    assert!(
+        rendered.contains("fn validate_named_name_value"),
+        "got: {rendered}"
+    );
+    assert!(
+        rendered.contains("fn deserialize_named_name"),
+        "got: {rendered}"
+    );
+
+    let attrs = &item.variants[0].fields.iter().next().unwrap().attrs;
+    let rendered_attrs = quote::quote!(#(#attrs)*).to_string();
+    assert!(
+        rendered_attrs.contains(r#"deserialize_with = "choice_schema::deserialize_named_name""#),
+        "got: {rendered_attrs}"
+    );
+}
+
+/// Without a schema module there is nothing for a `deserialize_with` to name, so the member is left
+/// exactly as written — the same subset in which a struct field generates no validator either.
+#[cfg(feature = "serde")]
+#[test]
+fn untagged_member_constraint_generates_nothing_without_a_schema_module() {
+    let mut item: syn::ItemEnum = syn::parse_quote! {
+        enum Choice {
+            Named {
+                #[model_schema_prop(minLength = 2)]
+                name: String,
+            },
+        }
+    };
+    let (_, _, _, errors, validation_fns) = collect_untagged_members(&mut item, None);
+    assert!(errors.is_empty(), "got: {errors:?}");
+    assert!(validation_fns.is_empty(), "got: {validation_fns:?}");
+    let attrs = &item.variants[0].fields.iter().next().unwrap().attrs;
+    assert!(attrs.is_empty(), "got: {}", quote::quote!(#(#attrs)*));
+}
+
+/// A newtype member has no ident for the two helpers and the accessor to be named from, so the
+/// bound is refused here for the reason it is refused on a tuple field — the position the generation
+/// this path now shares has always answered for.
+#[cfg(feature = "serde")]
+#[test]
+fn untagged_newtype_member_constraint_is_refused() {
+    let errors = untagged_guard_errors(syn::parse_quote! {
+        enum Choice {
+            Slug(#[model_schema_prop(minLength = 2)] String),
+        }
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(errors[0].contains("tuple field"), "got: {}", errors[0]);
+    assert!(
+        errors[0].contains("unsupported on a positional field"),
+        "got: {}",
+        errors[0]
     );
 }
 
@@ -426,7 +573,7 @@ fn untagged_member_prop_attribute_is_stripped_from_the_emitted_item() {
             },
         }
     };
-    collect_untagged_members(&mut item);
+    collect_untagged_members(&mut item, UNTAGGED_MODULE);
     let attrs = &item.variants[0].fields.iter().next().unwrap().attrs;
     assert!(
         !attrs
@@ -1188,6 +1335,45 @@ fn an_alias_targeting_a_map_key_with_no_members_is_refused() {
     assert!(error.contains("Doc"), "got: {error}");
 }
 
+/// A refused item still publishes the schema module every reference to it addresses.
+///
+/// The address is derived from the Rust ident and nothing else, so it is the same whatever became
+/// of the item — which is what lets a reference stand before it. An expansion that emitted no
+/// module left every referencing type with an `E0433` naming a module the author never wrote,
+/// sitting on top of the refusal they can act on.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_refused_item_publishes_the_module_a_reference_to_it_resolves_to() {
+    let ident = syn::Ident::new("CountsByDoc", proc_macro2::Span::call_site());
+    let module = super::refused_item_schema_module(&ident).to_string();
+    assert!(
+        module.contains(&format!(
+            "pub mod {}",
+            ident_schema_module_name("CountsByDoc")
+        )),
+        "got: {module}"
+    );
+    // The refusal is the one diagnostic the author reads, so the module adds none of its own.
+    assert!(!module.contains("compile_error"), "got: {module}");
+}
+
+/// And it publishes the call a reference emits: a sibling in field position asks the module it
+/// resolves to for `json_schema_within`, so that is the method that has to be there for the
+/// reference to compile.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_refused_items_module_answers_the_call_a_reference_emits() {
+    let span = proc_macro2::Span::call_site();
+    let ident = syn::Ident::new("CountsByRefusedDoc", span);
+    let module = super::refused_item_schema_module(&ident).to_string();
+    let addressed = super::sibling_schema_module_ident("CountsByRefusedDoc", span).to_string();
+    assert!(
+        module.contains(&format!("pub mod {addressed}")),
+        "got: {module}"
+    );
+    assert!(module.contains("json_schema_within"), "got: {module}");
+}
+
 /// The type the parser reads a field's written spelling as, rendered the way every surface receives
 /// it: one `FieldDef`, so a spelling that parses alike describes alike wherever it is dispatched.
 fn parsed_field_type(field_type: &proc_macro2::TokenStream) -> String {
@@ -1499,6 +1685,102 @@ fn a_fixed_shape_field_without_a_bound_is_left_alone() {
     }
 }
 
+/// A map and a tuple render their members, never themselves, so a bound written beside one reaches
+/// no surface either — the same loss the whole-schema types answer for, refused where it is written.
+#[test]
+fn a_bound_on_a_map_or_tuple_field_is_refused() {
+    for (constraint, key) in [
+        (quote::quote! { minLength = 30 }, "minLength"),
+        (quote::quote! { maxLength = 30 }, "maxLength"),
+        (quote::quote! { pattern = "^[a-z]+$" }, "pattern"),
+        (quote::quote! { minimum = 5 }, "minimum"),
+        (quote::quote! { maximum = 5 }, "maximum"),
+    ] {
+        for (field_type, shape) in [
+            (quote::quote! { HashMap<String, String> }, "a map"),
+            (quote::quote! { Option<HashMap<String, u32>> }, "a map"),
+            (quote::quote! { Vec<HashMap<String, u32>> }, "a map"),
+            (quote::quote! { (String, String) }, "a tuple"),
+            (quote::quote! { Option<(String, u32)> }, "a tuple"),
+        ] {
+            let errors = field_prop_guard_errors(&syn::parse_quote! {
+                struct Report {
+                    #[model_schema_prop(#constraint)]
+                    labels: #field_type,
+                }
+            });
+            assert_eq!(errors.len(), 1, "for {key} on {field_type}: {errors:?}");
+            for needle in ["compile_error", "field `labels`", key, shape, "brand"] {
+                assert!(
+                    errors[0].contains(needle),
+                    "{needle} missing for {key} on {field_type}: {}",
+                    errors[0]
+                );
+            }
+        }
+    }
+}
+
+/// A map or tuple field carrying no bound must not acquire one of these errors, and neither must the
+/// keys that name or wrap the rendering rather than constrain a value.
+#[test]
+fn a_map_or_tuple_field_without_a_bound_is_left_alone() {
+    for field in [
+        quote::quote! { labels: HashMap<String, String> },
+        quote::quote! { pair: (String, u32) },
+        quote::quote! { #[model_schema_prop(preprocess = ["trim"])] pair: (String, u32) },
+    ] {
+        let errors = field_prop_guard_errors(&syn::parse_quote! {
+            struct Report {
+                #field
+            }
+        });
+        assert!(errors.is_empty(), "for {field}: {errors:?}");
+    }
+}
+
+/// The docs a field's meta earns, read off the walk that writes them.
+fn field_docs_after_meta(item: &syn::ItemStruct) -> String {
+    let field = item.fields.iter().next().unwrap();
+    let name = field
+        .ident
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    let mut field_def = get_field_def(&name, &field.ty, "");
+    let meta = super::parse_model_schema_prop_attributes(&field.attrs);
+    super::apply_model_schema_prop_meta(&mut field_def, meta, &name);
+    field_def.docs
+}
+
+/// The `JSDoc` states the bound as a rule the value is held to, so it is written only where
+/// something holds the value to it — never for a placement the guard refuses, which was the one
+/// place the sentence appeared over nothing at all.
+#[test]
+fn the_constraint_docs_are_written_only_where_the_bound_is_kept() {
+    assert!(
+        field_docs_after_meta(&syn::parse_quote! {
+            struct Report {
+                #[model_schema_prop(minLength = 30)]
+                name: String,
+            }
+        })
+        .contains("Minimum length: 30"),
+        "a bound the surfaces render says so in the docs"
+    );
+    for field in [
+        quote::quote! { #[model_schema_prop(minLength = 30)] labels: HashMap<String, String> },
+        quote::quote! { #[model_schema_prop(maximum = 5)] pair: (u32, u32) },
+    ] {
+        let docs = field_docs_after_meta(&syn::parse_quote! {
+            struct Report {
+                #field
+            }
+        });
+        assert!(docs.is_empty(), "for {field}, got: {docs}");
+    }
+}
+
 /// `as` names the type the field already renders or it names nothing the expansion can honor: the
 /// surfaces are written from the declared type, and no second reading of the wire exists here.
 #[test]
@@ -1707,15 +1989,17 @@ fn branded_schema_example_carries_no_cfg_attribute() {
 #[cfg(feature = "typescript")]
 #[test]
 fn plain_enum_ts_definition_carries_no_cfg_attribute() {
-    let tokens = super::generate_plain_enum_ts_definition_method(" * Status", "Status", "  'a'");
+    let tokens =
+        super::generate_plain_enum_ts_definition_method(" * Status", "Status", "Status", "  'a'");
     assert_no_cfg_attribute(&tokens, "generate_plain_enum_ts_definition_method");
 }
 
 #[cfg(feature = "typescript")]
 #[test]
 fn discriminated_enum_ts_definition_carries_no_cfg_attribute() {
-    let tokens =
-        super::generate_discriminated_enum_ts_definition_method(" * Shape", "Shape", "  'a'");
+    let tokens = super::generate_discriminated_enum_ts_definition_method(
+        " * Shape", "Shape", "Shape", "  'a'",
+    );
     assert_no_cfg_attribute(&tokens, "generate_discriminated_enum_ts_definition_method");
 }
 
@@ -1815,7 +2099,7 @@ fn no_json_schema_emission_carries_a_warning_key() {
 fn alias_zod_method_carries_no_cfg_attribute() {
     let ty: syn::Type = syn::parse_quote!(String);
     let field_def = super::get_field_def("AliasType", &ty, "");
-    let tokens = super::generate_alias_zod_method("AliasType", &field_def);
+    let tokens = super::generate_alias_zod_method("AliasType", "Alias", &field_def);
     assert_no_cfg_attribute(&tokens, "generate_alias_zod_method");
 }
 
@@ -2975,18 +3259,29 @@ fn a_required_map_value_carries_no_nullable_wrap() {
 }
 
 /// The kind an alias registers is its *target's* answer, because a type path resolves through the
-/// alias. `Vec<Slot>` is the collection, not the enum it holds; a target this expansion has not
-/// seen registered is `Unknown`, which is not a negative.
+/// alias. A target serde writes as a bare string makes the alias one too, whatever spelling that
+/// target wears. `Vec<Slot>` is the collection, not the enum it holds; a target this expansion has
+/// not seen registered is `Unknown`, which is not a negative.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn an_alias_registers_the_kind_of_what_it_targets() {
     register_alias_info("Slot", "Slot", "slot_schema", AliasKind::EnumMembers);
     register_alias_info("Doc", "Doc", "doc_schema", AliasKind::NoEnumMembers);
+    register_alias_info(
+        "CorrelationId",
+        "CorrelationId",
+        "correlation_id_schema",
+        AliasKind::StringWire,
+    );
     for (target, expected) in [
         ("Slot", AliasKind::EnumMembers),
         ("Doc", AliasKind::NoEnumMembers),
-        ("String", AliasKind::NoEnumMembers),
+        ("String", AliasKind::StringWire),
+        ("PathBuf", AliasKind::StringWire),
+        ("CorrelationId", AliasKind::StringWire),
         ("u32", AliasKind::NoEnumMembers),
+        ("Vec<String>", AliasKind::NoEnumMembers),
+        ("Option<String>", AliasKind::NoEnumMembers),
         ("Vec<Slot>", AliasKind::NoEnumMembers),
         ("HashMap<Slot, String>", AliasKind::NoEnumMembers),
         ("Wrapper<Slot>", AliasKind::NoEnumMembers),
@@ -2996,6 +3291,133 @@ fn an_alias_registers_the_kind_of_what_it_targets() {
         let kind = super::alias_target_kind(&super::get_field_def("AliasType", &ty, ""));
         assert_eq!(kind, expected, "for alias target {target}");
     }
+}
+
+/// An alias of an alias of a string is still that bare string at the type path, so the chain carries
+/// `StringWire` through every link — and so does a chain ending at a string-wire brand.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn an_alias_chain_carries_the_string_wire_kind_to_its_end() {
+    register_alias_info(
+        "CorrelationId",
+        "CorrelationId",
+        "correlation_id_schema",
+        AliasKind::StringWire,
+    );
+    for end in ["String", "CorrelationId"] {
+        let first_target: syn::Type = syn::parse_str(end).unwrap();
+        let first = super::alias_target_kind(&super::get_field_def("FirstType", &first_target, ""));
+        assert_eq!(first, AliasKind::StringWire, "for a chain ending at {end}");
+        register_alias_info("First", "FirstType", "first_type_schema", first);
+
+        let second_target: syn::Type = syn::parse_str("First").unwrap();
+        let second =
+            super::alias_target_kind(&super::get_field_def("SecondType", &second_target, ""));
+        assert_eq!(second, AliasKind::StringWire, "for a chain ending at {end}");
+    }
+}
+
+/// [`super::branded_alias_kind`] read off the one field a brand is written with.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn brand_kind(inner: &str) -> AliasKind {
+    let inner_ty: syn::Type = syn::parse_str(inner).unwrap();
+    let item: syn::ItemStruct = syn::parse_quote! { struct Brand(#inner_ty); };
+    super::branded_alias_kind(item.fields.iter().next().unwrap())
+}
+
+/// The kind a brand registers is what serde writes for its inner, the brand being
+/// `#[serde(transparent)]` over it. A string-shaped inner is written as the bare string a JSON
+/// object key is; a plain enum's variant name is that bare string too, and the brand carries no
+/// `enum_members()` of its own to close an object over; a value serde stringifies is written as the
+/// object its bare inner writes; and an inner serde refuses as a key, or one this expansion has not
+/// classified, leaves the brand refused.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_brand_registers_what_serde_writes_for_its_inner() {
+    register_alias_info("Slot", "Slot", "slot_schema", AliasKind::EnumMembers);
+    register_alias_info("Doc", "Doc", "doc_schema", AliasKind::NoEnumMembers);
+    register_alias_info(
+        "CorrelationId",
+        "CorrelationId",
+        "correlation_id_schema",
+        AliasKind::StringWire,
+    );
+    register_alias_info("Tick", "Tick", "tick_schema", AliasKind::Stringified);
+    for (inner, expected) in [
+        ("String", AliasKind::StringWire),
+        ("PathBuf", AliasKind::StringWire),
+        ("CorrelationId", AliasKind::StringWire),
+        ("Slot", AliasKind::StringWire),
+        ("u32", AliasKind::Stringified),
+        ("bool", AliasKind::Stringified),
+        ("f64", AliasKind::Stringified),
+        ("Tick", AliasKind::Stringified),
+        ("Doc", AliasKind::NoEnumMembers),
+        ("Vec<String>", AliasKind::NoEnumMembers),
+        ("(String, String)", AliasKind::NoEnumMembers),
+        ("HashMap<String, u32>", AliasKind::NoEnumMembers),
+        ("Ghost", AliasKind::NoEnumMembers),
+    ] {
+        assert_eq!(brand_kind(inner), expected, "for brand inner {inner}");
+    }
+}
+
+/// The chrono renderings are keys serde stringifies, so a brand over one is written as the object
+/// its bare inner is written as.
+#[cfg(all(
+    feature = "chrono",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn a_brand_over_a_chrono_inner_is_stringified() {
+    for inner in ["NaiveDate", "NaiveTime", "NaiveDateTime", "DateTime<Utc>"] {
+        assert_eq!(
+            brand_kind(inner),
+            AliasKind::Stringified,
+            "for brand inner {inner}"
+        );
+    }
+}
+
+/// An `ObjectId` writes a JSON object, which serde uses as no key at all, so a brand over one stays
+/// refused where the stringifying inners are let through.
+#[cfg(all(
+    feature = "object_id",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn a_brand_over_an_object_id_stays_refused() {
+    assert_eq!(brand_kind("ObjectId"), AliasKind::NoEnumMembers);
+}
+
+/// A key the registry proves serde stringifies keeps the open object its bare inner describes as,
+/// at every depth a map is written at — and the refusals around it are untouched, a brand over a
+/// container or a struct still writing no key at all.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_stringified_key_is_left_alone_wherever_it_is_written() {
+    register_alias_info("Slot", "Slot", "slot_schema", AliasKind::EnumMembers);
+    register_alias_info("Tick", "Tick", "tick_schema", AliasKind::Stringified);
+    register_alias_info("Tags", "Tags", "tags_schema", AliasKind::NoEnumMembers);
+    for field_type in [
+        quote::quote! { HashMap<Tick, u32> },
+        quote::quote! { HashMap<String, HashMap<Tick, u32>> },
+        quote::quote! { HashMap<Slot, HashMap<Tick, u32>> },
+        quote::quote! { HashMap<Tick, HashMap<Tick, u32>> },
+        quote::quote! { Vec<HashMap<Tick, u32>> },
+        quote::quote! { (String, HashMap<Tick, u32>) },
+        quote::quote! { Wrapper<HashMap<Tick, u32>> },
+    ] {
+        let error = field_map_key_error(&field_type);
+        assert!(error.is_empty(), "for {field_type}, got: {error}");
+    }
+
+    let refused = field_map_key_error(&quote::quote! { HashMap<Tags, u32> });
+    assert!(
+        refused.contains("a map key must be a plain"),
+        "got: {refused}"
+    );
+    assert!(refused.contains("Tags"), "got: {refused}");
 }
 
 /// An alias of an alias of a plain enum is still a plain enum at the type path, so the chain

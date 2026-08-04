@@ -346,6 +346,87 @@ fn a_forward_referenced_renamed_item_exports_under_the_override() {
     }
 }
 
+/// The two declaration orders write the reference differently and always will: a reference
+/// standing before the item has nothing but the Rust ident to spell it by, and an override is not
+/// recoverable from that ident. What has to hold is name parity — every name a reference writes is
+/// one the emission the author collects also defines — so each nominal surface answers at the
+/// ident as well as at the override.
+#[cfg(feature = "typescript")]
+#[test]
+fn every_name_a_forward_item_reference_writes_is_defined_by_the_emission() {
+    let forward = NamesRenamedItemsDeclaredLater::ts_definition();
+    let emission = [
+        forward.clone(),
+        NamesRenamedItemsDeclaredEarlier::ts_definition(),
+        LaterRenamedGauge::ts_definition(),
+        LaterRenamedGrade::ts_definition(),
+    ]
+    .join("\n\n");
+    for (written, referenced) in [
+        ("gauge: LaterRenamedGauge;", "LaterRenamedGauge"),
+        ("grades: Array<LaterRenamedGrade>;", "LaterRenamedGrade"),
+    ] {
+        assert!(
+            forward.contains(written),
+            "{written} missing from: {forward}"
+        );
+        assert!(
+            emission.contains(&format!("export type {referenced} ")),
+            "{referenced} is referenced but never defined in: {emission}"
+        );
+    }
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn every_schema_a_forward_item_reference_names_is_defined_by_the_emission() {
+    let forward = NamesRenamedItemsDeclaredLater::zod_schema();
+    let emission = [
+        forward.clone(),
+        NamesRenamedItemsDeclaredEarlier::zod_schema(),
+        LaterRenamedGauge::zod_schema(),
+        LaterRenamedGrade::zod_schema(),
+    ]
+    .join("\n\n");
+    for (written, referenced) in [
+        ("gauge: LaterRenamedGauge$Schema", "LaterRenamedGauge"),
+        (
+            "grades: z.array(LaterRenamedGrade$Schema)",
+            "LaterRenamedGrade",
+        ),
+    ] {
+        assert!(
+            forward.contains(written),
+            "{written} missing from: {forward}"
+        );
+        assert!(
+            emission.contains(&format!("export const {referenced}$Schema")),
+            "{referenced} is referenced but never defined in: {emission}"
+        );
+    }
+}
+
+/// An item exported under its own Rust ident already answers at the spelling a forward reference
+/// has, so it publishes nothing extra — one exported name per surface, as before.
+#[cfg(any(feature = "typescript", feature = "zod"))]
+#[test]
+fn an_item_exported_under_its_ident_publishes_no_reexport() {
+    #[cfg(feature = "typescript")]
+    for ts in [
+        ReferencesRenamedItems::ts_definition(),
+        NamesRenamedItemsDeclaredLater::ts_definition(),
+    ] {
+        assert_eq!(ts.matches("export type ").count(), 1, "got: {ts}");
+    }
+    #[cfg(feature = "zod")]
+    for zod in [
+        ReferencesRenamedItems::zod_schema(),
+        NamesRenamedItemsDeclaredLater::zod_schema(),
+    ] {
+        assert_eq!(zod.matches("export const ").count(), 1, "got: {zod}");
+    }
+}
+
 #[cfg(feature = "zod")]
 #[test]
 fn a_forward_referenced_renamed_item_publishes_its_zod_schema_under_the_override() {

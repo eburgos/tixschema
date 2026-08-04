@@ -1,9 +1,12 @@
 use alloc::collections::{BTreeSet, BinaryHeap, VecDeque};
+#[cfg(feature = "chrono")]
+use chrono::NaiveDate;
 use core::hash::BuildHasher;
 use core::iter::once;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::DefaultHasher;
+use std::path::PathBuf;
 use tixschema::model_schema;
 
 /// The covered wrappers by the name a generated surface could leak. `Vec` is covered too but
@@ -160,6 +163,131 @@ struct StringKeyedBrandTwin {
     counts: HashMap<String, u64>,
     nested: HashMap<String, HashMap<String, u64>>,
     samples: HashMap<String, MetricSample>,
+}
+
+/// An alias of `String`. A type path resolves straight through it, so serde writes a key spelled
+/// this way as the bare string its target is — `{"abc": 1}`, the `String`-keyed map's own wire.
+#[model_schema()]
+type SlotKey = String;
+
+/// An alias of that alias, and an alias of a string-wire brand: every link of either chain ends at
+/// the same bare string.
+#[model_schema()]
+type SlotKeyRef = SlotKey;
+
+#[model_schema()]
+type CorrelationRef = CorrelationId;
+
+/// `PathBuf` writes the bare string a `String` writes, so an alias of one keys a map the same way.
+#[model_schema()]
+type PathKey = PathBuf;
+
+// An alias key is the open case under the alias's own exported name: the alias resolves to a
+// string, so the object is keyed by arbitrary strings — held below against the `String`-keyed twin.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct AliasKeyedMaps {
+    branded: HashMap<CorrelationRef, u64>,
+    chained: HashMap<SlotKeyRef, u64>,
+    counts: HashMap<SlotKey, u64>,
+    nested: HashMap<SlotKey, HashMap<SlotKey, u64>>,
+    paths: HashMap<PathKey, u64>,
+    samples: HashMap<SlotKey, MetricSample>,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct StringKeyedAliasKeyTwin {
+    branded: HashMap<String, u64>,
+    chained: HashMap<String, u64>,
+    counts: HashMap<String, u64>,
+    nested: HashMap<String, HashMap<String, u64>>,
+    paths: HashMap<String, u64>,
+    samples: HashMap<String, MetricSample>,
+}
+
+/// A brand over a stringifying scalar. serde writes the key its inner writes — `{"7": …}` — so the
+/// map serializes and reads back exactly as the bare-keyed one does, and describes as it does too.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+struct Tick(u32);
+
+/// A brand over that brand: the wire is the same stringified number at every link of the chain.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+struct TickRef(Tick);
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+struct Enabled(bool);
+
+/// A brand over a plain enum. serde writes the variant name, which is a bare string, so the brand
+/// keys a map the way a string does — under its own name, and open, the brand publishing no
+/// `enum_members()` of its own for a schema to close the object with. `no_display` is the inner's
+/// business, not the key's: a plain enum carries no `Display`, and the brand's key path never
+/// consults one.
+#[model_schema(no_display)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+struct SlotBrand(MetricSlot);
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct ScalarBrandKeyedMaps {
+    by_enabled: HashMap<Enabled, u64>,
+    by_tick: HashMap<Tick, u64>,
+    chained: HashMap<TickRef, u64>,
+    nested: HashMap<Tick, HashMap<Enabled, u64>>,
+    samples: HashMap<Tick, MetricSample>,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct ScalarKeyedBrandTwin {
+    by_enabled: HashMap<bool, u64>,
+    by_tick: HashMap<u32, u64>,
+    chained: HashMap<u32, u64>,
+    nested: HashMap<u32, HashMap<bool, u64>>,
+    samples: HashMap<u32, MetricSample>,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct EnumBrandKeyedMaps {
+    counts: HashMap<SlotBrand, u64>,
+    samples: HashMap<SlotBrand, MetricSample>,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct StringKeyedEnumBrandTwin {
+    counts: HashMap<String, u64>,
+    samples: HashMap<String, MetricSample>,
+}
+
+/// A brand over a chrono value: serde renders the inner into the key — `{"2020-01-02": …}` — the
+/// way it does for the bare chrono key.
+#[cfg(feature = "chrono")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+struct Day(NaiveDate);
+
+#[cfg(feature = "chrono")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct ChronoBrandKeyedMaps {
+    by_day: HashMap<Day, u64>,
+}
+
+#[cfg(feature = "chrono")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct ChronoKeyedBrandTwin {
+    by_day: HashMap<NaiveDate, u64>,
 }
 
 // A String key enumerates nothing, so one `additionalProperties` schema stands for every member —
@@ -1562,6 +1690,363 @@ fn test_brand_keyed_maps_match_the_serialized_form() {
 
     let read_back: BrandKeyedMaps = serde_json::from_value(payload).unwrap();
     assert_eq!(read_back, maps);
+}
+
+/// An alias key clears the derive under every feature set that reads one: the key is read off the
+/// field all three surfaces render from, so the same source cannot be a schema under one toggle and
+/// a refusal under another.
+#[test]
+fn test_alias_keyed_maps_constructible() {
+    let key: SlotKey = "abc".to_owned();
+    let maps = AliasKeyedMaps {
+        branded: HashMap::from([(CorrelationId(key.clone()), 4)]),
+        chained: HashMap::from([(key.clone(), 2)]),
+        counts: HashMap::from([(key.clone(), 1)]),
+        nested: HashMap::from([(key.clone(), HashMap::from([(key.clone(), 3)]))]),
+        paths: HashMap::from([(PathBuf::from("a/b"), 5)]),
+        samples: HashMap::from([(
+            key.clone(),
+            MetricSample {
+                label: "s".to_owned(),
+            },
+        )]),
+    };
+    assert_eq!(maps.counts[&key], 1);
+    assert_eq!(maps.nested[&key][&key], 3);
+
+    let twin = StringKeyedAliasKeyTwin {
+        branded: HashMap::from([("abc".to_owned(), 4)]),
+        chained: HashMap::from([("abc".to_owned(), 2)]),
+        counts: HashMap::from([("abc".to_owned(), 1)]),
+        nested: HashMap::from([("abc".to_owned(), HashMap::from([("abc".to_owned(), 3)]))]),
+        paths: HashMap::from([("a/b".to_owned(), 5)]),
+        samples: HashMap::new(),
+    };
+    assert_eq!(twin.counts["abc"], maps.counts[&key]);
+}
+
+/// An alias is the type it names, so a map keyed by an alias of a string builds the object a
+/// `String` key builds — field for field the `String`-keyed twin's, the alias's name being spent on
+/// the nominal surfaces and having nothing to say on the structural one.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_alias_keyed_maps_describe_as_their_string_keyed_twin() {
+    assert_eq!(
+        AliasKeyedMaps::json_schema()["properties"],
+        StringKeyedAliasKeyTwin::json_schema()["properties"]
+    );
+}
+
+/// The nominal surfaces keep the alias's own exported name as the key type, the way they keep an
+/// enum's and a brand's — a `Record` and a `z.record` keyed by the alias, not by bare `string`.
+#[test]
+#[cfg(all(feature = "typescript", feature = "zod"))]
+fn test_alias_keyed_maps_name_the_alias_as_the_key_type() {
+    let ts_definition = AliasKeyedMaps::ts_definition();
+    for expected in [
+        "branded: Partial<Record<CorrelationRefType, number>>;",
+        "chained: Partial<Record<SlotKeyRefType, number>>;",
+        "counts: Partial<Record<SlotKeyType, number>>;",
+        "nested: Partial<Record<SlotKeyType, Partial<Record<SlotKeyType, number>>>>;",
+        "paths: Partial<Record<PathKeyType, number>>;",
+        "samples: Partial<Record<SlotKeyType, MetricSample>>;",
+    ] {
+        assert!(
+            ts_definition.contains(expected),
+            "{expected} missing: {ts_definition}"
+        );
+    }
+
+    let zod_schema = AliasKeyedMaps::zod_schema();
+    for expected in [
+        "branded: z.record(CorrelationRefType$Schema, z.number().int())",
+        "chained: z.record(SlotKeyRefType$Schema, z.number().int())",
+        "counts: z.record(SlotKeyType$Schema, z.number().int())",
+        "nested: z.record(SlotKeyType$Schema, z.record(SlotKeyType$Schema, z.number().int()))",
+        "paths: z.record(PathKeyType$Schema, z.number().int())",
+        "samples: z.record(SlotKeyType$Schema, MetricSample$Schema)",
+    ] {
+        assert!(
+            zod_schema.contains(expected),
+            "{expected} missing: {zod_schema}"
+        );
+    }
+}
+
+/// The whole reason an alias of a string keys a map: serde writes the bare string the target is, so
+/// what the schema describes as an open object is the object the value actually writes — and reads
+/// back.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_alias_keyed_maps_match_the_serialized_form() {
+    let key: SlotKey = "abc".to_owned();
+    let maps = AliasKeyedMaps {
+        branded: HashMap::from([(CorrelationId(key.clone()), 4)]),
+        chained: HashMap::from([(key.clone(), 2)]),
+        counts: HashMap::from([(key.clone(), 1)]),
+        nested: HashMap::from([(key.clone(), HashMap::from([(key.clone(), 3)]))]),
+        paths: HashMap::from([(PathBuf::from("a/b"), 5)]),
+        samples: HashMap::from([(
+            key,
+            MetricSample {
+                label: "s".to_owned(),
+            },
+        )]),
+    };
+    let payload = serde_json::to_value(&maps).unwrap();
+    assert_eq!(payload["counts"], serde_json::json!({ "abc": 1_u64 }));
+    assert_eq!(payload["chained"], serde_json::json!({ "abc": 2_u64 }));
+    assert_eq!(payload["branded"], serde_json::json!({ "abc": 4_u64 }));
+    assert_eq!(payload["paths"], serde_json::json!({ "a/b": 5_u64 }));
+    assert_eq!(
+        payload["nested"],
+        serde_json::json!({ "abc": { "abc": 3_u64 } })
+    );
+
+    let schema = AliasKeyedMaps::json_schema();
+    for field_name in ["branded", "chained", "counts", "nested", "paths", "samples"] {
+        let field = &schema["properties"][field_name];
+        assert_eq!(field["type"], json_type_name(&payload[field_name]));
+        assert!(field["additionalProperties"].is_object(), "in: {field}");
+    }
+    assert_eq!(
+        schema["properties"]["samples"]["additionalProperties"],
+        MetricSample::json_schema()
+    );
+
+    let read_back: AliasKeyedMaps = serde_json::from_value(payload).unwrap();
+    assert_eq!(read_back, maps);
+}
+
+#[test]
+fn test_scalar_brand_keyed_maps_constructible() {
+    let maps = ScalarBrandKeyedMaps {
+        by_enabled: HashMap::from([(Enabled(true), 4)]),
+        by_tick: HashMap::from([(Tick(7), 1)]),
+        chained: HashMap::from([(TickRef(Tick(7)), 2)]),
+        nested: HashMap::from([(Tick(7), HashMap::from([(Enabled(true), 3)]))]),
+        samples: HashMap::from([(
+            Tick(7),
+            MetricSample {
+                label: "s".to_owned(),
+            },
+        )]),
+    };
+    assert_eq!(maps.by_tick[&Tick(7)], 1);
+    assert_eq!(maps.nested[&Tick(7)][&Enabled(true)], 3);
+
+    let twin = ScalarKeyedBrandTwin {
+        by_enabled: HashMap::from([(true, 4)]),
+        by_tick: HashMap::from([(7, 1)]),
+        chained: HashMap::from([(7, 2)]),
+        nested: HashMap::from([(7, HashMap::from([(true, 3)]))]),
+        samples: HashMap::new(),
+    };
+    assert_eq!(twin.by_tick[&7], maps.by_tick[&Tick(7)]);
+
+    let enum_branded = EnumBrandKeyedMaps {
+        counts: HashMap::from([(SlotBrand(MetricSlot::Daily), 1)]),
+        samples: HashMap::new(),
+    };
+    let enum_twin = StringKeyedEnumBrandTwin {
+        counts: HashMap::from([("Daily".to_owned(), 1)]),
+        samples: HashMap::new(),
+    };
+    assert_eq!(
+        enum_twin.counts["Daily"],
+        enum_branded.counts[&SlotBrand(MetricSlot::Daily)]
+    );
+}
+
+#[cfg(feature = "chrono")]
+#[test]
+fn test_chrono_brand_keyed_maps_constructible() {
+    let day = NaiveDate::from_ymd_opt(2020, 1, 2).unwrap();
+    let maps = ChronoBrandKeyedMaps {
+        by_day: HashMap::from([(Day(day), 1)]),
+    };
+    let twin = ChronoKeyedBrandTwin {
+        by_day: HashMap::from([(day, 1)]),
+    };
+    assert_eq!(twin.by_day[&day], maps.by_day[&Day(day)]);
+}
+
+/// A brand adds a name to its inner's wire and nothing else, so a brand over a value serde
+/// stringifies describes exactly as that bare inner describes — the open object with nothing said
+/// about its members, which is what the bare-keyed twin has always produced.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_scalar_brand_keyed_maps_describe_as_their_bare_inner_twin() {
+    assert_eq!(
+        ScalarBrandKeyedMaps::json_schema()["properties"],
+        ScalarKeyedBrandTwin::json_schema()["properties"]
+    );
+    assert_eq!(
+        ScalarBrandKeyedMaps::json_schema()["properties"]["by_tick"],
+        serde_json::json!({ "type": "object", "additionalProperties": true })
+    );
+}
+
+/// The name is the one thing the brand adds, and the nominal surfaces are where it lands: a
+/// `Record` and a `z.record` keyed by the brand, where the bare-inner twin writes `number` and
+/// `boolean`.
+#[test]
+#[cfg(all(feature = "typescript", feature = "zod"))]
+fn test_scalar_brand_keyed_maps_name_the_brand_as_the_key_type() {
+    let ts_definition = ScalarBrandKeyedMaps::ts_definition();
+    for expected in [
+        "by_enabled: Partial<Record<Enabled, number>>;",
+        "by_tick: Partial<Record<Tick, number>>;",
+        "chained: Partial<Record<TickRef, number>>;",
+        "nested: Partial<Record<Tick, Partial<Record<Enabled, number>>>>;",
+        "samples: Partial<Record<Tick, MetricSample>>;",
+    ] {
+        assert!(
+            ts_definition.contains(expected),
+            "{expected} missing: {ts_definition}"
+        );
+    }
+
+    let zod_schema = ScalarBrandKeyedMaps::zod_schema();
+    for expected in [
+        "by_enabled: z.record(Enabled$Schema, z.number().int())",
+        "by_tick: z.record(Tick$Schema, z.number().int())",
+        "chained: z.record(TickRef$Schema, z.number().int())",
+        "nested: z.record(Tick$Schema, z.record(Enabled$Schema, z.number().int()))",
+        "samples: z.record(Tick$Schema, MetricSample$Schema)",
+    ] {
+        assert!(
+            zod_schema.contains(expected),
+            "{expected} missing: {zod_schema}"
+        );
+    }
+}
+
+/// The premise the whole classification rests on: serde stringifies these keys, so the map it
+/// writes is a real object, and it reads back.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_scalar_brand_keyed_maps_match_the_serialized_form() {
+    let maps = ScalarBrandKeyedMaps {
+        by_enabled: HashMap::from([(Enabled(true), 4)]),
+        by_tick: HashMap::from([(Tick(7), 1)]),
+        chained: HashMap::from([(TickRef(Tick(7)), 2)]),
+        nested: HashMap::from([(Tick(7), HashMap::from([(Enabled(true), 3)]))]),
+        samples: HashMap::from([(
+            Tick(7),
+            MetricSample {
+                label: "s".to_owned(),
+            },
+        )]),
+    };
+    let payload = serde_json::to_value(&maps).unwrap();
+    assert_eq!(payload["by_tick"], serde_json::json!({ "7": 1_u64 }));
+    assert_eq!(payload["chained"], serde_json::json!({ "7": 2_u64 }));
+    assert_eq!(payload["by_enabled"], serde_json::json!({ "true": 4_u64 }));
+    assert_eq!(
+        payload["nested"],
+        serde_json::json!({ "7": { "true": 3_u64 } })
+    );
+
+    let schema = ScalarBrandKeyedMaps::json_schema();
+    for field_name in ["by_enabled", "by_tick", "chained", "nested", "samples"] {
+        let field = &schema["properties"][field_name];
+        assert_eq!(field["type"], json_type_name(&payload[field_name]));
+    }
+
+    let read_back: ScalarBrandKeyedMaps = serde_json::from_value(payload).unwrap();
+    assert_eq!(read_back, maps);
+}
+
+/// A brand over a plain enum writes the variant name, which is a bare string — so it describes as
+/// the `String`-keyed twin does, keeping the value's own schema under `additionalProperties`. The
+/// enum-keyed spelling closes the object over `enum_members()`; the brand has no such method, and
+/// the object it describes is open rather than closed over members nothing can supply.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_enum_brand_keyed_maps_describe_as_their_string_keyed_twin() {
+    assert_eq!(
+        EnumBrandKeyedMaps::json_schema()["properties"],
+        StringKeyedEnumBrandTwin::json_schema()["properties"]
+    );
+    assert_eq!(
+        EnumBrandKeyedMaps::json_schema()["properties"]["samples"]["additionalProperties"],
+        MetricSample::json_schema()
+    );
+}
+
+#[test]
+#[cfg(all(feature = "typescript", feature = "zod"))]
+fn test_enum_brand_keyed_maps_name_the_brand_as_the_key_type() {
+    let ts_definition = EnumBrandKeyedMaps::ts_definition();
+    assert!(
+        ts_definition.contains("counts: Partial<Record<SlotBrand, number>>;"),
+        "got: {ts_definition}"
+    );
+    let zod_schema = EnumBrandKeyedMaps::zod_schema();
+    assert!(
+        zod_schema.contains("samples: z.record(SlotBrand$Schema, MetricSample$Schema)"),
+        "got: {zod_schema}"
+    );
+}
+
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_enum_brand_keyed_maps_match_the_serialized_form() {
+    let maps = EnumBrandKeyedMaps {
+        counts: HashMap::from([(SlotBrand(MetricSlot::Daily), 1)]),
+        samples: HashMap::from([(
+            SlotBrand(MetricSlot::Weekly),
+            MetricSample {
+                label: "s".to_owned(),
+            },
+        )]),
+    };
+    let payload = serde_json::to_value(&maps).unwrap();
+    assert_eq!(payload["counts"], serde_json::json!({ "Daily": 1_u64 }));
+    assert!(payload["samples"]["Weekly"].is_object(), "got: {payload}");
+
+    let read_back: EnumBrandKeyedMaps = serde_json::from_value(payload).unwrap();
+    assert_eq!(read_back, maps);
+}
+
+/// A chrono value is stringified into a key by its own rendering, and a brand over one carries that
+/// rendering unchanged — the same twin equality the numeric brands keep.
+#[test]
+#[cfg(all(feature = "chrono", feature = "jsonschema"))]
+fn test_chrono_brand_keyed_maps_describe_as_their_bare_inner_twin() {
+    assert_eq!(
+        ChronoBrandKeyedMaps::json_schema()["properties"],
+        ChronoKeyedBrandTwin::json_schema()["properties"]
+    );
+
+    let day = NaiveDate::from_ymd_opt(2020, 1, 2).unwrap();
+    let maps = ChronoBrandKeyedMaps {
+        by_day: HashMap::from([(Day(day), 1)]),
+    };
+    let payload = serde_json::to_value(&maps).unwrap();
+    assert_eq!(
+        payload["by_day"],
+        serde_json::json!({ "2020-01-02": 1_u64 })
+    );
+
+    let read_back: ChronoBrandKeyedMaps = serde_json::from_value(payload).unwrap();
+    assert_eq!(read_back, maps);
+}
+
+#[test]
+#[cfg(all(feature = "chrono", feature = "typescript", feature = "zod"))]
+fn test_chrono_brand_keyed_maps_name_the_brand_as_the_key_type() {
+    let ts_definition = ChronoBrandKeyedMaps::ts_definition();
+    assert!(
+        ts_definition.contains("by_day: Partial<Record<Day, number>>;"),
+        "got: {ts_definition}"
+    );
+    let zod_schema = ChronoBrandKeyedMaps::zod_schema();
+    assert!(
+        zod_schema.contains("by_day: z.record(Day$Schema, z.number().int())"),
+        "got: {zod_schema}"
+    );
 }
 
 #[test]
