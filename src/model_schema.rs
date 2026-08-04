@@ -45,7 +45,9 @@ use crate::features::object_id::get_object_id_zod_schema_with;
 use crate::features::object_id::OBJECT_ID_HEX_PATTERN;
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-use crate::utils::{AliasKind, constraining_pattern, lookup_alias_info, portable_pattern};
+use crate::utils::{
+    AliasKind, constraining_pattern, lookup_alias_info, portable_pattern, record_value_shape,
+};
 
 #[cfg(feature = "serde")]
 use crate::utils::{TrivialPattern, trivial_pattern};
@@ -847,6 +849,8 @@ fn process_type_alias(item_type: ItemType, args: &ModelSchemaArgs) -> TokenStrea
     let alias_field_def = get_field_def(export_name.as_str(), &alias.ty, "");
     let kind = alias_target_kind(&alias_field_def);
     register_alias_info(&rust_ident_str, &export_name, &module_name, kind);
+    // An alias's schema *is* its target's, so it publishes whatever the target publishes.
+    record_value_shape(&rust_ident_str, published_value_shape(&alias_field_def));
     // An alias *is* the type it names, so a merge that flattens it multiplies over exactly the
     // members the target's own name would have given it.
     #[cfg(feature = "zod")]
@@ -1638,10 +1642,15 @@ fn branded_option_inner_error(
 /// number schema at all. A container inner never reaches that disagreement — it has no `Display`
 /// to render.
 ///
-/// A `SiblingType` inner — another brand, or an unresolved user type — is admitted, because
-/// expansion cannot know its shape. That is why the constrained path asserts `Display` separately:
-/// the guard bounds the schema surfaces, the assertion bounds the Rust one. A sequence wrapper is
-/// the one `SiblingType` spelling that says its shape outright, and is refused as the array it is.
+/// A `SiblingType` inner is asked of the registry, where the named item recorded what it publishes
+/// as it expanded. That is where the checks actually land: the brand emits `Inner$Schema.min(3)`,
+/// so a name whose recorded surface carries no such check is the very disagreement spelled one
+/// module out — `Blob$Schema.min(3)` against `const Blob$Schema = z.unknown().brand<"Blob">()` is a
+/// `TypeError` at load, before a payload is read. A name the registry cannot answer for keeps
+/// today's emission; see [`crate::utils::record_value_shape`]. That is also why the constrained
+/// path asserts `Display` separately: the guard bounds the schema surfaces, the assertion bounds
+/// the Rust one. A sequence wrapper is the one `SiblingType` spelling that says its shape outright
+/// without being asked, and is refused as the array it is.
 ///
 /// One of the brand's *own* type parameters is not such a name: it says its shape outright too,
 /// because both validating surfaces have already settled that it has none. Reading the inner off
@@ -1663,25 +1672,30 @@ fn branded_constraint_inner_error(
     if !args.has_string_constraints() {
         return None;
     }
-    let shape = non_string_inner_shape(&value_surface_field_def(
-        generics,
-        &get_field_def("_inner", &inner_field.ty, ""),
-    ))?;
-    Some(
-        syn::Error::new_spanned(
-            inner_field,
-            format!(
-                "model_schema: branded newtype `{name}` applies string constraints (pattern, \
-                 minLength, maxLength) to a {shape} inner type, which cannot carry them: Zod \
-                 reads `.min`/`.max` as bounds on the value itself and has no regex check for a \
-                 non-string schema, JSON Schema ignores `minLength`/`maxLength`/`pattern` outside \
-                 `\"type\": \"string\"`, and `validate()` measures the inner's `Display` \
-                 rendering — three surfaces, three answers. Brand a string-typed inner, or drop \
-                 the constraints."
-            ),
+    let inner = branded_inner_value_surface(generics, inner_field);
+    let shape = non_string_inner_shape(&inner)?;
+    let message = if let FieldDefType::SiblingType(inner_name, _) = &inner.field_type {
+        format!(
+            "model_schema: branded newtype `{name}` applies string constraints (pattern, \
+             minLength, maxLength) to `{inner_name}`, which this crate writes as the {shape} \
+             value the checks are then appended to — and that binding carries no string for them \
+             to measure: Zod either reads `.min`/`.max` as a bound on something else or has no \
+             such check on it at all, JSON Schema ignores `minLength`/`maxLength`/`pattern` \
+             outside `\"type\": \"string\"`, and `validate()` measures the inner's `Display` \
+             rendering — three surfaces, three answers. Brand a string-typed inner, or drop the \
+             constraints."
         )
-        .to_compile_error(),
-    )
+    } else {
+        format!(
+            "model_schema: branded newtype `{name}` applies string constraints (pattern, \
+             minLength, maxLength) to a {shape} inner type, which cannot carry them: Zod reads \
+             `.min`/`.max` as bounds on the value itself and has no regex check for a non-string \
+             schema, JSON Schema ignores `minLength`/`maxLength`/`pattern` outside `\"type\": \
+             \"string\"`, and `validate()` measures the inner's `Display` rendering — three \
+             surfaces, three answers. Brand a string-typed inner, or drop the constraints."
+        )
+    };
+    Some(syn::Error::new_spanned(inner_field, message).to_compile_error())
 }
 
 /// Names the shape an inner type resolves to that has no string for the constraints to measure, or
@@ -1697,12 +1711,17 @@ fn branded_constraint_inner_error(
 /// one. Reading only the first would let the second escape with the constraints reinterpreted: the
 /// JSON schema drops `minLength` outside a string, while Zod's `.min` on an array is a bound on
 /// how many items it holds rather than on how long any string is.
+///
+/// A name is asked of the registry rather than read off the declaration: the schema the checks are
+/// appended to is the one the *named* item published, which only that item's own expansion could
+/// have said anything about.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn non_string_inner_shape(inner: &FieldDef) -> Option<&'static str> {
     if inner.is_array() || sequence_wrapper_element(inner).is_some() {
         return Some("container");
     }
     match &inner.field_type {
+        FieldDefType::SiblingType(inner_name, _) => registered_value_shape(inner_name),
         FieldDefType::Map(..) | FieldDefType::Tuple(..) => Some("container"),
         FieldDefType::Boolean => Some("boolean"),
         FieldDefType::U8
@@ -1718,9 +1737,7 @@ fn non_string_inner_shape(inner: &FieldDef) -> Option<&'static str> {
         | FieldDefType::F32
         | FieldDefType::F64 => Some("numeric"),
         FieldDefType::TypeParam(_) | FieldDefType::Unknown => Some("opaque"),
-        FieldDefType::String | FieldDefType::StringLiteral(_) | FieldDefType::SiblingType(..) => {
-            None
-        }
+        FieldDefType::String | FieldDefType::StringLiteral(_) => None,
         #[cfg(feature = "object_id")]
         FieldDefType::ObjectId => None,
         #[cfg(feature = "chrono")]
@@ -1729,6 +1746,35 @@ fn non_string_inner_shape(inner: &FieldDef) -> Option<&'static str> {
         | FieldDefType::NaiveDateTime
         | FieldDefType::DateTime => None,
     }
+}
+
+/// What a registered name's own value surface is, and `None` for a name the registry has no answer
+/// for — one declared below the type reading it, or one this crate never expands at all.
+///
+/// Those two are the same absence and take the same answer, which is the emission the name has
+/// always had. Refusing on absence would refuse the unresolved user type the guard admits on
+/// purpose, and would make a diagnostic out of declaration order: moving a declaration would turn a
+/// compiling program into a refused one without changing what it means, and an author cannot act on
+/// a guard that fires on where a type is written rather than on what it is.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn registered_value_shape(rust_ident: &str) -> Option<&'static str> {
+    lookup_alias_info(rust_ident)?.value_shape
+}
+
+/// What the value surface a `#[model_schema()]` item publishes under a name is, as the
+/// constrained-brand guard reads shapes — the answer [`crate::utils::record_value_shape`] stores
+/// for every name a brand can then reach through.
+///
+/// An optional target is its own answer: it is written as `z.nullable(...)` or as the absent form,
+/// and neither carries the string checks the schema beneath it would have. The brand path never
+/// reaches this arm — an `Option` inner has its own refusal, which says the representable thing to
+/// say — but an item registering a name can be written over one.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn published_value_shape(written: &FieldDef) -> Option<&'static str> {
+    if written.is_optional() {
+        return Some("nullable");
+    }
+    non_string_inner_shape(written)
 }
 
 /// The `compile_error!` tokens for every `cfg_attr`-wrapped serde attribute a branded newtype
@@ -1778,6 +1824,23 @@ fn branded_pattern_error(name: &Ident, args: &ModelSchemaArgs) -> Option<proc_ma
     args.pattern_rejection
         .as_ref()
         .map(|rejection| pattern_guard_error(rejection, &format!("type `{name}`")))
+}
+
+/// The inner type as the two validating surfaces receive it: with the brand's own type parameters
+/// already erased to the opaque value, which is what those surfaces write for one.
+///
+/// The guard and the registration read the inner through this one call, so what a brand is refused
+/// for and what it records for the next brand to read cannot come apart.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn branded_inner_value_surface(generics: &syn::Generics, inner_field: &Field) -> FieldDef {
+    value_surface_field_def(generics, &get_field_def("_inner", &inner_field.ty, ""))
+}
+
+/// What a brand publishes as a value: `.brand()` returns the inner schema itself rather than a
+/// wrapper around it, so the brand carries exactly what its inner carries.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn branded_value_shape(generics: &syn::Generics, inner_field: &Field) -> Option<&'static str> {
+    non_string_inner_shape(&branded_inner_value_surface(generics, inner_field))
 }
 
 /// What the registry records for a brand.
@@ -1894,6 +1957,39 @@ fn flattened_field_guard_error(
     )
 }
 
+/// The attributes the emitted field keeps from the declaration it was written with: everything but
+/// this crate's own `model_schema_prop`, which is inert to every derive, so a copy left on the
+/// emitted item is one rustc reports as an attribute that does not exist, pointing at the author's
+/// line with a diagnostic naming the wrong macro.
+fn declaration_attrs(field: &Field) -> Vec<syn::Attribute> {
+    field
+        .attrs
+        .iter()
+        .filter(|attr| !attr.path().is_ident("model_schema_prop"))
+        .cloned()
+        .collect()
+}
+
+/// Writes the serde attributes generation held back onto the fields they were generated for.
+///
+/// An item its guards refused is emitted as written and without the schema module its surfaces
+/// would have lived in — see [`guard_failure_output`] — so a `#[serde(deserialize_with = "…")]`
+/// naming a function in that module would outlive the module and earn an `E0425` beside the
+/// refusal, pointing at the attribute rather than at anything the author wrote. Holding the
+/// injection back until the item has cleared every guard leaves the refusal the only diagnostic,
+/// and leaves nothing to unwrite when it fires.
+///
+/// One entry was pushed per field, in the order the collecting walk visited them, so the same walk
+/// hands each field back its own.
+fn apply_deferred_field_attrs<'field>(
+    fields: impl Iterator<Item = &'field mut Field>,
+    deferred: Vec<Vec<syn::Attribute>>,
+) {
+    for (field, attrs) in fields.zip(deferred) {
+        field.attrs.extend(attrs);
+    }
+}
+
 /// The `compile_error!` tokens for a `#[serde(flatten)]` field naming an untagged union one of
 /// whose recorded members serde does not write as an object, or `None` for every other field.
 ///
@@ -1952,6 +2048,7 @@ fn collect_struct_fields(
     let mut validation_fns: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut validate_bodies: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut guard_errors: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut deferred_attrs: Vec<Vec<syn::Attribute>> = Vec::new();
 
     for field in fields.iter_mut() {
         #[cfg(feature = "serde")]
@@ -1980,6 +2077,7 @@ fn collect_struct_fields(
             None,
             type_name,
             &type_parameters,
+            &mut deferred_attrs,
         );
 
         guard_errors.extend(field_guard_errors);
@@ -1997,6 +2095,10 @@ fn collect_struct_fields(
             validate_bodies.push(vb);
         }
         field_defs.push(f_def);
+    }
+
+    if guard_errors.is_empty() {
+        apply_deferred_field_attrs(fields.iter_mut(), deferred_attrs);
     }
 
     (
@@ -2032,8 +2134,15 @@ fn is_branded_newtype(item_struct: &syn::ItemStruct) -> bool {
 ///
 /// The module is named from the Rust ident, not from the export name, so that a type naming the
 /// struct before it has expanded assumes the module the struct goes on to publish.
+///
+/// `value_shape` is what the struct publishes as a value, for a brand written over its name to
+/// read back — see [`crate::utils::record_value_shape`].
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-fn struct_module_idents(name: &syn::Ident, name_override: Option<&str>) -> (String, String, Ident) {
+fn struct_module_idents(
+    name: &syn::Ident,
+    name_override: Option<&str>,
+    value_shape: Option<&'static str>,
+) -> (String, String, Ident) {
     let item_name = compute_item_export_name(&name.to_string(), name_override);
     let module_name = ident_schema_module_name(&name.to_string());
     let module_ident = Ident::new(&module_name, name.span());
@@ -2043,17 +2152,25 @@ fn struct_module_idents(name: &syn::Ident, name_override: Option<&str>) -> (Stri
         &module_name,
         AliasKind::NoEnumMembers,
     );
+    record_value_shape(&name.to_string(), value_shape);
     (item_name, module_name, module_ident)
 }
 
 /// The enum counterpart of [`struct_module_idents`], down to naming the module from the Rust ident.
 /// `kind` differs per enum shape: only a plain unit enum is given an `enum_members()`, so only it
-/// can back an enum-keyed map.
+/// can back an enum-keyed map — and only it is written as a `z.enum`, every other shape being a
+/// union of the members its variants render as.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-fn enum_module_idents(name: &syn::Ident, item_name: &str, kind: AliasKind) -> (String, Ident) {
+fn enum_module_idents(
+    name: &syn::Ident,
+    item_name: &str,
+    kind: AliasKind,
+    value_shape: Option<&'static str>,
+) -> (String, Ident) {
     let module_name = ident_schema_module_name(&name.to_string());
     let module_ident = Ident::new(&module_name, name.span());
     register_alias_info(&name.to_string(), item_name, &module_name, kind);
+    record_value_shape(&name.to_string(), value_shape);
     (module_name, module_ident)
 }
 
@@ -2126,7 +2243,7 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
     // Compute schema-module identifiers and register the struct in the alias registry.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     let (item_name, module_name, module_ident) =
-        struct_module_idents(&name, args.name_override.as_deref());
+        struct_module_idents(&name, args.name_override.as_deref(), Some("object"));
 
     // Extract docs early for example extraction
     #[cfg(any(feature = "typescript", feature = "zod"))]
@@ -2250,6 +2367,7 @@ fn collect_tuple_slots(
     let type_parameters = type_parameters_in_scope(generics);
     let mut slots: Vec<FieldDef> = Vec::new();
     let mut guard_errors: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut deferred_attrs: Vec<Vec<syn::Attribute>> = Vec::new();
     for field in fields.iter_mut() {
         let (slot, _, _, slot_guard_errors) = process_field(
             rename_all,
@@ -2258,9 +2376,13 @@ fn collect_tuple_slots(
             None,
             type_name,
             &type_parameters,
+            &mut deferred_attrs,
         );
         guard_errors.extend(slot_guard_errors);
         slots.push(slot);
+    }
+    if guard_errors.is_empty() {
+        apply_deferred_field_attrs(fields.iter_mut(), deferred_attrs);
     }
     (slots, guard_errors)
 }
@@ -2358,6 +2480,18 @@ fn build_tuple_struct_zod_schema_method(
     }
 }
 
+/// What a tuple struct publishes as a value: serde writes one slot as that slot's value alone, so
+/// the schema *is* the slot's schema and carries exactly what it carries; every other arity is the
+/// fixed array `z.tuple` writes, which takes no string check.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn tuple_struct_value_shape(fields: &syn::Fields) -> Option<&'static str> {
+    let mut slots = fields.iter();
+    match (slots.next(), slots.next()) {
+        (Some(slot), None) => published_value_shape(&get_field_def("_slot", &slot.ty, "")),
+        _ => Some("container"),
+    }
+}
+
 /// Processes a tuple struct that is not a branded newtype.
 ///
 /// serde writes a one-slot tuple struct as the slot's value alone and every other arity as a
@@ -2372,8 +2506,11 @@ fn process_tuple_struct(
     args: &ModelSchemaArgs,
 ) -> TokenStream {
     let name = item_struct.ident.clone();
-    let (item_name, module_name, module_ident) =
-        struct_module_idents(&name, args.name_override.as_deref());
+    let (item_name, module_name, module_ident) = struct_module_idents(
+        &name,
+        args.name_override.as_deref(),
+        tuple_struct_value_shape(&item_struct.fields),
+    );
 
     let (slots, guard_errors) = collect_tuple_slots(
         &mut item_struct.fields,
@@ -3440,6 +3577,31 @@ fn branded_guard_failure_output(
 /// binds them. The two validating surfaces read the inner off the erased def instead, so a
 /// parameter reaching either of them describes as the opaque value — see
 /// [`FieldDef::erase_type_parameters`].
+/// Registers a brand under its own name with both answers the registry holds about it: what serde
+/// writes for it where a map key is asked for, and what it publishes as a value where a brand
+/// written over its name asks.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn register_branded_newtype(
+    item_struct: &syn::ItemStruct,
+    rust_ident: &str,
+    item_name: &str,
+    module_name: &str,
+) {
+    let inner_field = item_struct.fields.iter().next().unwrap();
+    register_alias_info(
+        rust_ident,
+        item_name,
+        module_name,
+        branded_alias_kind(inner_field),
+    );
+    // A brand is written straight onto its inner's schema — `.brand()` hands back that same
+    // instance — so it publishes whatever its inner publishes.
+    record_value_shape(
+        rust_ident,
+        branded_value_shape(&item_struct.generics, inner_field),
+    );
+}
+
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> TokenStream {
     if let Some(output) = branded_guard_failure_output(&item_struct, args) {
@@ -3452,12 +3614,7 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
     let module_name = ident_schema_module_name(&rust_ident);
     let module_ident = Ident::new(&module_name, name.span());
 
-    register_alias_info(
-        &rust_ident,
-        &item_name,
-        &module_name,
-        branded_alias_kind(item_struct.fields.iter().next().unwrap()),
-    );
+    register_branded_newtype(&item_struct, &rust_ident, &item_name, &module_name);
 
     // Extract docs and example
     #[cfg(feature = "zod")]
@@ -3894,7 +4051,9 @@ fn process_plain_enum(
 ) -> TokenStream {
     // Compute the schema module name and register the enum so other types can find it.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    let (_, module_ident) = enum_module_idents(name, item_name, AliasKind::EnumMembers);
+    // A plain enum is written as a `z.enum` of its variant names, which takes no string check.
+    let (_, module_ident) =
+        enum_module_idents(name, item_name, AliasKind::EnumMembers, Some("enumerated"));
     #[cfg(any(feature = "typescript", feature = "zod"))]
     let rust_ident = name.to_string();
 
@@ -4045,6 +4204,7 @@ fn collect_discriminated_variants(
     let mut guard_errors: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut per_variant_checks: Vec<(proc_macro2::TokenStream, Vec<proc_macro2::TokenStream>)> =
         Vec::new();
+    let mut deferred_attrs: Vec<Vec<syn::Attribute>> = Vec::new();
     let enum_type_name = item_enum.ident.to_string();
 
     for item in &mut item_enum.variants {
@@ -4070,6 +4230,7 @@ fn collect_discriminated_variants(
                 Some(&variant_ident),
                 &enum_type_name,
                 &type_parameters,
+                &mut deferred_attrs,
             );
             if let Some(vfn) = validation_fn {
                 enum_validation_fns.push(vfn);
@@ -4096,6 +4257,16 @@ fn collect_discriminated_variants(
             field_defs,
             kind: variant_kind,
         });
+    }
+
+    if guard_errors.is_empty() {
+        apply_deferred_field_attrs(
+            item_enum
+                .variants
+                .iter_mut()
+                .flat_map(|item| item.fields.iter_mut()),
+            deferred_attrs,
+        );
     }
 
     (
@@ -4169,7 +4340,9 @@ fn process_discriminated_enum(
 ) -> TokenStream {
     // Compute the schema module name and register the enum so other types can find it.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    let (module_name, module_ident) = enum_module_idents(name, item_name, AliasKind::NoEnumMembers);
+    // Every other enum shape is written as a union of what its variants render as.
+    let (module_name, module_ident) =
+        enum_module_idents(name, item_name, AliasKind::NoEnumMembers, Some("union"));
 
     // Extract docs early for example extraction
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -4583,7 +4756,9 @@ fn process_externally_tagged_enum(
 ) -> TokenStream {
     // Compute the schema module name and register the enum so other types can find it.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    let (module_name, module_ident) = enum_module_idents(name, item_name, AliasKind::NoEnumMembers);
+    // Every other enum shape is written as a union of what its variants render as.
+    let (module_name, module_ident) =
+        enum_module_idents(name, item_name, AliasKind::NoEnumMembers, Some("union"));
 
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     let docs_vec = get_enum_docs(&item_enum);
@@ -4979,7 +5154,9 @@ fn process_internally_tagged_enum(
     item_name: &str,
 ) -> TokenStream {
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    let (module_name, module_ident) = enum_module_idents(name, item_name, AliasKind::NoEnumMembers);
+    // Every other enum shape is written as a union of what its variants render as.
+    let (module_name, module_ident) =
+        enum_module_idents(name, item_name, AliasKind::NoEnumMembers, Some("union"));
 
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     let docs_vec = get_enum_docs(&item_enum);
@@ -5186,7 +5363,7 @@ fn render_untagged_named(
             format!(
                 "{}{}: {}",
                 fld.name,
-                fld.ts_optional_key_marker(),
+                fld.optional_key_marker(),
                 fld.typescript_typename()
             )
         })
@@ -5408,6 +5585,28 @@ fn member_rejection_value(
     quote! { compile_error!(#message) }
 }
 
+/// The guard verdicts one untagged member earns, serde's and this crate's own combined — the
+/// checks [`process_field`] runs through its own channels, asked here by the walk that builds its
+/// field defs directly.
+#[cfg(feature = "serde")]
+fn untagged_member_guard_errors(
+    field: &Field,
+    field_def: &FieldDef,
+    field_name: &str,
+    prop_meta: &ModelSchemaPropMeta,
+    serde_field_meta: &SerdeFieldMeta,
+    positional_constraint_error: Option<proc_macro2::TokenStream>,
+) -> Vec<proc_macro2::TokenStream> {
+    let serde_guard_errors = field_guard_errors(
+        field,
+        field_name,
+        field_def.is_optional(),
+        serde_field_meta,
+        positional_constraint_error,
+    );
+    collect_field_guard_errors(field, field_def, field_name, prop_meta, serde_guard_errors)
+}
+
 /// Collects each untagged variant's union-member parts: the TypeScript member type, the Zod member
 /// schema, and the JSON-schema value token, plus the `compile_error!` tokens for any field-level
 /// guard violations. The first three are always returned; the caller selects which to use based on
@@ -5451,6 +5650,7 @@ fn collect_untagged_members(
     let mut validation_fns: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut per_variant_checks: Vec<(proc_macro2::TokenStream, Vec<proc_macro2::TokenStream>)> =
         Vec::new();
+    let mut deferred_attrs: Vec<Vec<syn::Attribute>> = Vec::new();
 
     for variant in &mut item_enum.variants {
         let kind = classify_variant(variant);
@@ -5469,12 +5669,8 @@ fn collect_untagged_members(
             let prop_meta = parse_model_schema_prop_attributes(&field.attrs);
             let serde_field_meta = parse_serde_field_attributes(&field.attrs);
 
-            let mut new_attrs: Vec<syn::Attribute> = field
-                .attrs
-                .iter()
-                .filter(|attr| !attr.path().is_ident("model_schema_prop"))
-                .cloned()
-                .collect();
+            let new_attrs = declaration_attrs(field);
+            let mut injected_attrs: Vec<syn::Attribute> = Vec::new();
             let (validation_fn, validate_body, positional_constraint_error) =
                 generate_field_validation(
                     field,
@@ -5482,9 +5678,10 @@ fn collect_untagged_members(
                     &field_name,
                     Some(&variant_name),
                     &prop_meta,
-                    &mut new_attrs,
+                    &mut injected_attrs,
                 );
             field.attrs = new_attrs;
+            deferred_attrs.push(injected_attrs);
             validation_fns.extend(validation_fn);
             if let (Some(body), Some(ident)) = (validate_body, field.ident.as_ref()) {
                 bound.push((ident.clone(), member_binding(ident)));
@@ -5492,19 +5689,14 @@ fn collect_untagged_members(
             }
 
             let mut field_def = get_field_def(&field_name, &field.ty, "");
-            let serde_guard_errors = field_guard_errors(
-                field,
-                &field_name,
-                field_def.is_optional(),
-                &serde_field_meta,
-                positional_constraint_error,
-            );
-            guard_errors.extend(collect_field_guard_errors(
+            apply_serde_key_omission(&mut field_def, field, &serde_field_meta);
+            guard_errors.extend(untagged_member_guard_errors(
                 field,
                 &field_def,
                 &field_name,
                 &prop_meta,
-                serde_guard_errors,
+                &serde_field_meta,
+                positional_constraint_error,
             ));
 
             field_def.resolve_self_references(&enum_type_name);
@@ -5534,6 +5726,16 @@ fn collect_untagged_members(
             }
             Err(err) => guard_errors.push(err.to_compile_error()),
         }
+    }
+
+    if guard_errors.is_empty() {
+        apply_deferred_field_attrs(
+            item_enum
+                .variants
+                .iter_mut()
+                .flat_map(|variant| variant.fields.iter_mut()),
+            deferred_attrs,
+        );
     }
 
     (
@@ -5729,7 +5931,9 @@ fn process_untagged_enum(
 ) -> TokenStream {
     // Compute the schema module name and register the enum so other types can find it.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    let (module_name, module_ident) = enum_module_idents(name, item_name, AliasKind::NoEnumMembers);
+    // Every other enum shape is written as a union of what its variants render as.
+    let (module_name, module_ident) =
+        enum_module_idents(name, item_name, AliasKind::NoEnumMembers, Some("union"));
 
     // Extract docs early for example extraction
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -5982,7 +6186,7 @@ fn write_named_variant_fields(
             "  /**\n{}\n**/\n  {}{}: {};",
             fld.docs,
             fld.name,
-            fld.ts_optional_key_marker(),
+            fld.optional_key_marker(),
             fld.typescript_typename()
         );
 
@@ -7459,7 +7663,7 @@ fn write_field_type_and_schema(
         "  /**\n{}\n**/\n  {}{}: {};",
         fld.docs,
         fld.name,
-        fld.ts_optional_key_marker(),
+        fld.optional_key_marker(),
         fld.typescript_typename()
     );
 
@@ -8106,11 +8310,22 @@ fn validate_ts_optional_flag(field_optional: bool, flag_set: bool) -> Result<(),
     Ok(())
 }
 
+/// Hands the field def the one serde fact the object surfaces spend: whether a `None` leaves the
+/// key out of the serialized object rather than writing it.
+///
+/// Only a named field has a key to leave out. A positional one is written by its place in a tuple,
+/// where nothing can be dropped and a `None` reaches the wire as a `null`, so the omission the
+/// attribute names never happens there and the slot spellings stand as written.
+#[cfg(feature = "serde")]
+const fn apply_serde_key_omission(field_def: &mut FieldDef, field: &Field, meta: &SerdeFieldMeta) {
+    field_def.omits_none = field.ident.is_some() && meta.omits_none;
+}
+
 /// Rejects a named `Option` field whose serde attributes let a `None` reach the wire as `null`.
 ///
-/// The generated contract renders such a field in the absent form — `T | undefined` and a
-/// `z.union([T, z.undefined()]).prefault(undefined)` inside a `z.strictObject` — which admits a
-/// missing key but never `null`. `is_optional` is the same signal that drives that rendering,
+/// The generated contract renders such a field in the absent form — `T` under an absent-able key
+/// and a `z.union([T, z.undefined()]).prefault(undefined)` inside a `z.strictObject` — which admits
+/// a missing key but never `null`. `is_optional` is the same signal that drives that rendering,
 /// which keeps the guard and the contract from ever disagreeing. Positional fields are exempt: a
 /// tuple slot cannot be omitted, so there `None` correctly renders as nullable.
 ///
@@ -8420,6 +8635,13 @@ fn check_os_string_field(
 /// Processes a field and returns its definition, optional module items (validators/deserializers),
 /// optional `validate_body` (contribution to the type-level `validate()` method), and the
 /// `compile_error!` tokens for every guard the field violates.
+///
+/// The serde attributes generation writes for the field are not written onto it here — they are
+/// pushed onto `deferred_attrs`, one entry per field in walk order, for
+/// [`apply_deferred_field_attrs`] to write once the whole item has cleared its guards. What is
+/// written here is only the stripping every path performs: `model_schema_prop` is this crate's own
+/// and inert to every derive, so a copy left on the emitted item is one rustc reports as an
+/// attribute that does not exist.
 fn process_field(
     rename_all: Option<&str>,
     field: &mut Field,
@@ -8427,13 +8649,18 @@ fn process_field(
     variant_ident: Option<&str>,
     type_name: &str,
     type_parameters: &[String],
+    deferred_attrs: &mut Vec<Vec<syn::Attribute>>,
 ) -> (
     FieldDef,
     Option<proc_macro2::TokenStream>,
     Option<proc_macro2::TokenStream>,
     Vec<proc_macro2::TokenStream>,
 ) {
-    let mut new_attrs = Vec::new();
+    // Only the serde side has anything to hang on a field; every other build holds back nothing.
+    #[cfg(feature = "serde")]
+    let mut injected_attrs: Vec<syn::Attribute> = Vec::new();
+    #[cfg(not(feature = "serde"))]
+    let injected_attrs: Vec<syn::Attribute> = Vec::new();
 
     #[cfg(feature = "serde")]
     let serde_field_meta = parse_serde_field_attributes(&field.attrs);
@@ -8452,14 +8679,9 @@ fn process_field(
     // Parse model_schema_prop attributes before filtering them out
     let model_schema_prop_meta = parse_model_schema_prop_attributes(&field.attrs);
 
-    // Filter out model_schema_prop attributes, and optionally inject serde deserialize_with
-    for attr in &field.attrs {
-        if !attr.path().is_ident("model_schema_prop") {
-            new_attrs.push(attr.clone());
-        }
-    }
+    let new_attrs = declaration_attrs(field);
 
-    // Generate validation code and inject serde attribute if serde feature is enabled
+    // Generate validation code and hold back the serde attribute it hangs on the field
     #[cfg(feature = "serde")]
     let (validation_fn, validate_body, positional_constraint_error) = generate_field_validation(
         field,
@@ -8467,7 +8689,7 @@ fn process_field(
         &raw_field_ident,
         variant_ident,
         &model_schema_prop_meta,
-        &mut new_attrs,
+        &mut injected_attrs,
     );
 
     #[cfg(not(feature = "serde"))]
@@ -8479,6 +8701,7 @@ fn process_field(
     let _: &_ = &(schema_module_name, variant_ident);
 
     field.attrs = new_attrs;
+    deferred_attrs.push(injected_attrs);
 
     let field_type: &syn::Type = &field.ty;
 
@@ -8492,6 +8715,9 @@ fn process_field(
     // (e.g. `Vec<Self>`) are treated exactly like `Vec<EnclosingType>`. Resolved before the guards
     // read the field so each one asks its question of the type the surfaces will render.
     field_def.resolve_self_references(type_name);
+
+    #[cfg(feature = "serde")]
+    apply_serde_key_omission(&mut field_def, field, &serde_field_meta);
 
     #[cfg(feature = "serde")]
     let serde_guard_errors = field_guard_errors(
@@ -8565,8 +8791,12 @@ fn positional_constraint_guard_error(
 }
 
 /// Generates per-field serde validation code (static validator + `deserialize_with`) and, when
-/// constraints apply, injects the corresponding `#[serde(deserialize_with = ...)]` attribute — plus
-/// the `#[serde(default)]` that keeps an optional key optional under one.
+/// constraints apply, collects the corresponding `#[serde(deserialize_with = ...)]` attribute into
+/// `injected_attrs` — plus the `#[serde(default)]` that keeps an optional key optional under one.
+///
+/// The attributes are collected rather than written: they name functions in the schema module, and
+/// an item its guards refuse publishes no such module. [`apply_deferred_field_attrs`] writes them
+/// once the item has cleared every guard.
 ///
 /// Returns (`module_items`, `validate_body`, `guard_error`).
 #[cfg(feature = "serde")]
@@ -8576,7 +8806,7 @@ fn generate_field_validation(
     raw_field_ident: &str,
     variant_ident: Option<&str>,
     model_schema_prop_meta: &ModelSchemaPropMeta,
-    new_attrs: &mut Vec<syn::Attribute>,
+    injected_attrs: &mut Vec<syn::Attribute>,
 ) -> (
     Option<proc_macro2::TokenStream>,
     Option<proc_macro2::TokenStream>,
@@ -8639,11 +8869,11 @@ fn generate_field_validation(
 
     let deserialize_with_path = format!("{module_name}::deserialize_{helper_stem}");
     let path_lit = syn::LitStr::new(&deserialize_with_path, proc_macro2::Span::call_site());
-    new_attrs.push(syn::parse_quote! {
+    injected_attrs.push(syn::parse_quote! {
         #[serde(deserialize_with = #path_lit)]
     });
     if needs_injected_default(&shape.wraps, has_serde_default(&field.attrs)) {
-        new_attrs.push(syn::parse_quote! {
+        injected_attrs.push(syn::parse_quote! {
             #[serde(default)]
         });
     }

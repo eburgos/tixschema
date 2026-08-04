@@ -17,7 +17,7 @@ use super::{
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use super::{
     AliasKind, alias_map_key_guard_error, branded_guard_errors, check_map_key,
-    ident_schema_module_name, register_alias_info,
+    ident_schema_module_name, record_value_shape, register_alias_info,
 };
 
 #[cfg(all(feature = "serde", feature = "zod"))]
@@ -1537,6 +1537,146 @@ fn a_refused_items_module_answers_the_call_a_reference_emits() {
     assert!(module.contains("json_schema_within"), "got: {module}");
 }
 
+/// Every attribute the walked fields are left carrying, rendered as the emitted item carries them.
+#[cfg(feature = "serde")]
+fn walked_field_attrs<'field>(fields: impl Iterator<Item = &'field syn::Field>) -> String {
+    let attrs: Vec<&syn::Attribute> = fields.flat_map(|field| field.attrs.iter()).collect();
+    quote::quote!(#(#attrs)*).to_string()
+}
+
+/// Every field of an enum, in the order the walks visit them.
+#[cfg(feature = "serde")]
+fn enum_fields(item: &syn::ItemEnum) -> impl Iterator<Item = &syn::Field> {
+    item.variants
+        .iter()
+        .flat_map(|variant| variant.fields.iter())
+}
+
+/// A refused pattern leaves the item without the `deserialize_with` naming the module the refusal
+/// drops.
+///
+/// A pattern is recorded as written whether or not a guard refused it, so the constraint is still
+/// a string constraint by the time the hook is generated: the item was emitted carrying
+/// `#[serde(deserialize_with = "probe_caret_schema::deserialize_anything")]` beside the
+/// `compile_error!`, while the module holding that function was replaced by the absorbing one —
+/// an `E0425` pointing at the attribute rather than at anything the author wrote.
+#[cfg(feature = "serde")]
+#[test]
+fn a_refused_pattern_leaves_no_hook_naming_the_dropped_module() {
+    let mut item: syn::ItemStruct = syn::parse_quote! {
+        struct ProbeCaret {
+            #[model_schema_prop(pattern = "^.$")]
+            anything: String,
+        }
+    };
+    let errors = super::collect_struct_fields(
+        &mut item.fields,
+        None,
+        Some("probe_caret_schema"),
+        "ProbeCaret",
+        &syn::Generics::default(),
+    )
+    .4;
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(
+        errors[0].to_string().contains("any-character class"),
+        "got: {}",
+        errors[0]
+    );
+    let rendered = walked_field_attrs(item.fields.iter());
+    assert_eq!(rendered, "", "got: {rendered}");
+}
+
+/// The same for a constraint written where the position cannot carry it: the refused slot takes
+/// none, and the member that would have earned one on its own is held back with it, the whole
+/// item's surface having been dropped.
+#[cfg(feature = "serde")]
+#[test]
+fn a_constraint_refused_its_placement_leaves_no_hook_naming_the_dropped_module() {
+    let mut item: syn::ItemEnum = syn::parse_quote! {
+        enum Action {
+            Slug(#[model_schema_prop(minLength = 2)] String),
+            Named {
+                #[model_schema_prop(minLength = 2)]
+                name: String,
+            },
+        }
+    };
+    let errors = collect_discriminated_variants(&mut item, None, Some("action_schema")).2;
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(
+        errors[0]
+            .to_string()
+            .contains("unsupported on a positional field"),
+        "got: {}",
+        errors[0]
+    );
+    let rendered = walked_field_attrs(enum_fields(&item));
+    assert_eq!(rendered, "", "got: {rendered}");
+}
+
+/// And for a map key no surface can write: the key is refused, and the constrained member beside
+/// it keeps no hook naming a module that is no longer published.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn a_refused_map_key_leaves_no_hook_naming_the_dropped_module() {
+    register_alias_info("Doc", "Doc", "doc_schema", AliasKind::NoEnumMembers);
+    let mut item: syn::ItemEnum = syn::parse_quote! {
+        enum Choice {
+            Named {
+                #[model_schema_prop(minLength = 2)]
+                name: String,
+                counts: HashMap<Doc, u32>,
+            },
+        }
+    };
+    let errors = collect_untagged_members(&mut item, UNTAGGED_MODULE).4;
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(
+        errors[0].to_string().contains("a map key must be a plain"),
+        "got: {}",
+        errors[0]
+    );
+    let rendered = walked_field_attrs(enum_fields(&item));
+    assert_eq!(rendered, "", "got: {rendered}");
+}
+
+/// A field that clears every guard still carries the hook, written after the attributes the
+/// declaration itself had.
+#[cfg(feature = "serde")]
+#[test]
+fn a_field_that_clears_the_guards_carries_the_hook_it_earned() {
+    let mut item: syn::ItemStruct = syn::parse_quote! {
+        struct Report {
+            #[serde(rename = "label")]
+            #[model_schema_prop(minLength = 2)]
+            name: String,
+        }
+    };
+    let errors = super::collect_struct_fields(
+        &mut item.fields,
+        None,
+        Some("report_schema"),
+        "Report",
+        &syn::Generics::default(),
+    )
+    .4;
+    assert!(errors.is_empty(), "got: {errors:?}");
+    let rendered = walked_field_attrs(item.fields.iter());
+    assert_eq!(
+        rendered,
+        quote::quote! {
+            #[serde(rename = "label")]
+            #[serde(deserialize_with = "report_schema::deserialize_name")]
+        }
+        .to_string(),
+        "got: {rendered}"
+    );
+}
+
 /// The type the parser reads a field's written spelling as, rendered the way every surface receives
 /// it: one `FieldDef`, so a spelling that parses alike describes alike wherever it is dispatched.
 fn parsed_field_type(field_type: &proc_macro2::TokenStream) -> String {
@@ -2679,6 +2819,141 @@ fn string_constraints_over_a_string_shaped_inner_pass() {
             &pattern_args(),
         );
         assert!(errors.is_empty(), "for {inner}, got: {errors:?}");
+    }
+}
+
+/// Registers a name carrying the value surface a `#[model_schema()]` item's own expansion would
+/// have recorded for it, standing in for that expansion.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn seed_value_shape(rust_ident: &str, shape: Option<&'static str>) {
+    register_alias_info(
+        rust_ident,
+        rust_ident,
+        &ident_schema_module_name(rust_ident),
+        AliasKind::NoEnumMembers,
+    );
+    record_value_shape(rust_ident, shape);
+}
+
+/// A brand's guard failures for a `pattern` over the named inner, spelled as a bare name.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn brand_over_named_inner_errors(inner: &str) -> Vec<String> {
+    let ty: syn::Type = syn::parse_str(inner).unwrap();
+    branded_errors_with(
+        &syn::parse_quote! {
+            #[serde(transparent)]
+            struct Branded(pub #ty);
+        },
+        &pattern_args(),
+    )
+}
+
+/// A named inner is where the checks actually land — the brand emits `Inner$Schema.min(3)` — so a
+/// name the registry says publishes something other than a string takes the refusal the same shape
+/// spelled directly takes, and names both the brand and the inner.
+///
+/// Spelled directly, `serde_json::Value` is refused through the opaque arm; one module out it was
+/// admitted, and `Blob$Schema.min(3)` over `const Blob$Schema = z.unknown().brand<"Blob">()` is a
+/// `TypeError` at load, before a payload is read.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn string_constraints_over_a_named_inner_the_registry_answers_for_are_rejected() {
+    for (inner, shape) in [
+        ("OpaqueSibling", "opaque"),
+        ("NumericSibling", "numeric"),
+        ("BooleanSibling", "boolean"),
+        ("ContainerSibling", "container"),
+        ("ObjectSibling", "object"),
+        ("EnumeratedSibling", "enumerated"),
+        ("UnionSibling", "union"),
+        ("NullableSibling", "nullable"),
+    ] {
+        seed_value_shape(inner, Some(shape));
+        let errors = brand_over_named_inner_errors(inner);
+        assert_eq!(errors.len(), 1, "for {inner}, got: {errors:?}");
+        assert!(errors[0].contains("compile_error"), "got: {}", errors[0]);
+        assert!(errors[0].contains("`Branded`"), "got: {}", errors[0]);
+        assert!(errors[0].contains(inner), "got: {}", errors[0]);
+        assert!(errors[0].contains(shape), "for {inner}, got: {}", errors[0]);
+    }
+}
+
+/// A name the registry says publishes a string carries the checks, so it stays admitted — the
+/// working case, unchanged.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn string_constraints_over_a_named_inner_the_registry_calls_a_string_pass() {
+    seed_value_shape("StringSibling", None);
+    let errors = brand_over_named_inner_errors("StringSibling");
+    assert!(errors.is_empty(), "got: {errors:?}");
+}
+
+/// A name the registry has no answer for keeps the emission it has always had.
+///
+/// The two names that reach this are the same absence: one written above the item that registers
+/// it, and one this crate never expands at all — an unresolved user type whose schema the author
+/// supplies. Refusing on absence would refuse the second for the sake of the first, and would make
+/// a diagnostic out of declaration order: moving a declaration would turn a compiling program into
+/// a refused one without changing what it means. The `Display` assertion still bounds the Rust
+/// surface either way.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn string_constraints_over_a_name_the_registry_cannot_answer_for_pass() {
+    let errors = brand_over_named_inner_errors("SiblingRegisteredNowhere");
+    assert!(errors.is_empty(), "got: {errors:?}");
+}
+
+/// What a brand records for the next brand written over it: whatever its own inner publishes, read
+/// through the same call the guard reads it through — including one link through a name, which is
+/// what carries a chain of brands to its end.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_brand_records_the_value_surface_its_inner_publishes() {
+    seed_value_shape("RecordedOpaqueSibling", Some("opaque"));
+    seed_value_shape("RecordedStringSibling", None);
+    for (inner, expected) in [
+        ("String", None),
+        ("PathBuf", None),
+        ("serde_json::Value", Some("opaque")),
+        ("u32", Some("numeric")),
+        ("bool", Some("boolean")),
+        ("Vec<String>", Some("container")),
+        ("(String, String)", Some("container")),
+        ("RecordedOpaqueSibling", Some("opaque")),
+        ("RecordedStringSibling", None),
+        ("SiblingRegisteredNowhere", None),
+    ] {
+        let ty: syn::Type = syn::parse_str(inner).unwrap();
+        let item: syn::ItemStruct = syn::parse_quote! {
+            #[serde(transparent)]
+            struct Branded(pub #ty);
+        };
+        let shape = super::branded_value_shape(&item.generics, item.fields.iter().next().unwrap());
+        assert_eq!(shape, expected, "for {inner}");
+    }
+}
+
+/// What a tuple struct records: serde writes one slot as that slot's value alone, so the schema is
+/// the slot's and carries what the slot carries; every other arity is the fixed array `z.tuple`
+/// writes, which takes no string check. An optional slot is `z.nullable(...)`, which takes none
+/// either.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_tuple_struct_records_the_value_surface_its_slots_publish() {
+    for (decl, expected) in [
+        ("struct Slots(pub String);", None),
+        ("struct Slots(pub Option<String>);", Some("nullable")),
+        ("struct Slots(pub u32);", Some("numeric")),
+        ("struct Slots(pub Vec<String>);", Some("container")),
+        ("struct Slots(pub String, pub u32);", Some("container")),
+        ("struct Slots();", Some("container")),
+    ] {
+        let item: syn::ItemStruct = syn::parse_str(decl).unwrap();
+        assert_eq!(
+            super::tuple_struct_value_shape(&item.fields),
+            expected,
+            "for {decl}"
+        );
     }
 }
 
@@ -4581,6 +4856,7 @@ fn wrapped_u32_value(wrapper: &str) -> super::FieldDef {
         model_schema_prop_meta: None,
         nullable_levels: Vec::new(),
         name: "items".to_owned(),
+        omits_none: false,
         type_span: proc_macro2::Span::call_site(),
     }
 }

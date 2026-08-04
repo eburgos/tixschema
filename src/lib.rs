@@ -95,7 +95,7 @@ export type User = {
  * age
  * 
 **/
-  age: number | undefined;
+  age?: number;
   /**
  * firstName
  * 
@@ -283,7 +283,7 @@ export type Event = {  /**
  * reason
  * 
 **/
-  reason: string | undefined;
+  reason?: string;
   /**
  * userId
  * 
@@ -454,7 +454,7 @@ export type Document = {
  * parent_id
  * 
 **/
-  parent_id: ObjectId | undefined;
+  parent_id?: ObjectId;
   /**
  * tags
  * 
@@ -550,6 +550,13 @@ export const Document$Schema: ZodType<Document> = Document$RawSchema;
 /// no `.min`/`.max`, and `.brand()` returns that same schema rather than a wrapper that could. So
 /// `#[model_schema(minLength = 3)] struct Slug<T>(pub T);` is refused at the inner field. Constrain
 /// a string-typed inner instead.
+///
+/// A named inner is judged by what that name publishes, since that is the schema the checks are
+/// appended to: `#[model_schema(minLength = 3)] struct Outer(pub Blob);` over
+/// `#[serde(transparent)] struct Blob(pub serde_json::Value);` is refused for the same reason the
+/// opaque inner spelled directly is. That answer comes from the named type's own expansion, so a
+/// brand written above the type it names — or over a type this crate never expands — keeps the
+/// emission it has always had rather than being refused for where its inner happens to be written.
 ///
 #[proc_macro_attribute]
 pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {

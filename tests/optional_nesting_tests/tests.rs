@@ -50,6 +50,20 @@ struct NullNestingSlots {
     tuple_vec_slot: (String, Option<Vec<u32>>),
 }
 
+/// The member spelling an `Option` field written with a `skip_serializing_if` renders as.
+///
+/// serde drops the key for a `None`, so the payload has no such key and the member is written with
+/// an optional one. Only a build that reads the attribute knows that: without the `serde` feature
+/// none is read, and the key stays written with an `undefined` value.
+#[cfg(feature = "typescript")]
+fn omitted_member(name: &str, ts_type: &str) -> String {
+    if cfg!(feature = "serde") {
+        format!("{name}?: {ts_type};")
+    } else {
+        format!("{name}: {ts_type} | undefined;")
+    }
+}
+
 fn element_null_fields() -> ElementNullFields {
     ElementNullFields {
         set_items: BTreeSet::from([None]),
@@ -240,11 +254,11 @@ fn test_the_typescript_surface_puts_the_null_at_the_level_it_was_written() {
         assert!(definition.contains(spelling), "Got: {definition}");
     }
     for spelling in [
-        "set_items: Array<number> | undefined;",
-        "vec_items: Array<number> | undefined;",
+        omitted_member("set_items", "Array<number>"),
+        omitted_member("vec_items", "Array<number>"),
     ] {
         let definition = SlotNullFields::ts_definition();
-        assert!(definition.contains(spelling), "Got: {definition}");
+        assert!(definition.contains(&spelling), "Got: {definition}");
     }
     let definition = NullNestingSlots::ts_definition();
     for spelling in [

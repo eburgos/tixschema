@@ -70,7 +70,7 @@ export const User$Schema: ZodType<User> = z.strictObject({
 
 ### Structs
 
-Any Rust struct annotated with `#[model_schema()]` generates a corresponding TypeScript type and Zod schema. Primitive types map as follows: `String` to `string`, `bool` to `boolean`, all numeric types to `number` (integers get `.int()`), `Option<T>` to `T | undefined`, `Vec<T>` to `Array<T>`, and `HashMap<String, T>` to `Partial<Record<string, T>>`.
+Any Rust struct annotated with `#[model_schema()]` generates a corresponding TypeScript type and Zod schema. Primitive types map as follows: `String` to `string`, `bool` to `boolean`, all numeric types to `number` (integers get `.int()`), `Option<T>` to `T` under a key the omission attribute decides ([Optional Fields](#optional-fields)), `Vec<T>` to `Array<T>`, and `HashMap<String, T>` to `Partial<Record<string, T>>`.
 
 ```rust
 #[model_schema()]
@@ -86,7 +86,9 @@ pub struct UserProfile {
 
 ### Optional Fields
 
-`Option<T>` fields become `T | undefined` in TypeScript and `z.union([type, z.undefined()]).prefault(undefined)` in Zod v4. The `.prefault(undefined)` makes the field default to `undefined` when omitted from the input.
+`Option<T>` fields validate as `z.union([type, z.undefined()]).prefault(undefined)` in Zod v4 and are left out of the JSON Schema's `required` list. The `.prefault(undefined)` makes the field default to `undefined` when omitted from the input.
+
+What TypeScript writes follows the wire. A field carrying `#[serde(skip_serializing_if = "Option::is_none")]` (or `skip` / `skip_serializing`) has no key at all in the payload serde writes for a `None`, so the member is written with an optional key — `field?: T`, which the absent-key payload satisfies. Every other `Option<T>` field keeps its key and carries `T | undefined`. The `serde` feature is what reads the attribute; without it no attribute is read and every `Option<T>` renders in the second form.
 
 ```rust
 #[model_schema()]
@@ -94,11 +96,25 @@ pub struct UserProfile {
 pub struct UserWithOptionals {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phone: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar_url: Option<String>,
 }
+```
+
+Generated TypeScript:
+
+```typescript
+export type UserWithOptionals = {
+  id: string;
+  name: string;
+  email?: string;
+  phone?: string;
+  avatar_url?: string;
+};
 ```
 
 ### Collections and Maps
@@ -981,7 +997,11 @@ A generic brand carries the requirement as a `Display` bound on each type parame
 
 You can add `pattern`, `minLength`, and `maxLength` constraints directly on the `#[model_schema()]` attribute for branded newtypes. Constraints are enforced in three places: the generated Zod schema, serde deserialization, and a `validate()` method on the type.
 
-**The inner type has to be one whose schema is a string** — `String`, `PathBuf`, `ObjectId`, a chrono date/time type, or another brand. A numeric, boolean, container (`Vec`, array, `HashMap`, tuple), or opaque inner is rejected at expansion time, because the three constraints are string checks and each surface would read them differently: Zod's `.min`/`.max` become bounds on the value itself, JSON Schema ignores `minLength`/`maxLength`/`pattern` outside `"type": "string"`, and `validate()` measures the inner's `Display` rendering.
+**The inner type has to be one whose schema is a string** — `String`, `PathBuf`, `ObjectId`, a chrono date/time type, or a named type whose own schema is one of those. A numeric, boolean, container (`Vec`, array, `HashMap`, tuple), or opaque inner is rejected at expansion time, because the three constraints are string checks and each surface would read them differently: Zod's `.min`/`.max` become bounds on the value itself, JSON Schema ignores `minLength`/`maxLength`/`pattern` outside `"type": "string"`, and `validate()` measures the inner's `Display` rendering.
+
+**A named inner is judged by what the named type publishes**, not by the fact that it is a name. The brand appends its checks to that type's own schema binding — `Inner$Schema.min(3)` — so a name whose schema is an object, a union, a `z.enum`, a number, an array or `z.unknown()` is rejected exactly as the same shape spelled directly is, and the refusal names both the brand and the inner. A brand over `serde_json::Value` is opaque, and so is a brand over that brand.
+
+That answer comes from the type's own expansion, so it is only available once that expansion has run: a brand written **above** the type it names, or over a type this crate never expands at all, is admitted with the emission it has always had. Declaration order is not a diagnostic — moving a declaration must not turn a compiling program into a rejected one — so keep a constrained brand below the type it constrains if you want the check.
 
 An opaque inner is `serde_json::Value` **or one of the brand's own type parameters**, which both validating surfaces read as the opaque value (see [Type Parameters](#type-parameters)). There is nothing there for the checks to attach to: Zod 4's `z.unknown()` carries no `.min`/`.max` at all, and `.brand()` hands back that same schema rather than a wrapper that could. Constrain a string-typed inner instead, or brand at the instantiation:
 
@@ -1448,7 +1468,7 @@ pub struct Event {
 
 ### Optional TypeScript Keys (`ts_optional`)
 
-By default an `Option<T>` field renders as a required key carrying `| undefined` (`field: T | undefined`). Add the bare `ts_optional` flag to render it as an optional key instead (`field?: T`).
+An `Option<T>` field whose serde attributes drop the key for a `None` already renders as an optional key ([Optional Fields](#optional-fields)). The bare `ts_optional` flag asks for that same spelling (`field?: T` rather than `field: T | undefined`) on the author's word, for a field whose key nothing else says may be absent — an `Option<T>` written where no serde attribute is read at all.
 
 This is a TypeScript-only knob -- the Zod schema and JSON Schema are unchanged (the field is already optional in both). The flag is only valid on `Option<T>` fields; applying it to a non-`Option` field is a compile error. It composes with `as = Type`, which names the type the field already renders.
 
@@ -1471,7 +1491,7 @@ export type Profile = {
 };
 ```
 
-Without `ts_optional`, `nickname` would render as `nickname: string | undefined`.
+Without `ts_optional` and without an attribute that drops the key, `nickname` would render as `nickname: string | undefined`.
 
 ## Compiler-Validated Examples
 
@@ -1851,7 +1871,7 @@ If the `serde` feature is disabled but serde attributes are present, you will se
 
 4. **Array Types**: `Vec<T>` becomes `Array<T>` in TypeScript, one `Array<...>` per level written — `Vec<Vec<T>>` is `Array<Array<T>>`.
 
-5. **Optional Fields**: `Option<T>` becomes `T | undefined` in TypeScript and `z.union([type, z.undefined()]).prefault(undefined)` in Zod v4.
+5. **Optional Fields**: `Option<T>` becomes `field?: T` in TypeScript where a serde attribute drops the key for a `None` and `field: T | undefined` where it does not, and `z.union([type, z.undefined()]).prefault(undefined)` in Zod v4 either way.
 
 6. **Complex Nesting**: The crate supports deeply nested structures including `HashMap<String, Vec<HashMap<String, T>>>` and similar patterns.
 
@@ -2152,4 +2172,4 @@ Benefits of the Zod v4 approach:
 - **JSON Schema generation**: Zod v4 can generate JSON schemas directly from the validation schemas.
 - **Cleaner code**: No complex transform functions needed.
 - **Better performance**: Eliminates runtime transform overhead.
-- **Type safety**: Maintains the same `T | undefined` TypeScript semantics.
+- **Type safety**: Validates exactly the payloads the TypeScript member admits, absent key included.
