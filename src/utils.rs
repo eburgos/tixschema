@@ -2,9 +2,9 @@ use core::cell::RefCell;
 use core::ops::Range;
 use regex_syntax::ast::parse::Parser as PatternParser;
 use regex_syntax::ast::{
-    Assertion, AssertionKind, Ast, ClassPerl, ClassPerlKind, ClassSet, ClassSetBinaryOpKind,
-    ClassSetItem, Flag, FlagsItemKind, Group, GroupKind, HexLiteralKind, Literal, LiteralKind,
-    SpecialLiteralKind,
+    Assertion, AssertionKind, Ast, ClassBracketed, ClassPerl, ClassPerlKind, ClassSet,
+    ClassSetBinaryOpKind, ClassSetItem, Flag, FlagsItemKind, Group, GroupKind, HexLiteralKind,
+    Literal, LiteralKind, SpecialLiteralKind,
 };
 use std::collections::HashMap;
 use syn::{Attribute, Expr, Field, Lit, LitStr, Meta, Variant};
@@ -72,23 +72,33 @@ enum Divergence {
     ValueSet,
 }
 
-/// What a registered Rust ident, *written as a type path*, resolves to — the two facts a map key
-/// asks of it: whether it carries an inherent `enum_members()`, the enumeration the JSON-schema
-/// map-key expansion calls, and whether serde writes it as a bare string, which is what a JSON
-/// object key is. Only a plain unit enum gets that method, and a type path sees straight through an
-/// alias, so an alias answers for whatever it targets rather than for itself.
+/// What a registered Rust ident, *written as a type path*, resolves to — the one question a map key
+/// asks of a name: what does serde write for a key spelled this way. A plain unit enum answers with
+/// its members, the enumeration the JSON-schema map-key expansion calls `enum_members()` for; every
+/// other answer is about the key's own wire form, a JSON object key being a string.
+///
+/// A type path sees straight through an alias and a `#[serde(transparent)]` brand writes what its
+/// inner writes, so both answer for their target and their inner rather than for themselves — and
+/// through the registry, so a chain of either carries its end's answer to every link.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AliasKind {
     /// A plain unit enum, or an alias chain ending in one.
     EnumMembers,
-    /// Provably has neither: a struct, a brand over a non-string inner, a non-plain enum, or an
-    /// alias whose target is a primitive, a collection, or one of those.
+    /// serde writes it as neither a string nor anything it will stringify, so it keys no map at
+    /// all: a struct, a brand over one or over a container, a non-plain enum, or an alias whose
+    /// target is any of those.
     NoEnumMembers,
-    /// No `enum_members()`, but serde writes it as a bare string: a `#[serde(transparent)]` brand
-    /// whose inner is itself string-shaped, or an alias chain ending in one. Such a type keys a map
+    /// No `enum_members()`, but serde writes it as a bare string: `String` and `PathBuf`, a
+    /// `#[serde(transparent)]` brand over one of those or over a plain enum, whose variant name is
+    /// itself a bare string, and an alias chain ending in any of them. Such a type keys a map
     /// exactly as `String` does, under its own name.
     StringWire,
+    /// No `enum_members()` and no bare string either, but serde stringifies it into a key all the
+    /// same — a number, a `bool`, a chrono rendering, or a brand over one of those. The map is an
+    /// object with nothing said about its members, which is what the bare inner already describes
+    /// as; the brand's own name still stands on the nominal surfaces.
+    Stringified,
     /// Undecidable at this expansion — an alias naming a type that was not registered before it.
     Unknown,
 }
@@ -185,7 +195,7 @@ impl JsSpelling {
             Ast::Literal(literal) => self.literal(literal, false),
             Ast::Assertion(assertion) => self.assertion(assertion),
             Ast::ClassUnicode(_) => self.refuse(UNICODE_CLASS_WRITTEN, UNICODE_CLASS_READ_AS),
-            Ast::ClassBracketed(class) => self.class_set(&class.kind),
+            Ast::ClassBracketed(class) => self.bracketed_class(class),
             Ast::Repetition(repetition) => self.ast(&repetition.ast),
             Ast::Group(group) => self.group(group),
             Ast::Alternation(alternation) => self.asts(&alternation.asts),
@@ -197,6 +207,31 @@ impl JsSpelling {
         for ast in asts {
             self.ast(ast);
         }
+    }
+
+    /// Walks a `[...]` class, refusing it first if it is negated.
+    ///
+    /// A negated class is the last construct both grammars read and fill differently, and the
+    /// members cannot settle it: the complement is taken one code unit at a time there and one
+    /// character at a time here, so `[^0-9]` parts ways over an astral character exactly as the
+    /// `\D` above it does. Nothing is bought by admitting the bracketed spelling of a construct
+    /// already refused under its perl one.
+    ///
+    /// The one class whose `regex` reading does leave every astral character out has to name them
+    /// by astral bounds, and a flagless literal reads those as surrogate halves in descending
+    /// order and will not parse the class at all — so there is no admissible spelling to fall back
+    /// to, which is what makes refusal the whole verdict rather than a table of survivors.
+    fn bracketed_class(&mut self, class: &ClassBracketed) {
+        if class.negated {
+            self.refuse_value_set(
+                "a negated character class `[^...]`",
+                "the complement of the same members taken one UTF-16 code unit at a time, where \
+                 the `regex` crate takes it one character at a time -- so a lone character outside \
+                 the Basic Multilingual Plane fills the class here and reaches that literal as the \
+                 two code units no one-character class holds",
+            );
+        }
+        self.class_set(&class.kind);
     }
 
     fn class_item(&mut self, item: &ClassSetItem) {
@@ -508,6 +543,43 @@ pub fn compute_alias_export_name(rust_ident: &str, override_name: Option<&str>) 
         || format!("{}Type", safe_type_name(rust_ident)),
         ToOwned::to_owned,
     )
+}
+
+/// The spelling every reference to a `#[model_schema()]` item falls back to when the registry
+/// cannot answer for it, which is what a reference standing *before* the item expanded has and
+/// nothing else — the ident with the `Json` suffix taken off, that being what the field walk
+/// records for a sibling and what [`ident_schema_module_name`] names the module from.
+///
+/// An item exported under this spelling already answers at it. One exported under any other — an
+/// alias, which is given the `Type` suffix, or anything carrying a `name = "…"` override — does
+/// not, so it publishes the ident as a name of its own on each nominal surface: the two
+/// declaration orders then spell the reference differently, and both spellings are defined by the
+/// same emission. The module seam settled the same question for the JSON surface, which addresses
+/// a Rust path rather than a name.
+#[cfg(any(feature = "typescript", feature = "zod"))]
+fn ident_reexport_name(rust_ident: &str, export_name: &str) -> Option<String> {
+    let referenced = safe_type_name(rust_ident);
+    (referenced != export_name).then_some(referenced)
+}
+
+/// The `TypeScript` line an item publishes under its own Rust ident, or nothing when it is already
+/// exported under it. The parameter list is repeated on both sides so a generic item stays generic
+/// through the re-export.
+#[cfg(feature = "typescript")]
+pub fn ident_reexport_ts(rust_ident: &str, export_name: &str, ts_generics: &str) -> String {
+    ident_reexport_name(rust_ident, export_name).map_or_else(String::new, |referenced| {
+        format!("\n\nexport type {referenced}{ts_generics} = {export_name}{ts_generics};")
+    })
+}
+
+/// The zod counterpart of [`ident_reexport_ts`] — a binding, not a second schema, so the two names
+/// carry the one schema the item published. It is written unannotated because a zod-only build has
+/// no `ZodType` to annotate it with, and the binding's own type is the exported schema's.
+#[cfg(feature = "zod")]
+pub fn ident_reexport_zod(rust_ident: &str, export_name: &str) -> String {
+    ident_reexport_name(rust_ident, export_name).map_or_else(String::new, |referenced| {
+        format!("\n\nexport const {referenced}$Schema = {export_name}$Schema;")
+    })
 }
 
 /// [`compute_alias_export_name`] for a declared item — a struct, an enum, a tuple struct, a branded

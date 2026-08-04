@@ -666,9 +666,16 @@ fn test_name_override() {
         ts.contains("export type CustomName = string;"),
         "Should use custom name from attribute. Got: {ts}"
     );
+    // The Rust ident reaches the surface once and only as the re-export: that is the spelling a
+    // reference written before the alias has, and the alias itself is written under the override.
     assert!(
-        !ts.contains("SomeType"),
-        "Should not contain original type name. Got: {ts}"
+        ts.contains("export type SomeType = CustomName;"),
+        "Should answer at the Rust ident too. Got: {ts}"
+    );
+    assert_eq!(
+        ts.matches("SomeType").count(),
+        1,
+        "Original type name should reach nothing but the re-export. Got: {ts}"
     );
 }
 

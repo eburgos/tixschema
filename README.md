@@ -144,7 +144,7 @@ pub struct Schedule {
 }
 ```
 
-A `#[serde(transparent)]` branded newtype over a string — a brand over `String` or `PathBuf`, or over another such brand — is the open case wearing a name. serde writes the brand as the bare string its inner is, which is exactly what a JSON object key is, so the map is an object keyed by arbitrary strings. TypeScript and Zod keep the brand's own spelling as the key type the way they keep an enum's — `Partial<Record<CorrelationId, V>>` and `z.record(CorrelationId$Schema, V)` — while the JSON schema is the open object, having no brand to say. A brand over anything else is refused as a key.
+A `#[serde(transparent)]` branded newtype over a string — a brand over `String` or `PathBuf`, or over another such brand — is the open case wearing a name. serde writes the brand as the bare string its inner is, which is exactly what a JSON object key is, so the map is an object keyed by arbitrary strings. TypeScript and Zod keep the brand's own spelling as the key type the way they keep an enum's — `Partial<Record<CorrelationId, V>>` and `z.record(CorrelationId$Schema, V)` — while the JSON schema is the open object, having no brand to say.
 
 ```rust
 use std::collections::HashMap;
@@ -162,7 +162,34 @@ pub struct Traces {
 }
 ```
 
-A key path is the one spelling that can name an enum or a brand, so a key path the expansion can prove is *neither* a plain enum nor a string-shaped brand — a struct, a brand over a non-string inner, a tagged or untagged enum, or a `#[model_schema()]` alias of any of them — is refused where it is written, at whatever depth the map sits at, naming the type as the author spelled it. A key path the expansion has not seen yet, one declared after the type that writes the map or one from another crate, cannot be ruled out and is emitted as an enumerating key; a key that turns out to have no members surfaces as an `E0599` at the key type instead.
+A brand adds a name to its inner's wire and nothing else, so it keys a map however its inner keys one — at every link of a chain of brands. A brand over a **plain enum** is the open case too: serde writes the variant name, which is a bare string, and the brand publishes no `enum_members()` of its own for a schema to close the object over, so it opens the object under its own name rather than closing it over members nothing can supply. A brand over a value serde **stringifies** — a number, a `bool`, a chrono type — describes exactly as that bare inner describes, the open object with nothing said about its members, while TypeScript and Zod keep the brand's name as the key type. Only a brand over something serde writes as no key at all — a struct, a container, a tuple, a nested map, an `ObjectId` — is refused, and so is a brand over an inner this expansion has not classified yet: what serde writes for such an inner is exactly what cannot be told.
+
+A `#[model_schema()]` **alias** answers the same way, its target standing in for it because a type path resolves straight through an alias. An alias of `String` or `PathBuf`, of a string-shaped brand, or of another such alias is written as that bare string, so it keys a map exactly as a `String` does — under the alias's own exported name on the nominal surfaces and as the open object on the structural one. An alias of a plain enum enumerates its members, as it always has.
+
+```rust
+use std::collections::HashMap;
+
+#[model_schema()]
+type SlotKey = String;
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+pub struct Tick(u32);
+
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+pub struct Samples {
+    // {"type": "object", "additionalProperties": {"type": "number"}}, serialized {"abc": 1.0}
+    // TypeScript `Partial<Record<SlotKeyType, number>>`, Zod `z.record(SlotKeyType$Schema, ...)`
+    pub by_slot: HashMap<SlotKey, f64>,
+    // {"type": "object", "additionalProperties": true}, serialized {"7": 1.0}
+    // TypeScript `Partial<Record<Tick, number>>`, Zod `z.record(Tick$Schema, ...)`
+    pub by_tick: HashMap<Tick, f64>,
+}
+```
+
+A key path is the one spelling that can name an enum, an alias or a brand, so a key path the expansion can prove serde writes as no key at all — a struct, a brand over one or over a container, a tagged or untagged enum, or a `#[model_schema()]` alias of any of them — is refused where it is written, at whatever depth the map sits at, naming the type as the author spelled it. A key path the expansion has not seen yet, one declared after the type that writes the map or one from another crate, cannot be ruled out and is emitted as an enumerating key; a key that turns out to have no members surfaces as an `E0599` at the key type instead.
 
 The remaining refusals are all one rule: a JSON object key is a string, and `serde_json` raises `key must be a string` — refusing the whole map at serialization, with no fallback form — for every key whose own wire form is not one. Each of these is therefore refused rather than described, there being no object to describe:
 
@@ -173,7 +200,7 @@ The remaining refusals are all one rule: a JSON object key is a string, and `ser
 
 All of them are covered under [Compilation Errors](#compilation-errors), with the exact diagnostic each produces.
 
-Every other key is neither open nor enumerable, and none of them is refused: serde stringifies each one into a key for you. The JSON schema describes such a map as an object and says nothing about its members — `{"type": "object", "additionalProperties": true}` — while TypeScript and Zod keep the key's own type, so a `HashMap<u32, String>` is `Partial<Record<number, string>>` and `z.record(z.number().int(), z.string())`. serde writes the object with the key's string form for its keys: `7` becomes `"7"`, `true` becomes `"true"`, a chrono `NaiveDate` its ISO rendering. Only the narrowing is missing, not the object. The rule the refusals apply is refuse-what-serde-refuses, never refuse-what-is-not-a-`String`.
+Every other key is neither open nor enumerable, and none of them is refused: serde stringifies each one into a key for you. The JSON schema describes such a map as an object and says nothing about its members — `{"type": "object", "additionalProperties": true}` — while TypeScript and Zod keep the key's own type, so a `HashMap<u32, String>` is `Partial<Record<number, string>>` and `z.record(z.number().int(), z.string())`. serde writes the object with the key's string form for its keys: `7` becomes `"7"`, `true` becomes `"true"`, a chrono `NaiveDate` its ISO rendering. A brand over one of those writes the same object and describes as the same one, under the brand's name. Only the narrowing is missing, not the object. The rule the refusals apply is refuse-what-serde-refuses, never refuse-what-is-not-a-`String`.
 
 ### Pointers and Borrowed Values
 
@@ -1341,13 +1368,13 @@ export type Document = {
 };
 
 export const Document$Schema = z.strictObject({
-  id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }),
+  id: z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/i, { message: "Invalid ObjectId" }) }),
   title: z.string(),
-  author_id: z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }),
-  tags: z.array(z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) })),
-  metadata: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) })),
-  parent_id: z.union([z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }), z.undefined()]).prefault(undefined),
-  related_docs: z.record(z.string(), z.array(z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" }) }))),
+  author_id: z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/i, { message: "Invalid ObjectId" }) }),
+  tags: z.array(z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/i, { message: "Invalid ObjectId" }) })),
+  metadata: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/i, { message: "Invalid ObjectId" }) })),
+  parent_id: z.union([z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/i, { message: "Invalid ObjectId" }) }), z.undefined()]).prefault(undefined),
+  related_docs: z.record(z.string(), z.array(z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/i, { message: "Invalid ObjectId" }) }))),
 });
 ```
 
@@ -1597,7 +1624,7 @@ If the `serde` feature is disabled but serde attributes are present, you will se
 
 2. **Type References**: Nested types reference each other by their TypeScript name (with the `Json` suffix stripped if present).
 
-3. **Map Keys**: `HashMap` and `BTreeMap` are both supported, and the key decides what the map describes as: a `String` key gives an object open to any string key, and a plain `#[model_schema()]` enum key gives one closed to the enum's members. A key path proved to be neither, and any sequence-wrapped key, is refused at expansion; every other key describes as an open object. See [Collections and Maps](#collections-and-maps).
+3. **Map Keys**: `HashMap` and `BTreeMap` are both supported, and the key decides what the map describes as: a `String` key gives an object open to any string key, and a plain `#[model_schema()]` enum key gives one closed to the enum's members. A brand and a `#[model_schema()]` alias answer by their inner and their target, keeping their own name on the TypeScript and Zod surfaces. A key path proved to be one serde writes as no key at all, and any sequence-wrapped key, is refused at expansion; every other key describes as an open object. See [Collections and Maps](#collections-and-maps).
 
 4. **Array Types**: `Vec<T>` becomes `Array<T>` in TypeScript, one `Array<...>` per level written — `Vec<Vec<T>>` is `Array<Array<T>>`.
 
@@ -1667,9 +1694,9 @@ tixschema = { features = ["serde"] }
 
 **Error:** *a map key must be a plain `#[model_schema()]` enum, whose members become the object's keys — `<type>` resolves to a type with no `enum_members()`*, reported at the field; or `no associated function or constant named enum_members found for <type>` (`E0599`), reported at the map's key type.
 
-A map key written as a type path must be a plain `#[model_schema()]` enum, whose members become the object's keys, or a `#[serde(transparent)]` brand over a string, which keys the map the way a `String` does. A `String` key is the third supported spelling, and every key that is none of them is covered under [Collections and Maps](#collections-and-maps) — this entry is about the two diagnostics a type path earns.
+A map key written as a type path must be something serde writes into a key: a plain `#[model_schema()]` enum, whose members become the object's keys; a `#[serde(transparent)]` brand or a `#[model_schema()]` alias whose wire form is one serde writes into a key; or a `String`. [Collections and Maps](#collections-and-maps) sets out what each of those describes as, and every key that is none of them is covered there too — this entry is about the two diagnostics a type path earns.
 
-A key the expansion has already seen and knows is neither — a struct, a brand over a non-string inner, a tagged or untagged enum, or a `#[model_schema()]` alias of one of those — is named directly, at the field that writes the map:
+A key the expansion has already seen and knows serde writes as no key at all — a struct, a brand over one or over a container, a tagged or untagged enum, or a `#[model_schema()]` alias of one of those — is named directly, at the field that writes the map:
 
 ```rust
 #[model_schema()]
@@ -1689,7 +1716,8 @@ An alias resolves through to what it names, so an alias of a struct is refused u
 Items expand in the order they are written, though, so a key declared after the type that writes the map, like one from another crate, has not been seen yet and is emitted as an enumerating key. When such a key carries no `enum_members()`, the same requirement surfaces as an `E0599` at the key type:
 
 ```rust
-// Wrong: `LateKey` resolves to `String`, which has no members to enumerate
+// Wrong: `LateKey` has not expanded yet, so it is emitted as an enumerating key — and it
+// resolves to `String`, which has no members to enumerate
 #[model_schema()]
 pub struct BadConfig {
     pub slots: HashMap<LateKey, String>, // E0599, reported at `LateKey`
@@ -1705,13 +1733,18 @@ pub enum Slot {
     Secondary,
 }
 
+// Correct: the alias expands first, so the registry knows serde writes it as a bare string
+#[model_schema()]
+pub type EarlyKey = String;
+
 #[model_schema()]
 pub struct Config {
     pub slots: HashMap<Slot, String>,
+    pub names: HashMap<EarlyKey, String>,
 }
 ```
 
-Declaration order decides only which of the two diagnostics is reported. A plain enum key works wherever it is declared.
+A plain enum key works wherever it is declared: it carries `enum_members()`, so the emitted call resolves whichever order the two items expand in, and declaration order decides only which of the two diagnostics a key *without* members earns. Every other supported spelling — an alias of a string, a brand — is known only through the registry, so it has to expand before the type that keys a map by it; until then the expansion cannot tell it from a plain enum declared later, and emits the enumerating key it would need to be.
 
 #### Sequence-Wrapped Map Keys
 

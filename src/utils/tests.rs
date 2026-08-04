@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(feature = "object_id")]
+use crate::features::object_id::OBJECT_ID_HEX_PATTERN;
+
 /// The pattern shapes the shipped tests write, none of which the two grammars spell differently.
 /// Every one of them has to come back byte for byte: the guard is there to stop a pattern only one
 /// grammar reads, not to touch the ones both already read the same way.
@@ -21,7 +24,7 @@ const PORTABLE_PATTERNS: [&str; 9] = [
 /// The list is the inventory of what `regex::Regex::new` accepts and a JavaScript regex literal
 /// either fails to parse or reads as something else, so it doubles as the record of what was
 /// checked against both grammars.
-const UNPORTABLE_PATTERNS: [(&str, &str); 32] = [
+const UNPORTABLE_PATTERNS: [(&str, &str); 34] = [
     ("(?i)abc", "inline flag directive"),
     ("abc(?i)def", "inline flag directive"),
     ("(?i:abc)", "case-insensitive flag on a `(?i:...)` group"),
@@ -52,8 +55,12 @@ const UNPORTABLE_PATTERNS: [(&str, &str); 32] = [
     ("[a[b]]", "class nested inside another class"),
     (r"\x{41}", "braced code point escape"),
     ("[]]", "unescaped `]` opening a character class"),
-    ("[^]]", "unescaped `]` opening a character class"),
+    // Negated, so the class is refused for being negated before its members are read at all — the
+    // `]` rule still answers for the two spellings above it.
+    ("[^]]", "negated character class"),
     ("[]-a]", "unescaped `]` opening a character class"),
+    ("[^a]", "negated character class"),
+    (r"[^\w]", "negated character class"),
 ];
 
 /// The haystacks a rewritten pattern is held to: whatever the original matched among them, the
@@ -270,6 +277,28 @@ const EQUALISED_PATTERNS: [(&str, &str); 10] = [
     (r"^[\w-]$", "^[0-9A-Za-z_-]$"),
     (r"^\d{3}\.\d{3}-\d{2}$", r"^[0-9]{3}\.[0-9]{3}-[0-9]{2}$"),
 ];
+
+/// The negated classes the verdict was decided over: a single member, the ranges an author reaches
+/// for to bound one to ASCII, an escape, and the `\d` the guard writes out to `0-9` on its way in.
+/// The last is the one that shows rewriting cannot help — its members come out ASCII and the
+/// complement is still taken two different ways.
+const NEGATED_CLASS_PATTERNS: [&str; 6] = [
+    "^[^a]$",
+    "^[^0-9]$",
+    r"^[^\n]$",
+    "^[^a-z]$",
+    r"^[^\x00-\x7F]$",
+    r"^[^\d]$",
+];
+
+/// Every regex this crate writes into a generated schema itself, rather than carrying over from an
+/// author's `pattern`.
+///
+/// An author's pattern reaches the three surfaces through the guard, which equalises what it can
+/// and refuses the rest. One the crate writes reaches them directly, so without this list there
+/// are two contracts and only one of them is enforced.
+#[cfg(feature = "object_id")]
+const CRATE_EMITTED_PATTERNS: [&str; 1] = [OBJECT_ID_HEX_PATTERN];
 
 #[cfg(feature = "zod")]
 #[test]
@@ -570,6 +599,42 @@ fn an_unrenamed_item_publishes_the_same_module_under_either_derivation() {
     );
 }
 
+/// The ident re-export answers at the same spelling the module seam answers at: whatever a
+/// reference falls back to when the registry cannot help it, which is the ident with the `Json`
+/// suffix read through. An item exported under that spelling already answers there and publishes
+/// nothing.
+#[cfg(feature = "typescript")]
+#[test]
+fn a_ts_reexport_is_written_only_where_the_export_moved_off_the_ident() {
+    assert_eq!(
+        ident_reexport_ts("LaterAlias", "LaterAliasType", ""),
+        "\n\nexport type LaterAlias = LaterAliasType;"
+    );
+    assert_eq!(
+        ident_reexport_ts("LaterItem", "RenamedLater", ""),
+        "\n\nexport type LaterItem = RenamedLater;"
+    );
+    assert_eq!(
+        ident_reexport_ts("Pair", "PairType", "<A, B>"),
+        "\n\nexport type Pair<A, B> = PairType<A, B>;"
+    );
+    for (ident, export) in [("PlainItem", "PlainItem"), ("PlainItemJson", "PlainItem")] {
+        assert_eq!(ident_reexport_ts(ident, export, ""), "", "for: {ident}");
+    }
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn a_zod_reexport_is_written_only_where_the_export_moved_off_the_ident() {
+    assert_eq!(
+        ident_reexport_zod("LaterAlias", "LaterAliasType"),
+        "\n\nexport const LaterAlias$Schema = LaterAliasType$Schema;"
+    );
+    for (ident, export) in [("PlainItem", "PlainItem"), ("PlainItemJson", "PlainItem")] {
+        assert_eq!(ident_reexport_zod(ident, export), "", "for: {ident}");
+    }
+}
+
 /// Runs the `pattern` guard over `pattern` written as the literal an author would have written,
 /// which is what the guard spans its refusals on.
 fn portable(pattern: &str) -> Result<String, String> {
@@ -666,6 +731,48 @@ fn test_the_emitted_pattern_picks_out_the_same_haystacks_in_both_engines() {
     }
 }
 
+/// Every regex this crate writes into a generated schema itself, rather than carrying over from an
+/// author's `pattern`.
+///
+/// Held to the guard the crate holds authors to, and held to it the strict way: admitted *and*
+/// handed back unchanged. A pattern the guard rewrites is one that was not written in the spelling
+/// both engines read the same way, and the crate is in a position to write it that way to begin
+/// with — so for these the rewrite is not a fix, it is the failure. That makes this the check a
+/// future emitted pattern has to pass before it can ship.
+#[test]
+#[cfg(feature = "object_id")]
+fn test_every_pattern_the_crate_emits_is_a_fixed_point_of_the_guard() {
+    for pattern in CRATE_EMITTED_PATTERNS {
+        assert_eq!(
+            portable(pattern).as_deref(),
+            Ok(pattern),
+            "the crate emits {pattern}, which the guard does not admit unchanged"
+        );
+    }
+}
+
+/// The `$oid` hex, run over the haystacks that tell the engines apart, on the same recorded-
+/// JavaScript discipline as the table above: twenty-four ARABIC-INDIC digits are what a `\d` in
+/// that class admits in the `regex` crate and a flagless literal refuses, so they are the case the
+/// spelling turns on. The real `ObjectId` and the uppercase hex are there to say the value set the
+/// constant is *for* did not move.
+#[test]
+#[cfg(feature = "object_id")]
+fn test_the_emitted_object_id_hex_agrees_with_javascript_over_every_hex_shaped_haystack() {
+    let emitted = regex::Regex::new(OBJECT_ID_HEX_PATTERN).unwrap();
+    for (haystack, javascript) in [
+        ("507f1f77bcf86cd799439011".to_owned(), true),
+        ("\u{661}".repeat(24), false),
+        ("507F1F77BCF86CD799439011".to_owned(), false),
+    ] {
+        assert_eq!(
+            emitted.is_match(&haystack),
+            javascript,
+            "the emitted `$oid` pattern parts ways with JavaScript over {haystack:?}"
+        );
+    }
+}
+
 /// The constructs with no equalising spelling at all, and why: a flagless JavaScript literal
 /// matches one UTF-16 code unit where the `regex` crate matches one character, so anything that
 /// can match a character outside the Basic Multilingual Plane parts ways over every one of them.
@@ -679,6 +786,54 @@ fn test_portable_pattern_refuses_what_no_spelling_equalises() {
             "{pattern} is not refused for a value-set divergence: {rejection}"
         );
     }
+}
+
+/// A negated class is the last construct that was admitted while covering different characters in
+/// the two engines, and it is refused the same way `\D`, `\W` and `\S` already are — which are the
+/// same class negated, so admitting the bracketed spelling was refusing a construct under one name
+/// and taking it under another.
+#[test]
+fn test_portable_pattern_refuses_a_negated_class_whatever_its_members() {
+    for pattern in NEGATED_CLASS_PATTERNS {
+        let rejection = portable(pattern).unwrap_err();
+        for needle in ["negated character class", "cover different characters"] {
+            assert!(
+                rejection.contains(needle),
+                "{needle} missing for {pattern}: {rejection}"
+            );
+        }
+    }
+}
+
+/// Held against the engines rather than restated, as the dot's verdict was: no spelling of a
+/// negated class agrees with JavaScript, so refusing every one of them is the verdict rather than
+/// an admission table of the ones that survive.
+///
+/// Each candidate below fills in the `regex` crate where a flagless literal cannot fill at all — a
+/// lone astral character is one character here and the two code units it is written from there, so
+/// no one-character class holds it. The one spelling whose `regex` reading does leave every astral
+/// character out has to name them by astral bounds, and that literal reads those bounds as
+/// surrogate halves in descending order: `new RegExp("^[^\u{10000}-\u{10FFFF}]$")` throws `Range
+/// out of order in character class` under node v26.2.0, so it is not a spelling that can be
+/// admitted either.
+#[test]
+fn test_no_spelling_of_a_negated_class_agrees_across_the_engines() {
+    for candidate in NEGATED_CLASS_PATTERNS.into_iter().chain(["^[^\u{1f601}]$"]) {
+        let rust = regex::Regex::new(candidate).unwrap();
+        assert!(
+            rust.is_match("\u{1f600}"),
+            "{candidate} was expected to match an astral character in the `regex` crate"
+        );
+    }
+    let astral_bounded = regex::Regex::new("^[^\u{10000}-\u{10ffff}]$").unwrap();
+    assert!(
+        !astral_bounded.is_match("\u{1f600}"),
+        "the astral-bounded class was expected to be the one whose `regex` reading excludes them"
+    );
+    assert!(
+        astral_bounded.is_match("\u{661}"),
+        "the astral-bounded class was expected to keep every character below the astral range"
+    );
 }
 
 /// Held against the engines rather than restated: for the dot, no candidate spelling agrees with
