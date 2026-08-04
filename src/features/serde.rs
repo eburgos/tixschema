@@ -134,8 +134,8 @@ pub fn parse_serde_key_omission(attrs: &[Attribute]) -> SerdeKeyOmission {
 /// Consumes the value of a `key = value` the walk had no use for.
 ///
 /// An unread value ends the walk on the comma that follows it, taking every attribute written
-/// after it along — so which attributes a field is read by would otherwise depend on the order
-/// someone happened to write them in.
+/// after it along — so which attributes a declaration is read by would otherwise depend on the
+/// order someone happened to write them in.
 fn consume_unread_value(nested: &ParseNestedMeta<'_>) -> syn::Result<()> {
     if nested.input.peek(Token![=]) {
         nested.value()?.parse::<syn::Expr>()?;
@@ -217,6 +217,7 @@ pub fn parse_serde_type_attributes(attrs: &[Attribute]) -> SerdeTypeMeta {
                 } else {
                     // Ignore other serde attributes.
                 }
+                consume_unread_value(&nested)?;
                 Ok(())
             })
             .unwrap_or_else(|e| {
