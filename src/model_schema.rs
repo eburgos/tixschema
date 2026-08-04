@@ -50,8 +50,8 @@ use crate::features::object_id::OBJECT_ID_HEX_PATTERN;
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::{
-    AliasKind, PublishedShape, constraining_pattern, lookup_alias_info, portable_pattern,
-    record_value_shape,
+    AliasKind, PublishedShape, ShapeQuestion, constraining_pattern, lookup_alias_info,
+    portable_pattern, record_shape_question, record_value_shape, shape_questions_for,
 };
 
 #[cfg(feature = "serde")]
@@ -1076,6 +1076,10 @@ pub fn exec_model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
     // impls, which a proc macro cannot answer — so it is asked here, of the compiler, and read off
     // the item before the shapes take it.
     let filling_bound_checks = default_types_bound_checks(&item, &parsed_args);
+    // Held across the dispatch that consumes the item: a constrained brand written above this
+    // declaration left its consult for whichever expansion registers the name, and this is that
+    // expansion.
+    let registering = item_schema_ident(&item).cloned();
     let expanded = if let Item::Struct(item_struct) = item {
         process_struct(item_struct, &parsed_args)
     } else if let Item::Enum(item_enum) = item {
@@ -1087,7 +1091,8 @@ pub fn exec_model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
             .to_compile_error()
             .into()
     };
-    with_filling_bound_checks(expanded, &filling_bound_checks)
+    let answered = with_prefixed_tokens(expanded, &deferred_shape_refusals(registering.as_ref()));
+    with_prefixed_tokens(answered, &filling_bound_checks)
 }
 
 /// Classifies what an alias resolves to, for the registry.
@@ -2449,26 +2454,24 @@ fn reads_any_name(tokens: proc_macro2::TokenStream, names: &[String]) -> bool {
     })
 }
 
-/// Emits the expansion with the checks a `default_types` declaration earned beside it, or the
-/// expansion untouched where it earned none.
+/// Emits the expansion with the tokens it earned beside it standing ahead of it, or the expansion
+/// untouched where it earned none.
 ///
-/// The checks accompany the expansion rather than replacing it: a filling failing a bound is a
-/// statement about the item, not a reason to withhold the item, and everything naming the item
-/// should still resolve so the bound's own diagnostic is the one the author reads.
+/// Both callers hand over statements *about* the item rather than reasons to withhold it — the
+/// checks a `default_types` declaration earned, and the refusals a constrained brand written above
+/// this declaration was owed — so everything naming the item still resolves and those diagnostics
+/// are the ones the author reads, rather than a cascade of unresolved names on top of them.
 ///
 /// They go ahead of it because a doc example is annotated at the same filling, and where the
 /// filling does not hold that annotation fails on the whole attribute. Both diagnostics are the one
 /// disagreement, and the author should meet the one that names the entry first.
-fn with_filling_bound_checks(
-    expanded: TokenStream,
-    checks: &[proc_macro2::TokenStream],
-) -> TokenStream {
-    if checks.is_empty() {
+fn with_prefixed_tokens(expanded: TokenStream, prefix: &[proc_macro2::TokenStream]) -> TokenStream {
+    if prefix.is_empty() {
         return expanded;
     }
     let item_and_surface: proc_macro2::TokenStream = expanded.into();
     quote! {
-        #(#checks)*
+        #(#prefix)*
         #item_and_surface
     }
     .into()
@@ -2640,7 +2643,8 @@ fn branded_option_inner_error(
 /// so a name whose recorded surface carries no such check is the very disagreement spelled one
 /// module out — `Blob$Schema.min(3)` against `const Blob$Schema = z.unknown().brand<"Blob">()` is a
 /// `TypeError` at load, before a payload is read. A name the registry cannot answer for keeps
-/// today's emission; see [`crate::utils::record_value_shape`]. That is also why the constrained
+/// today's emission *here*, and leaves the question for whichever expansion registers it — see
+/// [`deferred_shape_question`] and [`crate::utils::record_value_shape`]. That is also why the constrained
 /// path asserts `Display` separately: the guard bounds the schema surfaces, the assertion bounds
 /// the Rust one. A sequence wrapper is the one `SiblingType` spelling that says its shape outright
 /// without being asked, and is refused as the array it is.
@@ -2699,16 +2703,9 @@ fn branded_constraint_inner_error(
         return Some(syn::Error::new_spanned(inner_field, message).to_compile_error());
     }
     let message = match (&inner.field_type, non_string_inner_shape(&inner)) {
-        (FieldDefType::SiblingType(inner_name, _), Some(shape)) => format!(
-            "model_schema: branded newtype `{name}` applies string constraints (pattern, \
-             minLength, maxLength) to `{inner_name}`, which this crate writes as the {shape} \
-             value the checks are then appended to — and that binding carries no string for them \
-             to measure: Zod either reads `.min`/`.max` as a bound on something else or has no \
-             such check on it at all, JSON Schema ignores `minLength`/`maxLength`/`pattern` \
-             outside `\"type\": \"string\"`, and `validate()` measures the inner's `Display` \
-             rendering — three surfaces, three answers. Brand a string-typed inner, or drop the \
-             constraints."
-        ),
+        (FieldDefType::SiblingType(inner_name, _), Some(shape)) => {
+            named_inner_constraint_message(&name.to_string(), inner_name, shape)
+        }
         (_, Some(shape)) => format!(
             "model_schema: branded newtype `{name}` applies string constraints (pattern, \
              minLength, maxLength) to a {shape} inner type, which cannot carry them: Zod reads \
@@ -2720,6 +2717,125 @@ fn branded_constraint_inner_error(
         (_, None) => return None,
     };
     Some(syn::Error::new_spanned(inner_field, message).to_compile_error())
+}
+
+/// The consult a constrained brand leaves unanswered, for the expansion that registers the name to
+/// answer, or `None` for every brand the registry could answer at its own expansion.
+///
+/// Read after the brand has passed its guards, so that a brand refused outright — over one of its
+/// own parameters, over a pattern that is no regex — leaves nothing behind: it publishes no schema,
+/// and a second diagnostic arriving at another declaration would name a brand the author has
+/// already been told to fix.
+///
+/// The arguments are resolved here rather than kept as tokens because this is the expansion that
+/// holds them, and they are resolved through the very call [`instantiated_value_shape`] fills a
+/// recorded position with — so an answer reached one declaration later is the answer the other
+/// order reaches now.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn deferred_shape_question(
+    item_struct: &syn::ItemStruct,
+    args: &ModelSchemaArgs,
+) -> Option<ShapeQuestion> {
+    if !args.has_string_constraints() {
+        return None;
+    }
+    let inner =
+        branded_inner_value_surface(&item_struct.generics, item_struct.fields.iter().next()?);
+    if inner.is_array() || sequence_wrapper_element(&inner).is_some() {
+        return None;
+    }
+    let FieldDefType::SiblingType(inner_name, arguments) = &inner.field_type else {
+        return None;
+    };
+    if lookup_alias_info(inner_name).is_some() {
+        return None;
+    }
+    Some(ShapeQuestion {
+        argument_shapes: arguments.iter().map(non_string_inner_shape).collect(),
+        brand: item_struct.ident.to_string(),
+        inner: inner_name.clone(),
+    })
+}
+
+/// What a name a brand asked about publishes, once the registration answering it has landed —
+/// `None` where that is a shape a string check lands on, and where the reference wrote no argument
+/// at the position the registration published.
+///
+/// The same filling [`instantiated_value_shape`] performs, over shapes the asking expansion had
+/// already resolved rather than over the argument defs it no longer holds. Both readings are of one
+/// record, so the two orders of a pair cannot come to different verdicts.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn answered_shape(
+    published: PublishedShape,
+    argument_shapes: &[Option<&'static str>],
+) -> Option<&'static str> {
+    match published {
+        PublishedShape::Flat(shape) => shape,
+        PublishedShape::Parameter(position) => *argument_shapes.get(position)?,
+    }
+}
+
+/// The `compile_error!` tokens an item owes the constrained brands that asked about its name before
+/// it existed, spanned on the item's own name — the only tokens this expansion holds.
+///
+/// Read off the registry rather than off the questions alone, so an item its own guards refused
+/// answers nothing: it registered no shape, and a brand over a name that publishes nothing is
+/// already reading a crate that will not compile.
+///
+/// A question the registration proves is a string settles silently, and a question no registration
+/// ever reaches stays unanswered — which is the foreign-type admission, kept exactly as it was.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn deferred_shape_refusals(registering: Option<&Ident>) -> Vec<proc_macro2::TokenStream> {
+    let Some(name) = registering else {
+        return Vec::new();
+    };
+    let rust_ident = name.to_string();
+    let questions = shape_questions_for(&rust_ident);
+    // Asked before the record is read, so the expansion of an item no brand named — which is most
+    // of them — never pays for the lookup.
+    if questions.is_empty() {
+        return Vec::new();
+    }
+    let Some(info) = lookup_alias_info(&rust_ident) else {
+        return Vec::new();
+    };
+    questions
+        .into_iter()
+        .filter_map(|question| {
+            let shape = answered_shape(info.value_shape, &question.argument_shapes)?;
+            let message = named_inner_constraint_message(&question.brand, &rust_ident, shape);
+            Some(syn::Error::new_spanned(name, message).to_compile_error())
+        })
+        .collect()
+}
+
+/// The same, where no surface reads a published shape and so no brand ever asked.
+#[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+const fn deferred_shape_refusals(
+    _registering: Option<&syn::Ident>,
+) -> Vec<proc_macro2::TokenStream> {
+    Vec::new()
+}
+
+/// How a constrained brand over a name the registry proves publishes no string is refused, in the
+/// one wording both orders of the two declarations reach it by.
+///
+/// Written once and read from both the brand's own expansion and the named item's, because those
+/// two are the same fact about the same pair and an author moving one declaration past the other
+/// should read the same sentence. Only the span differs: the brand's expansion holds the inner it
+/// wrote, and the named item's holds nothing but itself — which is why the message names the brand
+/// rather than leaving the span to say which one it is.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn named_inner_constraint_message(brand: &str, inner: &str, shape: &str) -> String {
+    format!(
+        "model_schema: branded newtype `{brand}` applies string constraints (pattern, minLength, \
+         maxLength) to `{inner}`, which this crate writes as the {shape} value the checks are then \
+         appended to — and that binding carries no string for them to measure: Zod either reads \
+         `.min`/`.max` as a bound on something else or has no such check on it at all, JSON Schema \
+         ignores `minLength`/`maxLength`/`pattern` outside `\"type\": \"string\"`, and `validate()` \
+         measures the inner's `Display` rendering — three surfaces, three answers. Brand a \
+         string-typed inner, or drop the constraints."
+    )
 }
 
 /// Names the shape an inner type resolves to that has no string for the constraints to measure, or
@@ -2778,11 +2894,15 @@ fn non_string_inner_shape(inner: &FieldDef) -> Option<&'static str> {
 /// registry has no answer for — one declared below the type reading it, or one this crate never
 /// expands at all.
 ///
-/// Those two are the same absence and take the same answer, which is the emission the name has
-/// always had. Refusing on absence would refuse the unresolved user type the guard admits on
-/// purpose, and would make a diagnostic out of declaration order: moving a declaration would turn a
-/// compiling program into a refused one without changing what it means, and an author cannot act on
-/// a guard that fires on where a type is written rather than on what it is.
+/// Those two are the same absence *at this moment* and take the same answer, which is the emission
+/// the name has always had. Refusing on absence would refuse the unresolved user type the guard
+/// admits on purpose, and would make a diagnostic out of declaration order: moving a declaration
+/// would turn a compiling program into a refused one without changing what it means, and an author
+/// cannot act on a guard that fires on where a type is written rather than on what it is.
+///
+/// What tells the two apart is not available here and does arrive later: one of them registers. So
+/// the admission stands and the consult is kept — see [`deferred_shape_question`] — for the
+/// expansion that can answer it. A name nothing registers keeps the admission for good.
 ///
 /// A name that recorded a parameter position publishes a family, and the argument written at that
 /// position is the member of it this reference names — the same argument the emission composes the
@@ -4972,6 +5092,22 @@ fn register_branded_newtype(
     .record(rust_ident);
 }
 
+/// Registers the brand, then records the consult question its own registration could not answer —
+/// in that order, so a brand naming itself cannot answer its own.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn register_brand_with_questions(
+    item_struct: &syn::ItemStruct,
+    args: &ModelSchemaArgs,
+    rust_ident: &str,
+    item_name: &str,
+    module_name: &str,
+) {
+    register_branded_newtype(item_struct, rust_ident, item_name, module_name);
+    if let Some(question) = deferred_shape_question(item_struct, args) {
+        record_shape_question(question);
+    }
+}
+
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> TokenStream {
     if let Some(output) = branded_guard_failure_output(&item_struct, args) {
@@ -4984,7 +5120,7 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
     let module_name = ident_schema_module_name(&rust_ident);
     let module_ident = Ident::new(&module_name, name.span());
 
-    register_branded_newtype(&item_struct, &rust_ident, &item_name, &module_name);
+    register_brand_with_questions(&item_struct, args, &rust_ident, &item_name, &module_name);
 
     // Extract docs and example
     #[cfg(feature = "zod")]
