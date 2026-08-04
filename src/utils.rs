@@ -900,7 +900,7 @@ pub fn publishes_zod_factory(rust_ident: &str) -> bool {
 /// before deferral and before a constrained brand's `.min`/`.max`/`.check` chain is appended.
 ///
 /// This is a comparison key, not the text `$SchemaDefault` emits: the fold in
-/// [`default_zod_argument`] renders a downstream reference's own arguments the same plain way, so
+/// [`default_zod_rendering`] renders a downstream reference's own arguments the same plain way, so
 /// the two must agree in form for the comparison to ever succeed. Recorded once as the item's
 /// `$SchemaDefault` is built, so a later item whose own declared default names this one at the
 /// identical arguments can read them back and fold onto this binding instead of composing a second

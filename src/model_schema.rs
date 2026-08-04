@@ -678,6 +678,20 @@ struct VariantParts {
     type_code: String,
 }
 
+/// The two spellings [`zod_default_block`] has on hand for a constrained bare-parameter brand's
+/// check chain — see [`branded_zod_string_checks`] and [`branded_zod_base_checks`] for what each
+/// renders and why both exist.
+#[cfg(feature = "zod")]
+struct BrandedDefaultChecks {
+    /// Composed inside a deferred argument's `z.lazy(...)` thunk, onto whatever the thunk
+    /// resolves to — a sibling's `$Schema` or the fold's `$SchemaDefault` — neither of which is
+    /// guaranteed to expose `.min`/`.max`, only the base `.check(...)` every schema carries.
+    base: String,
+    /// Chained onto an eager argument — `z.string()` and the like — which the checks' own
+    /// `ZodString` methods always apply to directly.
+    chained: String,
+}
+
 /// What [`zod_default_block`] and [`zod_factory_block`] need beyond the item's own name and
 /// parameter list, bundled into one reference because the two already carry as many positional
 /// parameters as `clippy::too_many_arguments` admits.
@@ -686,8 +700,31 @@ struct VariantParts {
 /// [`zod_default_block`]'s doc comment for what it names.
 #[cfg(feature = "zod")]
 struct ZodDefaultInputs<'defaults> {
-    constrained: Option<(&'defaults str, &'defaults str)>,
+    constrained: Option<(&'defaults str, &'defaults BrandedDefaultChecks)>,
     default_types: &'defaults [(syn::Ident, syn::Type)],
+}
+
+/// What [`default_zod_rendering`] found: a self-contained expression left eager, or a name
+/// [`deferred_zod_operand`] still has to wrap — kept apart from the final string so
+/// [`zod_default_block`] can tell which one it has before deciding where a constrained brand's
+/// checks belong: chained directly onto an eager expression, or composed inside the thunk of a
+/// deferred one, whose own annotation is not guaranteed to carry `ZodString`'s chain methods.
+#[cfg(feature = "zod")]
+enum DefaultZodRendering {
+    Deferred(String),
+    Eager(String),
+}
+
+#[cfg(feature = "zod")]
+impl DefaultZodRendering {
+    /// The plain argument an unconstrained default composes: deferred renderings gain their
+    /// `z.lazy(...)` wrapper here, at the one place both variants converge back to a single string.
+    fn into_argument(self) -> String {
+        match self {
+            Self::Deferred(schema) => deferred_zod_operand(&schema),
+            Self::Eager(schema) => schema,
+        }
+    }
 }
 
 #[cfg(feature = "jsonschema")]
@@ -2987,7 +3024,7 @@ fn branded_option_inner_error(
 /// One of the brand's *own* type parameters is not asked of the registry — nothing is registered
 /// under a parameter's own name — but nor is it refused outright the way it once was. It is asked
 /// of the item's own `default_types` declaration instead, the same declaration
-/// [`default_zod_argument`] reads when it composes `$SchemaDefault`'s arguments: the *factory*'s
+/// [`default_zod_rendering`] reads when it composes `$SchemaDefault`'s arguments: the *factory*'s
 /// parameter still says its shape outright, because a caller supplying `ObjectId$Schema` must not
 /// inherit string bounds meant for `String`, so [`branded_zod_inner`] never appends a check to the
 /// bare parameter it renders inside the builder. What the checks reach instead is the default
@@ -4840,6 +4877,31 @@ fn branded_zod_string_checks(args: &ModelSchemaArgs) -> String {
     checks
 }
 
+/// The same three constraints [`branded_zod_string_checks`] renders, spelled instead as one
+/// `.check(...)` call over the base check functions (`z.minLength`, `z.maxLength`, `z.regex`) —
+/// the surface every Zod schema exposes, unlike `.min`/`.max`, which live on `ZodString` alone and
+/// so are not guaranteed to exist on whatever a deferred or folded default argument is annotated
+/// as. See [`zod_default_block`] for where the two spellings are chosen between.
+#[cfg(feature = "zod")]
+fn branded_zod_base_checks(args: &ModelSchemaArgs) -> String {
+    let mut checks = Vec::new();
+    if let Some(min_len) = args.min_length {
+        checks.push(format!("z.minLength({min_len})"));
+    }
+    if let Some(max_len) = args.max_length {
+        checks.push(format!("z.maxLength({max_len})"));
+    }
+    if let Some(pattern) = &args.pattern {
+        let literal_body = escape_js_regex_literal(pattern);
+        checks.push(format!("z.regex(/{literal_body}/)"));
+    }
+    if checks.is_empty() {
+        String::new()
+    } else {
+        format!(".check({})", checks.join(", "))
+    }
+}
+
 /// Whether a branded newtype's inner is an `ObjectId` written on its own, and so reaches the wire
 /// as the `$oid` object rather than as any string.
 ///
@@ -5082,9 +5144,13 @@ fn build_branded_zod_schema_method(
         branded_zod_const_block(item_name, inner, &expression, &reexport)
     } else {
         let checks = branded_zod_string_checks(args);
-        let constrained_default = match (&inner.field_type, checks.is_empty()) {
+        let branded_checks = BrandedDefaultChecks {
+            base: branded_zod_base_checks(args),
+            chained: checks,
+        };
+        let constrained_default = match (&inner.field_type, branded_checks.chained.is_empty()) {
             (FieldDefType::TypeParam(parameter), false) if !inner.is_array() => {
-                Some((parameter.as_str(), checks.as_str()))
+                Some((parameter.as_str(), &branded_checks))
             }
             _ => None,
         };
@@ -12304,11 +12370,11 @@ fn declared_default_field(parameter: &str, default_types: &[(syn::Ident, syn::Ty
         )
 }
 
-/// The Zod argument one declared default composes: the ordinary rendering [`FieldDef::zod_type`]
-/// gives every field, deferred through [`deferred_zod_operand`] wherever that rendering names
-/// another item's own module-scope binding — its factory, called with fresh arguments exactly as
-/// an ordinary field naming it does, or, where the default names that item at exactly the
-/// arguments it calls its own, that item's `$SchemaDefault` directly (the fold).
+/// The rendering one declared default composes: the ordinary rendering [`FieldDef::zod_type`]
+/// gives every field, deferred wherever that rendering names another item's own module-scope
+/// binding — its factory, called with fresh arguments exactly as an ordinary field naming it does,
+/// or, where the default names that item at exactly the arguments it calls its own, that item's
+/// `$SchemaDefault` directly (the fold).
 ///
 /// Either shape is deferred for the reason [`deferred_zod_operand`]'s own doc comment states for a
 /// flattened base: `{name}$SchemaFactory` and `{name}$SchemaDefault` are each another module-scope
@@ -12336,7 +12402,7 @@ fn declared_default_field(parameter: &str, default_types: &[(syn::Ident, syn::Ty
 /// declared, rather than reconstructing a plain instantiation beside them. See
 /// [`record_zod_default_arguments`].
 #[cfg(feature = "zod")]
-fn default_zod_argument(field: &FieldDef) -> String {
+fn default_zod_rendering(field: &FieldDef) -> DefaultZodRendering {
     if field.array_depth == 0
         && !field.is_optional()
         && let FieldDefType::SiblingType(name, args) = &field.field_type
@@ -12346,12 +12412,15 @@ fn default_zod_argument(field: &FieldDef) -> String {
         {
             let rendered: Vec<String> = args.iter().map(FieldDef::zod_type).collect();
             if zod_default_arguments(name).as_deref() == Some(rendered.as_slice()) {
-                return deferred_zod_operand(&format!("{}$SchemaDefault", info.export_name));
+                return DefaultZodRendering::Deferred(format!(
+                    "{}$SchemaDefault",
+                    info.export_name
+                ));
             }
         }
-        return deferred_zod_operand(&field.zod_type());
+        return DefaultZodRendering::Deferred(field.zod_type());
     }
-    field.zod_type()
+    DefaultZodRendering::Eager(field.zod_type())
 }
 
 /// What a generic item appends after its factory: the factory called with each parameter's
@@ -12366,10 +12435,17 @@ fn default_zod_argument(field: &FieldDef) -> String {
 ///
 /// `defaults.constrained` names the one parameter, if any, a branded newtype's own
 /// `pattern`/`minLength`/`maxLength` land on — the parameter its bare-parameter inner *is* —
-/// together with the check chain [`branded_zod_string_checks`] built for it. Every ordinary
-/// generic struct, tuple struct, enum and alias passes `None`: only a brand carries type-level
-/// string constraints, and [`branded_zod_inner`] already keeps them off the factory's own
-/// parameter, so the one place left for them is the default argument built here.
+/// together with the two check-chain spellings [`BrandedDefaultChecks`] built for it. Every
+/// ordinary generic struct, tuple struct, enum and alias passes `None`: only a brand carries
+/// type-level string constraints, and [`branded_zod_inner`] already keeps them off the factory's
+/// own parameter, so the one place left for them is the default argument built here.
+///
+/// Which spelling applies follows [`default_zod_rendering`]'s own answer for that argument: an
+/// eager rendering (a self-contained expression such as `z.string()`) takes the chained spelling
+/// directly, exactly as before this function had any deferred shape to consider; a deferred one
+/// takes the base spelling *inside* the `z.lazy(...)` thunk `into_argument` would otherwise close
+/// over untouched — appending after the thunk would land the checks on `ZodLazy`, which carries
+/// neither `.min`/`.max` nor any refinement of the schema it resolves to.
 #[cfg(feature = "zod")]
 fn zod_default_block(
     item_name: &str,
@@ -12387,12 +12463,17 @@ fn zod_default_block(
         .iter()
         .zip(&fields)
         .map(|(parameter, field)| {
-            let argument = default_zod_argument(field);
+            let rendering = default_zod_rendering(field);
             match defaults.constrained {
-                Some((target, checks)) if target == parameter.as_str() => {
-                    format!("{argument}{checks}")
-                }
-                _ => argument,
+                Some((target, checks)) if target == parameter.as_str() => match rendering {
+                    DefaultZodRendering::Eager(schema) => {
+                        format!("{schema}{}", checks.chained)
+                    }
+                    DefaultZodRendering::Deferred(schema) => {
+                        deferred_zod_operand(&format!("{schema}{}", checks.base))
+                    }
+                },
+                _ => rendering.into_argument(),
             }
         })
         .collect();

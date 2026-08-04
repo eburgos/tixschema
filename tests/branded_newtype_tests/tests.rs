@@ -916,6 +916,18 @@ mod constrained_generic_branded_tests {
         pub id: HolderType,
     }
 
+    /// A SECOND constrained generic brand — itself carrying string constraints, unlike
+    /// `StrictDocumentIdHolder` above, which carries none — whose declared default names
+    /// `StrictDocumentId` at exactly its own declared default. The fold (txsch-qobf) resolves
+    /// `default_zod_rendering` to the deferred `z.lazy(() => StrictDocumentId$SchemaDefault)`
+    /// spelling, and `OuterId`'s own checks have to compose *inside* that thunk rather than after
+    /// it — the folded-generic-sibling half of txsch-euxz's bug, the non-generic half being
+    /// `constrained_default_names_a_sibling_tests::OuterBrand` below.
+    #[model_schema(minLength = 10, default_types(WrapType = StrictDocumentId<String>))]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct OuterId<WrapType>(pub WrapType);
+
     /// The builder every call to the factory runs through carries no string check at all: a caller
     /// filling `IdType` with something other than the declared default — an `ObjectId` schema, say
     /// — must not inherit bounds meant for the default.
@@ -971,6 +983,115 @@ mod constrained_generic_branded_tests {
                  StrictDocumentId$SchemaDefault));"
             ),
             "Got:\n{zod}"
+        );
+    }
+
+    /// `OuterId` is itself constrained, and its declared default folds onto `StrictDocumentId`'s
+    /// own `$SchemaDefault` — the deferred, checks-carrying binding, not a plain
+    /// `StrictDocumentId$SchemaFactory(z.string())` reconstruction. `OuterId`'s own `minLength`
+    /// check composes *inside* the `z.lazy(...)` thunk, over `.check(...)`'s base spelling rather
+    /// than `.min(...)`'s chain spelling — the deferred target's annotation is not guaranteed to
+    /// carry `ZodString`'s own chain methods, only the `.check(...)` every schema exposes. Before
+    /// the fix, this same check was appended after the thunk closed, landing on `ZodLazy`, which
+    /// has neither.
+    #[test]
+    fn a_constrained_brands_default_naming_another_constrained_brands_default_composes_the_checks_inside_the_thunk()
+     {
+        let zod = OuterId::<String>::zod_schema();
+        assert!(
+            zod.contains(
+                "export const OuterId$SchemaDefault: ZodType<OuterId<StrictDocumentId<string>>> = \
+                 OuterId$SchemaFactory(z.lazy(() => \
+                 StrictDocumentId$SchemaDefault.check(z.minLength(10))));"
+            ),
+            "Got:\n{zod}"
+        );
+    }
+
+    /// The composed default enforces both bounds: `StrictDocumentId`'s own 24-hex, inherited
+    /// through the fold, and `OuterId`'s own `minLength`.
+    #[test]
+    fn the_folded_default_instantiation_enforces_both_brands_bounds_through_serde() {
+        let valid: OuterId<StrictDocumentId<String>> =
+            serde_json::from_str("\"64de3d95ff45b119e5b53a7e\"").unwrap();
+        valid.validate().unwrap();
+
+        let too_short: Result<OuterId<StrictDocumentId<String>>, _> =
+            serde_json::from_str("\"abc\"");
+        assert!(
+            too_short.is_err(),
+            "Should reject a value StrictDocumentId's own 24-hex bound rejects"
+        );
+    }
+}
+
+/// The non-generic-sibling half of txsch-euxz's bug: a constrained generic brand whose declared
+/// default names an ordinary (non-generic) `#[model_schema]` sibling. Held apart from
+/// `constrained_generic_branded_tests` above (whose fixtures all name a *generic* sibling) so each
+/// module pins one of the two spellings `default_zod_rendering` can defer to — a bare `$Schema`
+/// here, a folded `$SchemaDefault` there.
+#[cfg(all(feature = "zod", feature = "typescript", feature = "serde"))]
+mod constrained_default_names_a_sibling_tests {
+    use super::*;
+
+    /// An unconstrained branded newtype — the sibling a generic brand's own declared default can
+    /// name. Carries no checks of its own, so any composed checks downstream are unambiguously
+    /// `OuterBrand`'s.
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct InnerString(pub String);
+
+    /// A constrained generic brand whose declared default names `InnerString` — a non-generic
+    /// sibling, so `default_zod_rendering` defers to its bare `$Schema` binding (never a
+    /// `$SchemaDefault`, which only a generic sibling publishes) rather than reconstructing it
+    /// eagerly. This is the exact repro from txsch-euxz's own bug report.
+    #[model_schema(minLength = 3, default_types(T = InnerString))]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct OuterBrand<T>(pub T);
+
+    /// Before the fix: `OuterBrand$SchemaFactory(z.lazy(() => InnerString$Schema).min(3))` —
+    /// `.min` landing on `ZodLazy`, which does not have it. After: the check composes inside the
+    /// thunk, over `InnerString$Schema`'s own base `.check(...)` surface.
+    #[test]
+    fn a_constrained_brands_default_naming_a_non_generic_sibling_composes_the_check_inside_the_thunk()
+     {
+        let zod = OuterBrand::<String>::zod_schema();
+        assert!(
+            zod.contains(
+                "export const OuterBrand$SchemaDefault: ZodType<OuterBrand<InnerString>> = \
+                 OuterBrand$SchemaFactory(z.lazy(() => InnerString$Schema.check(z.minLength(3))));"
+            ),
+            "Got:\n{zod}"
+        );
+    }
+
+    /// The factory's own bare parameter still carries no check — exactly the invariant
+    /// `constrained_generic_branded_tests::the_factorys_own_parameter_carries_no_check` pins for
+    /// the primitive-default case, unaffected by where the default happens to point.
+    #[test]
+    fn the_factorys_own_parameter_carries_no_check() {
+        let zod = OuterBrand::<String>::zod_schema();
+        let builder_end = zod.find("OuterBrand$SchemaFactoryCache").unwrap();
+        let builder = &zod[..builder_end];
+        for check in [".min(", ".max(", ".check("] {
+            assert!(
+                !builder.contains(check),
+                "found {check} in builder:\n{builder}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_default_instantiation_enforces_the_bound_through_serde() {
+        let valid: OuterBrand<InnerString> = serde_json::from_str("\"abc\"").unwrap();
+        valid.validate().unwrap();
+
+        let too_short: Result<OuterBrand<InnerString>, _> = serde_json::from_str("\"ab\"");
+        assert!(
+            too_short.is_err(),
+            "Should reject a too-short value via serde"
         );
     }
 }
