@@ -24,18 +24,23 @@ const UNICODE_CLASS_READ_AS: &str = "an escaped `p` or `P` followed by a literal
 /// A Unicode class, in the three spellings the `regex` crate reads one by.
 const UNICODE_CLASS_WRITTEN: &str = "a Unicode class -- `\\p{...}`, `\\pL` or `\\P{...}`";
 
-/// Whether a registered Rust ident, *written as a type path*, resolves to something carrying an
-/// inherent `enum_members()` — the enumeration the JSON-schema map-key expansion calls. Only a
-/// plain unit enum gets that method, and a type path sees straight through an alias, so an alias
-/// answers for whatever it targets rather than for itself.
+/// What a registered Rust ident, *written as a type path*, resolves to — the two facts a map key
+/// asks of it: whether it carries an inherent `enum_members()`, the enumeration the JSON-schema
+/// map-key expansion calls, and whether serde writes it as a bare string, which is what a JSON
+/// object key is. Only a plain unit enum gets that method, and a type path sees straight through an
+/// alias, so an alias answers for whatever it targets rather than for itself.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AliasKind {
     /// A plain unit enum, or an alias chain ending in one.
     EnumMembers,
-    /// Provably has none: a struct, a branded newtype, a non-plain enum, or an alias whose target
-    /// is a primitive, a collection, or one of those.
+    /// Provably has neither: a struct, a brand over a non-string inner, a non-plain enum, or an
+    /// alias whose target is a primitive, a collection, or one of those.
     NoEnumMembers,
+    /// No `enum_members()`, but serde writes it as a bare string: a `#[serde(transparent)]` brand
+    /// whose inner is itself string-shaped, or an alias chain ending in one. Such a type keys a map
+    /// exactly as `String` does, under its own name.
+    StringWire,
     /// Undecidable at this expansion — an alias naming a type that was not registered before it.
     Unknown,
 }

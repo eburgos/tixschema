@@ -144,9 +144,36 @@ pub struct Schedule {
 }
 ```
 
-A key path is the one spelling that can name an enum, so a key path the expansion can prove is *not* a plain enum — a struct, a branded newtype, a tagged or untagged enum, or a `#[model_schema()]` alias of any of them — is refused where it is written, at whatever depth the map sits at, naming the type as the author spelled it. A key path the expansion has not seen yet, one declared after the type that writes the map or one from another crate, cannot be ruled out and is emitted as an enumerating key; a key that turns out to have no members surfaces as an `E0599` at the key type instead. A sequence-wrapped key — a `Vec`, a `[T; N]`, one of the sets — is refused outright, serde writing no object at all for a map keyed by one. All three are covered under [Compilation Errors](#compilation-errors), with the exact diagnostic each produces.
+A `#[serde(transparent)]` branded newtype over a string — a brand over `String` or `PathBuf`, or over another such brand — is the open case wearing a name. serde writes the brand as the bare string its inner is, which is exactly what a JSON object key is, so the map is an object keyed by arbitrary strings. TypeScript and Zod keep the brand's own spelling as the key type the way they keep an enum's — `Partial<Record<CorrelationId, V>>` and `z.record(CorrelationId$Schema, V)` — while the JSON schema is the open object, having no brand to say. A brand over anything else is refused as a key.
 
-Every other key is neither open nor enumerable, and none of them is refused. The JSON schema describes such a map as an object and says nothing about its members — `{"type": "object", "additionalProperties": true}` — while TypeScript and Zod keep the key's own type, so a `HashMap<u32, String>` is `Partial<Record<number, string>>` and `z.record(z.number().int(), z.string())`. serde writes the object with the key's string form for its keys: `7` becomes `"7"`, `true` becomes `"true"`, a chrono `NaiveDate` its ISO rendering. Only the narrowing is missing, not the object.
+```rust
+use std::collections::HashMap;
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+pub struct CorrelationId(String);
+
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+pub struct Traces {
+    // {"type": "object", "additionalProperties": {"type": "string"}}, serialized {"abc": "..."}
+    pub spans: HashMap<CorrelationId, String>,
+}
+```
+
+A key path is the one spelling that can name an enum or a brand, so a key path the expansion can prove is *neither* a plain enum nor a string-shaped brand — a struct, a brand over a non-string inner, a tagged or untagged enum, or a `#[model_schema()]` alias of any of them — is refused where it is written, at whatever depth the map sits at, naming the type as the author spelled it. A key path the expansion has not seen yet, one declared after the type that writes the map or one from another crate, cannot be ruled out and is emitted as an enumerating key; a key that turns out to have no members surfaces as an `E0599` at the key type instead.
+
+The remaining refusals are all one rule: a JSON object key is a string, and `serde_json` raises `key must be a string` — refusing the whole map at serialization, with no fallback form — for every key whose own wire form is not one. Each of these is therefore refused rather than described, there being no object to describe:
+
+- a **sequence-wrapped** key — a `Vec`, a `[T; N]`, one of the sets — which writes a JSON array;
+- a **tuple** key, which writes a JSON array;
+- a **nested map** key and an **`ObjectId`** key, which write JSON objects;
+- an **`Option`** key, whose `Some` writes what its inner writes but whose `None` writes nothing a key can be — so a single `None` fails the whole map at runtime, and a schema for the `Some` half alone would describe a contract the type does not keep.
+
+All of them are covered under [Compilation Errors](#compilation-errors), with the exact diagnostic each produces.
+
+Every other key is neither open nor enumerable, and none of them is refused: serde stringifies each one into a key for you. The JSON schema describes such a map as an object and says nothing about its members — `{"type": "object", "additionalProperties": true}` — while TypeScript and Zod keep the key's own type, so a `HashMap<u32, String>` is `Partial<Record<number, string>>` and `z.record(z.number().int(), z.string())`. serde writes the object with the key's string form for its keys: `7` becomes `"7"`, `true` becomes `"true"`, a chrono `NaiveDate` its ISO rendering. Only the narrowing is missing, not the object. The rule the refusals apply is refuse-what-serde-refuses, never refuse-what-is-not-a-`String`.
 
 ### Pointers and Borrowed Values
 
@@ -523,6 +550,8 @@ z.union([z.strictObject({ x: z.string(), }), z.strictObject({ y: z.number().int(
 ```
 
 Untagged enums compose with `#[serde(flatten)]`: a flattened variant carrying `Vec<DateValue>` renders `sampleValues: z.array(DateValue$Schema)` (TypeScript `Array<DateValue>`), and the JSON-schema `items` for that field is the `DateValue` `anyOf`.
+
+A member of an untagged variant carries `#[model_schema_prop(...)]` exactly as the same field written in a tagged variant does: the constraint reaches the Zod schema and the JSON Schema, and every guard the attribute earns is reported at the member. The one difference is the Rust side -- an untagged enum generates no per-field validators, so a constrained member has no `validate()` contribution and no deserialization check.
 
 **Unsupported variants:** unit variants and multi-field tuple variants in an untagged enum produce a compile-time error.
 
@@ -941,6 +970,12 @@ Generated JSON Schema for `username`: `{ "type": "string", "minLength": 3, "maxL
 
 The TypeScript type is unchanged -- still just `string`.
 
+A type whose schema this crate writes whole carries none of the five constraints, and writing one on
+such a field is a compile error naming the keys and the type: `ObjectId` writes a `{"$oid": "..."}`
+object rather than a string, and the chrono types (`NaiveDate`, `NaiveTime`, `NaiveDateTime`,
+`DateTime<Tz>`) write their own ISO spellings, which no surface reads a length, a pattern or a range
+beside. Carry the value in a `String` field if it needs one.
+
 A `PathBuf` field carries the same three constraints, as does the `Path` borrow behind a wrapper (`Box<Path>`, `Cow<'_, Path>`, `Arc<Path>`, `Rc<Path>`): serde writes a path as a JSON string, which is what the three surfaces render a constrained string for. The checks measure that string -- the path's `to_string_lossy` rendering, which is the exact wire value for every path serde can write, a path that is not UTF-8 being one serde refuses to serialize at all.
 
 ### Numeric Constraints (minimum, maximum)
@@ -1084,9 +1119,11 @@ Both approaches produce identical TypeScript and Zod output. The single-value en
 - **Pattern matching** -- match on `DocumentLiteralValue::Document` instead of checking string equality
 - **Naming convention**: Use the `<Something>LiteralValue` naming pattern (e.g., `DocumentLiteralValue`)
 
-### Type Overrides (`as`)
+### Type Names (`as`)
 
-Use `as` to override the TypeScript/Zod type for a field, keeping the Rust type unchanged:
+Use `as` to name the type a field renders. The target must be the type the field already renders --
+either the field's own type, or the value under its wrappers, so `as = String` is written on a
+`String`, an `Option<String>` and a `Vec<String>` alike:
 
 ```rust
 #[model_schema()]
@@ -1095,9 +1132,17 @@ pub struct ApiConfig {
     pub id: String,
     #[model_schema_prop(as = String)]
     pub metric_type: String,
+    #[model_schema_prop(as = String, minLength = 1)]
+    pub tags: Vec<String>,
     pub enabled: bool,
 }
 ```
+
+Naming any other type is a compile error. The key cannot override the emitted type: all three
+surfaces are written from the field's declared type because that is the type serde reads and writes,
+and a `serialize_with` names a function whose output the expansion cannot see -- so a target that
+rendered differently would describe a payload serde never produces. `as` also cannot be written
+beside `preprocess`; the two have no defined order.
 
 ### Zod Preprocessing
 
@@ -1121,7 +1166,7 @@ pub struct Event {
 
 By default an `Option<T>` field renders as a required key carrying `| undefined` (`field: T | undefined`). Add the bare `ts_optional` flag to render it as an optional key instead (`field?: T`).
 
-This is a TypeScript-only knob -- the Zod schema and JSON Schema are unchanged (the field is already optional in both). The flag is only valid on `Option<T>` fields; applying it to a non-`Option` field is a compile error. It composes with `as = Type`.
+This is a TypeScript-only knob -- the Zod schema and JSON Schema are unchanged (the field is already optional in both). The flag is only valid on `Option<T>` fields; applying it to a non-`Option` field is a compile error. It composes with `as = Type`, which names the type the field already renders.
 
 ```rust
 #[model_schema()]
@@ -1588,9 +1633,9 @@ tixschema = { features = ["serde"] }
 
 **Error:** *a map key must be a plain `#[model_schema()]` enum, whose members become the object's keys — `<type>` resolves to a type with no `enum_members()`*, reported at the field; or `no associated function or constant named enum_members found for <type>` (`E0599`), reported at the map's key type.
 
-A map key written as a type path must be a plain `#[model_schema()]` enum, whose members become the object's keys. A `String` key is the other supported spelling, and every key that is neither is covered under [Collections and Maps](#collections-and-maps) — this entry is about the two diagnostics a type path earns.
+A map key written as a type path must be a plain `#[model_schema()]` enum, whose members become the object's keys, or a `#[serde(transparent)]` brand over a string, which keys the map the way a `String` does. A `String` key is the third supported spelling, and every key that is none of them is covered under [Collections and Maps](#collections-and-maps) — this entry is about the two diagnostics a type path earns.
 
-A key the expansion has already seen and knows is not a plain enum — a struct, a branded newtype, a tagged or untagged enum, or a `#[model_schema()]` alias of one of those — is named directly, at the field that writes the map:
+A key the expansion has already seen and knows is neither — a struct, a brand over a non-string inner, a tagged or untagged enum, or a `#[model_schema()]` alias of one of those — is named directly, at the field that writes the map:
 
 ```rust
 #[model_schema()]
@@ -1655,6 +1700,53 @@ pub struct Counts {
 ```
 
 Every sequence spelling earns this — `Vec`, `[T; N]`, and the sets — the wrapper being what serde writes as an array. The message names the element rather than the wrapper, the parser having already collapsed those spellings onto their array levels. A sequence in the map's *value* is untouched: only the key has to be a string.
+
+#### Map Keys serde Refuses to Write
+
+**Error:** *a map key must be a value serde writes as a string ... serde writes `<type>` as a JSON array | a JSON object, and refuses to serialize a map keyed by one at all*, reported at the field.
+
+The same rule as above, reached by the key's own type rather than by a wrapper around it. A tuple writes a JSON array; a nested map and an `ObjectId` write JSON objects. `serde_json` uses none of them as an object key — it raises `key must be a string` and refuses the whole map — so there is no wire form for a schema to describe:
+
+```rust
+// Wrong: each key writes an array or an object, which serde will not use as an object key
+#[model_schema()]
+pub struct BadCounts {
+    pub by_pair: HashMap<(Slot, Slot), u32>,
+    pub by_map: HashMap<BTreeMap<String, u32>, u32>,
+    pub by_oid: HashMap<ObjectId, u32>,
+}
+
+// Correct: key by a value serde writes as a string
+#[model_schema()]
+pub struct Counts {
+    pub by_slot: HashMap<Slot, u32>,
+    pub by_id: HashMap<String, u32>,
+}
+```
+
+The keys serde *does* stringify for you are untouched and stay open — numbers, `bool`, and the chrono types all describe as `{"type": "object", "additionalProperties": true}`, as [Collections and Maps](#collections-and-maps) sets out. The rule is refuse-what-serde-refuses, never refuse-what-is-not-a-`String`. A tuple or a map in the map's *value* is untouched too: only the key has to be a string.
+
+#### `Option`-Wrapped Map Keys
+
+**Error:** *a map key must be a value serde writes as a string ... this key is an `Option<T>`, whose `Some` serde writes as the bare `T` while a `None` has no string form at all and makes serde refuse the whole map; key it by `T`*, reported at the field.
+
+An `Option` key is transparent for a `Some` — `HashMap<Option<Slot>, u32>` writes `{"Daily": 1}`, exactly what the bare-keyed map writes — and has no form at all for a `None`, which fails serialization with `key must be a string`. A schema describing only the `Some` half would validate documents the type can raise a runtime error on and say nothing about the half it cannot write, so the spelling is refused and the inner is named as the remedy:
+
+```rust
+// Wrong: a `None` key has no wire form, and one is enough to fail the whole map
+#[model_schema()]
+pub struct BadCounts {
+    pub counts: HashMap<Option<Slot>, u32>,
+}
+
+// Correct: key by the inner, which is what every `Some` was already writing
+#[model_schema()]
+pub struct Counts {
+    pub counts: HashMap<Slot, u32>,
+}
+```
+
+An `Option` in the map's *value* is untouched: a map entry cannot be dropped the way an object key can, so a `None` value is written as `null` and described as such.
 
 #### Function-Local Types
 

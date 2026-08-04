@@ -64,7 +64,11 @@ pub enum VariantKind {
 /// Feature dependencies:
 /// - "`object_id"`: Enables `ObjectId` variant for `MongoDB` support
 /// - Without features, falls back to basic mappings
-#[derive(Clone, Debug)]
+///
+/// Equality is the question `as = Type` asks: do two written types describe the same value on every
+/// surface? The variants a spelling collapses onto answer it — `Path` reaching `String` is the same
+/// type here as `PathBuf` is — and the nested defs answer it through [`FieldDef`]'s own `PartialEq`.
+#[derive(Clone, Debug, PartialEq)]
 pub enum FieldDefType {
     /// Boolean primitive - maps to boolean.
     Boolean,
@@ -187,6 +191,21 @@ pub struct FieldDef {
     pub nullable_levels: Vec<u8>,
     #[cfg(feature = "jsonschema")]
     pub type_span: Span,
+}
+
+/// Two field defs are equal when they describe the same value on every surface: the same type, the
+/// same array levels, the same fixed lengths and the same nullable levels.
+///
+/// What the author wrote *around* the value is left out. A name, a doc comment and a
+/// `model_schema_prop` are the field's, not the type's, and two fields differing only in those
+/// render the same schema — which is exactly the question `as = Type` asks of its target.
+impl PartialEq for FieldDef {
+    fn eq(&self, other: &Self) -> bool {
+        self.array_depth == other.array_depth
+            && self.array_lengths == other.array_lengths
+            && self.nullable_levels == other.nullable_levels
+            && self.field_type == other.field_type
+    }
 }
 
 impl FieldDef {
@@ -345,6 +364,51 @@ impl FieldDef {
             .iter()
             .find(|&&(at, _)| at == level)
             .map(|&(_, length)| length)
+    }
+
+    /// The name of the type this field renders as, when that type's schema is one the crate writes
+    /// whole and a `model_schema_prop` bound has no place in.
+    ///
+    /// Each of these renders a shape fixed here rather than the plain string or number a length, a
+    /// pattern or a range is spelled against: a chrono value as its own ISO spelling, an `ObjectId`
+    /// as the `{"$oid": …}` object serde writes it as. None of the three surfaces reads a bound for
+    /// them and neither does the Rust validator, so a bound written on one reaches nothing; the
+    /// caller turns that into a guard error naming the field instead of dropping it.
+    ///
+    /// Only the field's own rendering is asked about. A map or a tuple holding one of these
+    /// describes its members separately, and a bound on the field around them was never theirs.
+    pub const fn fixed_shape_name(&self) -> Option<&'static str> {
+        match &self.field_type {
+            #[cfg(feature = "object_id")]
+            FieldDefType::ObjectId => Some("ObjectId"),
+            #[cfg(feature = "chrono")]
+            FieldDefType::NaiveDate => Some("chrono::NaiveDate"),
+            #[cfg(feature = "chrono")]
+            FieldDefType::NaiveTime => Some("chrono::NaiveTime"),
+            #[cfg(feature = "chrono")]
+            FieldDefType::NaiveDateTime => Some("chrono::NaiveDateTime"),
+            #[cfg(feature = "chrono")]
+            FieldDefType::DateTime => Some("chrono::DateTime"),
+            FieldDefType::SiblingType(_, _)
+            | FieldDefType::Map(_, _)
+            | FieldDefType::Tuple(_)
+            | FieldDefType::Unknown
+            | FieldDefType::StringLiteral(_)
+            | FieldDefType::Boolean
+            | FieldDefType::String
+            | FieldDefType::U8
+            | FieldDefType::U16
+            | FieldDefType::U32
+            | FieldDefType::U64
+            | FieldDefType::I8
+            | FieldDefType::I16
+            | FieldDefType::I32
+            | FieldDefType::I64
+            | FieldDefType::Usize
+            | FieldDefType::Isize
+            | FieldDefType::F32
+            | FieldDefType::F64 => None,
+        }
     }
 
     #[cfg(feature = "chrono")]
@@ -649,6 +713,20 @@ impl FieldDef {
         } else {
             pre_result
         }
+    }
+
+    /// The value this field's wrappers hold, as a field of its own: the same type with the
+    /// `Option`s and the array levels dropped.
+    ///
+    /// The wrappers are the field's to declare and the value under them is what a type name stands
+    /// for, so this is what an `as = Type` is compared against when the target names a bare type —
+    /// the spelling `as = String` on a `Vec<String>` uses.
+    pub fn value_under_wrappers(&self) -> Self {
+        let mut value = self.clone();
+        value.array_depth = 0;
+        value.array_lengths.clear();
+        value.nullable_levels.clear();
+        value
     }
 
     /// The type match plus one `z.array(…)` per array level, each carrying the `z.nullable(…)` of
