@@ -4,9 +4,9 @@ use core::ops::Range;
 use core::slice::from_ref;
 use regex_syntax::ast::parse::Parser as PatternParser;
 use regex_syntax::ast::{
-    Assertion, AssertionKind, Ast, ClassPerl, ClassPerlKind, ClassSet, ClassSetBinaryOpKind,
-    ClassSetItem, Flag, FlagsItemKind, Group, GroupKind, HexLiteralKind, Literal, LiteralKind,
-    SpecialLiteralKind,
+    Assertion, AssertionKind, Ast, ClassBracketed, ClassPerl, ClassPerlKind, ClassSet,
+    ClassSetBinaryOpKind, ClassSetItem, Flag, FlagsItemKind, Group, GroupKind, HexLiteralKind,
+    Literal, LiteralKind, SpecialLiteralKind,
 };
 #[cfg(feature = "serde")]
 use regex_syntax::hir;
@@ -220,7 +220,7 @@ impl JsSpelling {
             Ast::Literal(literal) => self.literal(literal, false),
             Ast::Assertion(assertion) => self.assertion(assertion),
             Ast::ClassUnicode(_) => self.refuse(UNICODE_CLASS_WRITTEN, UNICODE_CLASS_READ_AS),
-            Ast::ClassBracketed(class) => self.class_set(&class.kind),
+            Ast::ClassBracketed(class) => self.bracketed_class(class),
             Ast::Repetition(repetition) => self.ast(&repetition.ast),
             Ast::Group(group) => self.group(group),
             Ast::Alternation(alternation) => self.asts(&alternation.asts),
@@ -232,6 +232,31 @@ impl JsSpelling {
         for ast in asts {
             self.ast(ast);
         }
+    }
+
+    /// Walks a `[...]` class, refusing it first if it is negated.
+    ///
+    /// A negated class is the last construct both grammars read and fill differently, and the
+    /// members cannot settle it: the complement is taken one code unit at a time there and one
+    /// character at a time here, so `[^0-9]` parts ways over an astral character exactly as the
+    /// `\D` above it does. Nothing is bought by admitting the bracketed spelling of a construct
+    /// already refused under its perl one.
+    ///
+    /// The one class whose `regex` reading does leave every astral character out has to name them
+    /// by astral bounds, and a flagless literal reads those as surrogate halves in descending
+    /// order and will not parse the class at all — so there is no admissible spelling to fall back
+    /// to, which is what makes refusal the whole verdict rather than a table of survivors.
+    fn bracketed_class(&mut self, class: &ClassBracketed) {
+        if class.negated {
+            self.refuse_value_set(
+                "a negated character class `[^...]`",
+                "the complement of the same members taken one UTF-16 code unit at a time, where \
+                 the `regex` crate takes it one character at a time -- so a lone character outside \
+                 the Basic Multilingual Plane fills the class here and reaches that literal as the \
+                 two code units no one-character class holds",
+            );
+        }
+        self.class_set(&class.kind);
     }
 
     fn class_item(&mut self, item: &ClassSetItem) {
