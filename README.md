@@ -1627,6 +1627,7 @@ Key points:
 - If multiple examples are present, only the **first one** is used.
 - Examples respect Serde attributes (field renaming, etc.).
 - Being Rust source, the example block is dropped from the JSDoc comment above the generated `export type`, whatever the type is declared as. On a struct or an enum it reaches the Zod `example` field; on a type alias, which publishes no `example` field, it reaches no generated surface at all.
+- A generic struct or enum has its example built at one instantiation, with every type parameter filled at `String`. A lifetime elides there and needs no filling, but a **const parameter takes none** -- `String` names a type, a const is a value, and no value is the one every example would be written at. So a struct or an enum that declares a const parameter and writes an example is refused, naming the const; drop the example or the const parameter. Nothing is owed where no example is written, on a type alias, or with the `zod` feature off, `zod` being the only surface that reads one.
 - The example code is executed at compile time and serialized to JSON.
 - Wrong types produce compile errors, ensuring examples stay in sync with your types.
 

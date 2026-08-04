@@ -39,6 +39,16 @@ use syn::spanned::Spanned as _;
 /// The variants of [`rendered_discriminated_union`]'s enum, in the order they are declared.
 const DECLARED_VARIANTS: [&str; 6] = ["Upload", "Generate", "Delete", "Rename", "Move", "Archive"];
 
+/// The doc attributes carrying a ` ```rust example ` block that the const-parameter probes are
+/// written under. Held apart from them so every probe writes the same block and only the
+/// declaration beneath it varies.
+#[cfg(feature = "zod")]
+const EXAMPLE_DOC_BLOCK: &str = "/// An item carrying an example block.\n\
+                                 ///\n\
+                                 /// ```rust example\n\
+                                 /// Probe::Held\n\
+                                 /// ```\n";
+
 /// Every pattern the `pattern` guards must decide, invalid ones first, then the valid shapes the
 /// shipped tests write.
 const PROBE_PATTERNS: [&str; 10] = [
@@ -3832,6 +3842,107 @@ fn a_parameter_with_no_default_is_accepted_where_no_json_document_is_built() {
         );
         assert!(messages.is_empty(), "for {args:?}: {messages:?}");
     }
+}
+
+/// The `compile_error!` tokens `source` earns for the example it carries against the parameters it
+/// declares. Parsed from text so the tokens carry file locations and each refusal's span can be
+/// read back as the source it points at.
+#[cfg(feature = "zod")]
+fn const_example_refusals(source: &str) -> Vec<proc_macro2::TokenStream> {
+    super::const_parameter_example_errors(&syn::parse_str(source).unwrap())
+}
+
+/// The refusals `source` earns, rendered.
+#[cfg(feature = "zod")]
+fn const_example_messages(source: &str) -> Vec<String> {
+    const_example_refusals(source)
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// A doc example is Rust compiled at one instantiation, and no value is the one every
+/// const-parameterised example is written at, so an item that writes one while declaring a const
+/// is refused instead of expanded into a `schema_example()` that cannot compile. Both shapes that
+/// publish an example answer alike, the branded newtype among them.
+#[cfg(feature = "zod")]
+#[test]
+fn a_doc_example_on_a_const_declaring_item_is_refused() {
+    for (source, label) in [
+        (
+            format!("{EXAMPLE_DOC_BLOCK}pub enum Probe<const WIDTH: usize> {{ Held }}"),
+            "type `Probe`",
+        ),
+        (
+            format!("{EXAMPLE_DOC_BLOCK}pub struct Probe<const WIDTH: usize>(pub String);"),
+            "type `Probe`",
+        ),
+    ] {
+        let messages = const_example_messages(&source);
+        assert_eq!(messages.len(), 1, "for {source}: {messages:?}");
+        for needle in [
+            "compile_error",
+            "WIDTH",
+            "const parameter",
+            "```rust example",
+            "`zod` feature",
+            label,
+        ] {
+            assert!(
+                messages[0].contains(needle),
+                "{needle} missing for {source}: {}",
+                messages[0]
+            );
+        }
+    }
+}
+
+/// The refusal is the one the item earned, not one per parameter: an item writes a single example,
+/// so a second const adds a name to the message rather than a second diagnostic. It points at the
+/// first const declared, the example itself having no one token to sit on.
+#[cfg(feature = "zod")]
+#[test]
+fn a_doc_example_is_refused_once_and_names_every_const_declared() {
+    let source = format!(
+        "{EXAMPLE_DOC_BLOCK}pub struct Probe<'label, ValueType, const WIDTH: usize, const DEPTH: \
+         usize> {{ pub value: ValueType }}"
+    );
+    let refusals = const_example_refusals(&source);
+    assert_eq!(refusals.len(), 1, "got: {refusals:?}");
+    assert_eq!(refusals[0].span().source_text().as_deref(), Some("WIDTH"));
+    let rendered = refusals[0].to_string();
+    for needle in ["WIDTH", "DEPTH"] {
+        assert!(rendered.contains(needle), "{needle} missing: {rendered}");
+    }
+}
+
+/// What a const costs is the example, not the declaration: an item that writes none is expanded
+/// exactly as before, and so is one whose parameters are all kinds a filling exists for — a
+/// lifetime elides in the annotation and a type parameter takes `String`.
+#[cfg(feature = "zod")]
+#[test]
+fn an_item_the_example_convention_covers_earns_no_refusal() {
+    for source in [
+        "pub enum Probe<const WIDTH: usize> { Held }".to_owned(),
+        "pub struct Probe<const WIDTH: usize>(pub String);".to_owned(),
+        format!("{EXAMPLE_DOC_BLOCK}pub struct Probe<'label> {{ pub label: &'label str }}"),
+        format!("{EXAMPLE_DOC_BLOCK}pub struct Probe<ValueType> {{ pub value: ValueType }}"),
+        format!("{EXAMPLE_DOC_BLOCK}pub enum Probe {{ Held }}"),
+        format!("{EXAMPLE_DOC_BLOCK}pub struct Probe {{ pub value: String }}"),
+    ] {
+        let messages = const_example_messages(&source);
+        assert!(messages.is_empty(), "for {source}: {messages:?}");
+    }
+}
+
+/// An alias publishes no `schema_example()` — the expansion never reads its example — so a const
+/// on one costs nothing and is left alone. The refusal is owed exactly where the method is built.
+#[cfg(feature = "zod")]
+#[test]
+fn a_const_declaring_alias_is_left_alone() {
+    let source = format!("{EXAMPLE_DOC_BLOCK}pub type Probe<const WIDTH: usize> = [u8; WIDTH];");
+    let messages = const_example_messages(&source);
+    assert!(messages.is_empty(), "got: {messages:?}");
 }
 
 /// Builds the `Display` assertion for the sole field of `source`, parsed from text so its spans
