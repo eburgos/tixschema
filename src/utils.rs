@@ -14,7 +14,7 @@ use syn::{Attribute, Expr, Field, GenericParam, Generics, Lit, LitStr, Meta, Var
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use syn::ItemEnum;
-#[cfg(any(feature = "typescript", feature = "zod"))]
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use syn::ItemStruct;
 
 /// The JavaScript engine generation the emitted Zod regex literals and JSON Schema `pattern`
@@ -783,7 +783,7 @@ pub fn compute_item_export_name(rust_ident: &str, override_name: Option<&str>) -
     override_name.map_or_else(|| safe_type_name(rust_ident), ToOwned::to_owned)
 }
 
-#[cfg(any(feature = "typescript", feature = "zod"))]
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 /// Extracts and concatenates documentation comments from a `syn::ItemStruct`.
 ///
 /// # Arguments

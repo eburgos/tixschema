@@ -19,21 +19,25 @@ mod typescript {
         Positional, Untagged, Wrapper,
     };
 
-    /// TypeScript is a type surface and the declaration binds the parameter for real, so the key
-    /// stays the name the author wrote where the two validating surfaces erase it.
+    /// The key states the string keys serde writes, the way the two validating surfaces already
+    /// do. `Record<K, V>` is declared `K extends keyof any`, so a declaration that hands it a
+    /// parameter it binds without bounding fails to type-check before a consumer writes a value —
+    /// and the bound that would repair it is one the parameter cannot carry, because a parameter
+    /// filled by anything serde can key a map with is filled by the string that reaches the wire.
+    /// The member gives up naming the parameter; the value beside it keeps it.
     #[test]
-    fn a_parameter_keyed_map_keeps_the_parameter_on_the_type_surface() {
+    fn a_parameter_keyed_map_states_the_string_keys_serde_writes_on_the_type_surface() {
         let ts = KeyedByParameter::<String, u32>::ts_definition();
         assert!(
             ts.contains("export type KeyedByParameter<KeyType, ValueType> = {"),
             "Got: {ts}"
         );
         assert!(
-            ts.contains("  parameter_keyed: Partial<Record<KeyType, string>>;"),
+            ts.contains("  parameter_keyed: Partial<Record<string, string>>;"),
             "Got: {ts}"
         );
         assert!(
-            ts.contains("  both_parameters: Partial<Record<KeyType, ValueType>>;"),
+            ts.contains("  both_parameters: Partial<Record<string, ValueType>>;"),
             "Got: {ts}"
         );
         assert!(
@@ -44,6 +48,7 @@ mod typescript {
             ts.contains("  stringified_number_key: Partial<Record<number, string>>;"),
             "Got: {ts}"
         );
+        assert!(!ts.contains("Record<KeyType"), "Got: {ts}");
     }
 
     /// The declaration binds what the fields under it are written with, so a field typed with a

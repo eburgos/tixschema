@@ -84,7 +84,7 @@ use crate::features::jsonschema::{MergeDiagnostic, merged_object_value};
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::get_enum_docs;
-#[cfg(any(feature = "typescript", feature = "zod"))]
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::get_struct_docs;
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -949,18 +949,20 @@ fn build_jsdoc_body(docs_vec: Option<&[String]>, fallback_name: &str) -> String 
     }))
 }
 
-/// The `schema_example()` an enum's type publishes: the value its ` ```rust example ` block
-/// builds, or `None` where there is nothing to build one from — no example written, or no `zod`,
-/// which is the only surface that reads one.
-///
-/// One seam for all five enum shapes, which differ in how their variants are written and not in
-/// what the type beside them exposes.
+/// The `schema_example()` an enum's type publishes, read off its docs. One seam for all five enum
+/// shapes, which differ in how their variants are written and not in what the type beside them
+/// exposes.
 #[cfg(feature = "zod")]
 fn enum_schema_example_method(
     docs_vec: Option<&[String]>,
     name: &syn::Ident,
+    generics: &syn::Generics,
 ) -> Option<proc_macro2::TokenStream> {
-    build_struct_schema_example(docs_vec.and_then(extract_example_from_docs).as_ref(), name)
+    item_schema_example_method(
+        docs_vec.and_then(extract_example_from_docs).as_ref(),
+        name,
+        generics,
+    )
 }
 
 #[cfg(all(
@@ -970,26 +972,70 @@ fn enum_schema_example_method(
 const fn enum_schema_example_method(
     _docs_vec: Option<&[String]>,
     _name: &syn::Ident,
+    _generics: &syn::Generics,
 ) -> Option<proc_macro2::TokenStream> {
     None
 }
 
-/// Builds the type-level `schema_example()` method from extracted example code, if present.
+/// The type a doc example's value is annotated with: the item's own name, with every parameter it
+/// declares instantiated at `String`.
+///
+/// The example is Rust the expansion has to compile, and a parameter names no type to compile it
+/// at — a bare ident is `E0107` before anything runs. Nothing in the attribute says which filling
+/// to pick and the example code itself names only one, so the convention is `String`: the one
+/// concrete type every example can be written against, whatever the item holds. The argument list
+/// is as long as the parameter list rather than one long, so an item declaring two parameters is
+/// annotated with two arguments.
+///
+/// Lifetimes and consts are not here, [`type_parameters_in_scope`] leaving both out: a lifetime in
+/// a `let` annotation elides, and a const has no filling this convention could name.
 #[cfg(feature = "zod")]
-fn build_struct_schema_example(
+fn schema_example_value_type(
+    name: &syn::Ident,
+    generic_params: &[String],
+) -> proc_macro2::TokenStream {
+    if generic_params.is_empty() {
+        return quote! { #name };
+    }
+    let args = generic_params.iter().map(|_| quote! { String });
+    quote! { #name<#(#args),*> }
+}
+
+/// The type-level `schema_example()` a declared item publishes: the value its ` ```rust example `
+/// block builds, or `None` where there is nothing to build one from — no example written, or no
+/// `zod`, which is the only surface that reads one.
+///
+/// The `None` answer is the seam's own rather than each caller's, so a struct, a tuple struct and
+/// every enum shape reach it the same way instead of repeating the feature pair at the call site.
+#[cfg(feature = "zod")]
+fn item_schema_example_method(
     example_code: Option<&String>,
     name: &syn::Ident,
+    generics: &syn::Generics,
 ) -> Option<proc_macro2::TokenStream> {
     let code = example_code?;
     let code_tokens: proc_macro2::TokenStream = code.parse().unwrap();
+    let value_ty = schema_example_value_type(name, &type_parameters_in_scope(generics));
     Some(quote! {
         pub fn schema_example() -> serde_json::Value {
-            let value: #name = {
+            let value: #value_ty = {
                 #code_tokens
             };
             serde_json::to_value(&value).unwrap()
         }
     })
+}
+
+#[cfg(all(
+    not(feature = "zod"),
+    any(feature = "typescript", feature = "jsonschema")
+))]
+const fn item_schema_example_method(
+    _example_code: Option<&String>,
+    _name: &syn::Ident,
+    _generics: &syn::Generics,
+) -> Option<proc_macro2::TokenStream> {
+    None
 }
 
 /// Builds the delegating impl methods (on the type itself) that forward to its schema module.
@@ -1002,6 +1048,9 @@ fn build_struct_schema_example(
 /// so the re-export is taken off the end while the example goes in and put back after it. An item
 /// exported under its own ident publishes no re-export and the delegate writes what it always
 /// wrote.
+///
+/// Which binding that is depends on what the item publishes, so the anchor does too — see
+/// [`zod_example_injection`].
 #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
 fn build_struct_delegate_items(
     module_ident: &Ident,
@@ -1039,21 +1088,13 @@ fn build_struct_delegate_items(
 
     #[cfg(feature = "zod")]
     items.push(if has_example {
+        let injected = zod_example_injection(item_name, parameters);
         quote! {
             pub fn zod_schema() -> String {
                 let base_schema = #module_ident::Schema::zod_schema();
                 let defined = base_schema.strip_suffix(#reexport).unwrap_or(base_schema.as_str());
                 let example_json = serde_json::to_string(&Self::schema_example()).unwrap();
-                let example_part = format!(".meta({{\n  example: {}\n}})", example_json);
-                // Insert .meta() before the final semicolon
-                let mut result = if let Some(pos) = defined.rfind(';') {
-                    let mut injected = defined[..pos].to_string();
-                    injected.push_str(&example_part);
-                    injected.push(';');
-                    injected
-                } else {
-                    format!("{}{}", defined, example_part)
-                };
+                let mut result = #injected;
                 result.push_str(#reexport);
                 result
             }
@@ -2218,7 +2259,11 @@ fn enum_module_idents(
 }
 
 /// Extracts a struct's doc lines and the first ` ```rust example ` block (if any) from them.
-#[cfg(any(feature = "typescript", feature = "zod"))]
+///
+/// Read in every build that emits a schema surface rather than only the two that render one of the
+/// halves: what the author wrote is a fact about the declaration, and the example half already
+/// answers `None` where `zod` — the only surface that reads one — is off.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn struct_docs_and_example(item_struct: &syn::ItemStruct) -> (Option<Vec<String>>, Option<String>) {
     let docs_vec = get_struct_docs(item_struct);
     #[cfg(feature = "zod")]
@@ -2289,7 +2334,7 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
         struct_module_idents(&name, args.name_override.as_deref(), Some("object"));
 
     // Extract docs early for example extraction
-    #[cfg(any(feature = "typescript", feature = "zod"))]
+    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     let docs_and_example = struct_docs_and_example(&item_struct);
 
     // `Some(..)` selects schema-module-aware field processing; `None` (no schema output feature)
@@ -2340,13 +2385,9 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
 
     // schema_example must be directly on the type (not in the module) because the example code
     // uses type names that may not be accessible from the nested module.
-    #[cfg(feature = "zod")]
-    let schema_example_method = build_struct_schema_example(docs_and_example.1.as_ref(), &name);
-    #[cfg(all(
-        not(feature = "zod"),
-        any(feature = "typescript", feature = "jsonschema")
-    ))]
-    let schema_example_method: Option<proc_macro2::TokenStream> = None;
+    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+    let schema_example_method =
+        item_schema_example_method(docs_and_example.1.as_ref(), &name, &item_struct.generics);
 
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     let validate_method = struct_validate_method(&collected.3, &module_ident);
@@ -2571,7 +2612,7 @@ fn process_tuple_struct(
         return output;
     }
 
-    #[cfg(any(feature = "typescript", feature = "zod"))]
+    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     let docs_and_example = struct_docs_and_example(&item_struct);
 
     let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![
@@ -2596,10 +2637,8 @@ fn process_tuple_struct(
 
     // schema_example must be directly on the type (not in the module) because the example code
     // uses type names that may not be accessible from the nested module.
-    #[cfg(feature = "zod")]
-    let schema_example_method = build_struct_schema_example(docs_and_example.1.as_ref(), &name);
-    #[cfg(not(feature = "zod"))]
-    let schema_example_method: Option<proc_macro2::TokenStream> = None;
+    let schema_example_method =
+        item_schema_example_method(docs_and_example.1.as_ref(), &name, &item_struct.generics);
 
     let delegate_impl_items = build_struct_delegate_items(
         &module_ident,
@@ -3450,17 +3489,7 @@ fn build_branded_schema_example(
         return quote! {};
     };
     let code_tokens: proc_macro2::TokenStream = code.parse().unwrap();
-    // The example is Rust the expansion has to compile, and a parameter names no type to compile
-    // it at, so every parameter the brand declares is instantiated at `String` (e.g.
-    // `DocumentId<String>`, `PairId<String, String>`) — the one concrete type every brand's
-    // example can be written against. A brand's arity is whatever it declares, so the argument
-    // list is as long as the parameter list rather than one long.
-    let value_ty = if generic_params.is_empty() {
-        quote! { #name }
-    } else {
-        let args = generic_params.iter().map(|_| quote! { String });
-        quote! { #name<#(#args),*> }
-    };
+    let value_ty = schema_example_value_type(name, generic_params);
     quote! {
         pub fn schema_example() -> serde_json::Value {
             let value: #value_ty = {
@@ -4157,7 +4186,8 @@ fn process_plain_enum(
     // schema_example must be directly on the type (not in the module) because the example code
     // uses type names that may not be accessible from the nested module.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    let schema_example_method = enum_schema_example_method(docs_vec.as_deref(), name);
+    let schema_example_method =
+        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics);
 
     // Build schema module impl items (without schema_example)
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
@@ -4463,7 +4493,8 @@ fn process_discriminated_enum(
     // schema_example must be directly on the type (not in the module) because the example code
     // uses type names that may not be accessible from the nested module.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    let schema_example_method = enum_schema_example_method(docs_vec.as_deref(), name);
+    let schema_example_method =
+        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics);
 
     // Build schema module impl items (without schema_example)
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
@@ -4865,7 +4896,8 @@ fn process_externally_tagged_enum(
     let _: &_ = &item_name;
 
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    let schema_example_method = enum_schema_example_method(docs_vec.as_deref(), name);
+    let schema_example_method =
+        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics);
 
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![
@@ -5271,7 +5303,8 @@ fn process_internally_tagged_enum(
     let _: &_ = &item_name;
 
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    let schema_example_method = enum_schema_example_method(docs_vec.as_deref(), name);
+    let schema_example_method =
+        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics);
 
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![
@@ -6102,7 +6135,8 @@ fn process_untagged_enum(
     let _: &_ = &(name, item_name, &ts_parts, &zod_parts, &json_parts);
 
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    let schema_example_method = enum_schema_example_method(docs_vec.as_deref(), name);
+    let schema_example_method =
+        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics);
 
     // Build schema module impl items (without schema_example)
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
@@ -9430,12 +9464,28 @@ fn zod_factory_body(item_name: &str, parameters: &[String]) -> String {
     let last = arguments.last().map_or_else(String::new, Clone::clone);
     let _ = write!(
         body,
-        "  const hit = {holder}.get({last});\n  if (hit) return hit;\n\n  const schema = \
-         {}({});\n  {holder}.set({last}, schema);\n  return schema;",
-        zod_factory_builder_name(item_name),
-        arguments.join(", ")
+        "  const hit = {holder}.get({last});\n  if (hit) return hit;\n\n  {};\n  {holder}.set({last}, \
+         schema);\n  return schema;",
+        zod_factory_memoized_binding(item_name, parameters)
     );
     body
+}
+
+/// The statement a factory binds the schema it is about to cache to, without its terminator.
+///
+/// Written once and read twice: [`zod_factory_body`] emits it, and the delegate injecting the
+/// item's example anchors on it — so the anchor cannot drift from the line it names.
+#[cfg(feature = "zod")]
+fn zod_factory_memoized_binding(item_name: &str, parameters: &[String]) -> String {
+    format!(
+        "const schema = {}({})",
+        zod_factory_builder_name(item_name),
+        parameters
+            .iter()
+            .map(|parameter| zod_factory_argument(parameter))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 /// What a generic type's Zod surface is written as: the builder holding the schema its arguments
@@ -9546,6 +9596,46 @@ fn zod_published_binding(
         )
     } else {
         zod_factory_block(item_name, parameters, preamble, expression, reexport)
+    }
+}
+
+/// The expression the delegate builds its schema-with-example from, read off the same decision
+/// [`zod_published_binding`] takes: where the example goes depends on what the item published.
+///
+/// A type that declares no parameter publishes the annotated `const`, and the example belongs on
+/// the value that `const` names — closed by the final `;`, which is the last one in the text.
+///
+/// A generic type publishes a factory, and a factory's last `;` closes its arrow function, so the
+/// same anchor would attach `.meta()` to a closing brace. The example belongs instead on the
+/// statement binding the schema the factory is about to cache: the one place that is both on the
+/// value every call hands back — a hit returns what was stored — and ahead of the store, so two
+/// calls with the same arguments stay the same schema. `return schema` satisfies the first and
+/// breaks the second, `.meta()` handing back a new instance rather than the memoized one.
+///
+/// The generated body reads `defined` (the module's schema with the re-export taken off) and
+/// `example_json`, both bound by the delegate this is spliced into.
+#[cfg(feature = "zod")]
+fn zod_example_injection(item_name: &str, parameters: &[String]) -> proc_macro2::TokenStream {
+    if parameters.is_empty() {
+        return quote! {{
+            let example_part = format!(".meta({{\n  example: {}\n}})", example_json);
+            if let Some(pos) = defined.rfind(';') {
+                let mut injected = defined[..pos].to_string();
+                injected.push_str(&example_part);
+                injected.push(';');
+                injected
+            } else {
+                format!("{}{}", defined, example_part)
+            }
+        }};
+    }
+    let binding = zod_factory_memoized_binding(item_name, parameters);
+    let anchor = format!("{binding};");
+    quote! {
+        defined.replace(
+            #anchor,
+            &format!("{}.meta({{\n    example: {}\n  }});", #binding, example_json),
+        )
     }
 }
 
