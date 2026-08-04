@@ -620,7 +620,12 @@ mod jsonschema {
 }
 
 use alloc::borrow::Cow;
-#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[cfg(any(
+    feature = "serde",
+    feature = "typescript",
+    feature = "zod",
+    feature = "jsonschema"
+))]
 use core::hash::Hash;
 use std::collections::HashMap;
 
@@ -698,8 +703,13 @@ pub struct Positional<IdType>(pub IdType, pub String);
 
 /// A map keyed by one of the item's own parameters, beside the concrete-keyed members the two
 /// validating surfaces must keep answering for exactly as before. Consumed only by the surface
-/// modules, so it exists only where one of them compiles.
-#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+/// modules and the serde wire tests, so it exists only where one of them compiles.
+#[cfg(any(
+    feature = "serde",
+    feature = "typescript",
+    feature = "zod",
+    feature = "jsonschema"
+))]
 #[model_schema()]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyedByParameter<KeyType: Eq + Hash, ValueType> {
