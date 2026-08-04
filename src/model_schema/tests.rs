@@ -3179,7 +3179,7 @@ fn an_object_id_enum_keyed_map_value_binds_the_one_oid_object() {
     let tokens = enum_key_map_value_binding(FieldDefType::ObjectId);
     assert!(
         tokens.contains(
-            r#"let value_schema = serde_json :: json ! ({ "type" : "object" , "properties" : { "$oid" : (serde_json :: json ! ({ "type" : "string" , "pattern" : "^[a-f\\d]{24}$" })) } , "required" : ["$oid"] , "additionalProperties" : false }) ;"#
+            r#"let value_schema = serde_json :: json ! ({ "type" : "object" , "properties" : { "$oid" : (serde_json :: json ! ({ "type" : "string" , "pattern" : "^[a-f0-9]{24}$" })) } , "required" : ["$oid"] , "additionalProperties" : false }) ;"#
         ),
         "got: {tokens}"
     );
@@ -3721,7 +3721,7 @@ fn a_nested_string_literal_map_value_keeps_its_const() {
 #[cfg(all(feature = "object_id", feature = "jsonschema"))]
 #[test]
 fn a_nested_object_id_map_value_keeps_its_oid_object() {
-    let inner_member = r#"{ "type" : "object" , "additionalProperties" : { "type" : "object" , "properties" : { "$oid" : (serde_json :: json ! ({ "type" : "string" , "pattern" : "^[a-f\\d]{24}$" })) } , "required" : ["$oid"] , "additionalProperties" : false } }"#;
+    let inner_member = r#"{ "type" : "object" , "additionalProperties" : { "type" : "object" , "properties" : { "$oid" : (serde_json :: json ! ({ "type" : "string" , "pattern" : "^[a-f0-9]{24}$" })) } , "required" : ["$oid"] , "additionalProperties" : false } }"#;
     let bare = nested_string_key_map_value_schema(FieldDefType::ObjectId, 0);
     assert!(
         bare.contains(&format!(r#""additionalProperties" : {inner_member}"#)),
@@ -4399,7 +4399,7 @@ fn an_object_id_tuple_element_spells_the_one_oid_object() {
         super::build_tuple_element_json_schema(&parsed)
             .unwrap()
             .to_string(),
-        r#"serde_json :: json ! ({ "type" : "object" , "properties" : { "$oid" : (serde_json :: json ! ({ "type" : "string" , "pattern" : "^[a-f\\d]{24}$" })) } , "required" : ["$oid"] , "additionalProperties" : false })"#
+        r#"serde_json :: json ! ({ "type" : "object" , "properties" : { "$oid" : (serde_json :: json ! ({ "type" : "string" , "pattern" : "^[a-f0-9]{24}$" })) } , "required" : ["$oid"] , "additionalProperties" : false })"#
     );
 }
 

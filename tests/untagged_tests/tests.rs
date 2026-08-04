@@ -574,7 +574,7 @@ fn test_untagged_objectid_member_spells_the_one_oid_object() {
         schema["anyOf"][0]["properties"]["one"],
         serde_json::json!({
             "type": "object",
-            "properties": { "$oid": { "type": "string", "pattern": r"^[a-f\d]{24}$" } },
+            "properties": { "$oid": { "type": "string", "pattern": "^[a-f0-9]{24}$" } },
             "required": ["$oid"],
             "additionalProperties": false
         }),
