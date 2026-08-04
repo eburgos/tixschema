@@ -8,7 +8,7 @@ fn test_should_generate_json_schema() {
 #[test]
 fn test_json_schema_method_generation() {
     let fields = vec![];
-    let method = generate_struct_json_schema_method(&fields, &[], "Node");
+    let method = generate_struct_json_schema_method(&fields, &[], "Node", &[]);
     let method_str = method.to_string();
 
     assert!(method_str.contains("json_schema"));
@@ -20,7 +20,7 @@ fn test_json_schema_method_generation() {
 #[test]
 fn test_json_schema_method_flatten_emits_merge() {
     let fields = vec![];
-    let no_flatten = generate_struct_json_schema_method(&fields, &[], "Node").to_string();
+    let no_flatten = generate_struct_json_schema_method(&fields, &[], "Node", &[]).to_string();
     let with_flatten = generate_struct_json_schema_method(
         &fields,
         &[MergedSource {
@@ -29,6 +29,7 @@ fn test_json_schema_method_flatten_emits_merge() {
             value: quote::quote! { serde_json::json!({ "type": "object" }) },
         }],
         "Node",
+        &[],
     )
     .to_string();
 
@@ -50,6 +51,7 @@ fn test_the_merge_wraps_branches_in_the_spelling_its_source_used() {
             value: quote::quote! { serde_json::json!({ "type": "object" }) },
         }],
         "Node",
+        &[],
     )
     .to_string();
 
@@ -83,6 +85,7 @@ fn test_an_optional_merged_source_carries_its_absence_into_the_merge() {
                 value: quote::quote! { serde_json::json!({ "type": "object" }) },
             }],
             "Node",
+            &[],
         )
         .to_string()
     };
@@ -115,6 +118,7 @@ fn test_the_merge_expands_branches_to_a_fixed_point_under_a_path_terminator() {
             value: quote::quote! { serde_json::json!({ "type": "object" }) },
         }],
         "Node",
+        &[],
     )
     .to_string();
 
@@ -147,6 +151,7 @@ fn test_the_merge_reads_a_tagged_unit_variant_at_the_edges_own_depth() {
             value: quote::quote! { serde_json::json!({ "type": "object" }) },
         }],
         "Node",
+        &[],
     )
     .to_string();
 
@@ -168,7 +173,7 @@ fn test_the_merge_reads_a_tagged_unit_variant_at_the_edges_own_depth() {
 /// is what turns the definitions it collected into a document root.
 #[test]
 fn test_json_schema_methods_pair_an_entry_point_with_a_guarded_body() {
-    let methods = json_schema_methods("Node", &quote::quote! { body }).to_string();
+    let methods = json_schema_methods("Node", &quote::quote! { body }, &[]).to_string();
 
     assert!(methods.contains("pub fn json_schema ()"), "{methods}");
     assert!(methods.contains("pub fn json_schema_within"), "{methods}");
@@ -180,7 +185,7 @@ fn test_json_schema_methods_pair_an_entry_point_with_a_guarded_body() {
 /// pointed anywhere but at the entry it hoists would resolve to nothing.
 #[test]
 fn test_the_deferred_reference_points_at_the_hoisted_defs_entry() {
-    let methods = json_schema_methods("Node", &quote::quote! { body }).to_string();
+    let methods = json_schema_methods("Node", &quote::quote! { body }, &[]).to_string();
 
     assert!(
         methods.contains("\"#/$defs/Node\""),
@@ -193,7 +198,7 @@ fn test_the_deferred_reference_points_at_the_hoisted_defs_entry() {
 /// like any other sibling.
 #[test]
 fn test_plain_enum_publishes_the_guarded_method_too() {
-    let method = generate_plain_enum_json_schema_method(&[quote::quote! { "a" }], "Flag");
+    let method = generate_plain_enum_json_schema_method(&[quote::quote! { "a" }], "Flag", &[]);
 
     assert!(
         method.to_string().contains("pub fn json_schema_within"),

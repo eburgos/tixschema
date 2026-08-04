@@ -6,12 +6,13 @@ use super::{
 
 #[cfg(feature = "serde")]
 use super::{
-    ConstraintLeaf, MemberAccess, ModelSchemaPropMeta, build_field_validation,
-    cfg_attr_guard_error, check_omitted_key_is_readable, check_optional_field_serialization,
-    collect_untagged_members, constrained_shape, enum_cfg_attr_guard_errors,
-    generate_field_validation, generate_numeric_validation_code, generate_string_validation_code,
-    has_serde_default, helper_name_stem, internally_tagged_guard_errors, needs_injected_default,
-    parse_serde_field_attributes, parse_serde_type_attributes, render_untagged_variant,
+    ConstraintLeaf, MemberAccess, ModelSchemaPropMeta, adjacent_collapsed_slot_guard_errors,
+    build_field_validation, cfg_attr_guard_error, check_omitted_key_is_readable,
+    check_optional_field_serialization, collect_untagged_members, constrained_shape,
+    enum_cfg_attr_guard_errors, generate_field_validation, generate_numeric_validation_code,
+    generate_string_validation_code, has_serde_default, helper_name_stem,
+    internally_tagged_guard_errors, needs_injected_default, parse_serde_field_attributes,
+    parse_serde_type_attributes, render_untagged_variant,
 };
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -2642,7 +2643,7 @@ fn a_string_filling_annotates_the_example_as_no_filling_does() {
 fn branded_json_schema_method_carries_no_cfg_attribute() {
     let args = super::ModelSchemaArgs::default();
     for inner in branded_json_inners() {
-        let tokens = super::build_branded_json_schema_method(&args, &inner, "DocumentId");
+        let tokens = super::build_branded_json_schema_method(&args, &inner, "DocumentId", &[]);
         assert_no_cfg_attribute(&tokens, "build_branded_json_schema_method");
     }
 }
@@ -2764,7 +2765,12 @@ fn alias_json_schema_method_carries_no_cfg_attribute() {
         pub type AliasIdent = String;
     );
     let field_def = super::get_field_def("AliasType", &alias.ty, "");
-    let tokens = super::generate_alias_json_schema_method(&alias, "AliasType", &field_def);
+    let tokens = super::generate_alias_json_schema_method(
+        &alias,
+        "AliasType",
+        &field_def,
+        &super::ModelSchemaArgs::default(),
+    );
     assert_no_cfg_attribute(&tokens, "generate_alias_json_schema_method");
 }
 
@@ -2781,8 +2787,13 @@ fn an_alias_of_an_unrenderable_target_emits_only_the_compile_error() {
     ] {
         let alias: syn::ItemType = syn::parse_str(alias_source).unwrap();
         let field_def = super::get_field_def("RowsType", &alias.ty, "");
-        let tokens =
-            super::generate_alias_json_schema_method(&alias, "RowsType", &field_def).to_string();
+        let tokens = super::generate_alias_json_schema_method(
+            &alias,
+            "RowsType",
+            &field_def,
+            &super::ModelSchemaArgs::default(),
+        )
+        .to_string();
         assert!(
             tokens.contains("compile_error !"),
             "for {alias_source}, got: {tokens}"
@@ -2823,8 +2834,13 @@ fn an_alias_type_parameter_is_erased_at_every_depth() {
     ] {
         let alias: syn::ItemType = syn::parse_str(alias_source).unwrap();
         let field_def = super::get_field_def("HolderType", &alias.ty, "");
-        let tokens =
-            super::generate_alias_json_schema_method(&alias, "HolderType", &field_def).to_string();
+        let tokens = super::generate_alias_json_schema_method(
+            &alias,
+            "HolderType",
+            &field_def,
+            &super::ModelSchemaArgs::default(),
+        )
+        .to_string();
         assert!(
             !tokens.contains("_schema :: Schema ::"),
             "for {alias_source}, got: {tokens}"
@@ -5103,14 +5119,17 @@ fn a_nested_enum_keyed_map_value_renders_its_inner_members() {
     }
 }
 
-/// A generic sibling is a map value the `String`-key path renders through its schema module, so the
-/// enum-key path renders it there too.
+/// A generic sibling is a map value the `String`-key path renders through its schema module at the
+/// arguments the reference carries, so the enum-key path renders it there and at those too.
 #[cfg(feature = "jsonschema")]
 #[test]
 fn a_generic_sibling_enum_keyed_map_value_emits_the_sibling_schema() {
     let tokens = map_field_schema("HashMap<Slot, Wrapper<String>>").to_string();
     assert!(
-        tokens.contains("let value_schema = wrapper_schema :: Schema :: json_schema_within (in_flight , hoisted_defs) ;"),
+        tokens.contains(
+            "let arguments = [serde_json :: json ! ({ \"type\" : \"string\" })] ; wrapper_schema \
+             :: Schema :: json_schema_within_with (in_flight , hoisted_defs , & arguments)"
+        ),
         "got: {tokens}"
     );
 }
@@ -6145,17 +6164,18 @@ fn a_sibling_string_keyed_map_value_emits_the_sibling_schema() {
     }
 }
 
-/// A sibling's type arguments do not reach its schema, which lives on the wrapper itself, so a
-/// generic value is the same schema-module reference a bare one is. Pinned on this key path as it
-/// is on the enum-key one: the two share a dispatcher, and a narrowing that reintroduces the
-/// divergence has to fail on the key path it is written for.
+/// A sibling's type arguments reach its schema, JSON Schema having no parameters for the wrapper to
+/// carry: the document is written at one filling, and the reference site names it. Pinned on this
+/// key path as it is on the enum-key one: the two share a dispatcher, and a narrowing that drops
+/// the arguments on one of them has to fail on the key path it is written for.
 #[cfg(feature = "jsonschema")]
 #[test]
 fn a_generic_sibling_string_keyed_map_value_emits_the_sibling_schema() {
     let tokens = map_field_schema("HashMap<String, Wrapper<String>>").to_string();
     assert!(
         tokens.contains(
-            r#""additionalProperties" : wrapper_schema :: Schema :: json_schema_within (in_flight , hoisted_defs)"#
+            "let arguments = [serde_json :: json ! ({ \"type\" : \"string\" })] ; wrapper_schema \
+             :: Schema :: json_schema_within_with (in_flight , hoisted_defs , & arguments)"
         ),
         "got: {tokens}"
     );
@@ -6416,6 +6436,7 @@ fn brand_json_schema_over(inner_ty: &syn::Type) -> String {
         &super::ModelSchemaArgs::default(),
         &super::branded_json_inner(&super::get_field_def("_inner", inner_ty, "")),
         "Wrapped",
+        &[],
     )
     .to_string()
 }
@@ -7501,6 +7522,89 @@ fn every_other_declared_arity_keeps_the_kind_it_declared() {
     }
 }
 
+/// The adjacent-form refusals a declaration earns, one per variant that earns one, as rendered
+/// `compile_error!` token strings.
+#[cfg(feature = "serde")]
+fn adjacent_refusals(declaration: &str) -> Vec<String> {
+    let item: syn::ItemEnum = syn::parse_str(declaration).unwrap();
+    adjacent_collapsed_slot_guard_errors(&item, "type", "value")
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// Captured from serde under `#[serde(tag = "type", content = "value")]`: the variant whose lone
+/// slot is off the wire writes `{"type":"One"}` and serde then refuses to read that back (missing
+/// field `value`), while only `{"type":"One","value":null}` reads. The write set and the read set
+/// have no common member, so the declaration is refused rather than described.
+#[cfg(feature = "serde")]
+#[test]
+fn an_adjacent_variant_whose_lone_slot_is_dropped_is_refused() {
+    let refusals = adjacent_refusals("enum Wire { One(#[serde(skip)] String) }");
+    assert_eq!(refusals.len(), 1, "got: {refusals:?}");
+    for needle in [
+        "`One`",
+        "`Wire`",
+        r#"{\"type\":\"One\"}"#,
+        r#"{\"type\":\"One\",\"value\":null}"#,
+        "Declare `One` as a unit variant",
+    ] {
+        assert!(
+            refusals[0].contains(needle),
+            "{needle} missing from: {}",
+            refusals[0]
+        );
+    }
+}
+
+/// Every other declared arity keeps the landed shrink: captured, a two-slot variant with one slot
+/// off the wire writes and reads `{"type":"One","value":[7]}` and with both off writes and reads
+/// `{"type":"One","value":[]}`, so each has a payload to be described by.
+#[cfg(feature = "serde")]
+#[test]
+fn every_other_adjacent_arity_is_left_alone() {
+    for declaration in [
+        "enum Wire { One(#[serde(skip)] String, u32) }",
+        "enum Wire { One(#[serde(skip)] String, #[serde(skip)] u32) }",
+        "enum Wire { One(String) }",
+        "enum Wire { One { #[serde(skip)] a: String } }",
+        "enum Wire { One }",
+        "enum Wire { One() }",
+    ] {
+        let refusals = adjacent_refusals(declaration);
+        assert!(refusals.is_empty(), "{declaration}: {refusals:?}");
+    }
+}
+
+/// The refusal points at the variant it is about, not at the enum's tagging attribute: an enum with
+/// many variants otherwise sends its author to the wrong line.
+#[cfg(feature = "serde")]
+#[test]
+fn the_adjacent_collapse_refusal_points_at_the_variant() {
+    let item: syn::ItemEnum =
+        syn::parse_str("enum Wire { Kept(u8, bool), Lone(#[serde(skip)] String) }").unwrap();
+    let errors = adjacent_collapsed_slot_guard_errors(&item, "type", "value");
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert_eq!(
+        errors[0].span().source_text().as_deref(),
+        Some("Lone(#[serde(skip)] String)")
+    );
+}
+
+/// The refusal quotes the keys the declaration named, so the payloads it prints are the author's
+/// own rather than serde's defaults.
+#[cfg(feature = "serde")]
+#[test]
+fn the_adjacent_collapse_refusal_quotes_the_declared_keys() {
+    let item: syn::ItemEnum = syn::parse_str("enum Wire { One(#[serde(skip)] String) }").unwrap();
+    let refusal = adjacent_collapsed_slot_guard_errors(&item, "kind", "payload")[0].to_string();
+    assert!(refusal.contains(r#"{\"kind\":\"One\"}"#), "Got: {refusal}");
+    assert!(
+        refusal.contains(r#"{\"kind\":\"One\",\"payload\":null}"#),
+        "Got: {refusal}"
+    );
+}
+
 /// The member spelling an untagged variant is refused with, run over the kind it publishes.
 #[cfg(feature = "serde")]
 fn untagged_refusal(declaration: &str, members: &[super::FieldDef]) -> String {
@@ -7511,12 +7615,61 @@ fn untagged_refusal(declaration: &str, members: &[super::FieldDef]) -> String {
 
 /// Captured from serde: an untagged variant whose lone slot is off the wire writes and reads `null`
 /// — the payload a declared unit variant writes there — so it takes the refusal a unit variant
-/// takes rather than describing the value nothing carries.
+/// takes rather than describing the value nothing carries. The words are the collapse's own: a
+/// declaration holding one inner type must not be told that inner types are what the union supports.
 #[cfg(feature = "serde")]
 #[test]
-fn an_untagged_variant_whose_lone_slot_is_dropped_is_refused_as_a_unit() {
+fn an_untagged_variant_whose_lone_slot_is_dropped_is_refused_for_the_collapse() {
     let refusal = untagged_refusal("enum Wire { One(#[serde(skip)] String) }", &[]);
-    assert!(refusal.contains("is a unit variant"), "Got: {refusal}");
+    for needle in [
+        "`One`",
+        "off the wire in both directions",
+        "`null`",
+        "Keep the slot on the wire",
+        "remove `One` from the union",
+    ] {
+        assert!(refusal.contains(needle), "{needle} missing from: {refusal}");
+    }
+    assert!(
+        !refusal.contains("supports newtype"),
+        "the collapse must not be told what the union supports: {refusal}"
+    );
+}
+
+/// The collapse's refusal points at the variant it is about, the way the shape refusal beside it
+/// does: an author sent to the enum's attribute is sent to the wrong line.
+#[cfg(feature = "serde")]
+#[test]
+fn the_untagged_collapse_refusal_points_at_the_variant() {
+    let variant = declared_variant("enum Wire { One(#[serde(skip)] String) }");
+    let error =
+        render_untagged_variant(&variant_wire_kind(&variant), &variant, &[], "Wire").unwrap_err();
+    assert_eq!(
+        error.span().source_text().as_deref(),
+        Some("One(#[serde(skip)] String)")
+    );
+}
+
+/// The standing refusal is untouched: a variant declared as a unit — and the empty tuple serde
+/// writes the same way — still reads the words the union has always answered them with.
+#[cfg(feature = "serde")]
+#[test]
+fn a_declared_untagged_unit_variant_keeps_its_own_refusal() {
+    // The ellipsis and em dash are spelled by escape so the pin stays byte-exact without writing a
+    // non-ASCII literal into the source.
+    let expected = "model_schema: variant `One`: `#[serde(untagged)]` supports newtype (`V(T)`) \
+                    and struct (`V { \u{2026} }`) variants only \u{2014} `One` is a unit variant, \
+                    which the union has no member spelling for: a member is written as the inner \
+                    type or as an object of named fields, and a variant that is neither has \
+                    nothing to be written as. Give it a single inner type or named fields, or drop \
+                    `#[serde(untagged)]`.";
+    for declaration in ["enum Wire { One }", "enum Wire { One() }"] {
+        assert_eq!(
+            untagged_refusal(declaration, &[]),
+            expected,
+            "{declaration}"
+        );
+    }
 }
 
 /// A refused tuple variant is named by the arity the author declared, not by the slots that reached
@@ -8122,6 +8275,78 @@ fn a_direct_flatten_of_a_plain_enum_is_left_to_the_guard_written_for_it() {
     assert!(
         written.contains("a plain enum writes its"),
         "got: {written}"
+    );
+}
+
+/// A registration publishing a choice reaches the same refusal, named by the branch its value sits
+/// at rather than at no position at all — the wording the JSON-schema merge, which reads that same
+/// choice back as a union, already refuses the declaration in.
+///
+/// The absence beside it is not what is refused: serde writes the object's own keys alone for it and
+/// reads them back as the absent value, which is the branch the merge already writes. What no
+/// spelling describes is the value, and one declaration cannot carry a branch that round-trips and a
+/// branch no payload satisfies.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_direct_flatten_of_a_nullable_scalar_registration_is_refused_at_its_value_branch() {
+    seed_slot_registration(&syn::parse_quote! { struct DirectMaybeCount(Option<i64>); });
+    let field: syn::Field = syn::parse_quote! { #[serde(flatten)] c: DirectMaybeCount };
+    let error = direct_flatten_error(&field).unwrap();
+    assert!(
+        error.contains(
+            "`#[serde(flatten)]` of `DirectMaybeCount` writes a union member that is not an object"
+        ),
+        "got: {error}"
+    );
+    assert!(
+        error.contains("its branch 1 describes a `integer`"),
+        "got: {error}"
+    );
+    assert!(
+        error.contains("write the field as a named member so the value gets a key of its own"),
+        "got: {error}"
+    );
+}
+
+/// Every keyword the value side can prove reaches that same refusal, each named by the word its own
+/// published document carries — the array a nullable sequence writes among them, which is the one
+/// the name proves rather than the one a field wrote around it.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_nullable_registration_is_refused_by_the_keyword_its_value_side_proves() {
+    seed_slot_registration(&syn::parse_quote! { struct DirectMaybeName(Option<String>); });
+    seed_slot_registration(&syn::parse_quote! { struct DirectMaybeFlag(Option<bool>); });
+    seed_slot_registration(&syn::parse_quote! { struct DirectMaybeList(Option<Vec<String>>); });
+    for (rust_ident, keyword) in [
+        ("DirectMaybeName", "string"),
+        ("DirectMaybeFlag", "boolean"),
+        ("DirectMaybeList", "array"),
+    ] {
+        let named: syn::Type = syn::parse_str(rust_ident).unwrap();
+        let error =
+            direct_flatten_error(&syn::parse_quote! { #[serde(flatten)] v: #named }).unwrap();
+        assert!(
+            error.contains(&format!("its branch 1 describes a `{keyword}`")),
+            "got: {error}"
+        );
+    }
+}
+
+/// And a registration whose value side is an object keeps the absence multiplication it was landed
+/// with: nothing beside the `null` is proved to be no object, so both branches are ones serde writes
+/// and reads back. A name publishing a `null` at no top level of its own is not this shape at all —
+/// there the `null` sits under a choice serde matched a member on, which the member position already
+/// answers for.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_direct_flatten_of_a_nullable_object_registration_stays_admitted() {
+    seed_registered_wire("DirectPlainDoc", AliasKind::NoEnumMembers, None);
+    seed_slot_registration(&syn::parse_quote! { struct DirectMaybeDoc(Option<DirectPlainDoc>); });
+    let field: syn::Field = syn::parse_quote! { #[serde(flatten)] base: DirectMaybeDoc };
+    assert!(
+        direct_flatten_error(&field).is_none(),
+        "got a rejection for {}",
+        quote::ToTokens::to_token_stream(&field)
     );
 }
 

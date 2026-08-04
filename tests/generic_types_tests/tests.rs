@@ -3,9 +3,9 @@
 //! Three questions run through every fixture here. Does the emitted `impl` still name the type the
 //! author declared — every parameter it binds, lifetimes and consts included. Does the TypeScript
 //! declaration bind the parameters its fields are written under. And does a field typed with one
-//! render as that parameter on the type surface while describing as the opaque value on the two
-//! validating ones, which publish one schema for every instantiation and so can say nothing else
-//! about it.
+//! reach, on each surface, whatever that surface fills the parameter with: the name itself on the
+//! type surface, the argument a factory binds on the value surface, and the document the filling
+//! describes as on the JSON one.
 //!
 //! A plain enum — all unit variants — cannot bind a *type* parameter at all: Rust refuses the
 //! declaration for an unused parameter before the attribute is reached. What it can bind is a
@@ -13,9 +13,9 @@
 //! `impl` has to repeat the const while the declaration names nothing.
 //!
 //! Every fixture binding a type parameter declares a default type for it, which is what a build
-//! generating a JSON document requires. Nothing here reads that declaration yet, so the surfaces
-//! pinned below are the ones the undeclared fixtures pinned — which is the whole of the evidence
-//! that declaring a default changes no emission.
+//! generating a JSON document requires. JSON Schema has no type parameters, so a document exists
+//! only at one filling: the declared one where the document stands alone, and the reference site's
+//! where a field embeds it.
 
 #[cfg(feature = "typescript")]
 mod typescript {
@@ -763,7 +763,12 @@ mod zod {
 
 #[cfg(feature = "jsonschema")]
 mod jsonschema {
-    use super::{KeyedByParameter, Pair, Wrapper};
+    #[cfg(all(feature = "chrono", feature = "object_id"))]
+    use super::StoredFolder;
+    use super::{
+        CountedFolder, EcmDocument, KeyedByParameter, Pair, Tagged, WireFolder, Wrapper,
+        ecm_document_schema,
+    };
 
     /// A key every instantiation writes as a string leaves the value side describable, so the
     /// object says what it holds instead of opening entirely — the answer the concrete
@@ -778,7 +783,10 @@ mod jsonschema {
         );
         assert_eq!(
             properties["both_parameters"],
-            serde_json::json!({ "type": "object", "additionalProperties": {} })
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": { "type": "integer" }
+            })
         );
         assert_eq!(
             properties["parameter_keyed"],
@@ -797,16 +805,16 @@ mod jsonschema {
         );
     }
 
-    /// One schema is written for every instantiation, so a parameter admits any value while the
-    /// shape it sits in stays described.
+    /// JSON Schema has no type parameters, so a document standing on its own is written at the one
+    /// filling the item stated for itself.
     #[test]
-    fn a_parameter_describes_as_the_open_schema() {
+    fn a_parameter_describes_as_the_type_declared_for_it() {
         let schema = Wrapper::<String>::json_schema();
         let properties = &schema["properties"];
-        assert_eq!(properties["id"], serde_json::json!({}));
+        assert_eq!(properties["id"], serde_json::json!({ "type": "string" }));
         assert_eq!(
             properties["children"],
-            serde_json::json!({ "type": "array", "items": {} })
+            serde_json::json!({ "type": "array", "items": { "type": "string" } })
         );
         assert_eq!(properties["name"], serde_json::json!({ "type": "string" }));
     }
@@ -817,13 +825,16 @@ mod jsonschema {
         let properties = &schema["properties"];
         assert_eq!(
             properties["by_key"],
-            serde_json::json!({ "type": "object", "additionalProperties": {} })
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": { "type": "integer" }
+            })
         );
         assert_eq!(
             properties["tuple"],
             serde_json::json!({
                 "type": "array",
-                "prefixItems": [{}, {}],
+                "prefixItems": [{ "type": "string" }, { "type": "integer" }],
                 "items": false,
                 "minItems": 2_u64,
                 "maxItems": 2_u64
@@ -839,7 +850,125 @@ mod jsonschema {
         let schema = super::Untagged::<String>::json_schema();
         assert_eq!(
             schema["anyOf"][0]["properties"]["id"],
-            serde_json::json!({})
+            serde_json::json!({ "type": "string" })
+        );
+    }
+
+    /// The whole of what the declared filling is for: the document a generic type publishes on its
+    /// own is the one its own declaration named, member by member.
+    #[test]
+    fn a_standalone_document_is_written_at_the_declared_filling() {
+        let properties = EcmDocument::<String, f64>::json_schema()["properties"].clone();
+        assert_eq!(
+            properties["document_id"],
+            serde_json::json!({ "type": "string" })
+        );
+        assert_eq!(
+            properties["created_at"],
+            serde_json::json!({ "type": "number" })
+        );
+    }
+
+    /// A field embeds the document its own arguments name, not the one the named type declared for
+    /// itself — a field carrying one filling described by another rejects every payload it holds.
+    #[test]
+    fn a_reference_embeds_the_document_its_own_arguments_name() {
+        let wire = WireFolder::json_schema()["properties"]["doc"]["properties"].clone();
+        assert_eq!(wire["document_id"], serde_json::json!({ "type": "string" }));
+        assert_eq!(wire["created_at"], serde_json::json!({ "type": "number" }));
+
+        let counted = CountedFolder::json_schema()["properties"]["doc"]["properties"].clone();
+        assert_eq!(
+            counted["document_id"],
+            serde_json::json!({ "type": "integer" })
+        );
+        assert_eq!(
+            counted["created_at"],
+            serde_json::json!({ "type": "boolean" })
+        );
+    }
+
+    /// An alias and a branded newtype are generic publishers like any other, so each is written at
+    /// its own declared filling standing alone and at the reference site's where a field names it.
+    #[test]
+    fn a_generic_alias_and_brand_are_written_at_the_filling_that_reached_them() {
+        assert_eq!(
+            Tagged::<String>::json_schema(),
+            serde_json::json!({ "type": "string" })
+        );
+        assert_eq!(
+            super::boxed_schema::Schema::json_schema(),
+            serde_json::json!({ "type": "array", "items": { "type": "string" } })
+        );
+
+        let properties = CountedFolder::json_schema()["properties"].clone();
+        assert_eq!(
+            properties["tagged"],
+            serde_json::json!({ "type": "integer" })
+        );
+        assert_eq!(
+            properties["boxed"],
+            serde_json::json!({ "type": "array", "items": { "type": "boolean" } })
+        );
+    }
+
+    /// The arguments are positional, in the order the item declares its parameters — which is not
+    /// the order its fields are written in, so a document read off the wrong end would pass every
+    /// assertion that only counted them.
+    #[test]
+    fn the_arguments_fill_the_parameters_in_declaration_order() {
+        let properties = ecm_document_schema::Schema::json_schema_with(&[
+            serde_json::json!({ "type": "boolean" }),
+            serde_json::json!({ "type": "integer" }),
+        ])["properties"]
+            .clone();
+        assert_eq!(
+            properties["document_id"],
+            serde_json::json!({ "type": "boolean" })
+        );
+        assert_eq!(
+            properties["created_at"],
+            serde_json::json!({ "type": "integer" })
+        );
+    }
+
+    /// Every argument reaches the document through whatever already describes its type, so a date
+    /// and a database identifier are each written exactly as they are written anywhere else.
+    #[cfg(all(feature = "chrono", feature = "object_id"))]
+    #[test]
+    fn an_argument_is_described_by_whatever_already_answers_for_it() {
+        let stored = StoredFolder::json_schema()["properties"]["doc"]["properties"].clone();
+        assert_eq!(
+            stored["document_id"],
+            serde_json::json!({
+                "type": "object",
+                "properties": { "$oid": { "type": "string", "pattern": "^[a-f0-9]{24}$" } },
+                "required": ["$oid"],
+                "additionalProperties": false
+            })
+        );
+        assert_eq!(
+            stored["created_at"],
+            serde_json::json!({ "type": "string", "format": "date-time" })
+        );
+    }
+
+    /// A parameter forwarded into a reference is filled by whatever filled the item forwarding it,
+    /// so a document reached two levels down still names the type at the top of the chain.
+    #[test]
+    fn a_forwarded_parameter_carries_the_filling_it_was_handed() {
+        let properties = super::FolderTree::<String>::json_schema()["properties"].clone();
+        assert_eq!(
+            properties["root"]["properties"]["document_id"],
+            serde_json::json!({ "type": "string" })
+        );
+        assert_eq!(
+            properties["many"]["items"]["properties"]["document_id"],
+            serde_json::json!({ "type": "string" })
+        );
+        assert_eq!(
+            properties["nested"]["properties"]["held"]["properties"]["value"],
+            serde_json::json!({ "type": "string" })
         );
     }
 }
@@ -968,10 +1097,10 @@ where
 }
 
 /// A parameter whose bound names the item's other parameter, which holds only where that one is
-/// filled too. Both fillings are declared, so the bound is checked at both at once — `String` does
-/// implement `From<char>` — and the fixture compiling is the whole of the assertion that a
-/// satisfying joint filling is let through.
-#[model_schema(default_types(WideType = String, NarrowType = char))]
+/// filled too. Both fillings are declared, so the bound is checked at both at once — `String`
+/// implements `From<String>` through the reflexive impl — and the fixture compiling is the whole
+/// of the assertion that a satisfying joint filling is let through.
+#[model_schema(default_types(WideType = String, NarrowType = String))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Widened<WideType: From<NarrowType>, NarrowType: Clone> {
     pub narrow: NarrowType,
@@ -1072,7 +1201,7 @@ pub struct Undefaulted<IdType> {
 /// The item the reference-site fixtures below point at. A generic type publishes a factory rather
 /// than a schema, so a field naming it has nothing to name — it has to call that factory with what
 /// fills each parameter.
-#[model_schema(default_types(IdType = String, DateType = String))]
+#[model_schema(default_types(IdType = String, DateType = f64))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EcmDocument<IdType, DateType> {
     pub created_at: DateType,
@@ -1111,6 +1240,27 @@ pub struct FolderTree<IdType> {
     pub many: Vec<EcmDocument<IdType, f64>>,
     pub nested: Outer<Inner<String>>,
     pub root: EcmDocument<IdType, f64>,
+}
+
+/// A second concrete filling of the three generic publishers, at arguments that are neither of the
+/// ones any of them declared for itself — the whole of the evidence that what a field embeds is the
+/// reference site's filling rather than the declaration's, in every build.
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CountedFolder {
+    pub boxed: Boxed<bool>,
+    pub doc: EcmDocument<u32, bool>,
+    pub tagged: Tagged<u32>,
+}
+
+/// The stored shape of the same document: a database identifier and a date where the wire shape
+/// carries a string and a number. Each argument reaches the document through whatever already
+/// describes its type, so neither is reached by a rule of its own.
+#[cfg(all(feature = "chrono", feature = "object_id"))]
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredFolder {
+    pub doc: EcmDocument<ObjectId, DateTime<Utc>>,
 }
 
 /// A date, a database identifier and a number in argument position. Each is rendered by whatever
@@ -1298,6 +1448,19 @@ fn a_reference_carrying_arguments_expands_to_rust_that_compiles() {
     };
     assert_eq!(referrer.boxed.len(), 1);
     assert_eq!(referrer.tagged.0, "t");
+
+    let counted = CountedFolder {
+        boxed: vec![true],
+        doc: EcmDocument {
+            created_at: false,
+            document_id: 1_u32,
+        },
+        tagged: Tagged(2_u32),
+    };
+    assert_eq!(counted.boxed.len(), 1);
+    assert!(!counted.doc.created_at);
+    assert_eq!(counted.doc.document_id, 1);
+    assert_eq!(counted.tagged.0, 2);
 }
 
 /// The two argument kinds no build reaches without their own feature, named the same way.
@@ -1316,6 +1479,15 @@ fn a_dated_and_an_identified_argument_expand_to_rust_that_compiles() {
     assert_eq!(mixed.sized.value, 1);
     assert_eq!(mixed.stamped.value.timestamp(), 0);
     assert!(!mixed.keyed.value.to_hex().is_empty());
+
+    let stored = StoredFolder {
+        doc: EcmDocument {
+            created_at: DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+            document_id: ObjectId::new(),
+        },
+    };
+    assert_eq!(stored.doc.created_at.timestamp(), 0);
+    assert!(!stored.doc.document_id.to_hex().is_empty());
 }
 
 /// The enum half of the same question, in every shape the tagging attributes reach — plus the one
