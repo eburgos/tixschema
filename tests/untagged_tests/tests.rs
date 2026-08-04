@@ -127,6 +127,18 @@ enum SoleConstrainedUnion {
     },
 }
 
+// A tagged twin of `SoleConstrainedUnion`: the same member under the same bound, written where the
+// tag keeps a failing read on the variant it names.
+#[model_schema()]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+enum SoleConstrainedTagged {
+    Slug {
+        #[model_schema_prop(minLength = 2, pattern = "^[a-z]+$")]
+        slug: String,
+    },
+}
+
 // The same member written twice, bound first and bare second: what a failing bound costs is the
 // branch, not the read.
 #[model_schema()]
@@ -579,5 +591,77 @@ fn test_untagged_objectid_member_spells_the_one_oid_object() {
             "additionalProperties": false
         }),
         "Got:\n{schema}"
+    );
+}
+
+/// What the read costs the author, pinned. serde's derived `Deserialize` for an untagged enum drops
+/// each candidate's own error as it moves to the next, so when no variant accepts, the bound that
+/// refused the value is gone and one generic sentence stands in its place. The tagged twin, whose
+/// tag names the variant before its members are read, keeps the bound's own words. A serde upgrade
+/// that rewords the sentence lands here.
+#[test]
+fn test_untagged_member_bound_failure_reports_serdes_generic_sentence() {
+    assert_eq!(
+        serde_json::from_str::<SoleConstrainedUnion>(r#"{"slug":"A"}"#)
+            .unwrap_err()
+            .to_string(),
+        "data did not match any variant of untagged enum SoleConstrainedUnion"
+    );
+    assert_eq!(
+        serde_json::from_str::<SoleConstrainedTagged>(r#"{"kind":"Slug","slug":"A"}"#)
+            .unwrap_err()
+            .to_string(),
+        "'slug' is too short: minimum length is 2, got 1"
+    );
+}
+
+/// The accessor is the one Rust surface that names the bound a union's value violates: the read
+/// path hands the bound to serde, which discards the sentence with the candidate it removes, so a
+/// value built or read back in Rust has nothing else to ask. It answers in the tagged twin's words.
+#[test]
+fn test_untagged_union_publishes_validate_for_its_constrained_members() {
+    let expected = vec!["'slug' is too short: minimum length is 2, got 1".to_owned()];
+    assert_eq!(
+        SoleConstrainedUnion::Slug {
+            slug: "A".to_owned()
+        }
+        .validate()
+        .unwrap_err(),
+        expected
+    );
+    assert_eq!(
+        SoleConstrainedTagged::Slug {
+            slug: "A".to_owned()
+        }
+        .validate()
+        .unwrap_err(),
+        expected
+    );
+    SoleConstrainedUnion::Slug {
+        slug: "ab".to_owned(),
+    }
+    .validate()
+    .unwrap();
+}
+
+/// A union whose variants differ in what they bind: the value's own variant decides which checks
+/// run, and a variant carrying no bound has nothing to answer for.
+#[test]
+fn test_untagged_validate_runs_only_the_held_variants_checks() {
+    assert_eq!(
+        CheckedThenLooseUnion::Checked {
+            name: "A".to_owned()
+        }
+        .validate()
+        .unwrap_err(),
+        vec!["'name' is too short: minimum length is 2, got 1".to_owned()]
+    );
+    assert!(
+        CheckedThenLooseUnion::Loose {
+            name: "A".to_owned()
+        }
+        .validate()
+        .is_ok(),
+        "the bare member is held to no bound"
     );
 }
