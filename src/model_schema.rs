@@ -675,13 +675,22 @@ pub fn exec_model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 
 /// Classifies what an alias resolves to, for the registry.
 ///
-/// A `SiblingType` is the only shape that can reach a plain enum, and it answers with whatever the
-/// named type registered: an alias of an alias of an enum inherits `EnumMembers` down the chain.
-/// A target registered after its alias reads as `Unknown`, which callers must treat as "cannot
-/// rule it out" rather than as a negative. An array (`Vec<Slot>`, `[Slot; 4]`) is a collection, not
-/// the enum it holds.
+/// A target serde writes as a bare string answers first, and it answers for the alias too: an alias
+/// is the type it names, so `type LateKey = String` is written as that bare string and keys a map
+/// exactly as a `String` does, under the alias's own exported name. `PathBuf`, a string-wire brand,
+/// and an alias chain ending in either are the same target wearing another spelling, which is why
+/// the question is asked of the key dispatch rather than of the target's syntax.
+///
+/// Below that, a `SiblingType` is the only shape that can reach a plain enum, and it answers with
+/// whatever the named type registered: an alias of an alias of an enum inherits `EnumMembers` down
+/// the chain. A target registered after its alias reads as `Unknown`, which callers must treat as
+/// "cannot rule it out" rather than as a negative. An array (`Vec<Slot>`, `[Slot; 4]`) is a
+/// collection, not the enum it holds.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn alias_target_kind(alias_field_def: &FieldDef) -> AliasKind {
+    if matches!(map_key_path(alias_field_def), MapKeyPath::Open) {
+        return AliasKind::StringWire;
+    }
     let FieldDefType::SiblingType(target_name, generic_args) = &alias_field_def.field_type else {
         return AliasKind::NoEnumMembers;
     };
@@ -1479,22 +1488,33 @@ fn branded_pattern_error(name: &Ident, args: &ModelSchemaArgs) -> Option<proc_ma
 
 /// What the registry records for a brand.
 ///
-/// A brand is `#[serde(transparent)]`, so its wire form is its inner's: a brand over a string is
-/// written as that bare string, which is exactly what a JSON object key is, and so it keys a map the
-/// way `String` does — under its own name on the nominal surfaces, and as the open object on the
-/// structural one, which has no brand to say. The inner is asked through the very dispatch a map key
-/// is read by, so only an inner that opens a map opens the brand: a brand over a number, a chrono
-/// value, an `ObjectId`, or a container answers `NoEnumMembers` and stays refused as a key, which is
-/// what it was before this question was asked at all.
+/// A brand is `#[serde(transparent)]`, so its wire form is its inner's, and the registry's question
+/// is what serde writes: the brand's answer is the inner's answer, read through the very dispatch a
+/// map key is read by. A brand over a string is written as that bare string, which is exactly what a
+/// JSON object key is, so it keys a map the way `String` does; a brand over a value serde
+/// stringifies — a number, a `bool`, a chrono rendering — writes the object its bare inner writes,
+/// so it describes as that inner does, with nothing said about the members; a brand over a struct, a
+/// container, an `ObjectId` or a tuple writes no key at all, and stays refused. Either way the
+/// nominal surfaces keep the brand's own name, which is all the brand adds to its inner's wire.
 ///
 /// It is never `EnumMembers`: the brand publishes no `enum_members()` of its own, whatever it wraps.
+/// A brand over a plain enum is `StringWire` instead — serde writes the variant name, which is a
+/// bare string — so the object is open under the brand's name rather than closed to members the
+/// brand has no method to supply. An inner this expansion has not classified keeps the refusal it
+/// had: what serde writes for it is exactly what cannot be told yet, and the brand has no members of
+/// its own to fall back on.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn branded_alias_kind(inner_field: &Field) -> AliasKind {
     let inner = get_field_def("", &inner_field.ty, "");
-    if matches!(map_key_path(&inner), MapKeyPath::Open) {
-        AliasKind::StringWire
-    } else {
-        AliasKind::NoEnumMembers
+    match map_key_path(&inner) {
+        MapKeyPath::Open => AliasKind::StringWire,
+        MapKeyPath::Unnarrowed => AliasKind::Stringified,
+        MapKeyPath::Refused(_) => AliasKind::NoEnumMembers,
+        MapKeyPath::Enumerated(inner_name) => match registered_key_kind(inner_name) {
+            Some(AliasKind::EnumMembers) => AliasKind::StringWire,
+            Some(AliasKind::Stringified) => AliasKind::Stringified,
+            _ => AliasKind::NoEnumMembers,
+        },
     }
 }
 
@@ -5840,9 +5860,11 @@ fn sequence_wrapper_element(fld: &FieldDef) -> Option<&FieldDef> {
 /// and reading past one would answer for the inner instead — enumerating an enum's members as keys
 /// the map cannot hold. A sequence writes an array; an `Option` writes its inner or nothing at all.
 ///
-/// Below them, only a bare type path can name an enum or a brand, and the registry says which: a
-/// generic spelling is a type this expansion has no `enum_members()` for, and every other type
-/// names keys the schema cannot enumerate.
+/// Below them, only a bare type path can name an enum, an alias or a brand, and the registry says
+/// which by saying what serde writes for it: a bare string opens the object, a value serde
+/// stringifies leaves its members unnarrowed, and anything else stays on the enumerating path,
+/// where a name the registry positively rules out earns the refusal. A generic spelling is a type
+/// this expansion has no `enum_members()` for, and every other type names keys it cannot enumerate.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn map_key_path(key: &FieldDef) -> MapKeyPath<'_> {
     if key.array_depth > 0 || sequence_wrapper_element(key).is_some() {
@@ -5854,10 +5876,10 @@ fn map_key_path(key: &FieldDef) -> MapKeyPath<'_> {
     match &key.field_type {
         FieldDefType::String => MapKeyPath::Open,
         FieldDefType::SiblingType(key_type_name, args) if args.is_empty() => {
-            if writes_string_wire(key_type_name) {
-                MapKeyPath::Open
-            } else {
-                MapKeyPath::Enumerated(key_type_name.as_str())
+            match registered_key_kind(key_type_name) {
+                Some(AliasKind::StringWire) => MapKeyPath::Open,
+                Some(AliasKind::Stringified) => MapKeyPath::Unnarrowed,
+                _ => MapKeyPath::Enumerated(key_type_name.as_str()),
             }
         }
         FieldDefType::Tuple(..) => MapKeyPath::Refused(unwritable_key(key, WRITTEN_AS_ARRAY)),
@@ -5965,21 +5987,19 @@ fn proves_no_enum_members(key_type_name: &str) -> bool {
     lookup_alias_info(key_type_name).is_some_and(|key_alias| {
         matches!(
             key_alias.kind,
-            AliasKind::NoEnumMembers | AliasKind::StringWire
+            AliasKind::NoEnumMembers | AliasKind::StringWire | AliasKind::Stringified
         )
     })
 }
 
-/// Whether the registry proves serde writes the named type as a bare string — the wire form a JSON
-/// object key has, so such a key opens the map the way a `String` key does, under its own name.
+/// What the registry says serde writes for a key spelled by this name, and `None` for a name it
+/// never saw registered.
 ///
-/// Only a `#[serde(transparent)]` brand over a string-shaped inner earns this, and an alias chain
-/// ending in one inherits it. An unregistered name earns nothing: the expansion cannot tell it from
-/// a plain enum declared later.
+/// An unregistered name earns nothing: the expansion cannot tell it from a plain enum declared
+/// later, which is why the dispatch above leaves such a key on the enumerating path.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-fn writes_string_wire(key_type_name: &str) -> bool {
-    lookup_alias_info(key_type_name)
-        .is_some_and(|key_alias| key_alias.kind == AliasKind::StringWire)
+fn registered_key_kind(key_type_name: &str) -> Option<AliasKind> {
+    lookup_alias_info(key_type_name).map(|key_alias| key_alias.kind)
 }
 
 /// Why the first map key this field reaches, at any depth, has no rendering.

@@ -72,23 +72,33 @@ enum Divergence {
     ValueSet,
 }
 
-/// What a registered Rust ident, *written as a type path*, resolves to — the two facts a map key
-/// asks of it: whether it carries an inherent `enum_members()`, the enumeration the JSON-schema
-/// map-key expansion calls, and whether serde writes it as a bare string, which is what a JSON
-/// object key is. Only a plain unit enum gets that method, and a type path sees straight through an
-/// alias, so an alias answers for whatever it targets rather than for itself.
+/// What a registered Rust ident, *written as a type path*, resolves to — the one question a map key
+/// asks of a name: what does serde write for a key spelled this way. A plain unit enum answers with
+/// its members, the enumeration the JSON-schema map-key expansion calls `enum_members()` for; every
+/// other answer is about the key's own wire form, a JSON object key being a string.
+///
+/// A type path sees straight through an alias and a `#[serde(transparent)]` brand writes what its
+/// inner writes, so both answer for their target and their inner rather than for themselves — and
+/// through the registry, so a chain of either carries its end's answer to every link.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AliasKind {
     /// A plain unit enum, or an alias chain ending in one.
     EnumMembers,
-    /// Provably has neither: a struct, a brand over a non-string inner, a non-plain enum, or an
-    /// alias whose target is a primitive, a collection, or one of those.
+    /// serde writes it as neither a string nor anything it will stringify, so it keys no map at
+    /// all: a struct, a brand over one or over a container, a non-plain enum, or an alias whose
+    /// target is any of those.
     NoEnumMembers,
-    /// No `enum_members()`, but serde writes it as a bare string: a `#[serde(transparent)]` brand
-    /// whose inner is itself string-shaped, or an alias chain ending in one. Such a type keys a map
+    /// No `enum_members()`, but serde writes it as a bare string: `String` and `PathBuf`, a
+    /// `#[serde(transparent)]` brand over one of those or over a plain enum, whose variant name is
+    /// itself a bare string, and an alias chain ending in any of them. Such a type keys a map
     /// exactly as `String` does, under its own name.
     StringWire,
+    /// No `enum_members()` and no bare string either, but serde stringifies it into a key all the
+    /// same — a number, a `bool`, a chrono rendering, or a brand over one of those. The map is an
+    /// object with nothing said about its members, which is what the bare inner already describes
+    /// as; the brand's own name still stands on the nominal surfaces.
+    Stringified,
     /// Undecidable at this expansion — an alias naming a type that was not registered before it.
     Unknown,
 }
