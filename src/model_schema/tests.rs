@@ -21,9 +21,7 @@ use super::{
 };
 
 #[cfg(all(feature = "serde", feature = "zod"))]
-use super::{
-    WireLeaf, flattened_union_member_guard_error, record_wire_leaves, record_zod_union_members,
-};
+use super::{WireLeaf, flatten_edge_guard_error, record_wire_leaves, record_zod_union_members};
 
 #[cfg(feature = "typescript")]
 use super::tuple_struct_ts_body;
@@ -2544,15 +2542,20 @@ fn the_cfg_probe_sees_an_emitted_cfg_attribute() {
 fn struct_schema_example_carries_no_cfg_attribute() {
     let name: syn::Ident = syn::parse_quote!(Report);
     let generics = syn::Generics::default();
-    let tokens =
-        super::item_schema_example_method(Some(&"Report { id: 1 }".to_owned()), &name, &generics)
-            .unwrap();
+    let tokens = super::item_schema_example_method(
+        Some(&"Report { id: 1 }".to_owned()),
+        &name,
+        &generics,
+        &super::ModelSchemaArgs::default(),
+    )
+    .unwrap();
     assert_no_cfg_attribute(&tokens, "item_schema_example_method");
 }
 
 /// The type the example is bound at carries one argument per declared parameter, the way a brand's
 /// already does — a bare ident on a generic item is `E0107` before the example is ever read. A
 /// lifetime and a const are not parameters a filling is chosen for, so neither reaches the list.
+/// With nothing declared, every argument is the `String` fallback.
 #[cfg(feature = "zod")]
 #[test]
 fn struct_schema_example_instantiates_every_type_parameter() {
@@ -2567,11 +2570,71 @@ fn struct_schema_example_instantiates_every_type_parameter() {
         ),
         (syn::parse_quote!(<'a>), "let value : Report ="),
     ] {
-        let rendered = super::item_schema_example_method(Some(&example), &name, &generics)
+        let rendered = super::item_schema_example_method(
+            Some(&example),
+            &name,
+            &generics,
+            &super::ModelSchemaArgs::default(),
+        )
+        .unwrap()
+        .to_string();
+        assert!(rendered.contains(expected), "Got: {rendered}");
+    }
+}
+
+/// Each argument is read off the `default_types` entry naming that parameter, so an item is
+/// annotated at the concrete types its author declared and in the order the parameters were
+/// written. A parameter no entry names keeps the `String` fallback, which is why a partly declared
+/// item mixes the two.
+#[cfg(feature = "zod")]
+#[test]
+fn struct_schema_example_instantiates_each_parameter_at_its_declared_filling() {
+    let name: syn::Ident = syn::parse_quote!(Report);
+    let example = "Report { id: 1 }".to_owned();
+    let generics: syn::Generics = syn::parse_quote!(<A, B>);
+    let count: (syn::Ident, syn::Type) = (syn::parse_quote!(A), syn::parse_quote!(u32));
+    let held: (syn::Ident, syn::Type) = (syn::parse_quote!(B), syn::parse_quote!(Vec<u8>));
+    for (default_types, expected) in [
+        (vec![count.clone()], "let value : Report < u32 , String > ="),
+        (
+            vec![held.clone()],
+            "let value : Report < String , Vec < u8 > > =",
+        ),
+        (
+            vec![held, count],
+            "let value : Report < u32 , Vec < u8 > > =",
+        ),
+    ] {
+        let args = super::ModelSchemaArgs {
+            default_types,
+            ..Default::default()
+        };
+        let rendered = super::item_schema_example_method(Some(&example), &name, &generics, &args)
             .unwrap()
             .to_string();
         assert!(rendered.contains(expected), "Got: {rendered}");
     }
+}
+
+/// A filling written as `String` is exactly what an unfilled parameter falls back to, so an item
+/// declaring one and an item declaring none are annotated with the same tokens — reading the
+/// declaration leaves every item the old convention already got right byte for byte as it was.
+#[cfg(feature = "zod")]
+#[test]
+fn a_string_filling_annotates_the_example_as_no_filling_does() {
+    let name: syn::Ident = syn::parse_quote!(Report);
+    let example = "Report { id: 1 }".to_owned();
+    let generics: syn::Generics = syn::parse_quote!(<A>);
+    let filled = super::ModelSchemaArgs {
+        default_types: vec![(syn::parse_quote!(A), syn::parse_quote!(String))],
+        ..Default::default()
+    };
+    let render = |args: &super::ModelSchemaArgs| {
+        super::item_schema_example_method(Some(&example), &name, &generics, args)
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(render(&filled), render(&super::ModelSchemaArgs::default()));
 }
 
 #[cfg(feature = "jsonschema")]
@@ -2612,7 +2675,12 @@ fn branded_schema_example_carries_no_cfg_attribute() {
         vec!["A".to_owned()],
         vec!["A".to_owned(), "B".to_owned()],
     ] {
-        let tokens = super::build_branded_schema_example(Some(&example), &name, &generic_params);
+        let tokens = super::build_branded_schema_example(
+            Some(&example),
+            &name,
+            &generic_params,
+            &super::ModelSchemaArgs::default(),
+        );
         assert_no_cfg_attribute(&tokens, "build_branded_schema_example");
     }
 }
@@ -2632,10 +2700,39 @@ fn branded_schema_example_instantiates_every_parameter() {
             "let value : DocumentId < String , String > =",
         ),
     ] {
-        let rendered =
-            super::build_branded_schema_example(Some(&example), &name, &generic_params).to_string();
+        let rendered = super::build_branded_schema_example(
+            Some(&example),
+            &name,
+            &generic_params,
+            &super::ModelSchemaArgs::default(),
+        )
+        .to_string();
         assert!(rendered.contains(expected), "Got: {rendered}");
     }
+}
+
+/// A brand reads its declaration through the same seam a declared struct does, so its example is
+/// annotated at the fillings its author wrote rather than at the fallback.
+#[cfg(feature = "zod")]
+#[test]
+fn branded_schema_example_instantiates_each_parameter_at_its_declared_filling() {
+    let name: syn::Ident = syn::parse_quote!(DocumentId);
+    let example = "DocumentId(\"abc\".to_string())".to_owned();
+    let args = super::ModelSchemaArgs {
+        default_types: vec![(syn::parse_quote!(A), syn::parse_quote!(u32))],
+        ..Default::default()
+    };
+    let rendered = super::build_branded_schema_example(
+        Some(&example),
+        &name,
+        &["A".to_owned(), "B".to_owned()],
+        &args,
+    )
+    .to_string();
+    assert!(
+        rendered.contains("let value : DocumentId < u32 , String > ="),
+        "Got: {rendered}"
+    );
 }
 
 #[cfg(feature = "typescript")]
@@ -3167,11 +3264,103 @@ fn string_constraints_over_a_named_inner_the_registry_calls_a_string_pass() {
 /// a diagnostic out of declaration order: moving a declaration would turn a compiling program into
 /// a refused one without changing what it means. The `Display` assertion still bounds the Rust
 /// surface either way.
+///
+/// Both of them name a type the declaration has already fixed, which is what the admission rests
+/// on; a name written over one of the brand's own parameters has not, and is refused below.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn string_constraints_over_a_name_the_registry_cannot_answer_for_pass() {
-    let errors = brand_over_named_inner_errors("SiblingRegisteredNowhere");
-    assert!(errors.is_empty(), "got: {errors:?}");
+    let bare = brand_over_named_inner_errors("SiblingRegisteredNowhere");
+    assert!(bare.is_empty(), "got: {bare:?}");
+
+    for inner in ["UnregisteredGeneric<String>", "UnregisteredGeneric<u32>"] {
+        let ty: syn::Type = syn::parse_str(inner).unwrap();
+        let carrying_a_fixed_argument = branded_errors_with(
+            &syn::parse_quote! {
+                #[serde(transparent)]
+                struct Branded<T>(pub #ty);
+            },
+            &pattern_args(),
+        );
+        assert!(
+            carrying_a_fixed_argument.is_empty(),
+            "for {inner}, got: {carrying_a_fixed_argument:?}"
+        );
+    }
+}
+
+/// A name written over one of the brand's own type parameters is refused, wherever the parameter
+/// sits inside it.
+///
+/// The registry's silence is not consent here. The brand composes the named type's schema from the
+/// argument the caller supplies, so the checks land on whatever that argument turns out to be: Zod
+/// appends them to a shape the call site decides, the one JSON document written for every
+/// instantiation still holds the `{}` a parameter describes as, and `validate()` measures the
+/// inner's `Display` — a numeric filling rejected for its digit count rather than for its value.
+/// The same two items written in the other order already refuse through the registry, so admitting
+/// this one puts the diagnostic back on declaration order the long way round.
+///
+/// The refusal names the brand, the inner and the parameter, so the author reads which declaration
+/// to fix and which name in it.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn string_constraints_over_a_name_written_over_the_brands_own_parameter_are_rejected() {
+    for inner in [
+        "UnregisteredGeneric<T>",
+        "UnregisteredGeneric<Vec<T>>",
+        "UnregisteredGeneric<String, U>",
+        "UnregisteredGeneric<HashMap<String, T>>",
+        "UnregisteredGeneric<(u32, U)>",
+    ] {
+        let ty: syn::Type = syn::parse_str(inner).unwrap();
+        let errors = branded_errors_with(
+            &syn::parse_quote! {
+                #[serde(transparent)]
+                struct Branded<T, U>(pub #ty);
+            },
+            &pattern_args(),
+        );
+        assert_eq!(errors.len(), 1, "for {inner}, got: {errors:?}");
+        assert!(errors[0].contains("compile_error"), "got: {}", errors[0]);
+        assert!(errors[0].contains("`Branded`"), "got: {}", errors[0]);
+        assert!(
+            errors[0].contains("UnregisteredGeneric"),
+            "for {inner}, got: {}",
+            errors[0]
+        );
+        assert!(
+            errors[0].contains("type parameter"),
+            "for {inner}, got: {}",
+            errors[0]
+        );
+    }
+}
+
+/// A name the registry calls a string publisher is refused too, once one of the brand's own
+/// parameters is written into it.
+///
+/// That registration answers for the declaration, and the declaration here is one whose value the
+/// filling supplies: `Later<T>` publishes a string for a `Later<String>` and something else for
+/// every other filling, so the checks still land on whatever the call site handed over. The
+/// registry's own arm cannot tell this case from an unregistered one — a string publisher records
+/// no shape, exactly as an absence records none — which is why it is the parameter that decides.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn string_constraints_over_a_registered_name_carrying_the_brands_parameter_are_rejected() {
+    seed_value_shape("RegisteredStringGeneric", None);
+    let errors = branded_errors_with(
+        &syn::parse_quote! {
+            #[serde(transparent)]
+            struct Branded<T>(pub RegisteredStringGeneric<T>);
+        },
+        &pattern_args(),
+    );
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(
+        errors[0].contains("RegisteredStringGeneric"),
+        "got: {}",
+        errors[0]
+    );
 }
 
 /// What a brand records for the next brand written over it: whatever its own inner publishes, read
@@ -7050,7 +7239,7 @@ fn flattening_a_union_of_objects_is_not_refused() {
         .is_none()
     );
     let unrecorded: syn::Field = syn::parse_quote! { #[serde(flatten)] base: NeverRecorded };
-    assert!(flattened_union_member_guard_error(&unrecorded, "Host").is_none());
+    assert!(flatten_edge_guard_error(&unrecorded, "Host").is_none());
 }
 
 /// Records an untagged enum's members the way its own expansion does, then asks the flatten guard
@@ -7071,7 +7260,7 @@ fn recorded_union_flatten_error(
         AliasKind::NoEnumMembers,
     );
     record_zod_union_members(rust_ident, &merge_parts);
-    flattened_union_member_guard_error(field, "Host").map(|error| error.to_string())
+    flatten_edge_guard_error(field, "Host").map(|error| error.to_string())
 }
 
 /// The branch trails one untagged enum's members are recorded at, beside what each is proved to
@@ -7325,6 +7514,100 @@ fn a_union_member_naming_an_object_or_an_unregistered_type_stays_admitted() {
             &syn::parse_quote! { #[serde(flatten)] either: NamedChoice },
         )
         .is_none()
+    );
+}
+
+/// What the flatten guard is asked about a field naming one item directly, with no union between.
+#[cfg(all(feature = "serde", feature = "zod"))]
+fn direct_flatten_error(field: &syn::Field) -> Option<String> {
+    flatten_edge_guard_error(field, "Host").map(|error| error.to_string())
+}
+
+/// The same refusal one position further out. A `#[serde(flatten)]` field naming an item whose own
+/// published wire is no object is the shape the member-position refusal was landed to stop, with the
+/// intersection written directly rather than through a union: serde refuses the value at runtime and
+/// the JSON-schema merge refuses the declaration, so the guard names it in the words that merge uses
+/// for a source at no position of its own.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn flattening_a_registered_scalar_wire_is_refused_where_the_field_was_written() {
+    seed_registered_wire("Counted", AliasKind::NoEnumMembers, Some("integer"));
+    let error = direct_flatten_error(&syn::parse_quote! { #[serde(flatten)] c: Counted }).unwrap();
+    assert!(
+        error.contains("`#[serde(flatten)]` of `Counted` is not written as an object"),
+        "got: {error}"
+    );
+    assert!(
+        error.contains("its schema describes a `integer`"),
+        "got: {error}"
+    );
+    assert!(
+        error.contains("write the field as a named member so the value gets a key of its own"),
+        "got: {error}"
+    );
+}
+
+/// Every keyword a registration can prove reaches the same refusal, each named by the word its own
+/// published document carries — the array a fixed-arity tuple struct writes among them, which serde
+/// refuses to flatten for the reason it refuses the scalar.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn flattening_a_registered_string_boolean_or_array_wire_is_refused_by_its_own_keyword() {
+    for (rust_ident, kind, keyword) in [
+        ("DirectSlug", AliasKind::StringWire, "string"),
+        ("DirectSwitch", AliasKind::Stringified, "boolean"),
+        ("DirectPair", AliasKind::NoEnumMembers, "array"),
+    ] {
+        seed_registered_wire(rust_ident, kind, Some(keyword));
+        let named: syn::Type = syn::parse_str(rust_ident).unwrap();
+        let error =
+            direct_flatten_error(&syn::parse_quote! { #[serde(flatten)] v: #named }).unwrap();
+        assert!(
+            error.contains(&format!("its schema describes a `{keyword}`")),
+            "got: {error}"
+        );
+    }
+}
+
+/// The three the direct position leaves exactly as they stand: an item the registry says publishes
+/// an object, a name it has never seen — the declaration-order fallback, which answers for a source
+/// written below the object no differently than for a foreign type — and an array of a proved
+/// scalar, where the array is what the field wrote rather than anything the name proves.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_direct_flatten_of_an_object_an_unregistered_name_or_an_array_stays_admitted() {
+    seed_registered_wire("DirectDoc", AliasKind::NoEnumMembers, None);
+    seed_registered_wire("DirectCount", AliasKind::NoEnumMembers, Some("integer"));
+    for admitted in [
+        syn::parse_quote! { #[serde(flatten)] base: DirectDoc },
+        syn::parse_quote! { #[serde(flatten)] base: NeverRegisteredDirectly },
+        syn::parse_quote! { #[serde(flatten)] counts: Vec<DirectCount> },
+    ] {
+        let field: syn::Field = admitted;
+        assert!(
+            direct_flatten_error(&field).is_none(),
+            "got a rejection for {}",
+            quote::ToTokens::to_token_stream(&field)
+        );
+    }
+}
+
+/// A plain enum proves the same `string` and keeps the refusal written for it: those words name the
+/// variant key serde writes into the object, which is what the author of that declaration acts on.
+/// Two guards firing on one field would put two diagnostics on one line, each answering for the same
+/// thing in different words.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_direct_flatten_of_a_plain_enum_is_left_to_the_guard_written_for_it() {
+    seed_registered_wire("DirectHue", AliasKind::EnumMembers, Some("string"));
+    let field: syn::Field = syn::parse_quote! { #[serde(flatten)] tone: DirectHue };
+    assert!(direct_flatten_error(&field).is_none());
+    let written = super::flattened_field_guard_error(&field, "Host")
+        .map(|error| error.to_string())
+        .unwrap();
+    assert!(
+        written.contains("a plain enum writes its"),
+        "got: {written}"
     );
 }
 
