@@ -19,6 +19,19 @@ use serde::{Deserialize, Serialize};
 ))]
 use tixschema::model_schema;
 
+/// What a type answers when it publishes no inherent `validate()` of its own. An inherent method
+/// takes precedence over a trait's, so reaching this one is what says none was published — the same
+/// question asked of a constraint-free struct, which has never published one either.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+trait UnpublishedValidate {
+    fn validate(&self) -> &'static str {
+        "no inherent validate()"
+    }
+}
+
 // ==================== String constraint: maxLength ====================
 
 #[cfg(all(feature = "serde", feature = "zod"))]
@@ -1797,4 +1810,390 @@ fn test_two_variants_naming_one_field_keep_their_own_constraints() {
         serde_json::from_str::<Action>(r#"{"kind":"Upload","note":"abc"}"#).is_ok(),
         "A value Upload admits is not held to Delete's minimum"
     );
+}
+
+// ==================== validate() method — enum members ====================
+
+/// The struct and its single-variant tagged twin carry the same constraint on the same member, so
+/// an author who changes the one declaration into the other reads the identical sentence back.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_tagged_enum_validate_answers_in_the_struct_twins_words() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct SlugStruct {
+        #[model_schema_prop(minLength = 2)]
+        pub slug: String,
+    }
+
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    #[serde(tag = "kind")]
+    pub enum SlugTagged {
+        One {
+            #[model_schema_prop(minLength = 2)]
+            slug: String,
+        },
+    }
+
+    let from_struct = SlugStruct {
+        slug: "A".to_owned(),
+    }
+    .validate()
+    .unwrap_err();
+    let from_enum = SlugTagged::One {
+        slug: "A".to_owned(),
+    }
+    .validate()
+    .unwrap_err();
+
+    assert_eq!(
+        from_struct,
+        vec!["'slug' is too short: minimum length is 2, got 1".to_owned()]
+    );
+    assert_eq!(from_enum, from_struct);
+
+    SlugTagged::One {
+        slug: "ab".to_owned(),
+    }
+    .validate()
+    .unwrap();
+}
+
+/// The tag decides how a value is written, not which of its members carry a bound — so every
+/// tagging serde offers publishes the accessor, and all three answer the same violation alike.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_every_tagged_flavor_publishes_validate_for_its_constrained_members() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub enum External {
+        One {
+            #[model_schema_prop(minLength = 2)]
+            slug: String,
+        },
+    }
+
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    #[serde(tag = "kind")]
+    pub enum Internal {
+        One {
+            #[model_schema_prop(minLength = 2)]
+            slug: String,
+        },
+    }
+
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    #[serde(tag = "kind", content = "data")]
+    pub enum Adjacent {
+        One {
+            #[model_schema_prop(minLength = 2)]
+            slug: String,
+        },
+    }
+
+    let expected = vec!["'slug' is too short: minimum length is 2, got 1".to_owned()];
+    assert_eq!(
+        External::One {
+            slug: "A".to_owned()
+        }
+        .validate()
+        .unwrap_err(),
+        expected
+    );
+    assert_eq!(
+        Internal::One {
+            slug: "A".to_owned()
+        }
+        .validate()
+        .unwrap_err(),
+        expected
+    );
+    assert_eq!(
+        Adjacent::One {
+            slug: "A".to_owned()
+        }
+        .validate()
+        .unwrap_err(),
+        expected
+    );
+}
+
+/// A value holds one variant at a time, so the walk runs that variant's checks and no other's —
+/// two variants naming one member are two constraints, and only the held one answers.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_enum_validate_runs_only_the_held_variants_checks() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    #[serde(tag = "kind")]
+    pub enum Action {
+        Delete {
+            #[model_schema_prop(minLength = 5)]
+            note: String,
+        },
+        Upload {
+            #[model_schema_prop(minLength = 3)]
+            note: String,
+        },
+    }
+
+    assert_eq!(
+        Action::Delete {
+            note: "abc".to_owned()
+        }
+        .validate()
+        .unwrap_err(),
+        vec!["'note' is too short: minimum length is 5, got 3".to_owned()]
+    );
+    assert!(
+        Action::Upload {
+            note: "abc".to_owned()
+        }
+        .validate()
+        .is_ok(),
+        "a value Upload admits is not held to Delete's minimum"
+    );
+}
+
+/// A variant that carries no bound contributes no check, and one that carries several answers with
+/// every violation at once — the struct accessor's own collecting shape, per arm.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_enum_validate_collects_every_violation_of_the_held_variant() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    #[serde(tag = "kind")]
+    pub enum Mixed {
+        Bounded {
+            #[model_schema_prop(maxLength = 3)]
+            code: String,
+            #[model_schema_prop(minimum = 10)]
+            size: u32,
+        },
+        Free {
+            note: String,
+        },
+        Nothing,
+    }
+
+    assert_eq!(
+        Mixed::Bounded {
+            code: "toolong".to_owned(),
+            size: 1,
+        }
+        .validate()
+        .unwrap_err(),
+        vec![
+            "'code' is too long: maximum length is 3, got 7".to_owned(),
+            "'size' is too small: minimum is 10, got 1".to_owned(),
+        ]
+    );
+    Mixed::Free {
+        note: "anything".to_owned(),
+    }
+    .validate()
+    .unwrap();
+    Mixed::Nothing.validate().unwrap();
+}
+
+/// A member written under wrappers is checked where the constraint lands, exactly as the same field
+/// written in a struct is: a `None` writes nothing to check, and a sequence answers per element.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_enum_validate_reaches_through_a_members_wrappers() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    #[serde(tag = "kind")]
+    pub enum Wrapped {
+        One {
+            #[model_schema_prop(minLength = 2)]
+            tags: Vec<String>,
+            #[model_schema_prop(minLength = 2)]
+            #[serde(skip_serializing_if = "Option::is_none")]
+            note: Option<String>,
+        },
+    }
+
+    assert!(
+        Wrapped::One {
+            tags: vec!["ab".to_owned()],
+            note: None,
+        }
+        .validate()
+        .is_ok(),
+        "a None writes nothing for the bound to describe"
+    );
+    assert_eq!(
+        Wrapped::One {
+            tags: vec!["ab".to_owned(), "c".to_owned()],
+            note: Some("d".to_owned()),
+        }
+        .validate()
+        .unwrap_err(),
+        vec![
+            "'tags' is too short: minimum length is 2, got 1".to_owned(),
+            "'note' is too short: minimum length is 2, got 1".to_owned(),
+        ]
+    );
+}
+
+/// Parity with the struct convention: an enum whose members carry no bound publishes no accessor,
+/// which is what a constraint-free struct has always published. The trait's method is reached only
+/// because no inherent one shadows it.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_a_constraint_free_enum_publishes_no_validate_just_as_a_struct_does() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct FreeStruct {
+        pub name: String,
+    }
+
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    #[serde(tag = "kind")]
+    pub enum FreeTagged {
+        One { name: String },
+        Two,
+    }
+
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    #[serde(tag = "kind")]
+    pub enum BoundTagged {
+        One {
+            #[model_schema_prop(minLength = 2)]
+            name: String,
+        },
+    }
+
+    impl UnpublishedValidate for FreeStruct {}
+    impl UnpublishedValidate for FreeTagged {}
+
+    assert_eq!(
+        FreeStruct {
+            name: String::new()
+        }
+        .validate(),
+        "no inherent validate()"
+    );
+    assert_eq!(
+        FreeTagged::One {
+            name: String::new()
+        }
+        .validate(),
+        "no inherent validate()"
+    );
+    assert_eq!(FreeTagged::Two.validate(), "no inherent validate()");
+    // An enum whose member does carry a bound answers with the accessor's own type, which is what
+    // makes the assertions above a statement about publication rather than about the trait: a
+    // published `validate()` would shadow the trait's and none of them would even compile.
+    assert_eq!(
+        BoundTagged::One {
+            name: "A".to_owned()
+        }
+        .validate()
+        .unwrap_err(),
+        vec!["'name' is too short: minimum length is 2, got 1".to_owned()]
+    );
+}
+
+/// The arm binds each constrained member under a name of its own, so a member spelled like
+/// something the body already reads is still checked rather than taking that name over: `errors` is
+/// the accumulator every check pushes into, and `value_0` is the head of the walk a wrapped member
+/// is reached through.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_a_member_named_like_the_walks_own_bindings_is_still_checked() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    #[serde(tag = "kind")]
+    pub enum Shadowing {
+        One {
+            #[model_schema_prop(minLength = 2)]
+            errors: String,
+            #[model_schema_prop(minLength = 2)]
+            value_0: Vec<String>,
+        },
+    }
+
+    assert_eq!(
+        Shadowing::One {
+            errors: "A".to_owned(),
+            value_0: vec!["B".to_owned()],
+        }
+        .validate()
+        .unwrap_err(),
+        vec![
+            "'errors' is too short: minimum length is 2, got 1".to_owned(),
+            "'value_0' is too short: minimum length is 2, got 1".to_owned(),
+        ]
+    );
+}
+
+/// The match names every variant the enum declares, whatever shape each one was written in, so a
+/// value of any of them reaches the accessor and only the constrained one answers.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_every_variant_shape_reaches_the_accessor() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub enum EveryShape {
+        Bare {
+            note: String,
+        },
+        Named {
+            #[model_schema_prop(minLength = 2)]
+            slug: String,
+        },
+        Nothing,
+        Pair(String, String),
+        Single(String),
+    }
+
+    assert_eq!(
+        EveryShape::Named {
+            slug: "A".to_owned()
+        }
+        .validate()
+        .unwrap_err(),
+        vec!["'slug' is too short: minimum length is 2, got 1".to_owned()]
+    );
+    EveryShape::Bare {
+        note: "A".to_owned(),
+    }
+    .validate()
+    .unwrap();
+    EveryShape::Single("A".to_owned()).validate().unwrap();
+    EveryShape::Pair("A".to_owned(), "B".to_owned())
+        .validate()
+        .unwrap();
+    EveryShape::Nothing.validate().unwrap();
 }

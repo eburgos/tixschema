@@ -135,8 +135,9 @@ struct DiscriminatedVariant {
     kind: VariantKind,
 }
 
-/// Per-variant data collected from a discriminated enum, plus the collected serde validators and
-/// the `compile_error!` tokens for any field-level guard violations.
+/// Per-variant data collected from a discriminated enum, plus the collected serde validators, the
+/// `compile_error!` tokens for any field-level guard violations, and the `validate()` match arms,
+/// empty where no variant carries a constrained member and there is nothing to aggregate.
 ///
 /// The variants are a sequence, not a map: their order is the enum's declaration order and it
 /// reaches the emitted output verbatim (JSON-schema `oneOf`, the TypeScript union, the Zod
@@ -144,6 +145,7 @@ struct DiscriminatedVariant {
 /// build.
 type DiscriminatedVariantData = (
     Vec<DiscriminatedVariant>,
+    Vec<proc_macro2::TokenStream>,
     Vec<proc_macro2::TokenStream>,
     Vec<proc_macro2::TokenStream>,
 );
@@ -158,11 +160,13 @@ type RenderedVariants = (
 
 /// Per-member data collected from an untagged enum: the TypeScript member types, the Zod member
 /// schemas, the JSON-schema value tokens, the `compile_error!` tokens for any field-level guard
-/// violations, and the per-member serde validation functions.
+/// violations, the per-member serde validation functions, and the `validate()` match arms those
+/// functions are run from.
 #[cfg(feature = "serde")]
 type UntaggedMemberData = (
     Vec<String>,
     Vec<String>,
+    Vec<proc_macro2::TokenStream>,
     Vec<proc_macro2::TokenStream>,
     Vec<proc_macro2::TokenStream>,
     Vec<proc_macro2::TokenStream>,
@@ -299,6 +303,18 @@ enum ConstraintLeaf {
 enum CheckSink {
     Collect,
     Fail,
+}
+
+/// How the body that checks a constrained member reaches the value.
+///
+/// A struct's field is read off `self`, which is what `validate()` is called on. A variant's member
+/// is not reachable that way — the value only names it once the arm that matched the variant has
+/// bound it — so the check reads the binding the arm introduced.
+#[cfg(feature = "serde")]
+#[derive(Clone, Copy)]
+enum MemberAccess {
+    SelfField,
+    VariantBinding,
 }
 
 /// A wrapper a constrained field can be written under, outermost first.
@@ -1036,6 +1052,96 @@ fn build_struct_validate_method(
                 use #module_ident::*;
                 let mut errors: Vec<String> = Vec::new();
                 #(#validate_bodies)*
+                if errors.is_empty() { Ok(()) } else { Err(errors) }
+            }
+        }
+    })
+}
+
+/// The pattern one variant is matched by in the enum-level `validate()`.
+///
+/// Only the constrained members are bound, each under the name its check reads; everything else the
+/// variant holds is left unread, and a variant that binds every member it has needs no rest pattern
+/// to say so.
+fn variant_check_pattern(
+    variant_ident: &proc_macro2::Ident,
+    kind: &VariantKind,
+    total_fields: usize,
+    bound: &[(proc_macro2::Ident, proc_macro2::Ident)],
+) -> proc_macro2::TokenStream {
+    if bound.is_empty() {
+        return match *kind {
+            VariantKind::Unit => quote! { Self::#variant_ident },
+            VariantKind::TupleSingle | VariantKind::TupleMultiple => {
+                quote! { Self::#variant_ident(..) }
+            }
+            VariantKind::Named if total_fields == 0 => quote! { Self::#variant_ident {} },
+            VariantKind::Named => quote! { Self::#variant_ident { .. } },
+        };
+    }
+    let fields = bound.iter().map(|(field, _)| field);
+    let bindings = bound.iter().map(|(_, binding)| binding);
+    if bound.len() == total_fields {
+        quote! { Self::#variant_ident { #(#fields: #bindings),* } }
+    } else {
+        quote! { Self::#variant_ident { #(#fields: #bindings,)* .. } }
+    }
+}
+
+/// The match arms the enum-level `validate()` runs — empty when no variant carries a constrained
+/// member, which is the parity a constraint-free struct has: it publishes no `validate()` either.
+///
+/// Every variant is named, so the match stays exhaustive without a wildcard standing in for shapes
+/// the declaration already lists. The ones with nothing to check share a single arm: their bodies
+/// would be the same empty body written once per variant, which is the arm an or-pattern says in
+/// one place.
+fn build_member_check_arms(
+    per_variant: Vec<(proc_macro2::TokenStream, Vec<proc_macro2::TokenStream>)>,
+) -> Vec<proc_macro2::TokenStream> {
+    let mut arms: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut unchecked: Vec<proc_macro2::TokenStream> = Vec::new();
+    for (pattern, checks) in per_variant {
+        if checks.is_empty() {
+            unchecked.push(pattern);
+        } else {
+            arms.push(quote! { #pattern => { #(#checks)* } });
+        }
+    }
+    if arms.is_empty() {
+        return Vec::new();
+    }
+    if !unchecked.is_empty() {
+        arms.push(quote! { #(#unchecked)|* => {} });
+    }
+    arms
+}
+
+/// Builds the type-level `validate()` method for an enum, aggregating the checks of whichever
+/// variant the value holds, or `None` when no variant carries a constrained member.
+///
+/// The per-member validators are the ones a struct's fields already generate, so the enum's
+/// accessor answers in the same words for the same violation: what differs is only that a value
+/// carries one variant's members at a time, so the walk is a match rather than a straight run
+/// through every field.
+///
+/// The arms are built from what `serde`'s own attributes name, so without that feature there are
+/// none to aggregate and the gate here is the one every emitted `impl` item already sits under.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn build_enum_validate_method(
+    arms: &[proc_macro2::TokenStream],
+    module_ident: &Ident,
+) -> Option<proc_macro2::TokenStream> {
+    (!arms.is_empty()).then(|| {
+        quote! {
+            /// Validates all constrained fields and returns all validation errors.
+            ///
+            /// Returns `Ok(())` if all constraints pass, or `Err(Vec<String>)` with all errors.
+            pub fn validate(&self) -> Result<(), Vec<String>> {
+                use #module_ident::*;
+                let mut errors: Vec<String> = Vec::new();
+                match self {
+                    #(#arms),*
+                }
                 if errors.is_empty() { Ok(()) } else { Err(errors) }
             }
         }
@@ -3693,7 +3799,12 @@ fn process_plain_enum(
 }
 
 /// Processes each variant of a discriminated enum, returning per-variant field defs, doc strings,
-/// and variant kinds in declaration order, plus the collected serde validation functions.
+/// and variant kinds in declaration order, plus the collected serde validation functions and the
+/// `validate()` arms those functions are run from.
+///
+/// A member's check is generated here whatever the enum's tagging, so the accessor built from these
+/// arms exists on all three tagged flavors alike — the tag decides how the value is written, not
+/// which of its members carry a bound.
 fn collect_discriminated_variants(
     item_enum: &mut syn::ItemEnum,
     rename_all: Option<&str>,
@@ -3702,6 +3813,8 @@ fn collect_discriminated_variants(
     let mut variants: Vec<DiscriminatedVariant> = Vec::new();
     let mut enum_validation_fns: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut guard_errors: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut per_variant_checks: Vec<(proc_macro2::TokenStream, Vec<proc_macro2::TokenStream>)> =
+        Vec::new();
     let enum_type_name = item_enum.ident.to_string();
 
     for item in &mut item_enum.variants {
@@ -3716,8 +3829,11 @@ fn collect_discriminated_variants(
         let variant_kind = classify_variant(item);
 
         let mut field_defs: Vec<FieldDef> = Vec::new();
+        let mut bound: Vec<(proc_macro2::Ident, proc_macro2::Ident)> = Vec::new();
+        let mut checks: Vec<proc_macro2::TokenStream> = Vec::new();
+        let total_fields = item.fields.len();
         for field in &mut item.fields {
-            let (f_def, validation_fn, _validate_body, field_guard_errors) = process_field(
+            let (f_def, validation_fn, validate_body, field_guard_errors) = process_field(
                 rename_all,
                 field,
                 enum_module_name_opt,
@@ -3727,9 +3843,20 @@ fn collect_discriminated_variants(
             if let Some(vfn) = validation_fn {
                 enum_validation_fns.push(vfn);
             }
+            // A constrained positional slot is refused by its own guard, so a member with a body to
+            // run is always one the arm can name.
+            if let (Some(body), Some(ident)) = (validate_body, field.ident.as_ref()) {
+                let binding = member_binding(ident);
+                bound.push((ident.clone(), binding));
+                checks.push(body);
+            }
             guard_errors.extend(field_guard_errors);
             field_defs.push(f_def);
         }
+        per_variant_checks.push((
+            variant_check_pattern(&item.ident, &variant_kind, total_fields, &bound),
+            checks,
+        ));
 
         let discriminator_docs = build_jsdoc_body(get_variant_docs(item).as_deref(), &final_name);
         variants.push(DiscriminatedVariant {
@@ -3740,7 +3867,12 @@ fn collect_discriminated_variants(
         });
     }
 
-    (variants, enum_validation_fns, guard_errors)
+    (
+        variants,
+        enum_validation_fns,
+        guard_errors,
+        build_member_check_arms(per_variant_checks),
+    )
 }
 
 /// Renders the TypeScript type fragments, Zod schema fragments (with optional-field lists), and
@@ -3899,14 +4031,14 @@ fn process_discriminated_enum(
     ];
 
     // Build delegating impl items; the discriminated-enum delegates match the struct ones (the
-    // `zod_schema` example injection uses the same `.meta()`-before-`;` form), with no `validate()`.
+    // `zod_schema` example injection uses the same `.meta()`-before-`;` form).
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     let delegate_impl_items = build_struct_delegate_items(
         &module_ident,
         item_name,
         &name.to_string(),
         schema_example_method.as_ref(),
-        None,
+        build_enum_validate_method(&variants.3, &module_ident),
     );
 
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
@@ -4306,7 +4438,7 @@ fn process_externally_tagged_enum(
         item_name,
         &name.to_string(),
         schema_example_method.as_ref(),
-        None,
+        build_enum_validate_method(&variants.3, &module_ident),
     );
 
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
@@ -4323,7 +4455,7 @@ fn process_externally_tagged_enum(
 
     #[cfg(not(any(feature = "zod", feature = "typescript", feature = "jsonschema")))]
     {
-        let _: &_ = &variants.1;
+        let _: &_ = &(&variants.1, &variants.3);
         let output = quote! {
             #item_enum
         };
@@ -4712,7 +4844,7 @@ fn process_internally_tagged_enum(
         item_name,
         &name.to_string(),
         schema_example_method.as_ref(),
-        None,
+        build_enum_validate_method(&variants.3, &module_ident),
     );
 
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
@@ -4729,7 +4861,7 @@ fn process_internally_tagged_enum(
 
     #[cfg(not(any(feature = "zod", feature = "typescript", feature = "jsonschema")))]
     {
-        let _: &_ = &variants.1;
+        let _: &_ = &(&variants.1, &variants.3);
         let output = quote! {
             #item_enum
         };
@@ -5074,12 +5206,17 @@ fn collect_untagged_members(
     let mut json_parts: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut guard_errors: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut validation_fns: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut per_variant_checks: Vec<(proc_macro2::TokenStream, Vec<proc_macro2::TokenStream>)> =
+        Vec::new();
 
     for variant in &mut item_enum.variants {
         let kind = classify_variant(variant);
         let variant_name = variant.ident.to_string();
 
         let mut field_defs: Vec<FieldDef> = Vec::new();
+        let mut bound: Vec<(proc_macro2::Ident, proc_macro2::Ident)> = Vec::new();
+        let mut checks: Vec<proc_macro2::TokenStream> = Vec::new();
+        let total_fields = variant.fields.len();
         for field in &mut variant.fields {
             let field_name = field
                 .ident
@@ -5095,16 +5232,21 @@ fn collect_untagged_members(
                 .filter(|attr| !attr.path().is_ident("model_schema_prop"))
                 .cloned()
                 .collect();
-            let (validation_fn, _, positional_constraint_error) = generate_field_validation(
-                field,
-                schema_module_name,
-                &field_name,
-                Some(&variant_name),
-                &prop_meta,
-                &mut new_attrs,
-            );
+            let (validation_fn, validate_body, positional_constraint_error) =
+                generate_field_validation(
+                    field,
+                    schema_module_name,
+                    &field_name,
+                    Some(&variant_name),
+                    &prop_meta,
+                    &mut new_attrs,
+                );
             field.attrs = new_attrs;
             validation_fns.extend(validation_fn);
+            if let (Some(body), Some(ident)) = (validate_body, field.ident.as_ref()) {
+                bound.push((ident.clone(), member_binding(ident)));
+                checks.push(body);
+            }
 
             let mut field_def = get_field_def(&field_name, &field.ty, "");
             let serde_guard_errors = field_guard_errors(
@@ -5127,6 +5269,11 @@ fn collect_untagged_members(
             field_defs.push(field_def);
         }
 
+        per_variant_checks.push((
+            variant_check_pattern(&variant.ident, &kind, total_fields, &bound),
+            checks,
+        ));
+
         match render_untagged_variant(&kind, variant, &field_defs, &enum_type_name) {
             Ok((ts, zod, json_val)) => {
                 ts_parts.push(ts);
@@ -5143,6 +5290,7 @@ fn collect_untagged_members(
         json_parts,
         guard_errors,
         validation_fns,
+        build_member_check_arms(per_variant_checks),
     )
 }
 
@@ -5261,7 +5409,7 @@ fn process_untagged_enum(
     let enum_module_name_opt = None;
 
     // Render each variant into its union member (TS / Zod / JSON parts).
-    let (ts_parts, zod_parts, json_parts, guard_errors, enum_validation_fns) =
+    let (ts_parts, zod_parts, json_parts, guard_errors, enum_validation_fns, validate_arms) =
         collect_untagged_members(&mut item_enum, enum_module_name_opt);
 
     // A violated field guard makes the whole contract unsound, so the schema surface is dropped
@@ -5292,13 +5440,17 @@ fn process_untagged_enum(
         &json_parts,
     );
 
+    // The union's own accessor is where a violated member bound is named in Rust at all: the read
+    // path hands the bound to serde, which drops the sentence with the candidate it removes (see
+    // `collect_untagged_members`), so this is the one surface that answers with the constraint
+    // rather than with `data did not match any variant`.
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     let delegate_impl_items = build_struct_delegate_items(
         &module_ident,
         item_name,
         &name.to_string(),
         schema_example_method.as_ref(),
-        None,
+        build_enum_validate_method(&validate_arms, &module_ident),
     );
 
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
@@ -5315,7 +5467,7 @@ fn process_untagged_enum(
 
     #[cfg(not(any(feature = "zod", feature = "typescript", feature = "jsonschema")))]
     {
-        let _: &_ = &enum_validation_fns;
+        let _: &_ = &(&enum_validation_fns, &validate_arms);
         let output = quote! {
             #item_enum
         };
@@ -6980,6 +7132,35 @@ fn wrap_binding(depth: usize) -> proc_macro2::Ident {
     proc_macro2::Ident::new(&format!("value_{depth}"), proc_macro2::Span::call_site())
 }
 
+/// The name a variant's constrained member is bound under in the arm that matched it.
+///
+/// The member cannot keep its own name there: the body it is bound for reads `errors`, and a member
+/// spelled that way would take the accumulator's name out from under the very pushes it is being
+/// checked to feed. The prefix is what keeps the arm's bindings clear of every name the body
+/// already spells — the accumulator and the walk's own `value_{depth}` steps — and clear of each
+/// other, two members differing wherever their idents do.
+fn member_binding(field_ident: &proc_macro2::Ident) -> proc_macro2::Ident {
+    proc_macro2::Ident::new(
+        &format!("member_{field_ident}"),
+        proc_macro2::Span::call_site(),
+    )
+}
+
+/// The expression a check reads its value from, in whichever position the member was written.
+#[cfg(feature = "serde")]
+fn member_access_expr(
+    access: MemberAccess,
+    field_ident_tok: &proc_macro2::Ident,
+) -> proc_macro2::TokenStream {
+    match access {
+        MemberAccess::SelfField => quote! { &self.#field_ident_tok },
+        MemberAccess::VariantBinding => {
+            let binding = member_binding(field_ident_tok);
+            quote! { #binding }
+        }
+    }
+}
+
 /// Builds the `validate()` contribution for a field, reaching through its wrappers to run the
 /// check on the value the constraint actually describes.
 ///
@@ -6987,15 +7168,21 @@ fn wrap_binding(depth: usize) -> proc_macro2::Ident {
 /// through. Otherwise the chain is bound once and walked: the head binding keeps every later step
 /// dereferencing a binding rather than a fresh borrow, and the block keeps its names off the
 /// enclosing body, where the next field's chain reuses them.
+///
+/// Only where the value is reached differs between a struct's field and a variant's member; the
+/// walk and the check are the same, so both positions run the identical rule and report it in the
+/// identical words.
 #[cfg(feature = "serde")]
 fn build_field_validation(
     wraps: &[ConstraintWrap],
+    access: MemberAccess,
     field_ident_tok: &proc_macro2::Ident,
     validate_value_fn_ident: &proc_macro2::Ident,
 ) -> proc_macro2::TokenStream {
+    let checked = member_access_expr(access, field_ident_tok);
     if wraps.is_empty() {
         return quote! {
-            if let Err(e) = #validate_value_fn_ident(&self.#field_ident_tok) {
+            if let Err(e) = #validate_value_fn_ident(#checked) {
                 errors.push(e);
             }
         };
@@ -7004,7 +7191,7 @@ fn build_field_validation(
     let walk = walk_wraps(wraps, &head, 1, validate_value_fn_ident, CheckSink::Collect);
     quote! {
         {
-            let #head = &self.#field_ident_tok;
+            let #head = #checked;
             #walk
         }
     }
@@ -7228,6 +7415,7 @@ fn generate_string_validation_code(
     meta: &ModelSchemaPropMeta,
     shape: &ConstrainedShape,
     field_ty: &syn::Type,
+    access: MemberAccess,
 ) -> FieldValidationCode {
     let wraps: &[ConstraintWrap] = &shape.wraps;
     let validate_value_fn_name = format!("validate_{helper_stem}_value");
@@ -7320,7 +7508,8 @@ fn generate_string_validation_code(
 
     let field_ident_tok = proc_macro2::Ident::new(field_ident, proc_macro2::Span::call_site());
 
-    let validate_body = build_field_validation(wraps, &field_ident_tok, &validate_value_fn_ident);
+    let validate_body =
+        build_field_validation(wraps, access, &field_ident_tok, &validate_value_fn_ident);
 
     FieldValidationCode {
         module_items,
@@ -7338,6 +7527,7 @@ fn generate_numeric_validation_code(
     meta: &ModelSchemaPropMeta,
     shape: &ConstrainedShape,
     field_ty: &syn::Type,
+    access: MemberAccess,
 ) -> FieldValidationCode {
     let wraps: &[ConstraintWrap] = &shape.wraps;
     let validate_value_fn_name = format!("validate_{helper_stem}_value");
@@ -7412,7 +7602,8 @@ fn generate_numeric_validation_code(
 
     let field_ident_tok = proc_macro2::Ident::new(field_ident, proc_macro2::Span::call_site());
 
-    let validate_body = build_field_validation(wraps, &field_ident_tok, &validate_value_fn_ident);
+    let validate_body =
+        build_field_validation(wraps, access, &field_ident_tok, &validate_value_fn_ident);
 
     FieldValidationCode {
         module_items,
@@ -8044,6 +8235,14 @@ fn generate_field_validation(
     };
 
     let helper_stem = helper_name_stem(raw_field_ident, variant_ident);
+    // The variant that scopes the helper names is the same thing that says where the value is
+    // reached from: a member of one is bound by the arm that matched it, and a struct's field is
+    // read off `self`.
+    let access = if variant_ident.is_some() {
+        MemberAccess::VariantBinding
+    } else {
+        MemberAccess::SelfField
+    };
     let generated = match shape.leaf {
         ConstraintLeaf::Path | ConstraintLeaf::Str => has_string_constraints.then(|| {
             generate_string_validation_code(
@@ -8052,6 +8251,7 @@ fn generate_field_validation(
                 model_schema_prop_meta,
                 &shape,
                 &field.ty,
+                access,
             )
         }),
         ConstraintLeaf::Number(rust_type) => has_numeric_constraints.then(|| {
@@ -8062,6 +8262,7 @@ fn generate_field_validation(
                 model_schema_prop_meta,
                 &shape,
                 &field.ty,
+                access,
             )
         }),
     };

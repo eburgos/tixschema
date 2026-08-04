@@ -6,11 +6,12 @@ use super::{
 
 #[cfg(feature = "serde")]
 use super::{
-    ConstraintLeaf, ModelSchemaPropMeta, build_field_validation, cfg_attr_guard_error,
-    check_optional_field_serialization, collect_untagged_members, constrained_shape,
-    enum_cfg_attr_guard_errors, generate_field_validation, generate_numeric_validation_code,
-    generate_string_validation_code, helper_name_stem, internally_tagged_guard_errors,
-    needs_injected_default, parse_serde_field_attributes, parse_serde_type_attributes,
+    ConstraintLeaf, MemberAccess, ModelSchemaPropMeta, build_field_validation,
+    cfg_attr_guard_error, check_optional_field_serialization, collect_untagged_members,
+    constrained_shape, enum_cfg_attr_guard_errors, generate_field_validation,
+    generate_numeric_validation_code, generate_string_validation_code, helper_name_stem,
+    internally_tagged_guard_errors, needs_injected_default, parse_serde_field_attributes,
+    parse_serde_type_attributes,
 };
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -475,7 +476,7 @@ fn untagged_member_carries_its_constraint_to_the_surfaces() {
             },
         }
     };
-    let (_, zod_parts, _, errors, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
+    let (_, zod_parts, _, errors, _, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
     assert!(errors.is_empty(), "got: {errors:?}");
     assert!(
         zod_parts[0].contains("z.string().min(2).check(z.regex(/^[a-z]+$/))"),
@@ -497,7 +498,7 @@ fn untagged_member_constraint_generates_the_validator_and_hangs_it_on_the_member
             },
         }
     };
-    let (_, _, _, errors, validation_fns) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
+    let (_, _, _, errors, validation_fns, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
     assert!(errors.is_empty(), "got: {errors:?}");
     assert_eq!(validation_fns.len(), 1, "got: {validation_fns:?}");
     let rendered = validation_fns[0].to_string();
@@ -531,7 +532,7 @@ fn untagged_member_constraint_generates_nothing_without_a_schema_module() {
             },
         }
     };
-    let (_, _, _, errors, validation_fns) = collect_untagged_members(&mut item, None);
+    let (_, _, _, errors, validation_fns, _) = collect_untagged_members(&mut item, None);
     assert!(errors.is_empty(), "got: {errors:?}");
     assert!(validation_fns.is_empty(), "got: {validation_fns:?}");
     let attrs = &item.variants[0].fields.iter().next().unwrap().attrs;
@@ -4833,14 +4834,41 @@ fn discriminated_union_rendering_is_stable_across_runs() {
     }
 }
 
-/// The `validate()` contribution for a field spelled `spelling`, as tokens.
+/// The `validate()` contribution for a field spelled `spelling`, reached from `access`, as tokens.
 #[cfg(feature = "serde")]
-fn emitted_validation(spelling: &str) -> String {
+fn emitted_validation_from(spelling: &str, access: MemberAccess) -> String {
     let ty: syn::Type = syn::parse_str(spelling).unwrap();
     let shape = constrained_shape(&ty).unwrap();
     let field = proc_macro2::Ident::new("field", proc_macro2::Span::call_site());
     let checker = proc_macro2::Ident::new("check", proc_macro2::Span::call_site());
-    build_field_validation(&shape.wraps, &field, &checker).to_string()
+    build_field_validation(&shape.wraps, access, &field, &checker).to_string()
+}
+
+/// The `validate()` contribution for a struct's field spelled `spelling`, as tokens.
+#[cfg(feature = "serde")]
+fn emitted_validation(spelling: &str) -> String {
+    emitted_validation_from(spelling, MemberAccess::SelfField)
+}
+
+/// The two positions differ in one place and nowhere else: where the checked value is reached.
+/// Everything downstream of that — the walk through the wrappers, the check, the push — is the
+/// same body, which is what makes a variant's member answer for its bound in a struct's words.
+#[cfg(feature = "serde")]
+#[test]
+fn a_variant_member_is_reached_through_the_binding_its_arm_made() {
+    for spelling in [
+        "String",
+        "u32",
+        "Option<String>",
+        "Vec<String>",
+        "Option<Arc<[String]>>",
+    ] {
+        assert_eq!(
+            emitted_validation_from(spelling, MemberAccess::VariantBinding),
+            emitted_validation(spelling).replace("& self . field", "member_field"),
+            "spelling {spelling}"
+        );
+    }
 }
 
 /// The one spelling whose emitted body predates the reach-through and must not move: anything else
@@ -4926,6 +4954,7 @@ fn emitted_string_module(spelling: &str) -> String {
         &meta,
         &shape,
         &ty,
+        MemberAccess::SelfField,
     )
     .module_items
     .to_string()
@@ -4946,6 +4975,7 @@ fn emitted_pattern_validator(pattern: &str) -> String {
         &meta,
         &constrained_shape(&ty).unwrap(),
         &ty,
+        MemberAccess::SelfField,
     )
     .module_items
     .to_string();
@@ -4988,6 +5018,7 @@ fn a_bare_field_deserializes_the_constrained_value_itself() {
         &numeric_meta,
         &constrained_shape(&numeric_ty).unwrap(),
         &numeric_ty,
+        MemberAccess::SelfField,
     )
     .module_items
     .to_string();
@@ -5142,7 +5173,7 @@ fn wire_walk_of(spelling: &str) -> String {
     let shape = constrained_shape(&ty).unwrap();
     let field = proc_macro2::Ident::new("field", proc_macro2::Span::call_site());
     let checker = proc_macro2::Ident::new("validate_field_value", proc_macro2::Span::call_site());
-    build_field_validation(&shape.wraps, &field, &checker)
+    build_field_validation(&shape.wraps, MemberAccess::SelfField, &field, &checker)
         .to_string()
         .replace(
             "if let Err (e) = validate_field_value (",
