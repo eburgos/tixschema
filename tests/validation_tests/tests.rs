@@ -1198,6 +1198,39 @@ fn test_pattern_anchored_single_character_prefix() {
     );
 }
 
+/// `^$` is written out of the two anchors a pattern admitting every value is written out of, and
+/// it is the one arrangement of them that still says something: both ends of the value at one
+/// position, which only the empty string has. It keeps validating, and it keeps compiling under a
+/// deny set that has no edit available at the attribute.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_pattern_pinning_both_ends_to_one_position() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct PatternBlankSlot {
+        #[model_schema_prop(pattern = "^$")]
+        pub slot: String,
+    }
+
+    PatternBlankSlot {
+        slot: String::new(),
+    }
+    .validate()
+    .unwrap();
+
+    let rejected = PatternBlankSlot {
+        slot: "x".to_owned(),
+    };
+    let errors = rejected.validate().unwrap_err();
+    assert_eq!(
+        errors[0], "'slot' does not match pattern '^$'",
+        "Rejection should read exactly as the regex path words it: {errors:?}"
+    );
+}
+
 // ==================== Constraints under Option / wrappers / sequences ====================
 
 #[cfg(all(
@@ -2196,6 +2229,85 @@ fn test_every_variant_shape_reaches_the_accessor() {
         .validate()
         .unwrap();
     EveryShape::Nothing.validate().unwrap();
+}
+
+// ==================== The error strings the README prints ====================
+
+/// The README's `validate()` example prints the errors a caller reads back, and a reader who greps
+/// for one of those sentences, or writes an assertion against it, is holding the crate to it. So
+/// the example is expanded here as written and held to the same two things: the generator answers
+/// with those exact sentences, and the README still shows them. Drift on either side fails here
+/// rather than in someone's editor.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_readme_struct_validate_example_prints_what_the_generator_writes() {
+    // The README declares `username` first; source here is ordered alphabetically, as this crate's
+    // lints require of Rust source. Only the order the two are collected in differs, and that order
+    // is pinned by `test_enum_validate_collects_every_violation_of_the_held_variant`.
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct Registration {
+        #[model_schema_prop(minimum = 0, maximum = 120)]
+        pub age: u32,
+
+        #[model_schema_prop(minLength = 3, maxLength = 30)]
+        pub username: String,
+    }
+
+    let reg = Registration {
+        age: 150,
+        username: "ab".to_owned(),
+    };
+    let errors = reg.validate().unwrap_err();
+    assert_eq!(
+        errors,
+        vec![
+            "'age' is too large: maximum is 120, got 150".to_owned(),
+            "'username' is too short: minimum length is 3, got 2".to_owned(),
+        ]
+    );
+
+    let readme = include_str!("../../README.md");
+    for error in &errors {
+        assert!(
+            readme.contains(error.as_str()),
+            "the README no longer shows this error verbatim: {error}"
+        );
+    }
+}
+
+/// The same holding for the branded newtype's `validate()` example. A brand names the rejected
+/// value bare where a struct field is named and quoted, which is the difference most easily lost
+/// when the sentence is written from memory.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_readme_branded_validate_example_prints_what_the_generator_writes() {
+    #[model_schema(pattern = "^[a-z0-9_]+$", minLength = 3, maxLength = 50)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct SlugId(pub String);
+
+    SlugId("hello_world".to_owned()).validate().unwrap();
+
+    let errors = SlugId("ab".to_owned()).validate().unwrap_err();
+    assert_eq!(
+        errors,
+        vec!["value is too short: minimum length is 3, got 2".to_owned()]
+    );
+
+    let readme = include_str!("../../README.md");
+    for error in &errors {
+        assert!(
+            readme.contains(error.as_str()),
+            "the README no longer shows this error verbatim: {error}"
+        );
+    }
 }
 
 /// The shipped rustdoc quotes the messages a failed `validate()` prints, so the block is checked

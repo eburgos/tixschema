@@ -296,7 +296,7 @@ fn positional_option_field_is_exempt() {
 /// Collects the untagged-path guard failures as rendered `compile_error!` token streams.
 #[cfg(feature = "serde")]
 fn untagged_guard_error_tokens(item: &mut syn::ItemEnum) -> Vec<proc_macro2::TokenStream> {
-    collect_untagged_members(item, UNTAGGED_MODULE).3
+    collect_untagged_members(item, UNTAGGED_MODULE).4
 }
 
 /// Collects the untagged-path guard failures as rendered `compile_error!` token strings.
@@ -476,7 +476,7 @@ fn untagged_member_carries_its_constraint_to_the_surfaces() {
             },
         }
     };
-    let (_, zod_parts, _, errors, _, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
+    let (_, zod_parts, _, _, errors, _, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
     assert!(errors.is_empty(), "got: {errors:?}");
     assert!(
         zod_parts[0].contains("z.string().min(2).check(z.regex(/^[a-z]+$/))"),
@@ -498,7 +498,8 @@ fn untagged_member_constraint_generates_the_validator_and_hangs_it_on_the_member
             },
         }
     };
-    let (_, _, _, errors, validation_fns, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
+    let (_, _, _, _, errors, validation_fns, _) =
+        collect_untagged_members(&mut item, UNTAGGED_MODULE);
     assert!(errors.is_empty(), "got: {errors:?}");
     assert_eq!(validation_fns.len(), 1, "got: {validation_fns:?}");
     let rendered = validation_fns[0].to_string();
@@ -532,7 +533,7 @@ fn untagged_member_constraint_generates_nothing_without_a_schema_module() {
             },
         }
     };
-    let (_, _, _, errors, validation_fns, _) = collect_untagged_members(&mut item, None);
+    let (_, _, _, _, errors, validation_fns, _) = collect_untagged_members(&mut item, None);
     assert!(errors.is_empty(), "got: {errors:?}");
     assert!(validation_fns.is_empty(), "got: {validation_fns:?}");
     let attrs = &item.variants[0].fields.iter().next().unwrap().attrs;
@@ -699,7 +700,7 @@ fn untagged_member_reaching_an_unwritable_map_key_is_refused() {
 #[cfg(all(feature = "serde", feature = "jsonschema"))]
 fn untagged_member_values(mut item: syn::ItemEnum) -> Vec<String> {
     collect_untagged_members(&mut item, UNTAGGED_MODULE)
-        .2
+        .3
         .iter()
         .map(ToString::to_string)
         .collect()
@@ -1695,6 +1696,51 @@ fn a_field_pattern_naming_a_group_the_rust_way_clears_the_guard() {
     assert!(errors.is_empty(), "got: {errors:?}");
 }
 
+/// A pattern every string satisfies is refused where it is written, naming the field, the way a
+/// bound written where no surface reads one is. The alternative — taking it and emitting no check
+/// — would leave the author a contract nothing enforces, and would leave the emitted
+/// `validate_..._value(value: &str)` with `value` unread, which the consumer's own deny set turns
+/// into a second failure it has no edit for.
+#[test]
+fn a_field_pattern_admitting_every_value_names_the_field_and_says_so() {
+    for pattern in ["", "^", "$", "|", "a*", "^a*"] {
+        let errors = field_prop_guard_errors(&syn::parse_quote! {
+            struct Report {
+                #[model_schema_prop(pattern = #pattern)]
+                name: String,
+            }
+        });
+        assert_eq!(errors.len(), 1, "for {pattern:?}, got: {errors:?}");
+        for needle in [
+            "compile_error",
+            "field `name`",
+            "admits every value",
+            "constrains nothing",
+        ] {
+            assert!(
+                errors[0].contains(needle),
+                "{needle} missing for {pattern:?}: {}",
+                errors[0]
+            );
+        }
+    }
+}
+
+/// The shapes written out of the same pieces that still turn a value away clear the guard: `^$`
+/// asks for the empty string, `^a*$` for a run of `a`, and `\b` for a word boundary.
+#[test]
+fn a_field_pattern_written_out_of_the_same_pieces_that_still_constrains_clears_the_guard() {
+    for pattern in ["^$", "^a*$", r"\b"] {
+        let errors = field_prop_guard_errors(&syn::parse_quote! {
+            struct Report {
+                #[model_schema_prop(pattern = #pattern)]
+                name: String,
+            }
+        });
+        assert!(errors.is_empty(), "for {pattern:?}, got: {errors:?}");
+    }
+}
+
 /// A field carrying no `pattern` at all must not acquire one of these errors.
 #[test]
 fn an_unpatterned_field_is_left_alone() {
@@ -2270,6 +2316,37 @@ fn an_alias_type_parameter_is_erased_at_every_depth() {
     }
 }
 
+/// The same erasure at the same depths on the value surface, where the consequence of skipping it
+/// is louder: a Zod `const` cannot be parameterised, so a parameter left to render names a
+/// `$Schema` binding no emitted module declares and the pasted output throws before a payload is
+/// read. Asserted over the identical alias list the JSON test walks, so the two surfaces cannot
+/// erase at different depths.
+#[cfg(feature = "zod")]
+#[test]
+fn an_alias_type_parameter_is_erased_at_every_depth_on_the_value_surface() {
+    for alias_source in [
+        "pub type Holder<V> = V;",
+        "pub type Holder<V> = Vec<V>;",
+        "pub type Holder<V> = Option<V>;",
+        "pub type Holder<V> = (String, V);",
+        "pub type Holder<V> = HashMap<String, V>;",
+        "pub type Holder<V> = HashMap<String, Vec<V>>;",
+    ] {
+        let alias: syn::ItemType = syn::parse_str(alias_source).unwrap();
+        let field_def = super::get_field_def("HolderType", &alias.ty, "");
+        let tokens = super::generate_alias_zod_method(&alias, "HolderType", "Holder", &field_def)
+            .to_string();
+        assert!(
+            !tokens.contains("V$Schema"),
+            "for {alias_source}, got: {tokens}"
+        );
+        assert!(
+            tokens.contains("\"HolderType<unknown>\""),
+            "for {alias_source}, got: {tokens}"
+        );
+    }
+}
+
 /// The stub this replaced answered every alias with an object carrying a lone `warning` key, which
 /// under JSON Schema constrains nothing — every slot naming an alias accepted every payload. No
 /// emission may carry one again.
@@ -2289,9 +2366,12 @@ fn no_json_schema_emission_carries_a_warning_key() {
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn alias_zod_method_carries_no_cfg_attribute() {
+    let alias: syn::ItemType = syn::parse_quote!(
+        pub type Alias = String;
+    );
     let ty: syn::Type = syn::parse_quote!(String);
     let field_def = super::get_field_def("AliasType", &ty, "");
-    let tokens = super::generate_alias_zod_method("AliasType", "Alias", &field_def);
+    let tokens = super::generate_alias_zod_method(&alias, "AliasType", "Alias", &field_def);
     assert_no_cfg_attribute(&tokens, "generate_alias_zod_method");
 }
 
@@ -2401,6 +2481,39 @@ fn a_brand_pattern_javascript_cannot_carry_names_the_type_and_the_construct() {
 fn a_brand_pattern_naming_a_group_the_rust_way_clears_the_guard() {
     let errors = brand_pattern_errors("^(?P<word>[a-z]+)$");
     assert!(errors.is_empty(), "got: {errors:?}");
+}
+
+/// The brand carries the same `pattern` to the same three surfaces a field does, so a pattern that
+/// says nothing has to be refused here too — and it is the only string constraint the brand has,
+/// so taking it would publish a `validate()` that turns nothing away.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_brand_pattern_admitting_every_value_names_the_type_and_says_so() {
+    for pattern in ["", "^", "$", "|", "a*", "^a*"] {
+        let errors = brand_pattern_errors(pattern);
+        assert_eq!(errors.len(), 1, "for {pattern:?}, got: {errors:?}");
+        for needle in [
+            "compile_error",
+            "type `UserId`",
+            "admits every value",
+            "constrains nothing",
+        ] {
+            assert!(
+                errors[0].contains(needle),
+                "{needle} missing for {pattern:?}: {}",
+                errors[0]
+            );
+        }
+    }
+}
+
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_brand_pattern_that_still_constrains_clears_the_guard() {
+    for pattern in ["^$", "^a*$", r"\b"] {
+        let errors = brand_pattern_errors(pattern);
+        assert!(errors.is_empty(), "for {pattern:?}, got: {errors:?}");
+    }
 }
 
 /// The brand renders its inner into the brand rather than walking it as a field, so the map-key
@@ -2530,10 +2643,14 @@ fn string_constraints_over_a_non_string_inner_are_rejected() {
     }
 }
 
-/// The inners that carry the constraints faithfully. A `SiblingType` — another brand, an
-/// unresolved user type, or a bare generic parameter — is admitted because expansion cannot know
-/// its shape; the constrained path's `Display` assertion is what covers it. A name carrying one
-/// argument that is not a sequence wrapper is such a name too, and stays admitted.
+/// The inners that carry the constraints faithfully. A `SiblingType` — another brand, or an
+/// unresolved user type — is admitted because expansion cannot know its shape; the constrained
+/// path's `Display` assertion is what covers it. A name carrying one argument that is not a
+/// sequence wrapper is such a name too, and stays admitted.
+///
+/// `U` is written where the brand declares no such parameter, so it is one of those unresolved
+/// names rather than a parameter: that is the whole of the line the classifier draws, and the
+/// brand's own `T` is on the other side of it in the test below.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn string_constraints_over_a_string_shaped_inner_pass() {
@@ -2542,7 +2659,7 @@ fn string_constraints_over_a_string_shaped_inner_pass() {
         "PathBuf",
         "ObjectId",
         "SomeOtherBrand",
-        "T",
+        "U",
         "SomeWrapper<String>",
     ] {
         let ty: syn::Type = syn::parse_str(inner).unwrap();
@@ -2554,6 +2671,36 @@ fn string_constraints_over_a_string_shaped_inner_pass() {
             &pattern_args(),
         );
         assert!(errors.is_empty(), "for {inner}, got: {errors:?}");
+    }
+}
+
+/// A brand constraining one of its own type parameters has nothing to hang the checks on.
+///
+/// Both validating surfaces read a parameter as the opaque value, and an opaque value takes no
+/// string checks: Zod 4's `z.unknown()` carries no `.min`/`.max`, and `.brand()` hands back that
+/// same instance rather than a wrapper that could; JSON Schema's string keywords go inert beside
+/// the `{}` a parameter describes as; and `validate()` still measures `Display`. So the parameter
+/// reaches the same refusal `serde_json::Value` reaches, through the same opaque arm — the erasure
+/// is what puts it there, and is why the guard does not have to name parameters itself.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn string_constraints_over_the_brands_own_type_parameter_are_rejected() {
+    for inner in ["T", "U"] {
+        let ty: syn::Type = syn::parse_str(inner).unwrap();
+        let errors = branded_errors_with(
+            &syn::parse_quote! {
+                #[serde(transparent)]
+                struct Branded<T, U>(pub #ty);
+            },
+            &pattern_args(),
+        );
+        assert_eq!(errors.len(), 1, "for {inner}, got: {errors:?}");
+        assert!(errors[0].contains("`Branded`"), "got: {}", errors[0]);
+        assert!(
+            errors[0].contains("opaque"),
+            "for {inner}, got: {}",
+            errors[0]
+        );
     }
 }
 
@@ -4529,7 +4676,7 @@ fn a_sibling_slot_carries_the_schema_module_reference() {
 fn brand_json_schema_over(inner_ty: &syn::Type) -> String {
     super::build_branded_json_schema_method(
         &super::ModelSchemaArgs::default(),
-        &super::branded_json_inner(&[], inner_ty),
+        &super::branded_json_inner(&super::get_field_def("_inner", inner_ty, "")),
         "Wrapped",
     )
     .to_string()
@@ -5504,5 +5651,41 @@ fn a_pattern_of_any_real_shape_keeps_its_regex() {
          static RE : LazyLock < regex :: Regex > = LazyLock :: new (|| { regex :: Regex :: new (\"^[a-z]+$\") . unwrap () }) ; \
          if ! RE . is_match (value) { \
          return Err (format ! (\"'{}' does not match pattern '{}'\" , \"field\" , \"^[a-z]+$\")) ; } } Ok (()) } "
+    );
+}
+
+/// `^$` is the empty-string check, not a degenerate pattern: it pins both ends of the value to one
+/// position. It keeps the `is_empty()` call it has been emitted as, byte for byte, now that the
+/// shapes written out of the same two anchors are refused.
+#[cfg(feature = "serde")]
+#[test]
+fn the_empty_string_pattern_keeps_the_call_it_was_already_emitted_as() {
+    assert_eq!(
+        emitted_pattern_validator("^$"),
+        "pub fn validate_field_value (value : & str) -> Result < () , String > \
+         { if ! value . is_empty () { \
+         return Err (format ! (\"'{}' does not match pattern '{}'\" , \"field\" , \"^$\")) ; } Ok (()) } "
+    );
+}
+
+/// `\b` is trivial to `clippy::trivial_regex` and names no `str` call, so it keeps the regex — and
+/// the lint keeps firing on it in the consumer, which is the one case left standing here.
+///
+/// The verdict is from a probe, not an assumption: `#[model_schema_prop(pattern = r"\b")]` run
+/// through `cargo clippy --all-targets -- -D warnings` in a crate denying `clippy::nursery`
+/// reported `error: trivial regex ... the regex is unlikely to be useful as it is`, against the
+/// `#[model_schema()]` attribute. It is left standing because `\b` turns a value away — the empty
+/// string holds no word boundary — so there is a check here to keep, and answering the lint would
+/// mean dropping it.
+#[cfg(feature = "serde")]
+#[test]
+fn a_word_boundary_pattern_keeps_its_regex() {
+    assert_eq!(
+        emitted_pattern_validator(r"\b"),
+        "pub fn validate_field_value (value : & str) -> Result < () , String > \
+         { { use std :: sync :: LazyLock ; \
+         static RE : LazyLock < regex :: Regex > = LazyLock :: new (|| { regex :: Regex :: new (\"\\\\b\") . unwrap () }) ; \
+         if ! RE . is_match (value) { \
+         return Err (format ! (\"'{}' does not match pattern '{}'\" , \"field\" , \"\\\\b\")) ; } } Ok (()) } "
     );
 }
