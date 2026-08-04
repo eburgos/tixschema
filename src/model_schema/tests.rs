@@ -6,12 +6,13 @@ use super::{
 
 #[cfg(feature = "serde")]
 use super::{
-    ConstraintLeaf, MemberAccess, ModelSchemaPropMeta, build_field_validation,
-    cfg_attr_guard_error, check_omitted_key_is_readable, check_optional_field_serialization,
-    collect_untagged_members, constrained_shape, enum_cfg_attr_guard_errors,
-    generate_field_validation, generate_numeric_validation_code, generate_string_validation_code,
-    has_serde_default, helper_name_stem, internally_tagged_guard_errors, needs_injected_default,
-    parse_serde_field_attributes, parse_serde_type_attributes, render_untagged_variant,
+    ConstraintLeaf, MemberAccess, ModelSchemaPropMeta, adjacent_collapsed_slot_guard_errors,
+    build_field_validation, cfg_attr_guard_error, check_omitted_key_is_readable,
+    check_optional_field_serialization, collect_untagged_members, constrained_shape,
+    enum_cfg_attr_guard_errors, generate_field_validation, generate_numeric_validation_code,
+    generate_string_validation_code, has_serde_default, helper_name_stem,
+    internally_tagged_guard_errors, needs_injected_default, parse_serde_field_attributes,
+    parse_serde_type_attributes, render_untagged_variant,
 };
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -2643,7 +2644,7 @@ fn a_string_filling_annotates_the_example_as_no_filling_does() {
 fn branded_json_schema_method_carries_no_cfg_attribute() {
     let args = super::ModelSchemaArgs::default();
     for inner in branded_json_inners() {
-        let tokens = super::build_branded_json_schema_method(&args, &inner, "DocumentId");
+        let tokens = super::build_branded_json_schema_method(&args, &inner, "DocumentId", &[]);
         assert_no_cfg_attribute(&tokens, "build_branded_json_schema_method");
     }
 }
@@ -2765,7 +2766,12 @@ fn alias_json_schema_method_carries_no_cfg_attribute() {
         pub type AliasIdent = String;
     );
     let field_def = super::get_field_def("AliasType", &alias.ty, "");
-    let tokens = super::generate_alias_json_schema_method(&alias, "AliasType", &field_def);
+    let tokens = super::generate_alias_json_schema_method(
+        &alias,
+        "AliasType",
+        &field_def,
+        &super::ModelSchemaArgs::default(),
+    );
     assert_no_cfg_attribute(&tokens, "generate_alias_json_schema_method");
 }
 
@@ -2782,8 +2788,13 @@ fn an_alias_of_an_unrenderable_target_emits_only_the_compile_error() {
     ] {
         let alias: syn::ItemType = syn::parse_str(alias_source).unwrap();
         let field_def = super::get_field_def("RowsType", &alias.ty, "");
-        let tokens =
-            super::generate_alias_json_schema_method(&alias, "RowsType", &field_def).to_string();
+        let tokens = super::generate_alias_json_schema_method(
+            &alias,
+            "RowsType",
+            &field_def,
+            &super::ModelSchemaArgs::default(),
+        )
+        .to_string();
         assert!(
             tokens.contains("compile_error !"),
             "for {alias_source}, got: {tokens}"
@@ -2824,8 +2835,13 @@ fn an_alias_type_parameter_is_erased_at_every_depth() {
     ] {
         let alias: syn::ItemType = syn::parse_str(alias_source).unwrap();
         let field_def = super::get_field_def("HolderType", &alias.ty, "");
-        let tokens =
-            super::generate_alias_json_schema_method(&alias, "HolderType", &field_def).to_string();
+        let tokens = super::generate_alias_json_schema_method(
+            &alias,
+            "HolderType",
+            &field_def,
+            &super::ModelSchemaArgs::default(),
+        )
+        .to_string();
         assert!(
             !tokens.contains("_schema :: Schema ::"),
             "for {alias_source}, got: {tokens}"
@@ -4480,28 +4496,204 @@ fn an_unbounded_parameter_earns_no_check() {
 }
 
 /// A bound naming another parameter of the item holds only where that one is filled too, which is a
-/// joint statement this per-filling check does not make — and the neighbour's name reproduced
-/// beside a single filling would resolve to nothing. So the bound is left to the item's own use
-/// sites, whether it names a type parameter, a lifetime or a const.
+/// joint statement no per-filling check makes — and the neighbour's name reproduced beside a single
+/// filling would resolve to nothing. So it earns no check of its own, and is carried instead by the
+/// one check that declares the whole parameter list.
 #[test]
-fn a_bound_naming_another_parameter_of_the_item_earns_no_check() {
+fn a_bound_naming_another_parameter_of_the_item_earns_no_check_of_its_own() {
+    let checks = filling_bound_check_text(
+        "pub struct Pair<AType: From<BType>, BType> { pub a: AType, pub b: BType }",
+        "default_types(AType = String, BType = char)",
+    );
+    assert_eq!(checks.len(), 1, "got: {checks:?}");
+    assert!(
+        !checks[0].contains("fn default_type_filling <"),
+        "the bound reads a neighbour, so no per-filling check carries it: {}",
+        checks[0]
+    );
+}
+
+/// The joint check declares every type parameter the item declares, carries the bounds that read a
+/// neighbour, and is called at every declared filling in the order they were declared — so each
+/// name such a bound reads stands at the filling the author declared for it.
+#[test]
+fn a_bound_naming_another_parameter_is_checked_at_the_whole_parameter_list_at_once() {
+    let checks = filling_bound_check_text(
+        "pub struct Pair<AType: From<BType>, BType> { pub a: AType, pub b: BType }",
+        "default_types(AType = String, BType = char)",
+    );
+    assert_eq!(checks.len(), 1, "got: {checks:?}");
+    for needle in [
+        "fn default_type_fillings < AType , BType > ()",
+        "where AType : From < BType >",
+        "default_type_fillings :: < String , char > ()",
+    ] {
+        assert!(
+            checks[0].contains(needle),
+            "{needle} missing: {}",
+            checks[0]
+        );
+    }
+}
+
+/// The joint call follows the parameter list, not the order the entries were written in: the
+/// arguments stand at positions, and an entry written out of order still fills its own.
+#[test]
+fn the_joint_check_is_called_in_the_order_the_parameters_were_declared() {
+    let checks = filling_bound_check_text(
+        "pub struct Pair<AType: From<BType>, BType> { pub a: AType, pub b: BType }",
+        "default_types(BType = char, AType = String)",
+    );
+    assert_eq!(checks.len(), 1, "got: {checks:?}");
+    assert!(
+        checks[0].contains("default_type_fillings :: < String , char > ()"),
+        "got: {}",
+        checks[0]
+    );
+}
+
+/// A parameter no bound reads is still declared and still filled, so the argument list lines up
+/// with the parameter list however few of them a bound actually joins.
+#[test]
+fn the_joint_check_declares_and_fills_the_parameters_no_bound_reads() {
+    let checks = filling_bound_check_text(
+        "pub struct Trio<AType: From<BType>, BType, CType> { pub a: AType, pub b: BType, pub c: CType }",
+        "default_types(AType = String, BType = char, CType = u8)",
+    );
+    assert_eq!(checks.len(), 1, "got: {checks:?}");
+    assert!(
+        checks[0].contains("fn default_type_fillings < AType , BType , CType > ()")
+            && checks[0].contains("default_type_fillings :: < String , char , u8 > ()"),
+        "got: {}",
+        checks[0]
+    );
+}
+
+/// A lifetime a bound reads is declared as it was written and left out of the call, where it
+/// elides — so a bound joining a parameter to a lifetime is reached like any other.
+#[test]
+fn a_lifetime_a_bound_reads_is_declared_as_written_and_left_out_of_the_call() {
+    let checks = filling_bound_check_text(
+        "pub struct Held<'label, ValueType: Into<&'label str>> { pub held: ValueType }",
+        "default_types(ValueType = String)",
+    );
+    assert_eq!(checks.len(), 1, "got: {checks:?}");
+    for needle in [
+        "fn default_type_fillings < 'label , ValueType > ()",
+        "where ValueType : Into < & 'label str >",
+        "default_type_fillings :: < String > ()",
+    ] {
+        assert!(
+            checks[0].contains(needle),
+            "{needle} missing: {}",
+            checks[0]
+        );
+    }
+}
+
+/// A const takes no filling from a convention that names types, so a joint function declaring one
+/// could not be called at all. A bound reading a const is left to the item's own use sites, as
+/// every bound reading a neighbour was before.
+#[test]
+fn a_bound_reading_a_const_parameter_earns_no_check() {
+    let checks = filling_bound_check_text(
+        "pub struct Bounded<ValueType: Fits<WIDTH>, const WIDTH: usize> { pub held: ValueType }",
+        "default_types(ValueType = String)",
+    );
+    assert!(checks.is_empty(), "got: {checks:?}");
+}
+
+/// A const beside a bound that does not read it costs the joint check nothing: it is declared
+/// nowhere and the call still lines up with the type parameters.
+#[test]
+fn a_const_no_bound_reads_leaves_the_joint_check_standing() {
+    let checks = filling_bound_check_text(
+        "pub struct Sized<AType: From<BType>, BType, const WIDTH: usize> { pub a: AType, pub b: BType }",
+        "default_types(AType = String, BType = char)",
+    );
+    assert_eq!(checks.len(), 1, "got: {checks:?}");
+    assert!(
+        checks[0].contains("fn default_type_fillings < AType , BType > ()")
+            && !checks[0].contains("WIDTH"),
+        "got: {}",
+        checks[0]
+    );
+}
+
+/// A parameter left without a filling — which only a build generating no JSON document allows —
+/// leaves nothing for the joint call to stand at, and a filling nobody declared would ask the
+/// compiler a question nobody asked. So the whole check is withheld.
+#[test]
+fn a_parameter_left_without_a_filling_withholds_the_joint_check() {
+    let checks = filling_bound_check_text(
+        "pub struct Pair<AType: From<BType>, BType> { pub a: AType, pub b: BType }",
+        "default_types(AType = String)",
+    );
+    assert!(checks.is_empty(), "got: {checks:?}");
+}
+
+/// The two kinds of bound partition a parameter's own: the half that reads no neighbour is checked
+/// at the filling alone, the half that does is checked jointly, and neither is checked twice.
+#[test]
+fn a_parameter_bounded_both_ways_is_checked_once_against_each_half() {
+    let checks = filling_bound_check_text(
+        "pub struct Pair<AType: Copy + From<BType>, BType> { pub a: AType, pub b: BType }",
+        "default_types(AType = u8, BType = char)",
+    );
+    assert_eq!(checks.len(), 2, "got: {checks:?}");
+    assert!(
+        checks[0].contains("fn default_type_filling < AType : Copy > ()")
+            && !checks[0].contains("From"),
+        "the per-filling check keeps only the neighbour-free half: {}",
+        checks[0]
+    );
+    assert!(
+        checks[1].contains("where AType : From < BType >") && !checks[1].contains("Copy"),
+        "the joint check holds exactly the complement: {}",
+        checks[1]
+    );
+}
+
+/// A declaration no bound joins earns no joint check, so an item that had none before is left
+/// exactly as it was.
+#[test]
+fn a_declaration_with_no_cross_parameter_bound_earns_no_joint_check() {
     for (source, args) in [
         (
-            "pub struct Pair<AType: From<BType>, BType> { pub a: AType, pub b: BType }",
-            "default_types(AType = String, BType = char)",
+            "pub struct Counted<CountType: Copy> { pub count: CountType }",
+            "default_types(CountType = String)",
         ),
         (
-            "pub struct Held<'label, ValueType: Into<&'label str>> { pub held: ValueType }",
-            "default_types(ValueType = String)",
-        ),
-        (
-            "pub struct Bounded<ValueType: Fits<WIDTH>, const WIDTH: usize> { pub held: ValueType }",
-            "default_types(ValueType = String)",
+            "pub struct Both<IdType, DateType> { pub id: IdType, pub at: DateType }",
+            "default_types(IdType = String, DateType = f64)",
         ),
     ] {
         let checks = filling_bound_check_text(source, args);
-        assert!(checks.is_empty(), "for {source}: {checks:?}");
+        assert!(
+            checks.iter().all(|check| !check.contains("fillings")),
+            "for {source}: {checks:?}"
+        );
     }
+}
+
+/// Rust does not enforce a bound written on a type alias's parameter, so a filling that fails one
+/// still names a type every use site of the alias accepts. Refusing it would refuse a program the
+/// language admits, so the alias earns no check of either kind.
+#[test]
+fn an_alias_earns_no_check_for_a_bound_rust_leaves_unenforced() {
+    for args in [
+        "default_types(ValueType = String)",
+        "default_types(ValueType = u32)",
+    ] {
+        let checks =
+            filling_bound_check_text("pub type Boxed<ValueType: Copy> = Vec<ValueType>;", args);
+        assert!(checks.is_empty(), "for {args}: {checks:?}");
+    }
+    let joint = filling_bound_check_text(
+        "pub type Paired<AType: From<BType>, BType> = (AType, BType);",
+        "default_types(AType = String, BType = char)",
+    );
+    assert!(joint.is_empty(), "got: {joint:?}");
 }
 
 /// A bound written in terms of the parameter it bounds names no neighbour, so it is checked like
@@ -4541,25 +4733,23 @@ fn every_bounded_filling_earns_its_own_check() {
     );
 }
 
-/// The three shapes the attribute expands answer alike: the check is read off the item's own
-/// parameters, which every one of them binds the same way.
+/// The two shapes whose parameters Rust binds answer alike: the check is read off the item's own
+/// parameters, which a struct and an enum bind the same way. The third — an alias, whose parameters
+/// bind nothing Rust checks — is left out entirely.
 #[test]
-fn every_expanded_shape_checks_its_fillings_alike() {
+fn every_expanded_shape_whose_bounds_rust_enforces_checks_its_fillings_alike() {
     let expected = filling_bound_check_text(
         "pub struct Held<ValueType: Copy> { pub held: ValueType }",
         "default_types(ValueType = String)",
     );
     assert_eq!(expected.len(), 1, "got: {expected:?}");
-    for source in [
-        "pub enum Held<ValueType: Copy> { Named { held: ValueType } }",
-        "pub type Held<ValueType: Copy> = Vec<ValueType>;",
-    ] {
-        assert_eq!(
-            filling_bound_check_text(source, "default_types(ValueType = String)"),
-            expected,
-            "for {source}"
-        );
-    }
+    assert_eq!(
+        filling_bound_check_text(
+            "pub enum Held<ValueType: Copy> { Named { held: ValueType } }",
+            "default_types(ValueType = String)",
+        ),
+        expected
+    );
 }
 
 /// The `compile_error!` tokens `source` earns for the example it carries against the parameters it
@@ -5097,14 +5287,17 @@ fn a_nested_enum_keyed_map_value_renders_its_inner_members() {
     }
 }
 
-/// A generic sibling is a map value the `String`-key path renders through its schema module, so the
-/// enum-key path renders it there too.
+/// A generic sibling is a map value the `String`-key path renders through its schema module at the
+/// arguments the reference carries, so the enum-key path renders it there and at those too.
 #[cfg(feature = "jsonschema")]
 #[test]
 fn a_generic_sibling_enum_keyed_map_value_emits_the_sibling_schema() {
     let tokens = map_field_schema("HashMap<Slot, Wrapper<String>>").to_string();
     assert!(
-        tokens.contains("let value_schema = wrapper_schema :: Schema :: json_schema_within (in_flight , hoisted_defs) ;"),
+        tokens.contains(
+            "let arguments = [serde_json :: json ! ({ \"type\" : \"string\" })] ; wrapper_schema \
+             :: Schema :: json_schema_within_with (in_flight , hoisted_defs , & arguments)"
+        ),
         "got: {tokens}"
     );
 }
@@ -6139,17 +6332,18 @@ fn a_sibling_string_keyed_map_value_emits_the_sibling_schema() {
     }
 }
 
-/// A sibling's type arguments do not reach its schema, which lives on the wrapper itself, so a
-/// generic value is the same schema-module reference a bare one is. Pinned on this key path as it
-/// is on the enum-key one: the two share a dispatcher, and a narrowing that reintroduces the
-/// divergence has to fail on the key path it is written for.
+/// A sibling's type arguments reach its schema, JSON Schema having no parameters for the wrapper to
+/// carry: the document is written at one filling, and the reference site names it. Pinned on this
+/// key path as it is on the enum-key one: the two share a dispatcher, and a narrowing that drops
+/// the arguments on one of them has to fail on the key path it is written for.
 #[cfg(feature = "jsonschema")]
 #[test]
 fn a_generic_sibling_string_keyed_map_value_emits_the_sibling_schema() {
     let tokens = map_field_schema("HashMap<String, Wrapper<String>>").to_string();
     assert!(
         tokens.contains(
-            r#""additionalProperties" : wrapper_schema :: Schema :: json_schema_within (in_flight , hoisted_defs)"#
+            "let arguments = [serde_json :: json ! ({ \"type\" : \"string\" })] ; wrapper_schema \
+             :: Schema :: json_schema_within_with (in_flight , hoisted_defs , & arguments)"
         ),
         "got: {tokens}"
     );
@@ -6410,6 +6604,7 @@ fn brand_json_schema_over(inner_ty: &syn::Type) -> String {
         &super::ModelSchemaArgs::default(),
         &super::branded_json_inner(&super::get_field_def("_inner", inner_ty, "")),
         "Wrapped",
+        &[],
     )
     .to_string()
 }
@@ -7495,6 +7690,89 @@ fn every_other_declared_arity_keeps_the_kind_it_declared() {
     }
 }
 
+/// The adjacent-form refusals a declaration earns, one per variant that earns one, as rendered
+/// `compile_error!` token strings.
+#[cfg(feature = "serde")]
+fn adjacent_refusals(declaration: &str) -> Vec<String> {
+    let item: syn::ItemEnum = syn::parse_str(declaration).unwrap();
+    adjacent_collapsed_slot_guard_errors(&item, "type", "value")
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// Captured from serde under `#[serde(tag = "type", content = "value")]`: the variant whose lone
+/// slot is off the wire writes `{"type":"One"}` and serde then refuses to read that back (missing
+/// field `value`), while only `{"type":"One","value":null}` reads. The write set and the read set
+/// have no common member, so the declaration is refused rather than described.
+#[cfg(feature = "serde")]
+#[test]
+fn an_adjacent_variant_whose_lone_slot_is_dropped_is_refused() {
+    let refusals = adjacent_refusals("enum Wire { One(#[serde(skip)] String) }");
+    assert_eq!(refusals.len(), 1, "got: {refusals:?}");
+    for needle in [
+        "`One`",
+        "`Wire`",
+        r#"{\"type\":\"One\"}"#,
+        r#"{\"type\":\"One\",\"value\":null}"#,
+        "Declare `One` as a unit variant",
+    ] {
+        assert!(
+            refusals[0].contains(needle),
+            "{needle} missing from: {}",
+            refusals[0]
+        );
+    }
+}
+
+/// Every other declared arity keeps the landed shrink: captured, a two-slot variant with one slot
+/// off the wire writes and reads `{"type":"One","value":[7]}` and with both off writes and reads
+/// `{"type":"One","value":[]}`, so each has a payload to be described by.
+#[cfg(feature = "serde")]
+#[test]
+fn every_other_adjacent_arity_is_left_alone() {
+    for declaration in [
+        "enum Wire { One(#[serde(skip)] String, u32) }",
+        "enum Wire { One(#[serde(skip)] String, #[serde(skip)] u32) }",
+        "enum Wire { One(String) }",
+        "enum Wire { One { #[serde(skip)] a: String } }",
+        "enum Wire { One }",
+        "enum Wire { One() }",
+    ] {
+        let refusals = adjacent_refusals(declaration);
+        assert!(refusals.is_empty(), "{declaration}: {refusals:?}");
+    }
+}
+
+/// The refusal points at the variant it is about, not at the enum's tagging attribute: an enum with
+/// many variants otherwise sends its author to the wrong line.
+#[cfg(feature = "serde")]
+#[test]
+fn the_adjacent_collapse_refusal_points_at_the_variant() {
+    let item: syn::ItemEnum =
+        syn::parse_str("enum Wire { Kept(u8, bool), Lone(#[serde(skip)] String) }").unwrap();
+    let errors = adjacent_collapsed_slot_guard_errors(&item, "type", "value");
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert_eq!(
+        errors[0].span().source_text().as_deref(),
+        Some("Lone(#[serde(skip)] String)")
+    );
+}
+
+/// The refusal quotes the keys the declaration named, so the payloads it prints are the author's
+/// own rather than serde's defaults.
+#[cfg(feature = "serde")]
+#[test]
+fn the_adjacent_collapse_refusal_quotes_the_declared_keys() {
+    let item: syn::ItemEnum = syn::parse_str("enum Wire { One(#[serde(skip)] String) }").unwrap();
+    let refusal = adjacent_collapsed_slot_guard_errors(&item, "kind", "payload")[0].to_string();
+    assert!(refusal.contains(r#"{\"kind\":\"One\"}"#), "Got: {refusal}");
+    assert!(
+        refusal.contains(r#"{\"kind\":\"One\",\"payload\":null}"#),
+        "Got: {refusal}"
+    );
+}
+
 /// The member spelling an untagged variant is refused with, run over the kind it publishes.
 #[cfg(feature = "serde")]
 fn untagged_refusal(declaration: &str, members: &[super::FieldDef]) -> String {
@@ -7505,12 +7783,61 @@ fn untagged_refusal(declaration: &str, members: &[super::FieldDef]) -> String {
 
 /// Captured from serde: an untagged variant whose lone slot is off the wire writes and reads `null`
 /// — the payload a declared unit variant writes there — so it takes the refusal a unit variant
-/// takes rather than describing the value nothing carries.
+/// takes rather than describing the value nothing carries. The words are the collapse's own: a
+/// declaration holding one inner type must not be told that inner types are what the union supports.
 #[cfg(feature = "serde")]
 #[test]
-fn an_untagged_variant_whose_lone_slot_is_dropped_is_refused_as_a_unit() {
+fn an_untagged_variant_whose_lone_slot_is_dropped_is_refused_for_the_collapse() {
     let refusal = untagged_refusal("enum Wire { One(#[serde(skip)] String) }", &[]);
-    assert!(refusal.contains("is a unit variant"), "Got: {refusal}");
+    for needle in [
+        "`One`",
+        "off the wire in both directions",
+        "`null`",
+        "Keep the slot on the wire",
+        "remove `One` from the union",
+    ] {
+        assert!(refusal.contains(needle), "{needle} missing from: {refusal}");
+    }
+    assert!(
+        !refusal.contains("supports newtype"),
+        "the collapse must not be told what the union supports: {refusal}"
+    );
+}
+
+/// The collapse's refusal points at the variant it is about, the way the shape refusal beside it
+/// does: an author sent to the enum's attribute is sent to the wrong line.
+#[cfg(feature = "serde")]
+#[test]
+fn the_untagged_collapse_refusal_points_at_the_variant() {
+    let variant = declared_variant("enum Wire { One(#[serde(skip)] String) }");
+    let error =
+        render_untagged_variant(&variant_wire_kind(&variant), &variant, &[], "Wire").unwrap_err();
+    assert_eq!(
+        error.span().source_text().as_deref(),
+        Some("One(#[serde(skip)] String)")
+    );
+}
+
+/// The standing refusal is untouched: a variant declared as a unit — and the empty tuple serde
+/// writes the same way — still reads the words the union has always answered them with.
+#[cfg(feature = "serde")]
+#[test]
+fn a_declared_untagged_unit_variant_keeps_its_own_refusal() {
+    // The ellipsis and em dash are spelled by escape so the pin stays byte-exact without writing a
+    // non-ASCII literal into the source.
+    let expected = "model_schema: variant `One`: `#[serde(untagged)]` supports newtype (`V(T)`) \
+                    and struct (`V { \u{2026} }`) variants only \u{2014} `One` is a unit variant, \
+                    which the union has no member spelling for: a member is written as the inner \
+                    type or as an object of named fields, and a variant that is neither has \
+                    nothing to be written as. Give it a single inner type or named fields, or drop \
+                    `#[serde(untagged)]`.";
+    for declaration in ["enum Wire { One }", "enum Wire { One() }"] {
+        assert_eq!(
+            untagged_refusal(declaration, &[]),
+            expected,
+            "{declaration}"
+        );
+    }
 }
 
 /// A refused tuple variant is named by the arity the author declared, not by the slots that reached
