@@ -50,7 +50,8 @@ use crate::features::object_id::OBJECT_ID_HEX_PATTERN;
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::{
-    AliasKind, constraining_pattern, lookup_alias_info, portable_pattern, record_value_shape,
+    AliasKind, PublishedShape, constraining_pattern, lookup_alias_info, portable_pattern,
+    record_value_shape,
 };
 
 #[cfg(feature = "serde")]
@@ -114,11 +115,8 @@ use crate::utils::record_zod_union_members;
 #[cfg(all(feature = "serde", feature = "zod"))]
 use crate::utils::ZodUnionMember;
 
-#[cfg(all(feature = "serde", feature = "zod"))]
-use crate::utils::record_zod_flatten_variants;
-
 #[cfg(all(feature = "serde", any(feature = "zod", feature = "typescript")))]
-use crate::utils::{WireLeaf, record_wire_leaves};
+use crate::utils::{FlattenVariant, WireLeaf, record_flatten_variants, record_wire_leaves};
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::register_alias_info;
@@ -598,7 +596,7 @@ impl SourceAbsence {
 /// name rather than at it.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 struct Surface {
-    shape: Option<&'static str>,
+    shape: PublishedShape,
     #[cfg(all(feature = "serde", any(feature = "zod", feature = "typescript")))]
     wire: RecordedWire,
 }
@@ -745,7 +743,7 @@ impl Surface {
         #[cfg(not(all(feature = "serde", any(feature = "zod", feature = "typescript"))))]
         let _: Option<&'static str> = wire;
         Self {
-            shape,
+            shape: PublishedShape::Flat(shape),
             #[cfg(all(feature = "serde", any(feature = "zod", feature = "typescript")))]
             wire: RecordedWire::Named(wire),
         }
@@ -779,9 +777,13 @@ impl Surface {
     }
 
     /// The surface a written type publishes, both answers read off the one def.
-    fn written(written: &FieldDef) -> Self {
+    ///
+    /// `parameters` is the item's own type-parameter list, in the order it declares them: a target
+    /// that *is* one of them publishes a family rather than a shape, and the position is what the
+    /// shape answer records for it — see [`PublishedShape`].
+    fn written(written: &FieldDef, parameters: &[String]) -> Self {
         Self {
-            shape: published_value_shape(written),
+            shape: published_value_shape(written, parameters),
             #[cfg(all(feature = "serde", any(feature = "zod", feature = "typescript")))]
             wire: RecordedWire::Leaves(published_wire_leaves(written)),
         }
@@ -1188,7 +1190,8 @@ fn process_type_alias(item_type: ItemType, args: &ModelSchemaArgs) -> TokenStrea
     let kind = alias_target_kind(&alias_field_def);
     register_alias_info(&rust_ident_str, &export_name, &module_name, kind);
     // An alias's schema *is* its target's, so it publishes whatever the target publishes.
-    Surface::written(&alias_field_def).record(&rust_ident_str);
+    Surface::written(&alias_field_def, &type_parameters_in_scope(&alias.generics))
+        .record(&rust_ident_str);
     // An alias *is* the type it names, so a merge that flattens it multiplies over exactly the
     // members the target's own name would have given it.
     #[cfg(feature = "zod")]
@@ -1677,7 +1680,7 @@ fn compute_flatten_outputs(
             absence: SourceAbsence::written(fld),
             #[cfg(feature = "zod")]
             branches: Vec::new(),
-            spelling: fld.typescript_merged_typename(),
+            spelling: flattened_ts_spelling(fld),
         })
         .collect();
     #[cfg(not(feature = "typescript"))]
@@ -1738,10 +1741,11 @@ const fn flattened_name_offers_absence(_fld: &FieldDef) -> bool {
 /// serde writes a unit variant as a bare name standing alone and as that name holding `null` where
 /// the enum is flattened.
 ///
-/// The tagged variants are read only where the same enum's recorded leaves prove one of them is no
-/// object, which is the bound those leaves are already spliced under one position further in. A
-/// tagged enum every variant of which serde writes as an object publishes one operand per branch
-/// that names what the enum's own binding names, and is left as the one operand it was.
+/// Every recorded variant is read, whatever its leaves prove. A Zod intersection recognizes exactly
+/// the keys its operands name and a `z.union` names none, so joining the object to the union as one
+/// operand describes a payload set no value inhabits — including the tagged enum every variant of
+/// which serde writes as an object, whose branches prove nothing and whose single-operand join
+/// nonetheless admits nothing.
 ///
 /// A source declared below the object has recorded neither, and takes the fallback the merge
 /// documents.
@@ -1751,10 +1755,10 @@ fn flattened_zod_branches(fld: &FieldDef) -> Vec<String> {
     if !members.is_empty() {
         return members.into_iter().map(|member| member.spelling).collect();
     }
-    if named_wire_leaves(fld).is_none() {
-        return Vec::new();
-    }
-    fld.zod_flatten_variants()
+    fld.flatten_variants()
+        .into_iter()
+        .map(|variant| variant.zod)
+        .collect()
 }
 
 /// No source names branches where nothing reads `#[serde(flatten)]`, for the reason no source offers
@@ -1765,6 +1769,45 @@ fn flattened_zod_branches(fld: &FieldDef) -> Vec<String> {
         .into_iter()
         .map(|member| member.spelling)
         .collect()
+}
+
+/// What one flattened source is written as where the TypeScript merge names it: the parenthesised
+/// union of the per-variant key sets an externally tagged enum recorded, and the name itself
+/// everywhere else.
+///
+/// TypeScript distributes an intersection over a union on its own, so a name standing for a choice
+/// every branch of which is an object already describes what the multiplication would write and is
+/// left as the one operand it is. What it cannot distribute over is a branch that is no object: the
+/// bare string a unit variant publishes standing alone intersects the object to `never`, and the
+/// payload serde actually writes for that variant — the variant's name holding `null` — belongs to
+/// no branch of the result. Where the enum's recorded leaves prove such a branch, the operand is
+/// spelled as the key sets serde writes instead of as the union the enum publishes.
+///
+/// A name the registry proves nothing about, and a source declared below the object, keep the
+/// spelling they always had.
+#[cfg(all(feature = "serde", feature = "typescript"))]
+fn flattened_ts_spelling(fld: &FieldDef) -> String {
+    let named = fld.typescript_merged_typename();
+    if named_wire_leaves(fld).is_none() {
+        return named;
+    }
+    let variants: Vec<String> = fld
+        .flatten_variants()
+        .into_iter()
+        .map(|variant| variant.typescript)
+        .collect();
+    if variants.is_empty() {
+        named
+    } else {
+        format!("({})", variants.join(" | "))
+    }
+}
+
+/// No name proves a branch where nothing reads `#[serde(flatten)]`: the registry records no wire for
+/// one to prove it in, and no field reaches the merge to begin with.
+#[cfg(all(feature = "typescript", not(feature = "serde")))]
+fn flattened_ts_spelling(fld: &FieldDef) -> String {
+    fld.typescript_merged_typename()
 }
 
 /// The schema methods a struct's module publishes — the JSON-schema document, the TypeScript
@@ -2510,16 +2553,21 @@ fn branded_option_inner_error(
 /// measures `Display`. Three surfaces, three answers — the disagreement this guard exists to stop.
 ///
 /// A name written *over* one of those parameters is the same answer reached one module out, and is
-/// the one absence the registry's silence must not be read as consent for. `Later<T>` names a type
-/// whose schema the brand composes from the argument the caller supplies, so the checks land on
-/// whatever that argument turns out to be: Zod appends them to a shape the call site decides, the
-/// one JSON document written for every instantiation still holds the `{}` a parameter describes as,
-/// and `validate()` still measures `Display` — a numeric filling being rejected for its digit count
-/// rather than for its value. Refusing it is what keeps the guard's answer a fact about the
-/// declaration: the same two items written in the other order already refuse, the registry having
-/// classified the inner by then, and an author cannot act on a diagnostic that fires on where a
-/// type is written. What stays admitted is the unresolved *concrete* name, whose instantiation the
-/// declaration has already fixed.
+/// refused ahead of the registry entirely. `Later<T>` names a type whose schema the brand composes
+/// from the argument the caller supplies, so the checks land on whatever that argument turns out to
+/// be: Zod appends them to a shape the call site decides, the one JSON document written for every
+/// instantiation still holds the `{}` a parameter describes as, and `validate()` still measures
+/// `Display` — a numeric filling being rejected for its digit count rather than for its value.
+/// Asking it first is what makes the refusal a fact about the declaration rather than about what
+/// the named item happened to record: the argument is what a recorded position would be filled
+/// with, and a parameter fills it with nothing any surface can name.
+///
+/// A concrete argument is the opposite case, and it is where the registry earns its consult. The
+/// checks compose onto the schema the *argument* resolves to, because that is what the emission
+/// hands the named item's factory — so a name recorded as publishing its own parameter answers
+/// with that argument's shape, and `Later<String>` carries the checks where `Later<u32>` cannot.
+/// One recorded word could not say either: it would have to stand for every instantiation, and the
+/// only word that does is the opaque one, which would refuse the working declaration outright.
 ///
 /// Resolved through the same `get_field_def` call the renderers make, so the guard and the
 /// contract cannot disagree about what a shape is.
@@ -2534,6 +2582,21 @@ fn branded_constraint_inner_error(
         return None;
     }
     let inner = branded_inner_value_surface(generics, inner_field);
+    if let FieldDefType::SiblingType(inner_name, _) = &inner.field_type
+        && let Some(parameter) = inner.argument_parameter_name()
+    {
+        let message = format!(
+            "model_schema: branded newtype `{name}` applies string constraints (pattern, \
+             minLength, maxLength) to `{inner_name}`, whose schema this crate builds from the \
+             type parameter `{parameter}` — so the checks land on whatever the instantiation \
+             supplies for it, and one declaration covers every instantiation: Zod appends \
+             `.min`/`.max` to a schema the call site decides the shape of, JSON Schema writes \
+             them beside the `{{}}` a parameter describes as, where they go inert, and \
+             `validate()` measures the inner's `Display` rendering — three surfaces, three \
+             answers. Brand a string-typed inner, or drop the constraints."
+        );
+        return Some(syn::Error::new_spanned(inner_field, message).to_compile_error());
+    }
     let message = match (&inner.field_type, non_string_inner_shape(&inner)) {
         (FieldDefType::SiblingType(inner_name, _), Some(shape)) => format!(
             "model_schema: branded newtype `{name}` applies string constraints (pattern, \
@@ -2545,19 +2608,6 @@ fn branded_constraint_inner_error(
              rendering — three surfaces, three answers. Brand a string-typed inner, or drop the \
              constraints."
         ),
-        (FieldDefType::SiblingType(inner_name, _), None) => {
-            let parameter = inner.argument_parameter_name()?;
-            format!(
-                "model_schema: branded newtype `{name}` applies string constraints (pattern, \
-                 minLength, maxLength) to `{inner_name}`, whose schema this crate builds from the \
-                 type parameter `{parameter}` — so the checks land on whatever the instantiation \
-                 supplies for it, and one declaration covers every instantiation: Zod appends \
-                 `.min`/`.max` to a schema the call site decides the shape of, JSON Schema writes \
-                 them beside the `{{}}` a parameter describes as, where they go inert, and \
-                 `validate()` measures the inner's `Display` rendering — three surfaces, three \
-                 answers. Brand a string-typed inner, or drop the constraints."
-            )
-        }
         (_, Some(shape)) => format!(
             "model_schema: branded newtype `{name}` applies string constraints (pattern, \
              minLength, maxLength) to a {shape} inner type, which cannot carry them: Zod reads \
@@ -2594,7 +2644,9 @@ fn non_string_inner_shape(inner: &FieldDef) -> Option<&'static str> {
         return Some("container");
     }
     match &inner.field_type {
-        FieldDefType::SiblingType(inner_name, _) => registered_value_shape(inner_name),
+        FieldDefType::SiblingType(inner_name, arguments) => {
+            instantiated_value_shape(inner_name, arguments)
+        }
         FieldDefType::Map(..) | FieldDefType::Tuple(..) => Some("container"),
         FieldDefType::Boolean => Some("boolean"),
         FieldDefType::U8
@@ -2621,17 +2673,26 @@ fn non_string_inner_shape(inner: &FieldDef) -> Option<&'static str> {
     }
 }
 
-/// What a registered name's own value surface is, and `None` for a name the registry has no answer
-/// for — one declared below the type reading it, or one this crate never expands at all.
+/// What a registered name filled with `arguments` publishes as a value, and `None` for a name the
+/// registry has no answer for — one declared below the type reading it, or one this crate never
+/// expands at all.
 ///
 /// Those two are the same absence and take the same answer, which is the emission the name has
 /// always had. Refusing on absence would refuse the unresolved user type the guard admits on
 /// purpose, and would make a diagnostic out of declaration order: moving a declaration would turn a
 /// compiling program into a refused one without changing what it means, and an author cannot act on
 /// a guard that fires on where a type is written rather than on what it is.
+///
+/// A name that recorded a parameter position publishes a family, and the argument written at that
+/// position is the member of it this reference names — the same argument the emission composes the
+/// checks onto, so the guard's answer and the emitted schema cannot disagree. The recursion walks
+/// one written argument in per step and so cannot cycle, however the arguments nest.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-fn registered_value_shape(rust_ident: &str) -> Option<&'static str> {
-    lookup_alias_info(rust_ident)?.value_shape
+fn instantiated_value_shape(rust_ident: &str, arguments: &[FieldDef]) -> Option<&'static str> {
+    match lookup_alias_info(rust_ident)?.value_shape {
+        PublishedShape::Flat(shape) => shape,
+        PublishedShape::Parameter(position) => non_string_inner_shape(arguments.get(position)?),
+    }
 }
 
 /// The JSON type keyword a registered name's wire describes as, when the registry proves that wire
@@ -2710,12 +2771,43 @@ const fn scalar_json_type_keyword(field_type: &FieldDefType) -> Option<&'static 
 /// and neither carries the string checks the schema beneath it would have. The brand path never
 /// reaches this arm — an `Option` inner has its own refusal, which says the representable thing to
 /// say — but an item registering a name can be written over one.
+///
+/// A target that *is* one of the item's own parameters records that parameter's position rather
+/// than a word. Every word available at the declaration would be a word about the declaration, and
+/// the only one true of every instantiation is the opaque one a parameter describes as on both
+/// validating surfaces — which is a fact about what the item writes for itself, not about what a
+/// reference to it composes. A reference fills the position, and only then is there a shape to
+/// name.
+///
+/// The target is read through the same erasure every surface reads it through, so which of the two
+/// a written name is — the item's own parameter or a reference to another type — is settled once.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-fn published_value_shape(written: &FieldDef) -> Option<&'static str> {
-    if written.is_optional() {
-        return Some("nullable");
+fn published_value_shape(written: &FieldDef, parameters: &[String]) -> PublishedShape {
+    let mut target = written.clone();
+    target.erase_type_parameters(parameters);
+    if target.is_optional() {
+        return PublishedShape::Flat(Some("nullable"));
     }
-    non_string_inner_shape(written)
+    published_parameter_position(&target, parameters).map_or_else(
+        || PublishedShape::Flat(non_string_inner_shape(&target)),
+        PublishedShape::Parameter,
+    )
+}
+
+/// The position of the item's own parameter a written target *is*, and `None` for every target that
+/// fixes a shape of its own around one.
+///
+/// The sequence spellings are turned away first, through the same pair [`non_string_inner_shape`]
+/// reads them as: the parser collapses a `Vec<T>` onto array levels over the `T` itself, so the
+/// parameter is reached at the leaf there exactly as it is when written bare. An array is an array
+/// however the instantiation fills it — a shape the record keeps, rather than the family it defers.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn published_parameter_position(target: &FieldDef, parameters: &[String]) -> Option<usize> {
+    if target.is_array() || sequence_wrapper_element(target).is_some() {
+        return None;
+    }
+    let name = target.parameter_shape_name()?;
+    parameters.iter().position(|declared| declared == name)
 }
 
 /// The `compile_error!` tokens for every `cfg_attr`-wrapped serde attribute a branded newtype
@@ -2951,7 +3043,8 @@ fn flatten_edge_guard_error(
     let refused = inner
         .zod_union_members()
         .into_iter()
-        .find_map(|member| member.non_object.map(|named| (member.branch_path(), named)));
+        .find_map(|member| member.non_object.map(|named| (member.branch_path(), named)))
+        .or_else(|| flattened_name_refused_branch(&inner));
     let message = if let Some((branch, named)) = refused {
         format!(
             "model_schema: `{type_name}`: `#[serde(flatten)]` of `{inner_name}` writes a \
@@ -2991,6 +3084,44 @@ fn flattened_name_non_object_wire(inner: &FieldDef) -> Option<&'static str> {
         return None;
     };
     registered_non_object_wire(name)
+}
+
+/// The branch a flattened field's own name proves is no object, beside the JSON type keyword that
+/// branch describes as — and `None` for every name whose leaves prove no such branch.
+///
+/// [`registered_non_object_wire`] answers a name publishing one leaf, which is a name that has no
+/// position of its own to be named at. A name publishing a choice does: a registration whose surface
+/// is nullable writes its value or writes nothing, so it publishes the value's own leaves beside its
+/// published absence, and the merge that reads the document names that value by the branch it sits
+/// at. The absence itself needs no refusal — serde writes the object's own keys alone for it and
+/// reads them back as the absent value, which is the multiplication the merge already writes — so
+/// what the declaration turns on is whether every leaf beside it is proved to be no object. Where
+/// they all are, the value side is unwritable at the flatten edge whichever leaf it took, and the
+/// refusal names the first of them in the branch-naming words the JSON-schema merge refuses the same
+/// declaration in.
+///
+/// A nullable object keeps its absence multiplication, having no leaf proved to be no object beside
+/// the `null`. The array and plain-enum carve-outs are [`flattened_name_non_object_wire`]'s, for its
+/// reasons.
+#[cfg(all(feature = "serde", feature = "zod"))]
+fn flattened_name_refused_branch(inner: &FieldDef) -> Option<(String, &'static str)> {
+    if inner.is_array() || flattened_plain_enum(inner).is_some() {
+        return None;
+    }
+    let FieldDefType::SiblingType(name, _) = &inner.field_type else {
+        return None;
+    };
+    let leaves = lookup_alias_info(name)?.wire;
+    let (absences, values): (Vec<&WireLeaf>, Vec<&WireLeaf>) =
+        leaves.iter().partition(|leaf| leaf.is_published_absence());
+    if absences.len() != 1 {
+        return None;
+    }
+    if !values.iter().all(|leaf| leaf.non_object.is_some()) {
+        return None;
+    }
+    let first = values.first()?;
+    Some((first.branch_path(), first.non_object?))
 }
 
 /// Processes every field of a struct, returning the regular field defs, the `#[serde(flatten)]`
@@ -3560,10 +3691,10 @@ fn build_tuple_struct_zod_schema_method(
 /// *is* the slot's schema and carries exactly what it carries; every other arity is the fixed array
 /// `z.tuple` writes, which takes no string check and which no object can be merged with.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-fn tuple_struct_surface(fields: &syn::Fields) -> Surface {
+fn tuple_struct_surface(fields: &syn::Fields, parameters: &[String]) -> Surface {
     let mut slots = fields.iter();
     match (slots.next(), slots.next()) {
-        (Some(slot), None) => Surface::written(&get_field_def("_slot", &slot.ty, "")),
+        (Some(slot), None) => Surface::written(&get_field_def("_slot", &slot.ty, ""), parameters),
         _ => Surface::array(),
     }
 }
@@ -3585,7 +3716,10 @@ fn process_tuple_struct(
     let (item_name, module_name, module_ident) = struct_module_idents(
         &name,
         args.name_override.as_deref(),
-        tuple_struct_surface(&item_struct.fields),
+        tuple_struct_surface(
+            &item_struct.fields,
+            &type_parameters_in_scope(&item_struct.generics),
+        ),
     );
 
     let (shape, guard_errors) = collect_tuple_slots(
@@ -4721,10 +4855,10 @@ fn register_branded_newtype(
     );
     // A brand is written straight onto its inner's schema — `.brand()` hands back that same
     // instance — so it publishes whatever its inner publishes.
-    Surface::written(&branded_inner_value_surface(
-        &item_struct.generics,
-        inner_field,
-    ))
+    Surface::written(
+        &branded_inner_value_surface(&item_struct.generics, inner_field),
+        &type_parameters_in_scope(&item_struct.generics),
+    )
     .record(rust_ident);
 }
 
@@ -6051,31 +6185,48 @@ fn render_external_variant(
 /// the order the union writes them.
 ///
 /// A data-carrying variant contributes the single-key object it already renders as: serde writes
-/// exactly that into the object being merged, and the member is the operand. A unit variant renders
-/// as the bare name it is written as standing alone, which no object joins — flattened, serde writes
-/// that name as a key holding `null`, so the operand is written here instead of taken from the
-/// member.
-#[cfg(all(feature = "serde", feature = "zod"))]
+/// exactly that into the object being merged, and the member is the operand on both surfaces. A unit
+/// variant renders as the bare name it is written as standing alone, which no object joins —
+/// flattened, serde writes that name as a key holding `null`, so the operand is written here instead
+/// of taken from the member, in the shape the same variant would have rendered as had it carried
+/// data. That is what puts the two spellings of one variant at one indent and under one `JSDoc`
+/// block.
+#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod")))]
 fn record_external_flatten_operands(
     rust_ident: &str,
     variants: &[DiscriminatedVariant],
     members: &[(String, String, proc_macro2::TokenStream)],
 ) {
-    let operands: Vec<String> = variants
+    let operands: Vec<FlattenVariant> = variants
         .iter()
         .zip(members)
-        .map(|(variant, (_, zod, _))| {
-            if matches!(variant.kind, VariantKind::Unit) {
+        .map(|(variant, member)| {
+            let unit = matches!(variant.kind, VariantKind::Unit);
+            let key = &variant.discriminator_value;
+            #[cfg(feature = "typescript")]
+            let typescript = if unit {
                 format!(
-                    "z.strictObject({{\n  \"{}\": z.null(),\n}})",
-                    variant.discriminator_value
+                    "{{\n{}\n  \"{key}\": null;\n}}",
+                    member_jsdoc_block(&variant.docs)
                 )
             } else {
-                zod.clone()
+                member.0.clone()
+            };
+            #[cfg(feature = "zod")]
+            let zod = if unit {
+                format!("z.strictObject({{\n  \"{key}\": z.null(),\n}})")
+            } else {
+                member.1.clone()
+            };
+            FlattenVariant {
+                #[cfg(feature = "typescript")]
+                typescript,
+                #[cfg(feature = "zod")]
+                zod,
             }
         })
         .collect();
-    record_zod_flatten_variants(rust_ident, &operands);
+    record_flatten_variants(rust_ident, &operands);
 }
 
 /// Joins an externally tagged enum's rendered members into its three union surfaces: the
@@ -6180,7 +6331,7 @@ fn process_externally_tagged_enum(
 
     // Recorded once the variants have rendered, because the flatten-edge spelling of a data-carrying
     // one is the member's own and only this expansion holds it.
-    #[cfg(all(feature = "serde", feature = "zod"))]
+    #[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod")))]
     record_external_flatten_operands(&name.to_string(), &variants.0, &members);
 
     let (main_schema_code, type_code, schema_code) = join_external_union(&members);

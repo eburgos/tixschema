@@ -17,7 +17,7 @@ use super::{
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use super::{
-    AliasKind, alias_map_key_guard_error, branded_guard_errors, check_map_key,
+    AliasKind, PublishedShape, alias_map_key_guard_error, branded_guard_errors, check_map_key,
     ident_schema_module_name, record_value_shape, register_alias_info,
 };
 
@@ -3195,6 +3195,13 @@ fn string_constraints_over_a_string_shaped_inner_pass() {
 /// have recorded for it, standing in for that expansion.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn seed_value_shape(rust_ident: &str, shape: Option<&'static str>) {
+    seed_published_shape(rust_ident, PublishedShape::Flat(shape));
+}
+
+/// The same, for a name whose own target is one of its parameters and which therefore records a
+/// position rather than a word.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn seed_published_shape(rust_ident: &str, shape: PublishedShape) {
     register_alias_info(
         rust_ident,
         rust_ident,
@@ -3389,12 +3396,99 @@ fn a_brand_records_the_value_surface_its_inner_publishes() {
             #[serde(transparent)]
             struct Branded(pub #ty);
         };
-        let surface = super::Surface::written(&super::branded_inner_value_surface(
-            &item.generics,
-            item.fields.iter().next().unwrap(),
-        ));
-        assert_eq!(surface.shape, expected, "for {inner}");
+        assert_eq!(
+            brand_surface(&item).shape,
+            PublishedShape::Flat(expected),
+            "for {inner}"
+        );
     }
+}
+
+/// A brand whose inner *is* one of its own parameters records that parameter's position, not a
+/// word: what it publishes is settled by the argument a reference writes, and no word available at
+/// the declaration says that. A parameter reached under a wrapper keeps the wrapper's own shape,
+/// which no filling changes.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_brand_over_its_own_parameter_records_the_position_it_publishes() {
+    for (inner, expected) in [
+        ("TagType", PublishedShape::Parameter(0)),
+        ("ValueType", PublishedShape::Parameter(1)),
+        ("Vec<TagType>", PublishedShape::Flat(Some("container"))),
+        (
+            "HashMap<String, ValueType>",
+            PublishedShape::Flat(Some("container")),
+        ),
+        (
+            "(TagType, ValueType)",
+            PublishedShape::Flat(Some("container")),
+        ),
+        ("Option<TagType>", PublishedShape::Flat(Some("nullable"))),
+        ("String", PublishedShape::Flat(None)),
+    ] {
+        let ty: syn::Type = syn::parse_str(inner).unwrap();
+        let item: syn::ItemStruct = syn::parse_quote! {
+            #[serde(transparent)]
+            struct Branded<TagType, ValueType>(pub #ty);
+        };
+        assert_eq!(brand_surface(&item).shape, expected, "for {inner}");
+    }
+}
+
+/// The surface a brand's own registration records, built the way `register_branded_newtype` builds
+/// it.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn brand_surface(item: &syn::ItemStruct) -> super::Surface {
+    super::Surface::written(
+        &super::branded_inner_value_surface(&item.generics, item.fields.iter().next().unwrap()),
+        &super::type_parameters_in_scope(&item.generics),
+    )
+}
+
+/// A recorded position is filled with the argument the reference writes, so one declaration answers
+/// per instantiation: the checks compose onto that argument's schema, and the guard names the shape
+/// the argument resolves to rather than the opaque one the declaration alone could say.
+///
+/// The same answer whichever way the two declarations are written — the record is the same record —
+/// which is what takes the guard's verdict off declaration order for every reference that reaches
+/// it at all.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn string_constraints_over_a_parameter_publisher_read_the_argument_written_for_it() {
+    seed_published_shape("PublishesItsParameter", PublishedShape::Parameter(0));
+    let admitted = brand_over_named_inner_errors("PublishesItsParameter<String>");
+    assert!(admitted.is_empty(), "got: {admitted:?}");
+
+    for (inner, shape) in [
+        ("PublishesItsParameter<u32>", "numeric"),
+        ("PublishesItsParameter<bool>", "boolean"),
+        ("PublishesItsParameter<Vec<String>>", "container"),
+        ("PublishesItsParameter<serde_json::Value>", "opaque"),
+    ] {
+        let errors = brand_over_named_inner_errors(inner);
+        assert_eq!(errors.len(), 1, "for {inner}, got: {errors:?}");
+        assert!(errors[0].contains("`Branded`"), "got: {}", errors[0]);
+        assert!(
+            errors[0].contains("PublishesItsParameter"),
+            "for {inner}, got: {}",
+            errors[0]
+        );
+        assert!(errors[0].contains(shape), "for {inner}, got: {}", errors[0]);
+    }
+}
+
+/// A position the reference writes no argument at, and one a second parameter is published at, are
+/// both read off the same list the declaration numbered.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_recorded_position_is_read_off_the_arguments_the_reference_writes() {
+    seed_published_shape("PublishesItsSecond", PublishedShape::Parameter(1));
+    let errors = brand_over_named_inner_errors("PublishesItsSecond<String, u32>");
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(errors[0].contains("numeric"), "got: {}", errors[0]);
+
+    let unwritten = brand_over_named_inner_errors("PublishesItsSecond<String>");
+    assert!(unwritten.is_empty(), "got: {unwritten:?}");
 }
 
 /// What a tuple struct records: serde writes one slot as that slot's value alone, so the schema is
@@ -3405,16 +3499,37 @@ fn a_brand_records_the_value_surface_its_inner_publishes() {
 #[test]
 fn a_tuple_struct_records_the_value_surface_its_slots_publish() {
     for (decl, expected) in [
-        ("struct Slots(pub String);", None),
-        ("struct Slots(pub Option<String>);", Some("nullable")),
-        ("struct Slots(pub u32);", Some("numeric")),
-        ("struct Slots(pub Vec<String>);", Some("container")),
-        ("struct Slots(pub String, pub u32);", Some("container")),
-        ("struct Slots();", Some("container")),
+        ("struct Slots(pub String);", PublishedShape::Flat(None)),
+        (
+            "struct Slots(pub Option<String>);",
+            PublishedShape::Flat(Some("nullable")),
+        ),
+        (
+            "struct Slots(pub u32);",
+            PublishedShape::Flat(Some("numeric")),
+        ),
+        (
+            "struct Slots(pub Vec<String>);",
+            PublishedShape::Flat(Some("container")),
+        ),
+        (
+            "struct Slots(pub String, pub u32);",
+            PublishedShape::Flat(Some("container")),
+        ),
+        ("struct Slots();", PublishedShape::Flat(Some("container"))),
+        ("struct Slots<T>(pub T);", PublishedShape::Parameter(0)),
+        (
+            "struct Slots<T>(pub Vec<T>);",
+            PublishedShape::Flat(Some("container")),
+        ),
     ] {
         let item: syn::ItemStruct = syn::parse_str(decl).unwrap();
         assert_eq!(
-            super::tuple_struct_surface(&item.fields).shape,
+            super::tuple_struct_surface(
+                &item.fields,
+                &super::type_parameters_in_scope(&item.generics)
+            )
+            .shape,
             expected,
             "for {decl}"
         );
@@ -7969,12 +8084,90 @@ fn a_direct_flatten_of_a_plain_enum_is_left_to_the_guard_written_for_it() {
     );
 }
 
+/// A registration publishing a choice reaches the same refusal, named by the branch its value sits
+/// at rather than at no position at all — the wording the JSON-schema merge, which reads that same
+/// choice back as a union, already refuses the declaration in.
+///
+/// The absence beside it is not what is refused: serde writes the object's own keys alone for it and
+/// reads them back as the absent value, which is the branch the merge already writes. What no
+/// spelling describes is the value, and one declaration cannot carry a branch that round-trips and a
+/// branch no payload satisfies.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_direct_flatten_of_a_nullable_scalar_registration_is_refused_at_its_value_branch() {
+    seed_slot_registration(&syn::parse_quote! { struct DirectMaybeCount(Option<i64>); });
+    let field: syn::Field = syn::parse_quote! { #[serde(flatten)] c: DirectMaybeCount };
+    let error = direct_flatten_error(&field).unwrap();
+    assert!(
+        error.contains(
+            "`#[serde(flatten)]` of `DirectMaybeCount` writes a union member that is not an object"
+        ),
+        "got: {error}"
+    );
+    assert!(
+        error.contains("its branch 1 describes a `integer`"),
+        "got: {error}"
+    );
+    assert!(
+        error.contains("write the field as a named member so the value gets a key of its own"),
+        "got: {error}"
+    );
+}
+
+/// Every keyword the value side can prove reaches that same refusal, each named by the word its own
+/// published document carries — the array a nullable sequence writes among them, which is the one
+/// the name proves rather than the one a field wrote around it.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_nullable_registration_is_refused_by_the_keyword_its_value_side_proves() {
+    seed_slot_registration(&syn::parse_quote! { struct DirectMaybeName(Option<String>); });
+    seed_slot_registration(&syn::parse_quote! { struct DirectMaybeFlag(Option<bool>); });
+    seed_slot_registration(&syn::parse_quote! { struct DirectMaybeList(Option<Vec<String>>); });
+    for (rust_ident, keyword) in [
+        ("DirectMaybeName", "string"),
+        ("DirectMaybeFlag", "boolean"),
+        ("DirectMaybeList", "array"),
+    ] {
+        let named: syn::Type = syn::parse_str(rust_ident).unwrap();
+        let error =
+            direct_flatten_error(&syn::parse_quote! { #[serde(flatten)] v: #named }).unwrap();
+        assert!(
+            error.contains(&format!("its branch 1 describes a `{keyword}`")),
+            "got: {error}"
+        );
+    }
+}
+
+/// And a registration whose value side is an object keeps the absence multiplication it was landed
+/// with: nothing beside the `null` is proved to be no object, so both branches are ones serde writes
+/// and reads back. A name publishing a `null` at no top level of its own is not this shape at all —
+/// there the `null` sits under a choice serde matched a member on, which the member position already
+/// answers for.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_direct_flatten_of_a_nullable_object_registration_stays_admitted() {
+    seed_registered_wire("DirectPlainDoc", AliasKind::NoEnumMembers, None);
+    seed_slot_registration(&syn::parse_quote! { struct DirectMaybeDoc(Option<DirectPlainDoc>); });
+    let field: syn::Field = syn::parse_quote! { #[serde(flatten)] base: DirectMaybeDoc };
+    assert!(
+        direct_flatten_error(&field).is_none(),
+        "got a rejection for {}",
+        quote::ToTokens::to_token_stream(&field)
+    );
+}
+
 /// Runs the registration a tuple struct's own expansion runs, so what the registry answers for the
 /// name is what a declaration put there rather than a word written by hand.
 #[cfg(all(feature = "serde", feature = "zod"))]
 fn seed_slot_registration(item: &syn::ItemStruct) {
-    let _: (String, String, syn::Ident) =
-        super::struct_module_idents(&item.ident, None, super::tuple_struct_surface(&item.fields));
+    let _: (String, String, syn::Ident) = super::struct_module_idents(
+        &item.ident,
+        None,
+        super::tuple_struct_surface(
+            &item.fields,
+            &super::type_parameters_in_scope(&item.generics),
+        ),
+    );
 }
 
 /// The same for a branded newtype, whose wire is its inner's.

@@ -188,6 +188,16 @@ pub struct WireLeaf {
 
 #[cfg(all(feature = "serde", any(feature = "zod", feature = "typescript")))]
 impl WireLeaf {
+    /// The leaf's position, spelled the way the JSON-schema merge spells the same one.
+    #[cfg(feature = "zod")]
+    pub fn branch_path(&self) -> String {
+        self.branch
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<String>>()
+            .join(".")
+    }
+
     /// Whether this leaf is the absence the name itself offers: the `null` of a choice the
     /// registration publishes at its own top level, one position in from the name and no deeper.
     ///
@@ -201,9 +211,53 @@ impl WireLeaf {
     }
 }
 
+/// What an object flattening an externally tagged enum joins for one of that enum's variants, on
+/// each surface that writes a merge of its own.
+///
+/// The two spellings are recorded together, from one reading of the rendered variant, because they
+/// answer one question — what serde writes for this variant into the object being merged — and a
+/// surface that answered it on its own would be free to drift from the other.
+#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod")))]
+#[derive(Clone)]
+pub struct FlattenVariant {
+    #[cfg(feature = "typescript")]
+    pub typescript: String,
+    #[cfg(feature = "zod")]
+    pub zod: String,
+}
+
+/// What a `#[model_schema()]` item publishes as a value, as the constrained-brand guard reads
+/// shapes.
+///
+/// One word cannot answer for a name that publishes a family. A generic item whose written target
+/// *is* one of its own parameters writes whatever the instantiation hands it, so the only flat
+/// answer available at its declaration is the opaque one every parameter describes as — and a
+/// brand written over `Later<String>` would then be refused for a shape the emission never
+/// composes, while the same declaration written above it is admitted for want of any record at
+/// all. So such a name records the position instead, and the reader fills it with the argument the
+/// reference carries.
+///
+/// A target with its own fixed shape — a `Vec<T>`, a map, a tuple — records that shape, which no
+/// filling changes.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PublishedShape {
+    /// The one shape written under this name, whatever fills it — `None` where that shape is one a
+    /// string check lands on, and the answer an unrecorded name leaves.
+    Flat(Option<&'static str>),
+    /// The name publishes its own type parameter at this position in the list it declares them,
+    /// so what it publishes is whatever the argument written there resolves to.
+    Parameter(usize),
+}
+
 #[derive(Clone)]
 pub struct AliasInfo {
     pub export_name: String,
+    /// What an externally tagged enum's variants are spelled as where an object flattens the enum
+    /// itself, one per variant in the order the union writes them, and empty for every other item.
+    /// Filled by [`record_flatten_variants`] once that enum's own expansion has rendered them.
+    #[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod")))]
+    pub flatten_variants: Vec<FlattenVariant>,
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     pub kind: AliasKind,
     #[cfg(feature = "jsonschema")]
@@ -214,11 +268,11 @@ pub struct AliasInfo {
     #[cfg(feature = "zod")]
     pub publishes_zod_factory: bool,
     /// What the value surface written under this name is, in the vocabulary a constrained brand's
-    /// refusal names shapes by — and `None` both when that surface is one string checks land on and
-    /// when nothing has been recorded at all. Filled by [`record_value_shape`] as each item
-    /// registers.
+    /// refusal names shapes by — and [`PublishedShape::Flat(None)`] both when that surface is one
+    /// string checks land on and when nothing has been recorded at all. Filled by
+    /// [`record_value_shape`] as each item registers.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    pub value_shape: Option<&'static str>,
+    pub value_shape: PublishedShape,
     /// What the value surface written under this name puts on the wire, one entry per leaf of it,
     /// and empty when nothing has been recorded at all. Filled by [`record_wire_leaves`] as each
     /// item registers.
@@ -229,11 +283,6 @@ pub struct AliasInfo {
     /// two documents, and an array and a map one shape and opposite answers.
     #[cfg(all(feature = "serde", any(feature = "zod", feature = "typescript")))]
     pub wire: Vec<WireLeaf>,
-    /// What an externally tagged enum's variants are spelled as where an object flattens the enum
-    /// itself, one per variant in the order the union writes them, and empty for every other item.
-    /// Filled by [`record_zod_flatten_variants`] once that enum's own expansion has rendered them.
-    #[cfg(all(feature = "serde", feature = "zod"))]
-    pub zod_flatten_variants: Vec<String>,
     /// What an untagged enum's members are spelled as on the Zod surface, and empty for every other
     /// item. Filled by [`record_zod_union_members`] once the enum's own expansion has rendered
     /// them.
@@ -598,16 +647,16 @@ pub fn register_alias_info(
             rust_ident.to_owned(),
             AliasInfo {
                 export_name: export_name.to_owned(),
+                #[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod")))]
+                flatten_variants: Vec::new(),
                 kind,
                 #[cfg(feature = "jsonschema")]
                 module_name: module_name.to_owned(),
                 #[cfg(feature = "zod")]
                 publishes_zod_factory: false,
-                value_shape: None,
+                value_shape: PublishedShape::Flat(None),
                 #[cfg(all(feature = "serde", any(feature = "zod", feature = "typescript")))]
                 wire: Vec::new(),
-                #[cfg(all(feature = "serde", feature = "zod"))]
-                zod_flatten_variants: Vec::new(),
                 #[cfg(feature = "zod")]
                 zod_union_members: Vec::new(),
             },
@@ -624,15 +673,19 @@ pub fn register_alias_info(
 /// published. So each item answers for itself as it registers, and a brand over a name reads the
 /// answer back rather than guessing at it.
 ///
-/// `None` is what an unanswered name and a string-checked one both leave, and the guard treats them
-/// alike: a name it cannot classify keeps the emission it has always had. That is the same regime
-/// the map-key registry already runs — `AliasKind::Unknown` is a name that was not registered
-/// before the type reading it — rather than a second one.
+/// [`PublishedShape::Flat(None)`] is what an unanswered name and a string-checked one both leave,
+/// and the guard treats them alike: a name it cannot classify keeps the emission it has always
+/// had. That is the same regime the map-key registry already runs — `AliasKind::Unknown` is a name
+/// that was not registered before the type reading it — rather than a second one.
+///
+/// A name whose written target *is* one of its own parameters records that position instead of a
+/// word, because one word would have to stand for every instantiation and only the opaque one
+/// does — see [`PublishedShape`].
 ///
 /// A chain resolves one link at a time and cannot cycle, because an entry is only ever built from
 /// entries registered before it.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-pub fn record_value_shape(rust_ident: &str, shape: Option<&'static str>) {
+pub fn record_value_shape(rust_ident: &str, shape: PublishedShape) {
     ALIAS_INFO.with(|map| {
         if let Some(info) = map.borrow_mut().get_mut(rust_ident) {
             info.value_shape = shape;
@@ -703,14 +756,15 @@ pub fn record_zod_union_members(rust_ident: &str, members: &[ZodUnionMember]) {
 /// where the union publishes a bare string no object joins. So the flatten-edge spelling is recorded
 /// beside the union's rather than read back off it.
 ///
-/// Recorded for every externally tagged enum and read only where the same enum's leaves prove the
-/// merge would otherwise write a branch no payload satisfies, which is the bound the leaves are
-/// already spliced under one position further in.
-#[cfg(all(feature = "serde", feature = "zod"))]
-pub fn record_zod_flatten_variants(rust_ident: &str, variants: &[String]) {
+/// Recorded for every externally tagged enum, and read by each surface under the bound that
+/// surface's own merge has: Zod joins one operand per variant wherever the enum is flattened
+/// directly, TypeScript only where a variant is proved to be no object, an intersection distributing
+/// over a union of objects on its own.
+#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod")))]
+pub fn record_flatten_variants(rust_ident: &str, variants: &[FlattenVariant]) {
     ALIAS_INFO.with(|map| {
         if let Some(info) = map.borrow_mut().get_mut(rust_ident) {
-            info.zod_flatten_variants = variants.to_vec();
+            info.flatten_variants = variants.to_vec();
         }
     });
 }
