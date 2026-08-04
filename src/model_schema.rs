@@ -96,6 +96,9 @@ use crate::utils::{get_item_docs, ident_reexport_ts};
 #[cfg(feature = "zod")]
 use crate::utils::ident_reexport_zod;
 
+#[cfg(feature = "zod")]
+use crate::utils::record_zod_union_members;
+
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::register_alias_info;
 
@@ -159,11 +162,12 @@ type RenderedVariants = (
 );
 
 /// Per-member data collected from an untagged enum: the TypeScript member types, the Zod member
-/// schemas, the JSON-schema value tokens, the `compile_error!` tokens for any field-level guard
-/// violations, the per-member serde validation functions, and the `validate()` match arms those
-/// functions are run from.
+/// schemas, what those Zod members contribute to an object that merges the enum, the JSON-schema
+/// value tokens, the `compile_error!` tokens for any field-level guard violations, the per-member
+/// serde validation functions, and the `validate()` match arms those functions are run from.
 #[cfg(feature = "serde")]
 type UntaggedMemberData = (
+    Vec<String>,
     Vec<String>,
     Vec<String>,
     Vec<proc_macro2::TokenStream>,
@@ -457,6 +461,12 @@ struct ModelSchemaArgs {
 /// keys alone. Where that choice is spelled is each surface's to answer.
 #[cfg(any(feature = "typescript", feature = "zod"))]
 struct MergedOperand {
+    /// What the source contributes to each branch when it names an untagged union the registry has
+    /// recorded — one member per branch — and empty for every other source, which contributes
+    /// `spelling`. Zod only: TypeScript distributes an intersection over a union on its own, so
+    /// there the union is spelled as the one operand it is.
+    #[cfg(feature = "zod")]
+    members: Vec<String>,
     optional: bool,
     spelling: String,
 }
@@ -809,6 +819,10 @@ fn process_type_alias(item_type: ItemType, args: &ModelSchemaArgs) -> TokenStrea
     let alias_field_def = get_field_def(export_name.as_str(), &alias.ty, "");
     let kind = alias_target_kind(&alias_field_def);
     register_alias_info(&rust_ident_str, &export_name, &module_name, kind);
+    // An alias *is* the type it names, so a merge that flattens it multiplies over exactly the
+    // members the target's own name would have given it.
+    #[cfg(feature = "zod")]
+    record_zod_union_members(&rust_ident_str, &alias_field_def.zod_union_members());
 
     // Registered above whatever the outcome, so a type naming a refused alias still resolves to the
     // export name the author wrote and the alias's own diagnostic stays the one they act on.
@@ -1164,6 +1178,8 @@ fn compute_flatten_outputs(
     let ts_types = flattened_fields
         .iter()
         .map(|fld| MergedOperand {
+            #[cfg(feature = "zod")]
+            members: Vec::new(),
             optional: fld.is_optional(),
             spelling: fld.typescript_merged_typename(),
         })
@@ -1175,6 +1191,7 @@ fn compute_flatten_outputs(
     let zod_schemas = flattened_fields
         .iter()
         .map(|fld| MergedOperand {
+            members: fld.zod_union_members(),
             optional: fld.is_optional(),
             spelling: fld.zod_merged_schema(),
         })
@@ -5208,6 +5225,10 @@ fn collect_untagged_members(
     let enum_type_name = item_enum.ident.to_string();
     let mut ts_parts: Vec<String> = Vec::new();
     let mut zod_parts: Vec<String> = Vec::new();
+    #[cfg(feature = "zod")]
+    let mut zod_merge_parts: Vec<String> = Vec::new();
+    #[cfg(not(feature = "zod"))]
+    let zod_merge_parts: Vec<String> = Vec::new();
     let mut json_parts: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut guard_errors: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut validation_fns: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -5281,6 +5302,8 @@ fn collect_untagged_members(
 
         match render_untagged_variant(&kind, variant, &field_defs, &enum_type_name) {
             Ok((ts, zod, json_val)) => {
+                #[cfg(feature = "zod")]
+                zod_merge_parts.extend(zod_merge_branches(&kind, &field_defs, &zod));
                 ts_parts.push(ts);
                 zod_parts.push(zod);
                 json_parts.push(json_val);
@@ -5292,11 +5315,31 @@ fn collect_untagged_members(
     (
         ts_parts,
         zod_parts,
+        zod_merge_parts,
         json_parts,
         guard_errors,
         validation_fns,
         build_member_check_arms(per_variant_checks),
     )
+}
+
+/// What one rendered member contributes to an object that merges the enum: the members of the union
+/// it names, when it names one the registry has recorded, and the member as rendered otherwise.
+///
+/// This is where the recorded member list is multiplied out, so what the registry hands a merge is
+/// the leaf set rather than a chain to walk. A member reached through an `Option` is left as it was
+/// rendered: its absence is a bare `null` on the wire, which is not a key set and joins no object.
+#[cfg(all(feature = "serde", feature = "zod"))]
+fn zod_merge_branches(kind: &VariantKind, field_defs: &[FieldDef], rendered: &str) -> Vec<String> {
+    let members = match (kind, field_defs) {
+        (VariantKind::TupleSingle, [fld]) if !fld.is_optional() => fld.zod_union_members(),
+        _ => Vec::new(),
+    };
+    if members.is_empty() {
+        vec![rendered.to_owned()]
+    } else {
+        members
+    }
 }
 
 /// Builds the schema module's impl items for an untagged enum: its JSON schema, its `TypeScript`
@@ -5414,14 +5457,27 @@ fn process_untagged_enum(
     let enum_module_name_opt = None;
 
     // Render each variant into its union member (TS / Zod / JSON parts).
-    let (ts_parts, zod_parts, json_parts, guard_errors, enum_validation_fns, validate_arms) =
-        collect_untagged_members(&mut item_enum, enum_module_name_opt);
+    let (
+        ts_parts,
+        zod_parts,
+        zod_merge_parts,
+        json_parts,
+        guard_errors,
+        enum_validation_fns,
+        validate_arms,
+    ) = collect_untagged_members(&mut item_enum, enum_module_name_opt);
 
     // A violated field guard makes the whole contract unsound, so the schema surface is dropped
     // and only the original item plus the errors are emitted.
     if let Some(output) = guard_failure_output(&item_enum, Some(&item_enum.ident), &guard_errors) {
         return output;
     }
+
+    // Recorded only past the guards, so nothing merges an enum whose own schema was dropped.
+    #[cfg(feature = "zod")]
+    record_zod_union_members(&name.to_string(), &zod_merge_parts);
+    #[cfg(not(feature = "zod"))]
+    let _: &_ = &zod_merge_parts;
 
     #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
     let _: &_ = &(name, item_name, &ts_parts, &zod_parts, &json_parts);
@@ -8445,8 +8501,8 @@ fn flatten_merged_source(fld: &FieldDef) -> MergedSource {
 /// passes through it, and that payload is one the object never writes.
 #[cfg(feature = "typescript")]
 fn ts_merged_operand(operand: &MergedOperand) -> String {
-    let MergedOperand { optional, spelling } = operand;
-    if *optional {
+    let spelling = &operand.spelling;
+    if operand.optional {
         format!("({spelling} | {{ [K in keyof {spelling}]?: never }})")
     } else {
         spelling.clone()
@@ -8524,55 +8580,74 @@ fn deferred_zod_operand(schema: &str) -> String {
     format!("z.lazy(() => {schema})")
 }
 
+/// What one merged source contributes to each branch: one schema per member of the untagged union
+/// it names, and the source itself when it names none.
+#[cfg(feature = "zod")]
+fn zod_operand_contributions(operand: &MergedOperand) -> Vec<&str> {
+    if operand.members.is_empty() {
+        vec![operand.spelling.as_str()]
+    } else {
+        operand.members.iter().map(String::as_str).collect()
+    }
+}
+
 /// What the object's schema is written as: the statements bound ahead of it, and the expression
 /// itself.
 ///
-/// A source reached through an `Option` contributes its members or contributes nothing, and every
-/// other source contributes always, so what the object writes is one intersection per combination
-/// of the sources it merges — the multiplication the JSON-schema document is written from, in the
-/// order that document writes it. Zod can only say that as a union around the intersections: an
-/// intersection recognizes exactly the keys its operands name, and an operand that is itself a
-/// choice leaves each of its branches answering for the keys the other branch carries — which
-/// rejects every payload the object writes rather than admitting two of them.
+/// A source offers a choice on two counts. One reached through an `Option` contributes its members
+/// or contributes nothing; one that is an untagged union contributes the members of whichever of
+/// its own members matched. Every other source contributes one key set, always. So what the object
+/// writes is one intersection per combination — the multiplication the JSON-schema document is
+/// written from, in the order that document writes it.
 ///
-/// With no absence to offer there is one intersection and no choice to write, so the object's own
-/// keys stay where they were. With one, they are bound to a name the branches read: they are the
-/// same keys in every branch, and a branch says what it adds to them rather than repeating them.
+/// Zod can only say that as a union around the intersections. An intersection recognizes exactly
+/// the keys its operands name, and an operand that is itself a choice leaves each of its branches
+/// answering for the keys the other branch carries — which rejects every payload the object writes
+/// rather than admitting each of them. `z.discriminatedUnion` is the one union Zod does read a key
+/// set off, so a source spelled as one is an operand like any other and never reaches the
+/// multiplication.
+///
+/// With one combination there is no choice to write, so the object's own keys stay where they were.
+/// With more, they are bound to a name the branches read: they are the same keys in every branch,
+/// and a branch says what it adds to them rather than repeating them.
+///
+/// A source declared *below* the object has no registry entry to read members off, so it is written
+/// as the one operand it names — the same fallback a forward reference already takes for the name
+/// itself (see [`deferred_zod_operand`]). Nothing at the merge tells that source apart from a plain
+/// struct declared below, so an untagged union flattened by an object above it must be declared
+/// above the object for the multiplication to reach it.
 #[cfg(feature = "zod")]
 fn zod_merged_statements(
     item_name: &str,
     own: &str,
     operands: &[MergedOperand],
 ) -> (String, String) {
-    let joined = |acc: &mut String, operand: &MergedOperand| {
-        let _ = write!(acc, ".and({})", deferred_zod_operand(&operand.spelling));
-    };
-    if !operands.iter().any(|operand| operand.optional) {
-        let mut expression = own.to_owned();
-        for operand in operands {
-            joined(&mut expression, operand);
-        }
-        return (String::new(), expression);
-    }
-
-    let own_name = format!("{item_name}$OwnSchema");
-    let mut branches = vec![own_name.clone()];
+    // Built as the joins alone so the root can be decided once every combination is counted: one
+    // combination writes the object's own keys where they stood, and more bind them to a name.
+    let mut joins = vec![String::new()];
     for operand in operands {
-        branches = branches
-            .into_iter()
-            .flat_map(|branch| {
-                let mut present = branch.clone();
-                joined(&mut present, operand);
+        joins = joins
+            .iter()
+            .flat_map(|join| {
+                let mut grown: Vec<String> = zod_operand_contributions(operand)
+                    .into_iter()
+                    .map(|schema| format!("{join}.and({})", deferred_zod_operand(schema)))
+                    .collect();
                 if operand.optional {
-                    vec![present, branch]
-                } else {
-                    vec![present]
+                    grown.push(join.clone());
                 }
+                grown
             })
             .collect();
     }
-    let written = branches.iter().fold(String::new(), |mut acc, branch| {
-        let _ = writeln!(acc, "  {branch},");
+
+    if let [only] = joins.as_slice() {
+        return (String::new(), format!("{own}{only}"));
+    }
+
+    let own_name = format!("{item_name}$OwnSchema");
+    let written = joins.iter().fold(String::new(), |mut acc, join| {
+        let _ = writeln!(acc, "  {own_name}{join},");
         acc
     });
     (

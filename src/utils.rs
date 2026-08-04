@@ -135,6 +135,11 @@ pub struct AliasInfo {
     pub kind: AliasKind,
     #[cfg(feature = "jsonschema")]
     pub module_name: String,
+    /// What an untagged enum's members are spelled as on the Zod surface, and empty for every other
+    /// item. Filled by [`record_zod_union_members`] once the enum's own expansion has rendered
+    /// them.
+    #[cfg(feature = "zod")]
+    pub zod_union_members: Vec<String>,
 }
 
 /// The walk over a parsed `pattern` that collects the rewrites its JavaScript spelling needs and
@@ -497,8 +502,32 @@ pub fn register_alias_info(
                 kind,
                 #[cfg(feature = "jsonschema")]
                 module_name: module_name.to_owned(),
+                #[cfg(feature = "zod")]
+                zod_union_members: Vec::new(),
             },
         );
+    });
+}
+
+/// Records what an untagged enum's members are spelled as on the Zod surface, on the entry that
+/// enum has already registered.
+///
+/// A merge that flattens the enum is a different macro invocation from the enum's own, so the
+/// members reach it through the registry or not at all — an intersection recognizes exactly the
+/// keys its operands name, and a `z.union` names none, so the merge joins one member per branch
+/// rather than the union as one operand.
+///
+/// What is recorded is already multiplied out: a member that is itself a recorded union contributes
+/// that union's members instead of its own name. That leaves the merge nothing to walk, and the
+/// walk is what could not be made to terminate — two unions naming each other is a shape a merge is
+/// free to reach. The recording cannot hold such a cycle, because an entry is only ever built from
+/// entries registered before it.
+#[cfg(feature = "zod")]
+pub fn record_zod_union_members(rust_ident: &str, members: &[String]) {
+    ALIAS_INFO.with(|map| {
+        if let Some(info) = map.borrow_mut().get_mut(rust_ident) {
+            info.zod_union_members = members.to_vec();
+        }
     });
 }
 
