@@ -202,8 +202,8 @@ mod zod {
     use super::MixedArguments;
     use super::{
         Adjacent, Carried, Envelope, External, FolderTree, Holder, Internal, KeyedByParameter,
-        LifetimeStruct, Pair, PlainConst, Positional, Quintet, Referrer, Tagged, Untagged,
-        WireFolder, Wrapper,
+        LifetimeStruct, Pair, PlainConst, Positional, Quintet, Referrer, Summarised, Tagged,
+        Untagged, WireFolder, Wrapper,
     };
 
     /// A record key has to produce string keys, and serde says every instantiation this map has
@@ -534,20 +534,46 @@ mod zod {
         assert!(!zod.contains("ZodType"), "Got: {zod}");
     }
 
-    /// The two surfaces that publish a `const` rather than a factory have no argument for a
-    /// parameter inside them to name, so both still write the opaque value there.
+    /// The alias and the brand write the same untyped factory, and the brand's marker drops the
+    /// type argument only TypeScript reads — the two spellings that made this build's output stop
+    /// at load rather than at a payload.
+    #[cfg(not(feature = "typescript"))]
     #[test]
-    fn a_surface_publishing_no_factory_keeps_the_opaque_value() {
+    fn a_javascript_build_writes_the_alias_and_the_brand_untyped() {
         let alias = super::boxed_schema::Schema::zod_schema();
-        assert!(alias.contains("z.array(z.unknown())"), "Got: {alias}");
-        assert!(!alias.contains("$SchemaFactory"), "Got: {alias}");
+        assert!(
+            alias.contains("const buildBoxed$Schema = (\n  valueType,\n) =>"),
+            "Got: {alias}"
+        );
+        assert!(!alias.contains("ZodType"), "Got: {alias}");
+        assert!(!alias.contains("$Schema:"), "Got: {alias}");
+
+        let brand = Tagged::<String>::zod_schema();
+        assert!(brand.contains("}).brand();"), "Got: {brand}");
+        assert!(!brand.contains(".brand<"), "Got: {brand}");
+        assert!(!brand.contains("ZodType"), "Got: {brand}");
+    }
+
+    /// An alias and a branded newtype are generic publishers like any other, so each binds an
+    /// argument per parameter and composes it — the alias into the shape it names, the brand into
+    /// the value it marks.
+    #[test]
+    fn every_generic_publisher_binds_its_parameter_as_a_factory_argument() {
+        let alias = super::boxed_schema::Schema::zod_schema();
+        assert!(
+            alias.contains("export const Boxed$SchemaFactory = "),
+            "Got: {alias}"
+        );
+        assert!(alias.contains("z.array(valueType)"), "Got: {alias}");
+        assert!(!alias.contains("z.unknown()"), "Got: {alias}");
 
         let brand = Tagged::<String>::zod_schema();
         assert!(
-            brand.contains("z.unknown().brand<\"Tagged\">()"),
+            brand.contains("export const Tagged$SchemaFactory = "),
             "Got: {brand}"
         );
-        assert!(!brand.contains("$SchemaFactory"), "Got: {brand}");
+        assert!(brand.contains("  valueType.meta({"), "Got: {brand}");
+        assert!(!brand.contains("z.unknown()"), "Got: {brand}");
     }
 
     /// A field naming a generic type has no schema to name — the type publishes a factory — so it
@@ -616,15 +642,36 @@ mod zod {
         }
     }
 
-    /// A reference names what the type it names publishes. An alias and a branded newtype publish
-    /// a `const` whatever they were written with, so a field supplying either an argument still
-    /// names that `const` rather than calling a factory neither declares.
+    /// A reference names what the type it names publishes, and the seam saying which of the two it
+    /// was is the item's own registry entry — so an alias and a branded newtype joining the
+    /// factories moved every field naming either with them, no reference-site rule of its own.
     #[test]
-    fn a_reference_to_a_type_publishing_a_const_still_names_it() {
+    fn a_reference_to_an_alias_or_a_brand_calls_the_factory_it_publishes() {
         let zod = Referrer::zod_schema();
-        assert!(zod.contains("boxed: Boxed$Schema,"), "Got: {zod}");
-        assert!(zod.contains("tagged: Tagged$Schema,"), "Got: {zod}");
-        assert!(!zod.contains("$SchemaFactory("), "Got: {zod}");
+        assert!(
+            zod.contains("boxed: Boxed$SchemaFactory(z.number().int()),"),
+            "Got: {zod}"
+        );
+        assert!(
+            zod.contains("tagged: Tagged$SchemaFactory(z.string()),"),
+            "Got: {zod}"
+        );
+    }
+
+    /// The argument a containing factory was handed is what reaches the alias and the brand it
+    /// holds, so a caller filling the container fills what validates inside it — where before the
+    /// container took the filling and threw it away.
+    #[test]
+    fn a_forwarded_parameter_reaches_an_alias_and_a_brand_alike() {
+        let zod = Summarised::<String>::zod_schema();
+        assert!(
+            zod.contains("boxed: Boxed$SchemaFactory(valueType),"),
+            "Got: {zod}"
+        );
+        assert!(
+            zod.contains("tagged: Tagged$SchemaFactory(valueType),"),
+            "Got: {zod}"
+        );
     }
 
     /// The one helper every factory builds its cache with, and the only assertion in the output.
@@ -952,13 +999,24 @@ pub struct MixedArguments {
     pub stamped: Inner<DateTime<Utc>>,
 }
 
-/// The two surfaces that publish a `const` whatever they were written with, named from a field
-/// that supplies each of them an argument.
+/// An alias and a branded newtype, named from a field that supplies each of them a concrete
+/// argument.
 #[model_schema()]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Referrer {
     pub boxed: Boxed<u32>,
     pub tagged: Tagged<String>,
+}
+
+/// The same two, named from a field that forwards the referrer's own parameter into each. Read by
+/// the Zod surface alone, where an argument is a value that has to be passed on, so it exists only
+/// where that surface compiles.
+#[cfg(feature = "zod")]
+#[model_schema(default_types(ValueType = String))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Summarised<ValueType> {
+    pub boxed: Boxed<ValueType>,
+    pub tagged: Tagged<ValueType>,
 }
 
 #[cfg(not(feature = "jsonschema"))]

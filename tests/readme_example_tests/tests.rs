@@ -11,6 +11,10 @@
 //! Rust source; the README orders its examples for reading. Only the order the members are written
 //! in differs, so every member is held as a whole line rather than as part of a block — what is
 //! pinned is the spelling of each, which is what an omitted key changes.
+//!
+//! The README's `ts_optional` example is not here. The flag decides the key only where no serde
+//! attribute is read, so the section shows a declaration this module's build cannot compile; the
+//! same declares-and-shows pin sits in `optional_key_flag_tests`, gated the other way.
 
 #![cfg(all(feature = "serde", feature = "typescript"))]
 
@@ -93,32 +97,6 @@ fn test_the_collections_example_is_declarable() {
         "    #[serde(default, skip_serializing_if = \"Option::is_none\")]\n    pub settings: Option<HashMap<String, String>>,\n",
         &UserWithCollections::ts_definition(),
         &[],
-    );
-}
-
-/// The `ts_optional` example. The flag asks for the optional key on the author's word; the omission
-/// attribute the guard requires of the field asks for it off the wire. Both are on the field here,
-/// as the README declares it, and the key the section shows is the one that comes out.
-#[test]
-fn test_the_optional_key_flag_example_is_declarable_and_shows_what_it_emits() {
-    #[model_schema()]
-    #[derive(Serialize, Deserialize)]
-    pub struct Profile {
-        pub name: String,
-        #[model_schema_prop(ts_optional)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub nickname: Option<String>,
-    }
-
-    assert_readme_declares_and_shows(
-        "    #[model_schema_prop(ts_optional)]\n    #[serde(default, skip_serializing_if = \"Option::is_none\")]\n    pub nickname: Option<String>,\n",
-        &Profile::ts_definition(),
-        &[
-            "export type Profile = {",
-            "  name: string;",
-            "  nickname?: string;",
-            "};",
-        ],
     );
 }
 

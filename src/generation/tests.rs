@@ -21,6 +21,7 @@ fn test_typescript_field_formatting() {
         array_lengths: Vec::new(),
         model_schema_prop_meta: None,
         nullable_levels: Vec::new(),
+        absent_from_wire: false,
         omits_value: false,
         #[cfg(feature = "jsonschema")]
         type_span: proc_macro2::Span::call_site(),

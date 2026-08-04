@@ -2715,10 +2715,10 @@ fn an_alias_type_parameter_is_erased_at_every_depth() {
 }
 
 /// The same erasure at the same depths on the value surface, where the consequence of skipping it
-/// is louder: a Zod `const` cannot be parameterised, so a parameter left to render names a
-/// `$Schema` binding no emitted module declares and the pasted output throws before a payload is
-/// read. Asserted over the identical alias list the JSON test walks, so the two surfaces cannot
-/// erase at different depths.
+/// is louder: a parameter left to render names a `$Schema` binding no emitted module declares, and
+/// the pasted output throws before a payload is read. What it renders as instead is the argument
+/// the alias's own factory binds for it, at whatever depth it was written. Asserted over the
+/// identical alias list the JSON test walks, so the two surfaces cannot erase at different depths.
 #[cfg(feature = "zod")]
 #[test]
 fn an_alias_type_parameter_is_erased_at_every_depth_on_the_value_surface() {
@@ -2739,7 +2739,7 @@ fn an_alias_type_parameter_is_erased_at_every_depth_on_the_value_surface() {
             "for {alias_source}, got: {tokens}"
         );
         assert!(
-            tokens.contains("\"HolderType<unknown>\""),
+            tokens.contains("HolderType$SchemaFactory"),
             "for {alias_source}, got: {tokens}"
         );
     }
@@ -5498,6 +5498,7 @@ fn wrapped_u32_value(wrapper: &str) -> super::FieldDef {
         model_schema_prop_meta: None,
         nullable_levels: Vec::new(),
         name: "items".to_owned(),
+        absent_from_wire: false,
         omits_value: false,
         type_span: proc_macro2::Span::call_site(),
     }

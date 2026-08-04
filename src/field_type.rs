@@ -186,6 +186,13 @@ pub enum FieldDefType {
 ///   that may be absent, `field: T | undefined` for one that is always written — and what takes
 ///   the field out of the JSON surface's `required`. Read in every build: the attribute stating
 ///   it is on the field whatever the features say, and one declaration describes one wire.
+/// - `absent_from_wire`: whether the serde attributes on a *named* field take its key out of both
+///   directions at once — nothing serde writes carries it and nothing serde reads keeps what a
+///   payload put under it. A bare `skip` says so, and so do `skip_serializing` and
+///   `skip_deserializing` written side by side, which is the same wire spelled out. A field
+///   carrying it is one no surface describes at all: the surfaces describe the payload serde
+///   writes, and there is no such key in any of them. Read in every build, for the same reason
+///   `omits_value` is.
 /// - `type_span`: where the type this field carries was written — the name segment of a path, the
 ///   whole type otherwise, and the innermost name under a wrapper, so `Vec<Inner>` points at
 ///   `Inner`. The JSON schema is the one surface that emits a Rust path built from a type name, so
@@ -201,6 +208,7 @@ pub enum FieldDefType {
 /// - Feature "zod" enables `zod_type()` method
 #[derive(Clone, Debug)]
 pub struct FieldDef {
+    pub absent_from_wire: bool,
     pub array_depth: u8,
     pub array_lengths: Vec<(u8, usize)>,
     pub docs: String,
@@ -257,6 +265,7 @@ impl FieldDef {
             .model_schema_prop_meta
             .clone_from(&self.model_schema_prop_meta);
         arrayed.omits_value = self.omits_value;
+        arrayed.absent_from_wire = self.absent_from_wire;
         arrayed
     }
 
@@ -388,11 +397,13 @@ impl FieldDef {
     /// enclosing item's *own* parameters are rewritten: a genuinely unresolved sibling type keeps
     /// its `$Schema` reference, because the type it names does publish that binding.
     ///
-    /// The rewrite carries into what a schema surface may then claim about the value. An opaque
-    /// value takes no string checks — Zod 4's `z.unknown()` carries no `.min`/`.max`, and
-    /// `.brand()` hands back the very same instance rather than a wrapper that could — so a
-    /// branded newtype constraining one of its own parameters is refused, through the opaque arm
-    /// of `non_string_inner_shape` this rewrite puts it in front of.
+    /// The rewrite carries into what a schema surface may then claim about the value. A parameter
+    /// is a value on one surface and no value at all on the other — Zod reaches it through the
+    /// argument the enclosing factory binds, while the one JSON document written covers every
+    /// instantiation and so describes it as `{}` — so a branded newtype constraining one of its
+    /// own parameters is refused, through the opaque arm of `non_string_inner_shape` this rewrite
+    /// puts it in front of. Three surfaces answering three ways is the refusal: `minLength` goes
+    /// inert beside a `{}`, while `validate()` still measures `Display`.
     ///
     /// Recurses through `SiblingType` generics, `Map` keys/values, and `Tuple` elements. Applied
     /// after the field guards have read the field, so every guard asks its question of the type
@@ -521,6 +532,11 @@ impl FieldDef {
     /// writes simply has no key there. That second one asks nothing about `Option`-ness on purpose
     /// — a `Vec` behind a `Vec::is_empty` predicate has no `None` anywhere in it and its key still
     /// goes missing, so a rule keyed on `Option` would describe a payload serde does not write.
+    ///
+    /// The two overlap on every field that carries both, which leaves the flag deciding this only
+    /// where no such attribute was written — a field the `serde` feature's `Option`-null guard
+    /// refuses, so the flag's own answer is one a build with that feature off is the only place to
+    /// read.
     fn key_may_be_absent(&self) -> bool {
         self.omits_value
             || (self.is_optional()
@@ -578,17 +594,6 @@ impl FieldDef {
             | FieldDefType::NaiveTime
             | FieldDefType::NaiveDateTime
             | FieldDefType::DateTime => Vec::new(),
-        }
-    }
-
-    #[cfg(feature = "zod")]
-    fn opaque_type_parameters(&mut self) {
-        if matches!(self.field_type, FieldDefType::TypeParam(_)) {
-            self.field_type = FieldDefType::Unknown;
-            return;
-        }
-        for nested in self.nested_type_positions() {
-            nested.opaque_type_parameters();
         }
     }
 
@@ -951,20 +956,6 @@ impl FieldDef {
         value
     }
 
-    /// The same def with every [`FieldDefType::TypeParam`] written back as the opaque value.
-    ///
-    /// Zod names a parameter through the argument the enclosing factory binds for it, which only a
-    /// type that publishes a factory has. An alias and a branded newtype publish a plain `const`,
-    /// so there is no argument for a parameter inside either to name and the opaque value is still
-    /// all either can write — the answer [`Self::erase_type_parameters`] describes, kept for the
-    /// two surfaces that have not moved off it.
-    #[cfg(feature = "zod")]
-    #[must_use]
-    pub fn with_opaque_type_parameters(mut self) -> Self {
-        self.opaque_type_parameters();
-        self
-    }
-
     /// The type match plus one `z.array(…)` per array level, each carrying the `z.nullable(…)` of
     /// the level it wraps and the `.length(N)` of a level written as a fixed-size `[T; N]`, before
     /// the preprocess wrap.
@@ -980,10 +971,9 @@ impl FieldDef {
     fn zod_array_base(&self) -> String {
         let result = match &self.field_type {
             FieldDefType::Unknown => "z.unknown()".to_owned(),
-            // A `const` cannot be parameterised, so a generic type publishes a factory and a
+            // A `const` cannot be parameterised, so every generic publisher writes a factory and a
             // parameter composes the argument that factory binds for it — see
-            // [`zod_factory_argument`]. A surface with no factory to bind one opaques the
-            // parameter first, through [`FieldDef::with_opaque_type_parameters`].
+            // [`zod_factory_argument`].
             FieldDefType::TypeParam(name) => zod_factory_argument(name),
             FieldDefType::Tuple(lst) => {
                 let elements = lst
@@ -1000,11 +990,10 @@ impl FieldDef {
                     // The element carries this field's own array levels, so it applies the wrap.
                     return self.collection_element_field(element).zod_array_base();
                 } else if let Some(info) = lookup_alias_info(name) {
-                    // What the named type published is what this can name. A generic struct or
-                    // enum published a factory, so the arguments written here are the call's; an
-                    // alias and a branded newtype published the one `const` they have whatever
-                    // they were declared with, and that `const` is the whole of what a reference
-                    // to either can say.
+                    // What the named type published is what this can name: a factory where the
+                    // type declares parameters, and the one schema it has where it declares none.
+                    // Read off the registry rather than off the arguments written here, because a
+                    // name carrying arguments says nothing about which of the two it published.
                     if info.publishes_zod_factory {
                         zod_factory_call(&info.export_name, lst)
                     } else {
@@ -1367,6 +1356,7 @@ fn get_field_def_from_type_path(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            absent_from_wire: false,
             omits_value: false,
             #[cfg(feature = "jsonschema")]
             type_span: type_path.span(),
@@ -1382,6 +1372,7 @@ fn get_field_def_from_type_path(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            absent_from_wire: false,
             omits_value: false,
             // The name segment, not the whole path: it is what a generated module is named after,
             // so a reference the module cannot resolve is blamed on the name it was built from.
@@ -1400,6 +1391,7 @@ fn get_field_def_from_type_path(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            absent_from_wire: false,
             omits_value: false,
             #[cfg(feature = "jsonschema")]
             type_span: segment.ident.span(),
@@ -1450,37 +1442,15 @@ fn get_field_def_from_generic_type(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            absent_from_wire: false,
             omits_value: false,
             #[cfg(feature = "jsonschema")]
             type_span: type_ident.span(),
         }
-    }
-    // A collapse keeps the field and drops only the wrapper. The docs were written where the field
-    // was, not around what it holds, so they cross onto the element the field's own name crosses
-    // onto — the element was parsed with none of its own to lose.
-    else if arg_types.len() == 1 && ident == "Option" {
-        let mut result = arg_types[0].clone();
-        result.name = safe_name;
-        field_docs.clone_into(&mut result.docs);
-        result.mark_nullable_at(result.array_depth);
-        result
-    } else if arg_types.len() == 1 && ident == "Vec" {
-        let mut result = arg_types[0].clone();
-        result.name = safe_name;
-        field_docs.clone_into(&mut result.docs);
-        result.array_depth = result.array_depth.saturating_add(1);
-        result
-    }
-    // A wrapper that is not on the wire adds nothing for the field to carry: the inner field stands
-    // in whole, under the wrapped field's own name and its own docs, which belong to where the
-    // field was written rather than to what it was written under. Everything a wrapper could sit
-    // around or inside — the optionality an `Option` lifts, the levels a sequence counts — is
-    // already on that field and rides along untouched.
-    else if arg_types.len() == 1 && is_transparent_wrapper(ident) {
-        let mut result = arg_types[0].clone();
-        result.name = safe_name;
-        field_docs.clone_into(&mut result.docs);
-        result
+    } else if let [element] = arg_types.as_slice()
+        && let Some(collapsed) = collapsed_wrapper_def(ident, element, &safe_name, field_docs)
+    {
+        collapsed
     } else if arg_types.len() == 2 && (ident == "HashMap" || ident == "BTreeMap") {
         log::trace!(
             "Creating HashMap Map type - key: {:?}, value: {:?}",
@@ -1498,6 +1468,7 @@ fn get_field_def_from_generic_type(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            absent_from_wire: false,
             omits_value: false,
             #[cfg(feature = "jsonschema")]
             type_span: type_ident.span(),
@@ -1512,6 +1483,7 @@ fn get_field_def_from_generic_type(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            absent_from_wire: false,
             omits_value: false,
             #[cfg(feature = "jsonschema")]
             type_span: type_ident.span(),
@@ -1526,11 +1498,41 @@ fn get_field_def_from_generic_type(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            absent_from_wire: false,
             omits_value: false,
             #[cfg(feature = "jsonschema")]
             type_span: type_ident.span(),
         }
     }
+}
+
+/// The def a single-argument wrapper collapses onto, for the wrappers that collapse.
+///
+/// A collapse keeps the field and drops only the wrapper. The docs were written where the field
+/// was, not around what it holds, so they cross onto the element the field's own name crosses onto
+/// — the element was parsed with none of its own to lose. Everything a wrapper could sit around or
+/// inside is already on that element and rides along untouched: `Option` lifts its optionality onto
+/// the outermost level, a sequence counts one more level, and a wrapper that is not on the wire at
+/// all adds nothing for the field to carry and hands the element over whole.
+///
+/// `None` for every other name, which is a wrapper this does not answer for rather than one that
+/// collapses to nothing — the caller goes on to its own arms.
+fn collapsed_wrapper_def(
+    ident: &str,
+    element: &FieldDef,
+    safe_name: &str,
+    field_docs: &str,
+) -> Option<FieldDef> {
+    let mut result = element.clone();
+    match ident {
+        "Option" => result.mark_nullable_at(result.array_depth),
+        "Vec" => result.array_depth = result.array_depth.saturating_add(1),
+        _ if is_transparent_wrapper(ident) => {}
+        _ => return None,
+    }
+    safe_name.clone_into(&mut result.name);
+    field_docs.clone_into(&mut result.docs);
+    Some(result)
 }
 
 /// The element count a fixed-size array was written with, when the expansion can read it.
@@ -1597,6 +1599,7 @@ pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            absent_from_wire: false,
             omits_value: false,
             #[cfg(feature = "jsonschema")]
             type_span: written.span(),
@@ -1611,6 +1614,7 @@ pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            absent_from_wire: false,
             omits_value: false,
             #[cfg(feature = "jsonschema")]
             type_span: written.span(),
