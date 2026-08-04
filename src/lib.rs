@@ -225,6 +225,13 @@ pub struct Document {
 /// A generic brand carries the requirement as a `Display` bound on each type parameter, so a
 /// non-`Display` type argument is rejected where the brand is used, not where it is declared.
 ///
+/// String constraints stop at the brand's own type parameters. TypeScript binds a parameter for
+/// real, but the two validating surfaces read it as the opaque value — one schema is written for
+/// every instantiation — and an opaque value takes no string checks: Zod 4's `z.unknown()` carries
+/// no `.min`/`.max`, and `.brand()` returns that same schema rather than a wrapper that could. So
+/// `#[model_schema(minLength = 3)] struct Slug<T>(pub T);` is refused at the inner field. Constrain
+/// a string-typed inner instead.
+///
 #[proc_macro_attribute]
 pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
     exec_model_schema(args, input)
