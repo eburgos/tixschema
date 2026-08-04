@@ -5022,14 +5022,18 @@ fn branded_zod_inner(args: &ModelSchemaArgs, inner: &FieldDef) -> String {
 /// spelled `ObjectId` is not mistaken for the `$oid` object, and so a composite is annotated with
 /// the class its own value rendering produces instead of falling through to `ZodString`.
 ///
-/// Each name is the class bare, as `ZodObject` is: every one of them defaults its type parameters,
-/// so the annotation widens the raw schema rather than restating its element types.
+/// Each name is spelled off the `z` namespace (`z.ZodObject`, ...), never bare: `import { z } from
+/// "zod";` is the entire import surface CLAUDE.md's and README's own generation pattern requires of
+/// a consumer, and none of these classes is a top-level *value* export under that line — only a
+/// top-level *type* export, reachable solely by qualifying it off `z` (txsch-9rcw). Every one of
+/// them defaults its type parameters, so the annotation widens the raw schema rather than restating
+/// its element types.
 ///
 /// A named inner has no class of its own to name — the type it names publishes one, and this
 /// expansion cannot resolve it — so the annotation is the type of the very binding the value is
-/// composed from, read back off that same rendering. A check the brand adds returns the schema it
-/// was called on, so the binding's type is the base schema's type whether or not the brand
-/// constrains it.
+/// composed from, read back off that same rendering (a local `const`/factory name, not a `zod`
+/// export, so it is written bare). A check the brand adds returns the schema it was called on, so
+/// the binding's type is the base schema's type whether or not the brand constrains it.
 ///
 /// A type parameter reaches this off the erased def, as `z.unknown()` — the opaque arm — so the
 /// annotation follows the value rather than naming a binding the value no longer composes from.
@@ -5037,14 +5041,14 @@ fn branded_zod_inner(args: &ModelSchemaArgs, inner: &FieldDef) -> String {
 fn branded_zod_type_name(inner: &FieldDef) -> String {
     #[cfg(feature = "object_id")]
     if branded_inner_is_object_id(inner) {
-        return "ZodObject".to_owned();
+        return "z.ZodObject".to_owned();
     }
     if let Some(composite) = branded_inner_composite(inner) {
         return match composite {
-            BrandedComposite::Array => "ZodArray".to_owned(),
-            BrandedComposite::Map => "ZodRecord".to_owned(),
-            BrandedComposite::Opaque => "ZodUnknown".to_owned(),
-            BrandedComposite::Tuple => "ZodTuple".to_owned(),
+            BrandedComposite::Array => "z.ZodArray".to_owned(),
+            BrandedComposite::Map => "z.ZodRecord".to_owned(),
+            BrandedComposite::Opaque => "z.ZodUnknown".to_owned(),
+            BrandedComposite::Tuple => "z.ZodTuple".to_owned(),
         };
     }
     if let FieldDefType::SiblingType(_, args) = &inner.field_type
@@ -5053,9 +5057,9 @@ fn branded_zod_type_name(inner: &FieldDef) -> String {
         return format!("typeof {}", inner.zod_type());
     }
     match inner.typescript_typename().as_str() {
-        "number" => "ZodNumber".to_owned(),
-        "boolean" => "ZodBoolean".to_owned(),
-        _ => "ZodString".to_owned(),
+        "number" => "z.ZodNumber".to_owned(),
+        "boolean" => "z.ZodBoolean".to_owned(),
+        _ => "z.ZodString".to_owned(),
     }
 }
 
@@ -5225,7 +5229,7 @@ fn branded_zod_const_block(
     {
         format!(
             "const {item_name}$RawSchema = {expression};\n\nexport const {item_name}$Schema: \
-             $ZodBranded<{}, \"{item_name}\"> = {item_name}$RawSchema;{reexport}",
+             z.core.$ZodBranded<{}, \"{item_name}\"> = {item_name}$RawSchema;{reexport}",
             branded_zod_type_name(inner)
         )
     }
@@ -5583,8 +5587,10 @@ fn branded_guard_failure_output(
 /// to name, so the intersection is written against a `unique symbol` declared beside the type, and
 /// those two lines are the whole emission. Zod brands the inner's own schema with
 /// `.brand<"Name">()`, carries the item's description in the `.meta({ description })` every item
-/// carries it in, and annotates the exported binding `$ZodBranded<Class, "Name">` for the `Class`
-/// read off the very inner that rendering was built from.
+/// carries it in, and annotates the exported binding `z.core.$ZodBranded<Class, "Name">` for the
+/// `Class` read off the very inner that rendering was built from — every class name spelled off the
+/// `z` namespace, since none resolves as a bare name under the documented `import { z } from
+/// "zod";` (txsch-9rcw).
 ///
 /// Generic parameters on the struct are preserved in the TypeScript output, whose declaration
 /// binds them. The two validating surfaces read the inner off the erased def instead, so a
@@ -12531,9 +12537,10 @@ fn zod_default_block(
 /// factory's return type there, since nothing in the chain calls `.brand()`, so nothing narrows
 /// the classic `ZodType` interface's own deprecated `_output` field out from under it. A branded
 /// newtype's factory always ends its chain in `.brand()` (see [`branded_zod_expression`]), so its
-/// return type is always some `$ZodBranded<Argument, Name>` — never the plain `Name<...>`
+/// return type is always some `z.core.$ZodBranded<Argument, Name>` — never the plain `Name<...>`
 /// instantiation `ZodType` names — and the annotation has to read the same way, exactly as
-/// [`branded_zod_const_block`] already annotates the non-generic case. See txsch-bpnj.
+/// [`branded_zod_const_block`] already annotates the non-generic case. See txsch-bpnj. The class is
+/// spelled off the `z` namespace throughout, per [`branded_zod_type_name`] (txsch-9rcw).
 #[cfg(all(feature = "zod", feature = "typescript"))]
 fn branded_default_annotation(
     item_name: &str,
@@ -12568,12 +12575,12 @@ fn branded_default_annotation(
             branded_default_argument_class(&fields[index], &renderings[index])
         }
     };
-    format!(": $ZodBranded<{argument_type}, \"{item_name}\">")
+    format!(": z.core.$ZodBranded<{argument_type}, \"{item_name}\">")
 }
 
 /// The class a bare-parameter brand's own declared-default argument is annotated with, for
 /// [`branded_default_annotation`]: the eager expression's own class from [`branded_zod_type_name`]
-/// bare, or that same class wrapped in `ZodLazy<...>` for a deferred one — `typeof {schema}` when
+/// bare, or that same class wrapped in `z.ZodLazy<...>` for a deferred one — `typeof {schema}` when
 /// the deferred target is a plain binding name, which is every deferred shape
 /// [`default_zod_rendering`] folds or defers to a sibling's own `$Schema`/`$SchemaDefault`; the
 /// widened class otherwise, for the one shape it is not — a declared default naming a generic
@@ -12584,9 +12591,9 @@ fn branded_default_argument_class(field: &FieldDef, rendering: &DefaultZodRender
     match rendering {
         DefaultZodRendering::Eager(_) => branded_zod_type_name(field),
         DefaultZodRendering::Deferred(schema) if !schema.contains('(') => {
-            format!("ZodLazy<typeof {schema}>")
+            format!("z.ZodLazy<typeof {schema}>")
         }
-        DefaultZodRendering::Deferred(_) => format!("ZodLazy<{}>", branded_zod_type_name(field)),
+        DefaultZodRendering::Deferred(_) => format!("z.ZodLazy<{}>", branded_zod_type_name(field)),
     }
 }
 
