@@ -126,6 +126,14 @@ pub enum FieldDefType {
     StringLiteral(String), // For string literal types like "Tixena"
     /// Tuple type - generates anonymous object in TS/Zod.
     Tuple(Vec<FieldDef>),
+    /// One of the enclosing item's own type parameters — `IdType` in `struct Wrapper<IdType>`.
+    ///
+    /// Held apart from [`FieldDefType::SiblingType`] because the three surfaces answer for it
+    /// differently, and only one of them can name it: TypeScript binds the parameter for real, so
+    /// it renders as the name it was written with, while the two validating surfaces render the
+    /// opaque value. [`FieldDef::erase_type_parameters`] is where that rule is written down and
+    /// where a written name becomes this.
+    TypeParam(String),
     U16,
     U32,
     U64,
@@ -259,6 +267,7 @@ impl FieldDef {
             | FieldDefType::NaiveDateTime
             | FieldDefType::DateTime => None,
             FieldDefType::SiblingType(_, _)
+            | FieldDefType::TypeParam(_)
             | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
             | FieldDefType::Boolean
@@ -317,7 +326,8 @@ impl FieldDef {
                 .iter()
                 .any(|e| e.contains_type_reference(type_name)),
             // Primitive and leaf types can't contain recursive references
-            FieldDefType::Unknown
+            FieldDefType::TypeParam(_)
+            | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
             | FieldDefType::Boolean
             | FieldDefType::String
@@ -343,20 +353,35 @@ impl FieldDef {
         }
     }
 
-    /// Replaces every reference to one of the enclosing item's type parameters with the opaque
-    /// type.
+    /// Rewrites every name that is one of the enclosing item's own type parameters into
+    /// [`FieldDefType::TypeParam`], so the surfaces stop reading it as a reference to another
+    /// generated type.
     ///
-    /// A parameter names no type at expansion — the instantiation names one, and the schema is
-    /// written once for every instantiation. So a parameter describes as an opaque value does,
-    /// which leaves the shape it sits in — a tuple's arity, an array, a map's keys — described.
+    /// This is the one rule the two validating surfaces read a type parameter under, and the one
+    /// place they part company with TypeScript over it. A parameter names no type at expansion —
+    /// the instantiation names one, and one schema is written for every instantiation. So on those
+    /// two surfaces a parameter describes as an opaque value does (`{}` in JSON Schema,
+    /// `z.unknown()` in Zod), which leaves the shape it sits in — a tuple's arity, an array, a
+    /// map's keys — described. TypeScript needs no such rule: it is a type surface, and
+    /// `export type Wrapper<IdType> = { id: IdType }` binds the parameter for real, so it renders
+    /// the name.
     ///
-    /// Recurses through `SiblingType` generics, `Map` keys/values, and `Tuple` elements.
-    #[cfg(feature = "jsonschema")]
+    /// Zod is why the rule cannot stop at JSON. Zod publishes *values*, and a `const` cannot be
+    /// parameterised, so a parameter left to render as the `Name$Schema` binding every unresolved
+    /// type is named after would reference a binding no emitted module declares — the consumer
+    /// pasting the output gets a `ReferenceError` before a payload is read. That is why only the
+    /// enclosing item's *own* parameters are rewritten: a genuinely unresolved sibling type keeps
+    /// its `$Schema` reference, because the type it names does publish that binding.
+    ///
+    /// Recurses through `SiblingType` generics, `Map` keys/values, and `Tuple` elements. Applied
+    /// after the field guards have read the field, so every guard asks its question of the type
+    /// the author wrote — and in every build, features or none, because which of the two a name is
+    /// is a fact about the declaration rather than about the surfaces reading it.
     pub fn erase_type_parameters(&mut self, parameters: &[String]) {
         if let FieldDefType::SiblingType(name, _) = &self.field_type
             && parameters.iter().any(|parameter| parameter == name)
         {
-            self.field_type = FieldDefType::Unknown;
+            self.field_type = FieldDefType::TypeParam(name.clone());
             return;
         }
         match &mut self.field_type {
@@ -375,7 +400,8 @@ impl FieldDef {
                 }
             }
             // Leaf types name no parameter.
-            FieldDefType::Unknown
+            FieldDefType::TypeParam(_)
+            | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
             | FieldDefType::Boolean
             | FieldDefType::String
@@ -439,6 +465,7 @@ impl FieldDef {
             FieldDefType::SiblingType(_, _)
             | FieldDefType::Map(_, _)
             | FieldDefType::Tuple(_)
+            | FieldDefType::TypeParam(_)
             | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
             | FieldDefType::Boolean
@@ -530,7 +557,8 @@ impl FieldDef {
                 key.os_string_name().or_else(|| value.os_string_name())
             }
             FieldDefType::Tuple(elements) => elements.iter().find_map(Self::os_string_name),
-            FieldDefType::Unknown
+            FieldDefType::TypeParam(_)
+            | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
             | FieldDefType::Boolean
             | FieldDefType::String
@@ -586,7 +614,8 @@ impl FieldDef {
                 }
             }
             // Leaf types cannot contain nested references.
-            FieldDefType::Unknown
+            FieldDefType::TypeParam(_)
+            | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
             | FieldDefType::Boolean
             | FieldDefType::String
@@ -623,6 +652,8 @@ impl FieldDef {
     fn typescript_base(&self) -> String {
         let result = match &self.field_type {
             FieldDefType::Unknown => "unknown".to_owned(),
+            // The declaration binds this name, so the field is written under it.
+            FieldDefType::TypeParam(name) => name.clone(),
             FieldDefType::Tuple(lst) => {
                 let elements = lst
                     .iter()
@@ -803,7 +834,9 @@ impl FieldDef {
     #[cfg(feature = "zod")]
     fn zod_array_base(&self) -> String {
         let result = match &self.field_type {
-            FieldDefType::Unknown => "z.unknown()".to_owned(),
+            // A `const` cannot be parameterised, so the value a parameter composes into is the
+            // opaque one — see [`FieldDef::erase_type_parameters`].
+            FieldDefType::TypeParam(_) | FieldDefType::Unknown => "z.unknown()".to_owned(),
             FieldDefType::Tuple(lst) => {
                 let elements = lst
                     .iter()
