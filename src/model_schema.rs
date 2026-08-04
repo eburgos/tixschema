@@ -2234,21 +2234,6 @@ fn process_tuple_struct(
     )
 }
 
-/// Processes a branded newtype (transparent single-field tuple struct) and generates
-/// TypeScript branded type definitions and Zod brand schemas.
-///
-/// A branded newtype is detected when a struct has **both** `#[serde(transparent)]` and exactly
-/// one unnamed field. The generated output depends on the active features:
-///
-/// - With `zod` + `typescript`: emits a Zod `.brand<"Name">()` schema and a
-///   `type Name<T> = T & z.$brand<"Name">` alias.
-/// - With `typescript` only (no `zod`): emits a `unique symbol` brand pattern and an
-///   `assertName()` type-assertion helper function.
-///
-/// Generic parameters on the struct are preserved in the TypeScript output. For non-generic
-/// newtypes, the inner field's Rust type is resolved to its TypeScript equivalent. For generic
-/// newtypes, the Zod schema always uses `z.string()` as the base because the generic parameter
-/// cannot be resolved at macro-expansion time.
 /// Builds the `validate_value`/`deserialize_value` functions for a constrained branded newtype.
 ///
 /// Returns `None` when the newtype has no string constraints. A path inner is measured by the
@@ -3206,6 +3191,23 @@ fn branded_guard_failure_output(
     )
 }
 
+/// Processes a branded newtype — a `#[serde(transparent)]` struct holding exactly one unnamed
+/// field — into the parts [`assemble_branded_output`] joins: the struct itself, the `Display` impl
+/// it earns, its schema module, and the delegate impl forwarding to that module.
+///
+/// A brand adds its own name to what its inner already writes, and each surface says so in the
+/// spelling that surface has for the marker. TypeScript intersects the inner's rendering with
+/// `$brand<"Name">`, the marker the `zod` runtime supplies; without `zod` there is no such marker
+/// to name, so the intersection is written against a `unique symbol` declared beside the type, and
+/// those two lines are the whole emission. Zod brands the inner's own schema with
+/// `.brand<"Name">()`, carries the item's description in the `.meta({ description })` every item
+/// carries it in, and annotates the exported binding `$ZodBranded<Class, "Name">` for the `Class`
+/// read off the very inner that rendering was built from.
+///
+/// The brand's own type parameters are inners like any other: TypeScript renders a parameter as
+/// the name it was written with, and Zod reaches it through that parameter's `Name$Schema`
+/// binding, so a generic brand describes whatever its argument publishes rather than a base of its
+/// own.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> TokenStream {
     if let Some(output) = branded_guard_failure_output(&item_struct, args) {

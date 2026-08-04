@@ -299,8 +299,10 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 ///
 /// ### The `validate()` Method
 ///
-/// When any field has constraints, the macro also generates a `validate(&self) -> Result<(), Vec<String>>`
-/// method for validating instances constructed in code. Serde deserialization validates automatically.
+/// With `serde` and a schema output feature (`zod`, `typescript`, or `jsonschema`) both active, a
+/// type carrying at least one constrained field also gets a
+/// `validate(&self) -> Result<(), Vec<String>>` method for validating instances constructed in
+/// code. Serde deserialization validates automatically.
 ///
 /// ```rust
 /// use tixschema::{model_schema, model_schema_prop};
@@ -317,8 +319,8 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 /// }
 /// ```
 ///
-/// When a schema output feature is active (`zod`, `typescript`, or `jsonschema`), the macro also
-/// generates a `validate(&self) -> Result<(), Vec<String>>` method:
+/// Every constrained field that fails contributes its own message, each naming the field it came
+/// from:
 ///
 /// ```text
 /// let reg = RegistrationJson { username: "ab".to_string(), age: 150 };
@@ -328,8 +330,8 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 ///         for e in &errors {
 ///             println!("Error: {e}");
 ///         }
-///         // "username: too short (minimum length 3, got 2)"
-///         // "age: too large (maximum 120, got 150)"
+///         // "'username' is too short: minimum length is 3, got 2"
+///         // "'age' is too large: maximum is 120, got 150"
 ///     }
 /// }
 /// ```
