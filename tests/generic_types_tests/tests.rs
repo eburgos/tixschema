@@ -763,13 +763,6 @@ mod zod {
 
 #[cfg(feature = "jsonschema")]
 mod jsonschema {
-    #[cfg(all(feature = "chrono", feature = "object_id"))]
-    use super::StoredFolder;
-    use super::{
-        CountedFolder, EcmDocument, KeyedByParameter, Pair, Tagged, WireFolder, Wrapper,
-        ecm_document_schema,
-    };
-
     /// `#[serde(flatten)]` is read only where `serde` is, so the merge these pin is only written
     /// there.
     #[cfg(feature = "serde")]
@@ -821,6 +814,13 @@ mod jsonschema {
             );
         }
     }
+
+    #[cfg(all(feature = "chrono", feature = "object_id"))]
+    use super::StoredFolder;
+    use super::{
+        CountedFolder, EcmDocument, KeyedByParameter, Pair, Tagged, WireFolder, Wrapper,
+        ecm_document_schema,
+    };
 
     /// A key every instantiation writes as a string leaves the value side describable, so the
     /// object says what it holds instead of opening entirely — the answer the concrete
