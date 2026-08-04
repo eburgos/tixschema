@@ -10,7 +10,9 @@
 //! Each type is declared with its fields ordered alphabetically, as this crate's lints require of
 //! Rust source; the README orders its examples for reading. Only the order the members are written
 //! in differs, so every member is held as a whole line rather than as part of a block — what is
-//! pinned is the spelling of each, which is what an omitted key changes.
+//! pinned is the spelling of each, which is what an omitted key changes. A derive list is widened
+//! here for the same reason and to the same effect on the emission, which is none: the generator
+//! reads no derive but serde's.
 //!
 //! The README's `ts_optional` example is not here. The flag decides the key only where no serde
 //! attribute is read, so the section shows a declaration this module's build cannot compile; the
@@ -27,7 +29,7 @@ use tixschema::model_schema;
 const PREDICATE_BULLET: &str = "- `#[serde(skip_serializing_if = \"...\")]` -- the key is left out of the payload when the predicate fires, so the member is described under an optional key: `roles?: Array<string>;` in TypeScript, `roles: z.array(z.string()).optional(),` in Zod, and no `required` entry in the JSON Schema";
 
 /// The bare-`skip` bullet, whose claim is an absence on every surface.
-const SKIP_BULLET: &str = "- `#[serde(skip)]` -- the key is written into no payload and read out of none, so no surface describes the member at all: no TypeScript member, no Zod key, and neither a `properties` nor a `required` entry. On a tuple-struct slot it takes the slot out of the described tuple, which shortens the arity";
+const SKIP_BULLET: &str = "- `#[serde(skip)]` -- the key is written into no payload and read out of none, so no surface describes the member at all: no TypeScript member, no Zod key, and neither a `properties` nor a `required` entry. On a tuple-struct or tuple-variant slot it takes the slot out of the described tuple, which shortens the arity -- and a variant declaring one slot becomes a unit variant, which is what serde writes for it";
 
 /// The write-half bullet, which lands where the predicate bullet does.
 const WRITE_HALF_BULLET: &str = "- `#[serde(skip_serializing)]` -- the write half of `skip`: the key is left out of every payload while a supplied one is still read, so the member is described under an optional key, as `skip_serializing_if` is";
@@ -349,5 +351,125 @@ fn test_the_chrono_example_is_declarable_and_shows_what_it_emits() {
             "  created_at: z.coerce.date(),",
             "  updated_at: z.union([z.coerce.date(), z.undefined()]).prefault(undefined),",
         ],
+    );
+}
+
+/// The README declares this, and the block beside it is the emission whole.
+///
+/// Held as one block rather than line by line, which is what a truncated paste needs: an emission
+/// shown down to its seventh line matches every line it shows and still leaves the reader without
+/// the factory the rest of the block declares.
+fn assert_readme_declares_and_shows_whole(declaration: &str, emission: &str) {
+    assert!(
+        readme().contains(declaration),
+        "the README no longer declares this verbatim:\n{declaration}"
+    );
+    assert!(
+        readme().contains(emission.trim_end()),
+        "the README no longer shows this emission whole:\n{emission}"
+    );
+}
+
+/// The "Branded Newtypes" example: a generic brand beside a non-generic one, and the whole of what
+/// each publishes.
+///
+/// A generic brand publishes a factory, so its emission runs well past the builder the block used
+/// to stop at — the type alias reading the builder's return back, the two-method cache interface,
+/// the cache itself and the exported factory. All of it is what a reader pastes.
+#[test]
+#[cfg(feature = "zod")]
+fn test_the_branded_newtype_example_is_declarable_and_shows_what_it_emits() {
+    #[model_schema(default_types(IdType = String))]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct UserId<IdType>(pub IdType);
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct CorrelationId(pub String);
+
+    assert_readme_declares_and_shows_whole(
+        "pub struct UserId<IdType>(pub IdType);",
+        &UserId::<String>::ts_definition(),
+    );
+    assert_readme_declares_and_shows_whole(
+        "pub struct UserId<IdType>(pub IdType);",
+        &UserId::<String>::zod_schema(),
+    );
+    assert_readme_declares_and_shows_whole(
+        "pub struct CorrelationId(pub String);",
+        &CorrelationId::ts_definition(),
+    );
+    assert_readme_declares_and_shows_whole(
+        "pub struct CorrelationId(pub String);",
+        &CorrelationId::zod_schema(),
+    );
+}
+
+/// The same two declarations in a build with no `zod`, where the brand is a `unique symbol` the
+/// type is intersected with rather than a marker Zod's `.brand()` carries — the block the README
+/// shows under "without `zod` feature", and the one this build is the only one that can run.
+#[test]
+#[cfg(not(feature = "zod"))]
+fn test_the_branded_newtype_example_shows_what_a_build_without_zod_emits() {
+    #[model_schema(default_types(IdType = String))]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct UserId<IdType>(pub IdType);
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct CorrelationId(pub String);
+
+    assert_readme_declares_and_shows_whole(
+        "pub struct UserId<IdType>(pub IdType);",
+        &UserId::<String>::ts_definition(),
+    );
+    assert_readme_declares_and_shows_whole(
+        "pub struct CorrelationId(pub String);",
+        &CorrelationId::ts_definition(),
+    );
+}
+
+/// The "Doc Comments and Examples on Branded Newtypes" example, whose docs and `rust example` block
+/// reach the factory's builder as a description and an example — and whose factory below them is
+/// the same whole block the plain generic brand publishes.
+#[test]
+#[cfg(feature = "zod")]
+fn test_the_documented_branded_newtype_example_is_declarable_and_shows_what_it_emits() {
+    /// Generic document identifier.
+    ///
+    /// - `DocumentId<String>` for API/HTTP layer
+    /// - `DocumentId<ObjectId>` for MongoDB layer
+    ///
+    /// ```rust example
+    /// DocumentId("64de3d95ff45b119e5b53a7e".to_string())
+    /// ```
+    #[model_schema(default_types(IdType = String))]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct DocumentId<IdType>(pub IdType);
+
+    assert_readme_declares_and_shows_whole(
+        "pub struct DocumentId<IdType>(pub IdType);",
+        &DocumentId::<String>::zod_schema(),
+    );
+}
+
+/// The rejected half of the constrained-brand rule for an inner written over a parameter. Only its
+/// spelling can be held here — the declaration itself is a `compile_error!` by construction, which
+/// is what the rule says it should be — so what this pins is that the README still shows the two
+/// declarations the refusal is written about.
+#[test]
+fn test_the_constrained_brand_over_a_parameterised_inner_example_is_still_shown() {
+    assert!(
+        readme().contains("pub struct TaggedSlug<T>(pub Tagged<T>);"),
+        "the README no longer shows the rejected declaration"
+    );
+    assert!(
+        readme().contains("pub struct Tagged<T>(pub T);"),
+        "the README no longer shows the inner the rejected declaration is written over"
     );
 }

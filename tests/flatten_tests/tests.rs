@@ -159,13 +159,16 @@ struct FlatOverEnum {
     tone: FlatHue,
 }
 
-/// A newtype over a `String` flattened into a struct: serde writes it as the string it wraps, and
-/// the registry cannot tell it apart from a struct — both register as having no enum members. So
-/// the declaration compiles and the divergence is left for the merge to catch.
+/// A newtype over a `String` flattened into a struct: serde writes it as the string it wraps, which
+/// is no object and which the merge has nothing to join its own keys to. The name records that wire
+/// as it expands, so a build carrying the Zod merge refuses the declaration where it was written and
+/// only a build without one gets as far as the merge.
+#[cfg(not(feature = "zod"))]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct FlatSlug(String);
 
+#[cfg(not(feature = "zod"))]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct FlatOverBrand {
@@ -173,6 +176,24 @@ struct FlatOverBrand {
     #[serde(flatten)]
     slug: FlatSlug,
 }
+
+/// The same newtype declared *below* the object that flattens it. The recording holds what has
+/// already expanded, so this one proves nothing about its wire and the guard keeps the
+/// declaration-order fallback — while the JSON-schema merge, which reads the document back at run
+/// time, refuses it wherever it is declared.
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatOverLaterBrand {
+    own: String,
+    #[serde(flatten)]
+    slug: LaterFlatSlug,
+}
+
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct LaterFlatSlug(String);
 
 /// An untagged enum every member of which serde writes as an object, and the struct that flattens
 /// it. serde writes whichever member matched into the object the struct is writing, so what the
@@ -604,6 +625,20 @@ enum LaterMemberExtBareEither {
     Ext(MemberExtBare),
 }
 
+/// The same tagged enum flattened directly, with no union between. That position asks what the
+/// member position asks — can serde read the payload back — and answers the other way: serde writes
+/// a unit variant as its name holding `null` into the object being written rather than as the bare
+/// string it is standing alone, and reads that payload back as the variant. One declaration, both
+/// directions, so the merges owe it one branch per variant.
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct ExtBareDirectHolder {
+    #[serde(flatten)]
+    ext: MemberExtBare,
+    own: String,
+}
+
 /// And a tagged enum whose every variant carries data, which serde writes as the object its name
 /// tags in every case — admitted where it always was, on every surface.
 #[cfg(any(feature = "jsonschema", feature = "zod"))]
@@ -629,6 +664,18 @@ enum MemberExtObjEither {
 struct FlatOverMemberExtObjUntagged {
     #[serde(flatten)]
     either: MemberExtObjEither,
+    own: String,
+}
+
+/// And that enum flattened directly. No branch of it proves anything the name did not — the operand
+/// a merge joins is the name's own binding whichever variant matched — so it stays the one operand
+/// it always was.
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct ExtObjDirectHolder {
+    #[serde(flatten)]
+    ext: MemberExtObjects,
     own: String,
 }
 
@@ -844,12 +891,12 @@ struct NamedMaybeHolder {
 
 /// And a name whose published surface is not nullable, which offers no absence and stays the one
 /// operand it always was.
-#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[cfg(any(feature = "jsonschema", feature = "zod", feature = "typescript"))]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct PlainOptBase(OptBase);
 
-#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[cfg(any(feature = "jsonschema", feature = "zod", feature = "typescript"))]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct NamedPlainHolder {
@@ -1337,9 +1384,10 @@ fn test_flattening_a_plain_enum_writes_a_key_the_struct_does_not_name() {
     );
 }
 
-/// And what serde writes for a flattened newtype that reaches the wire as a string — nothing. A
-/// name got this one past the declaration guard; the value never reaches the wire at all.
+/// And what serde writes for a flattened newtype that reaches the wire as a string — nothing. The
+/// value never reaches the wire at all, wherever the name was declared.
 #[test]
+#[cfg(not(feature = "zod"))]
 fn test_flattening_a_string_newtype_is_unserializable() {
     let refusal = serde_json::to_value(FlatOverBrand {
         own: "o".to_owned(),
@@ -1353,9 +1401,24 @@ fn test_flattening_a_string_newtype_is_unserializable() {
     );
 }
 
+#[test]
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+fn test_flattening_a_later_string_newtype_is_unserializable() {
+    let refusal = serde_json::to_value(FlatOverLaterBrand {
+        own: "o".to_owned(),
+        slug: LaterFlatSlug("s".to_owned()),
+    })
+    .unwrap_err()
+    .to_string();
+    assert!(
+        refusal.contains("can only flatten structs and maps"),
+        "Got: {refusal}"
+    );
+}
+
 /// So the merge refuses it too, rather than closing the object around the fields that are left.
 #[test]
-#[cfg(feature = "jsonschema")]
+#[cfg(all(feature = "jsonschema", not(feature = "zod")))]
 #[should_panic(
     expected = "`FlatOverBrand`: `#[serde(flatten)]` of `FlatSlug` is not written as an object"
 )]
@@ -1363,12 +1426,36 @@ fn test_flattening_a_string_newtype_is_refused_by_the_merge() {
     assert!(FlatOverBrand::json_schema().is_object());
 }
 
+/// And in those same words wherever the newtype was declared, which is the one reading of the
+/// declaration that survives the Zod surface refusing it at expansion.
+#[test]
+#[cfg(feature = "jsonschema")]
+#[should_panic(
+    expected = "`FlatOverLaterBrand`: `#[serde(flatten)]` of `LaterFlatSlug` is not written as an object"
+)]
+fn test_flattening_a_later_string_newtype_is_refused_by_the_merge() {
+    assert!(FlatOverLaterBrand::json_schema().is_object());
+}
+
 /// The remedy the refusal names is one the author can act on.
 #[test]
 #[cfg(feature = "jsonschema")]
 #[should_panic(expected = "write the field as a named member so the value gets a key of its own")]
 fn test_the_flatten_merge_refusal_names_the_remedy() {
-    assert!(FlatOverBrand::json_schema().is_object());
+    assert!(FlatOverLaterBrand::json_schema().is_object());
+}
+
+/// And a source the registry could answer for is refused where it was written instead, in those
+/// same words: the guard names the wire the newtype recorded rather than waiting for a document
+/// nothing on the Zod surface would ever build.
+#[test]
+#[cfg(feature = "zod")]
+fn test_the_later_string_newtype_keeps_the_declaration_order_fallback() {
+    let zod = FlatOverLaterBrand::zod_schema();
+    assert!(
+        zod.contains("z.lazy(() => LaterFlatSlug$Schema)"),
+        "expected the name as the one operand it is, got: {zod}"
+    );
 }
 
 /// What serde writes for a flattened untagged enum: the struct's own fields, and beside them the
@@ -2246,9 +2333,43 @@ fn test_the_named_nullable_flatten_schema_offers_the_base_and_its_absence() {
     );
 }
 
+/// And TypeScript writes the same choice over the same two key sets. The name itself carries the
+/// value branch — an intersection distributes over the choice behind it and the `null` side takes no
+/// key, so that branch is already the base's — while the branch carrying none of the base's members
+/// reads them off the value side by name, a choice having no key of its own for `keyof` to find.
+///
+/// Read off tsc 7.0.2 under `--strict`, the emitted declarations compiled as written: this type
+/// accepts `{ own: "o", left: "l", right: true }` and `{ own: "o" }`, and rejects
+/// `{ own: "o", left: "l" }` — payload for payload what the `Option`-typed field's own type answers.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_the_named_nullable_flatten_type_offers_the_base_and_its_absence() {
+    let ts = NamedMaybeHolder::ts_definition();
+    assert!(
+        ts.contains("} & (MaybeOptBase | { [K in keyof NonNullable<MaybeOptBase>]?: never });"),
+        "expected the base beside its absence, got: {ts}"
+    );
+    assert!(
+        !ts.contains("| undefined"),
+        "the whole value is offered as absent in: {ts}"
+    );
+}
+
 /// The absence is a question about what the name published and nothing else, so a direct flatten
 /// naming an item whose surface is not nullable is spelled exactly as it was before there was a
-/// second branch to spell — one intersection, and one closed object.
+/// second branch to spell — one intersection on Zod, one closed object on the document, and the
+/// bare name on TypeScript.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_a_named_non_nullable_flatten_type_is_byte_identical() {
+    let ts = NamedPlainHolder::ts_definition();
+    let declared = &ts[ts.find("export type").unwrap()..];
+    assert_eq!(
+        declared,
+        "export type NamedPlainHolder = {\n  /**\n   * own\n   * \n   */\n  own: string;\n} & PlainOptBase;"
+    );
+}
+
 #[test]
 #[cfg(feature = "zod")]
 fn test_a_named_non_nullable_flatten_schema_is_byte_identical() {
@@ -2824,5 +2945,121 @@ fn test_the_tagged_enums_are_byte_identical_standing_alone() {
     assert_eq!(
         [MemberExtBare::zod_schema(), MemberExtObjects::zod_schema(),],
         EXPECTED.map(str::to_owned)
+    );
+}
+
+/// The direct position asks the round-trip question the member position asks and gets the other
+/// answer. serde writes the unit variant as its name holding `null` into the object being written —
+/// not the bare string it is standing alone — and reads that payload back as the variant, so the
+/// declaration is one serde admits in both directions.
+#[test]
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+fn test_a_directly_flattened_tagged_enum_round_trips_every_variant() {
+    let forms = [
+        (
+            MemberExtBare::Bare,
+            serde_json::json!({ "Bare": null, "own": "o" }),
+        ),
+        (
+            MemberExtBare::Wrapped(FlatSecond { b: true }),
+            serde_json::json!({ "Wrapped": { "b": true }, "own": "o" }),
+        ),
+    ];
+    for (ext, expected) in forms {
+        let holder = ExtBareDirectHolder {
+            ext,
+            own: "o".to_owned(),
+        };
+        let written = serde_json::to_value(&holder).unwrap();
+        assert_eq!(written, expected);
+        let back: ExtBareDirectHolder = serde_json::from_value(written).unwrap();
+        assert_eq!(back, holder);
+    }
+}
+
+/// So the document distributes the object over the variants rather than refusing at the branch the
+/// bare string sits at: one branch per variant, the unit one carrying the single key serde writes
+/// for it.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_the_direct_tagged_flatten_document_writes_one_branch_per_variant() {
+    assert_eq!(
+        serde_json::to_string(&ExtBareDirectHolder::json_schema()).unwrap(),
+        r#"{"type":"object","oneOf":[{"type":"object","properties":{"own":{"type":"string"},"Bare":{"type":"null"}},"required":["own","Bare"],"additionalProperties":false},{"type":"object","properties":{"own":{"type":"string"},"Wrapped":{"type":"object","additionalProperties":false,"properties":{"b":{"type":"boolean"}},"required":["b"]}},"required":["own","Wrapped"],"additionalProperties":false}]}"#
+    );
+}
+
+/// And it admits exactly the payloads serde writes, and no payload carrying two variants at once or
+/// none.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_the_direct_tagged_flatten_document_admits_the_captured_payloads() {
+    let schema = ExtBareDirectHolder::json_schema();
+    for payload in [
+        serde_json::json!({ "Bare": null, "own": "o" }),
+        serde_json::json!({ "Wrapped": { "b": true }, "own": "o" }),
+    ] {
+        assert!(
+            closed_document_accepts(&schema, &payload),
+            "{payload} is rejected by {schema}"
+        );
+    }
+    for payload in [
+        serde_json::json!({ "own": "o" }),
+        serde_json::json!({ "Bare": null, "Wrapped": { "b": true }, "own": "o" }),
+        serde_json::json!({ "Bare": null }),
+    ] {
+        assert!(
+            !closed_document_accepts(&schema, &payload),
+            "{payload} is accepted by {schema}"
+        );
+    }
+}
+
+/// And Zod multiplies the object over the same variants, each written in the spelling a merge joins
+/// rather than the one the union publishes: the unit variant is the key serde writes for it, not the
+/// literal the enum's own schema names.
+///
+/// Read off zod 4.4.3, the emitted spelling transcribed: this union accepts `{"own":"o","Bare":null}`
+/// and `{"own":"o","Wrapped":{"b":true}}`, and rejects `{"own":"o"}`, `{"own":"o","Bare":"Bare"}`,
+/// `{"own":"o","Bare":null,"Wrapped":{"b":true}}`, `{"Bare":null}` and any payload carrying a key
+/// neither the object nor the matched variant names.
+#[test]
+#[cfg(feature = "zod")]
+fn test_the_direct_tagged_flatten_schema_multiplies_the_object_over_the_variants() {
+    let zod = ExtBareDirectHolder::zod_schema();
+    assert!(
+        zod.contains(
+            "z.union([\n  ExtBareDirectHolder$OwnSchema.and(z.lazy(() => z.strictObject({\n  \"Bare\": z.null(),\n}))),\n  ExtBareDirectHolder$OwnSchema.and(z.lazy(() => z.strictObject({\n  \"Wrapped\": FlatSecond$Schema,\n}))),\n])"
+        ),
+        "expected one operand per variant, got: {zod}"
+    );
+    assert!(
+        !zod.contains("MemberExtBare$Schema"),
+        "the union is named as an operand in: {zod}"
+    );
+}
+
+/// The multiplication is a question about the branches a name proves no object, so a direct flatten
+/// of a tagged enum every variant of which carries data is spelled exactly as it was before there
+/// was a second branch to spell — one intersection on Zod, and the document its own distribution
+/// already wrote.
+#[test]
+#[cfg(feature = "zod")]
+fn test_an_all_object_tagged_direct_flatten_schema_is_byte_identical() {
+    #[cfg(feature = "typescript")]
+    const EXPECTED: &str = "const ExtObjDirectHolder$RawSchema = z.strictObject({\n  own: z.string(),\n}).and(z.lazy(() => MemberExtObjects$Schema));\n\nexport const ExtObjDirectHolder$Schema: ZodType<ExtObjDirectHolder> = ExtObjDirectHolder$RawSchema;";
+    #[cfg(not(feature = "typescript"))]
+    const EXPECTED: &str = "export const ExtObjDirectHolder$Schema = z.strictObject({\n  own: z.string(),\n}).and(z.lazy(() => MemberExtObjects$Schema));";
+
+    assert_eq!(ExtObjDirectHolder::zod_schema(), EXPECTED);
+}
+
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_an_all_object_tagged_direct_flatten_document_is_byte_identical() {
+    assert_eq!(
+        serde_json::to_string(&ExtObjDirectHolder::json_schema()).unwrap(),
+        r#"{"type":"object","oneOf":[{"type":"object","properties":{"own":{"type":"string"},"One":{"type":"object","additionalProperties":false,"properties":{"a":{"type":"string"}},"required":["a"]}},"required":["own","One"],"additionalProperties":false},{"type":"object","properties":{"own":{"type":"string"},"Two":{"type":"object","additionalProperties":false,"properties":{"b":{"type":"boolean"}},"required":["b"]}},"required":["own","Two"],"additionalProperties":false}]}"#
     );
 }

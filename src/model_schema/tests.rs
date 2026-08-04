@@ -11,7 +11,7 @@ use super::{
     collect_untagged_members, constrained_shape, enum_cfg_attr_guard_errors,
     generate_field_validation, generate_numeric_validation_code, generate_string_validation_code,
     has_serde_default, helper_name_stem, internally_tagged_guard_errors, needs_injected_default,
-    parse_serde_field_attributes, parse_serde_type_attributes,
+    parse_serde_field_attributes, parse_serde_type_attributes, render_untagged_variant,
 };
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -21,9 +21,7 @@ use super::{
 };
 
 #[cfg(all(feature = "serde", feature = "zod"))]
-use super::{
-    WireLeaf, flattened_union_member_guard_error, record_wire_leaves, record_zod_union_members,
-};
+use super::{WireLeaf, flatten_edge_guard_error, record_wire_leaves, record_zod_union_members};
 
 #[cfg(feature = "typescript")]
 use super::tuple_struct_ts_body;
@@ -35,7 +33,11 @@ use super::tuple_struct_zod_body;
 use super::tuple_struct_json_body;
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-use super::{check_slot_wire_is_readable, parse_serde_key_omission, tuple_struct_shape};
+use super::{check_slot_wire_is_readable, tuple_struct_shape};
+
+use super::{
+    VariantKind, check_variant_slot_wire_is_readable, parse_serde_key_omission, variant_wire_kind,
+};
 
 use syn::spanned::Spanned as _;
 
@@ -85,7 +87,8 @@ const UNPORTABLE_PROBE_PATTERNS: [(&str, &str); 6] = [
 /// Every slot spelling the refusal reads, beside whether it is refused. A slot dropped from one of
 /// serde's directions and not the other is; the pair that drops both is the wire the description
 /// already answers for, and everything else is a slot written in its place.
-#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+///
+/// Ungated because the variant seam reads the same list in every build.
 const SLOT_OMISSION_SPELLINGS: [(&str, bool); 6] = [
     ("skip_serializing", true),
     ("skip_serializing_if = \"Option::is_none\"", true),
@@ -3261,11 +3264,103 @@ fn string_constraints_over_a_named_inner_the_registry_calls_a_string_pass() {
 /// a diagnostic out of declaration order: moving a declaration would turn a compiling program into
 /// a refused one without changing what it means. The `Display` assertion still bounds the Rust
 /// surface either way.
+///
+/// Both of them name a type the declaration has already fixed, which is what the admission rests
+/// on; a name written over one of the brand's own parameters has not, and is refused below.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn string_constraints_over_a_name_the_registry_cannot_answer_for_pass() {
-    let errors = brand_over_named_inner_errors("SiblingRegisteredNowhere");
-    assert!(errors.is_empty(), "got: {errors:?}");
+    let bare = brand_over_named_inner_errors("SiblingRegisteredNowhere");
+    assert!(bare.is_empty(), "got: {bare:?}");
+
+    for inner in ["UnregisteredGeneric<String>", "UnregisteredGeneric<u32>"] {
+        let ty: syn::Type = syn::parse_str(inner).unwrap();
+        let carrying_a_fixed_argument = branded_errors_with(
+            &syn::parse_quote! {
+                #[serde(transparent)]
+                struct Branded<T>(pub #ty);
+            },
+            &pattern_args(),
+        );
+        assert!(
+            carrying_a_fixed_argument.is_empty(),
+            "for {inner}, got: {carrying_a_fixed_argument:?}"
+        );
+    }
+}
+
+/// A name written over one of the brand's own type parameters is refused, wherever the parameter
+/// sits inside it.
+///
+/// The registry's silence is not consent here. The brand composes the named type's schema from the
+/// argument the caller supplies, so the checks land on whatever that argument turns out to be: Zod
+/// appends them to a shape the call site decides, the one JSON document written for every
+/// instantiation still holds the `{}` a parameter describes as, and `validate()` measures the
+/// inner's `Display` — a numeric filling rejected for its digit count rather than for its value.
+/// The same two items written in the other order already refuse through the registry, so admitting
+/// this one puts the diagnostic back on declaration order the long way round.
+///
+/// The refusal names the brand, the inner and the parameter, so the author reads which declaration
+/// to fix and which name in it.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn string_constraints_over_a_name_written_over_the_brands_own_parameter_are_rejected() {
+    for inner in [
+        "UnregisteredGeneric<T>",
+        "UnregisteredGeneric<Vec<T>>",
+        "UnregisteredGeneric<String, U>",
+        "UnregisteredGeneric<HashMap<String, T>>",
+        "UnregisteredGeneric<(u32, U)>",
+    ] {
+        let ty: syn::Type = syn::parse_str(inner).unwrap();
+        let errors = branded_errors_with(
+            &syn::parse_quote! {
+                #[serde(transparent)]
+                struct Branded<T, U>(pub #ty);
+            },
+            &pattern_args(),
+        );
+        assert_eq!(errors.len(), 1, "for {inner}, got: {errors:?}");
+        assert!(errors[0].contains("compile_error"), "got: {}", errors[0]);
+        assert!(errors[0].contains("`Branded`"), "got: {}", errors[0]);
+        assert!(
+            errors[0].contains("UnregisteredGeneric"),
+            "for {inner}, got: {}",
+            errors[0]
+        );
+        assert!(
+            errors[0].contains("type parameter"),
+            "for {inner}, got: {}",
+            errors[0]
+        );
+    }
+}
+
+/// A name the registry calls a string publisher is refused too, once one of the brand's own
+/// parameters is written into it.
+///
+/// That registration answers for the declaration, and the declaration here is one whose value the
+/// filling supplies: `Later<T>` publishes a string for a `Later<String>` and something else for
+/// every other filling, so the checks still land on whatever the call site handed over. The
+/// registry's own arm cannot tell this case from an unregistered one — a string publisher records
+/// no shape, exactly as an absence records none — which is why it is the parameter that decides.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn string_constraints_over_a_registered_name_carrying_the_brands_parameter_are_rejected() {
+    seed_value_shape("RegisteredStringGeneric", None);
+    let errors = branded_errors_with(
+        &syn::parse_quote! {
+            #[serde(transparent)]
+            struct Branded<T>(pub RegisteredStringGeneric<T>);
+        },
+        &pattern_args(),
+    );
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(
+        errors[0].contains("RegisteredStringGeneric"),
+        "got: {}",
+        errors[0]
+    );
 }
 
 /// What a brand records for the next brand written over it: whatever its own inner publishes, read
@@ -6995,6 +7090,159 @@ fn a_lone_slot_is_refused_for_no_spelling() {
     }
 }
 
+/// The variant a declaration's first (and here only) variant parses to.
+fn declared_variant(declaration: &str) -> syn::Variant {
+    let item: syn::ItemEnum = syn::parse_str(declaration).unwrap();
+    item.variants.into_iter().next().unwrap()
+}
+
+/// Every refusal that declaration's variant earns, one per slot that earns one.
+fn variant_slot_refusals(declaration: &str) -> Vec<String> {
+    let variant = declared_variant(declaration);
+    let variant_name = variant.ident.to_string();
+    variant
+        .fields
+        .iter()
+        .enumerate()
+        .filter_map(|(index, field)| {
+            check_variant_slot_wire_is_readable(
+                field,
+                index,
+                &variant_name,
+                "Wire",
+                parse_serde_key_omission(&field.attrs),
+            )
+            .err()
+            .map(|err| err.to_string())
+        })
+        .collect()
+}
+
+/// Captured from serde on `enum E { One(#[serde(...)] String, u32) }`: `skip_serializing` alone
+/// writes `{"One":[7]}` and reads only `{"One":["s",7]}`, `skip_deserializing` alone writes
+/// `{"One":["s",7]}` and reads only `{"One":[7]}`. What serde writes is not what serde reads, and
+/// a slot has no optional spelling to describe both, so the declaration is refused.
+#[test]
+fn a_variant_slot_dropped_from_one_direction_only_is_refused() {
+    for (spelling, refused) in SLOT_OMISSION_SPELLINGS {
+        let refusals = variant_slot_refusals(&format!(
+            "enum Wire {{ One(#[serde({spelling})] Option<String>, u32) }}"
+        ));
+        assert_eq!(
+            refusals.len(),
+            usize::from(refused),
+            "{spelling}: {refusals:?}"
+        );
+        for message in refusals {
+            assert!(message.contains("slot 0"), "{spelling}: {message}");
+            assert!(message.contains("`One`"), "{spelling}: {message}");
+            assert!(message.contains("`Wire`"), "{spelling}: {message}");
+        }
+    }
+}
+
+/// A named member of a struct variant is left alone by the same walk: its key is absent from one
+/// payload and present in the other, which an optional key describes.
+#[test]
+fn a_named_variant_member_is_refused_for_no_spelling() {
+    for (spelling, _) in SLOT_OMISSION_SPELLINGS {
+        let refusals = variant_slot_refusals(&format!(
+            "enum Wire {{ One {{ #[serde({spelling})] a: Option<String> }} }}"
+        ));
+        assert!(refusals.is_empty(), "{spelling}: {refusals:?}");
+    }
+}
+
+/// The lone slot of a variant is asked the same question, which is where this seam parts from the
+/// tuple-struct one. Captured: `One(#[serde(skip_serializing)] String)` writes the bare name
+/// `"One"` and reads only `{"One":"s"}`, so the halves split a variant at every declared arity
+/// where a newtype struct ignored them outright.
+#[test]
+fn a_lone_variant_slot_is_refused_for_the_same_spellings() {
+    for (spelling, refused) in SLOT_OMISSION_SPELLINGS {
+        let refusals = variant_slot_refusals(&format!(
+            "enum Wire {{ One(#[serde({spelling})] Option<String>) }}"
+        ));
+        assert_eq!(
+            refusals.len(),
+            usize::from(refused),
+            "{spelling}: {refusals:?}"
+        );
+    }
+}
+
+/// Captured from serde: a variant declaring one slot and taking it off the wire is written as a
+/// unit variant — `"One"` externally, `{"type":"One"}` under a tag, `null` untagged — which are the
+/// payloads a declared unit variant writes in the same three places.
+#[test]
+fn a_variant_taking_its_lone_slot_off_the_wire_publishes_a_unit() {
+    for spelling in ["skip", "skip_serializing, skip_deserializing"] {
+        let variant =
+            declared_variant(&format!("enum Wire {{ One(#[serde({spelling})] String) }}"));
+        assert_eq!(variant_wire_kind(&variant), VariantKind::Unit, "{spelling}");
+    }
+}
+
+/// Every other declared arity keeps the kind it declared. Captured: a two-slot variant with one
+/// slot off the wire writes `{"One":[7]}` and with both off writes `{"One":[]}` — a shorter array
+/// and then an empty one, never the bare name a unit writes.
+#[test]
+fn every_other_declared_arity_keeps_the_kind_it_declared() {
+    for (declaration, expected) in [
+        (
+            "enum Wire { One(#[serde(skip)] String, u32) }",
+            VariantKind::TupleMultiple,
+        ),
+        (
+            "enum Wire { One(#[serde(skip)] String, #[serde(skip)] u32) }",
+            VariantKind::TupleMultiple,
+        ),
+        ("enum Wire { One(String) }", VariantKind::TupleSingle),
+        (
+            "enum Wire { One { #[serde(skip)] a: String } }",
+            VariantKind::Named,
+        ),
+        ("enum Wire { One }", VariantKind::Unit),
+    ] {
+        assert_eq!(
+            variant_wire_kind(&declared_variant(declaration)),
+            expected,
+            "for: {declaration}"
+        );
+    }
+}
+
+/// The member spelling an untagged variant is refused with, run over the kind it publishes.
+#[cfg(feature = "serde")]
+fn untagged_refusal(declaration: &str, members: &[super::FieldDef]) -> String {
+    let variant = declared_variant(declaration);
+    render_untagged_variant(&variant_wire_kind(&variant), &variant, members, "Wire")
+        .map_or_else(|err| err.to_string(), |_| String::new())
+}
+
+/// Captured from serde: an untagged variant whose lone slot is off the wire writes and reads `null`
+/// — the payload a declared unit variant writes there — so it takes the refusal a unit variant
+/// takes rather than describing the value nothing carries.
+#[cfg(feature = "serde")]
+#[test]
+fn an_untagged_variant_whose_lone_slot_is_dropped_is_refused_as_a_unit() {
+    let refusal = untagged_refusal("enum Wire { One(#[serde(skip)] String) }", &[]);
+    assert!(refusal.contains("is a unit variant"), "Got: {refusal}");
+}
+
+/// A refused tuple variant is named by the arity the author declared, not by the slots that reached
+/// the wire: a slot dropped from the description is still a slot the union has no spelling for.
+#[cfg(feature = "serde")]
+#[test]
+fn a_refused_untagged_tuple_variant_is_named_by_its_declared_arity() {
+    let carried = get_field_def("_1", &syn::parse_str::<syn::Type>("u32").unwrap(), "");
+    let refusal = untagged_refusal("enum Wire { One(#[serde(skip)] String, u32) }", &[carried]);
+    assert!(
+        refusal.contains("a tuple variant with 2 fields"),
+        "Got: {refusal}"
+    );
+}
+
 /// A path writes a string on the wire, which is the value the rendered constraint describes, so
 /// every spelling of one reaches a leaf the checks can land on — the borrowed form included.
 #[cfg(feature = "serde")]
@@ -7216,7 +7464,7 @@ fn flattening_a_union_of_objects_is_not_refused() {
         .is_none()
     );
     let unrecorded: syn::Field = syn::parse_quote! { #[serde(flatten)] base: NeverRecorded };
-    assert!(flattened_union_member_guard_error(&unrecorded, "Host").is_none());
+    assert!(flatten_edge_guard_error(&unrecorded, "Host").is_none());
 }
 
 /// Records an untagged enum's members the way its own expansion does, then asks the flatten guard
@@ -7237,7 +7485,7 @@ fn recorded_union_flatten_error(
         AliasKind::NoEnumMembers,
     );
     record_zod_union_members(rust_ident, &merge_parts);
-    flattened_union_member_guard_error(field, "Host").map(|error| error.to_string())
+    flatten_edge_guard_error(field, "Host").map(|error| error.to_string())
 }
 
 /// The branch trails one untagged enum's members are recorded at, beside what each is proved to
@@ -7491,6 +7739,100 @@ fn a_union_member_naming_an_object_or_an_unregistered_type_stays_admitted() {
             &syn::parse_quote! { #[serde(flatten)] either: NamedChoice },
         )
         .is_none()
+    );
+}
+
+/// What the flatten guard is asked about a field naming one item directly, with no union between.
+#[cfg(all(feature = "serde", feature = "zod"))]
+fn direct_flatten_error(field: &syn::Field) -> Option<String> {
+    flatten_edge_guard_error(field, "Host").map(|error| error.to_string())
+}
+
+/// The same refusal one position further out. A `#[serde(flatten)]` field naming an item whose own
+/// published wire is no object is the shape the member-position refusal was landed to stop, with the
+/// intersection written directly rather than through a union: serde refuses the value at runtime and
+/// the JSON-schema merge refuses the declaration, so the guard names it in the words that merge uses
+/// for a source at no position of its own.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn flattening_a_registered_scalar_wire_is_refused_where_the_field_was_written() {
+    seed_registered_wire("Counted", AliasKind::NoEnumMembers, Some("integer"));
+    let error = direct_flatten_error(&syn::parse_quote! { #[serde(flatten)] c: Counted }).unwrap();
+    assert!(
+        error.contains("`#[serde(flatten)]` of `Counted` is not written as an object"),
+        "got: {error}"
+    );
+    assert!(
+        error.contains("its schema describes a `integer`"),
+        "got: {error}"
+    );
+    assert!(
+        error.contains("write the field as a named member so the value gets a key of its own"),
+        "got: {error}"
+    );
+}
+
+/// Every keyword a registration can prove reaches the same refusal, each named by the word its own
+/// published document carries — the array a fixed-arity tuple struct writes among them, which serde
+/// refuses to flatten for the reason it refuses the scalar.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn flattening_a_registered_string_boolean_or_array_wire_is_refused_by_its_own_keyword() {
+    for (rust_ident, kind, keyword) in [
+        ("DirectSlug", AliasKind::StringWire, "string"),
+        ("DirectSwitch", AliasKind::Stringified, "boolean"),
+        ("DirectPair", AliasKind::NoEnumMembers, "array"),
+    ] {
+        seed_registered_wire(rust_ident, kind, Some(keyword));
+        let named: syn::Type = syn::parse_str(rust_ident).unwrap();
+        let error =
+            direct_flatten_error(&syn::parse_quote! { #[serde(flatten)] v: #named }).unwrap();
+        assert!(
+            error.contains(&format!("its schema describes a `{keyword}`")),
+            "got: {error}"
+        );
+    }
+}
+
+/// The three the direct position leaves exactly as they stand: an item the registry says publishes
+/// an object, a name it has never seen — the declaration-order fallback, which answers for a source
+/// written below the object no differently than for a foreign type — and an array of a proved
+/// scalar, where the array is what the field wrote rather than anything the name proves.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_direct_flatten_of_an_object_an_unregistered_name_or_an_array_stays_admitted() {
+    seed_registered_wire("DirectDoc", AliasKind::NoEnumMembers, None);
+    seed_registered_wire("DirectCount", AliasKind::NoEnumMembers, Some("integer"));
+    for admitted in [
+        syn::parse_quote! { #[serde(flatten)] base: DirectDoc },
+        syn::parse_quote! { #[serde(flatten)] base: NeverRegisteredDirectly },
+        syn::parse_quote! { #[serde(flatten)] counts: Vec<DirectCount> },
+    ] {
+        let field: syn::Field = admitted;
+        assert!(
+            direct_flatten_error(&field).is_none(),
+            "got a rejection for {}",
+            quote::ToTokens::to_token_stream(&field)
+        );
+    }
+}
+
+/// A plain enum proves the same `string` and keeps the refusal written for it: those words name the
+/// variant key serde writes into the object, which is what the author of that declaration acts on.
+/// Two guards firing on one field would put two diagnostics on one line, each answering for the same
+/// thing in different words.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_direct_flatten_of_a_plain_enum_is_left_to_the_guard_written_for_it() {
+    seed_registered_wire("DirectHue", AliasKind::EnumMembers, Some("string"));
+    let field: syn::Field = syn::parse_quote! { #[serde(flatten)] tone: DirectHue };
+    assert!(direct_flatten_error(&field).is_none());
+    let written = super::flattened_field_guard_error(&field, "Host")
+        .map(|error| error.to_string())
+        .unwrap();
+    assert!(
+        written.contains("a plain enum writes its"),
+        "got: {written}"
     );
 }
 

@@ -100,6 +100,8 @@ A slot dropped from only one of the two directions has no such description and i
 
 A struct declaring a single slot keeps it whatever these attributes say: serde writes and reads a newtype struct's only slot regardless, so nothing there is dropped.
 
+A tuple *variant*'s slots read the same way, with one difference at the lone-slot arity. `enum E { One(#[serde(skip)] String, u32) }` holding `("s", 7)` writes `{"One":[7]}`, reads that back, and refuses `{"One":["s",7]}`, so the described tuple shrinks exactly as a struct's does — under the content key when one is named, and to `{"One":[]}` when every slot is dropped. Where a variant differs is that it has its own name to fall back on: a variant declaring one slot and dropping it is written as a unit variant, `"One"` externally, `{"type":"One"}` under a tag and `null` untagged, and each surface describes it as the unit it has become. Because serde does read a variant slot's attributes at every arity, the one-directional halves are refused there at every arity too — `One(#[serde(skip_serializing)] String)` writes `"One"` and reads only `{"One":"s"}`.
+
 Which key a field writes is read off the attribute in every build, `serde` feature or not — one declaration describes one wire under every toggle. What the feature buys is the renaming, the tagging and the guards.
 
 ```rust
@@ -944,10 +946,10 @@ use tixschema::model_schema;
 use serde::{Deserialize, Serialize};
 
 // Generic branded newtype (good for parameterized IDs)
-#[model_schema(default_types(ID_TYPE = String))]
+#[model_schema(default_types(IdType = String))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct UserId<ID_TYPE>(pub ID_TYPE);
+pub struct UserId<IdType>(pub IdType);
 
 // Non-generic branded newtype
 #[model_schema()]
@@ -959,13 +961,35 @@ pub struct CorrelationId(pub String);
 Generated TypeScript (with `zod` feature):
 
 ```typescript
-export type UserId<ID_TYPE> = ID_TYPE & $brand<"UserId">;
-const buildUserId$Schema = <ID_TYPE extends ZodType>(
-  iD_TYPE: ID_TYPE,
+export type UserId<IdType> = IdType & $brand<"UserId">;
+const buildUserId$Schema = <IdType extends ZodType>(
+  idType: IdType,
 ) =>
-  iD_TYPE.meta({
+  idType.meta({
   description: "UserId",
 }).brand<"UserId">();
+
+type UserId$SchemaOf<IdType extends ZodType> = ReturnType<
+  typeof buildUserId$Schema<IdType>
+>;
+
+interface UserId$SchemaFactoryCache {
+  get<IdType extends ZodType>(key: IdType): UserId$SchemaOf<IdType> | undefined;
+  set<IdType extends ZodType>(key: IdType, value: UserId$SchemaOf<IdType>): this;
+}
+
+const UserId$SchemaFactoryCache = createSchemaCache<UserId$SchemaFactoryCache>();
+
+export const UserId$SchemaFactory = <IdType extends ZodType>(
+  idType: IdType,
+): UserId$SchemaOf<IdType> => {
+  const hit = UserId$SchemaFactoryCache.get(idType);
+  if (hit) return hit;
+
+  const schema = buildUserId$Schema(idType);
+  UserId$SchemaFactoryCache.set(idType, schema);
+  return schema;
+};
 
 export type CorrelationId = string & $brand<"CorrelationId">;
 const CorrelationId$RawSchema = z.string().brand<"CorrelationId">().meta({
@@ -979,7 +1003,7 @@ Generated TypeScript (without `zod` feature):
 
 ```typescript
 declare const __brand_UserId: unique symbol;
-export type UserId<ID_TYPE> = ID_TYPE & { readonly [__brand_UserId]: true };
+export type UserId<IdType> = IdType & { readonly [__brand_UserId]: true };
 
 declare const __brand_CorrelationId: unique symbol;
 export type CorrelationId = string & { readonly [__brand_CorrelationId]: true };
@@ -988,7 +1012,7 @@ export type CorrelationId = string & { readonly [__brand_CorrelationId]: true };
 Notes:
 
 - If the Rust type name ends with `Json`, the suffix is stripped in the generated TypeScript (e.g., `UserIdJson` becomes `UserId`). Otherwise, the Rust name is used as-is.
-- Generic parameter names (e.g., `ID_TYPE`) are preserved exactly in the TypeScript type.
+- Generic parameter names (e.g., `IdType`) are preserved exactly in the TypeScript type.
 - A generic brand publishes a factory, as every other generic item does, so the brand and its inner's shape land on the argument the caller supplied rather than on a value pinned at expansion. A parameter reaches it as the factory's own argument, under the rule in [Type Parameters](#type-parameters); a brand written over that parameter still describes what its inner writes, so `TagList<T>(pub Vec<T>)` is an array on every surface — `Array<T>`, `z.array(t)`, `{"type": "array", "items": {}}` — and not the bare parameter.
 - The description is written before the brand in a factory and after it in a `const`. Inside a factory the receiver is the parameter the caller filled, and Zod's `.meta()` returns `this` — which TypeScript resolves back to that bare parameter, dropping the marker `.brand<"Name">()` had just added. Both orders build the same schema.
 - Serde transparent serialization works normally -- the wrapper is invisible in JSON.
@@ -1075,6 +1099,23 @@ pub struct GenericSlug<T>(pub T);
 #[serde(transparent)]
 pub struct Slug(pub String);
 ```
+
+**A name written over one of those parameters is rejected too**, whether or not the named type has expanded yet. `Tagged<T>` is not a type the declaration fixed — the instantiation fixes it — so the checks land on whatever the caller supplies: Zod appends them to a schema the call site decides the shape of, the one JSON document written for every instantiation still holds the `{}` a parameter describes as, and `validate()` measures the inner's `Display` rendering, which rejects `TaggedSlug(Tagged(7))` for having one decimal digit rather than for its value. This is the one place the registry's silence is not read as consent, and it is what keeps declaration order out of the diagnostic: the same two declarations written in the other order are rejected through the registry, so admitting this order would decide one program two ways.
+
+```rust
+// Rejected: the checks would measure whatever the instantiation supplies for `T`.
+#[model_schema(minLength = 3, default_types(T = String))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TaggedSlug<T>(pub Tagged<T>);
+
+#[model_schema(default_types(T = String))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Tagged<T>(pub T);
+```
+
+Brand a string-typed inner instead. The bound belongs on a declaration that writes a string — a `String` brand of its own, which the parameterised type can then be instantiated with (`Tagged<BoundedSlug>`), so the check sits where every surface can read it.
 
 **The inner type also has to implement `Display`,** since validation runs against `to_string()`. That holds whether or not the brand passes `no_display`: the flag drops the `Display` impl, not the requirement.
 
@@ -1209,22 +1250,44 @@ Branded newtypes support doc comments (for Zod `.meta({ description })`) and com
 /// ```rust example
 /// DocumentId("64de3d95ff45b119e5b53a7e".to_string())
 /// ```
-#[model_schema(default_types(ID_TYPE = String))]
+#[model_schema(default_types(IdType = String))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct DocumentId<ID_TYPE>(pub ID_TYPE);
+pub struct DocumentId<IdType>(pub IdType);
 ```
 
 Generated Zod:
 
 ```typescript
-const buildDocumentId$Schema = <ID_TYPE extends ZodType>(
-  iD_TYPE: ID_TYPE,
+const buildDocumentId$Schema = <IdType extends ZodType>(
+  idType: IdType,
 ) =>
-  iD_TYPE.meta({
+  idType.meta({
   description: "Generic document identifier.\n- `DocumentId<String>` for API/HTTP layer\n- `DocumentId<ObjectId>` for MongoDB layer",
   example: "64de3d95ff45b119e5b53a7e",
 }).brand<"DocumentId">();
+
+type DocumentId$SchemaOf<IdType extends ZodType> = ReturnType<
+  typeof buildDocumentId$Schema<IdType>
+>;
+
+interface DocumentId$SchemaFactoryCache {
+  get<IdType extends ZodType>(key: IdType): DocumentId$SchemaOf<IdType> | undefined;
+  set<IdType extends ZodType>(key: IdType, value: DocumentId$SchemaOf<IdType>): this;
+}
+
+const DocumentId$SchemaFactoryCache = createSchemaCache<DocumentId$SchemaFactoryCache>();
+
+export const DocumentId$SchemaFactory = <IdType extends ZodType>(
+  idType: IdType,
+): DocumentId$SchemaOf<IdType> => {
+  const hit = DocumentId$SchemaFactoryCache.get(idType);
+  if (hit) return hit;
+
+  const schema = buildDocumentId$Schema(idType);
+  DocumentId$SchemaFactoryCache.set(idType, schema);
+  return schema;
+};
 ```
 
 ## Field Validation (`model_schema_prop`)
@@ -1922,7 +1985,7 @@ Supported Serde attributes:
 - `#[serde(flatten)]` -- flatten a field into the parent as an intersection type (`A & B`) / Zod `.and(...)`
 - `#[serde(transparent)]` -- transparent wrappers (used for branded newtypes)
 - `#[serde(skip_serializing_if = "...")]` -- the key is left out of the payload when the predicate fires, so the member is described under an optional key: `roles?: Array<string>;` in TypeScript, `roles: z.array(z.string()).optional(),` in Zod, and no `required` entry in the JSON Schema
-- `#[serde(skip)]` -- the key is written into no payload and read out of none, so no surface describes the member at all: no TypeScript member, no Zod key, and neither a `properties` nor a `required` entry. On a tuple-struct slot it takes the slot out of the described tuple, which shortens the arity
+- `#[serde(skip)]` -- the key is written into no payload and read out of none, so no surface describes the member at all: no TypeScript member, no Zod key, and neither a `properties` nor a `required` entry. On a tuple-struct or tuple-variant slot it takes the slot out of the described tuple, which shortens the arity -- and a variant declaring one slot becomes a unit variant, which is what serde writes for it
 - `#[serde(skip_serializing)]` -- the write half of `skip`: the key is left out of every payload while a supplied one is still read, so the member is described under an optional key, as `skip_serializing_if` is
 - `#[serde(skip_deserializing)]` -- the read half: the key is written into every payload while a supplied one is discarded, so the member keeps a required key
 
