@@ -955,6 +955,29 @@ pub struct LifetimeStruct<'label> {
     pub label: Cow<'label, str>,
 }
 
+/// A parameter bounded in the `where` clause rather than beside itself, filled at a type that
+/// satisfies the bound. Every declared filling is checked against the bounds its parameter carries,
+/// so the fixture compiling is the whole of the assertion that a satisfying one is let through.
+#[model_schema(default_types(LabelType = String))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Labelled<LabelType>
+where
+    LabelType: Clone + Eq,
+{
+    pub label: LabelType,
+}
+
+/// A parameter whose bound names the item's other parameter, which holds only where that one is
+/// filled too — a joint statement the per-filling check does not make, and one whose name
+/// reproduced beside a single filling would resolve to nothing. The fixture compiling is the whole
+/// of the assertion that such a bound is left to the item's own use sites.
+#[model_schema(default_types(WideType = String, NarrowType = char))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Widened<WideType: From<NarrowType>, NarrowType: Clone> {
+    pub narrow: NarrowType,
+    pub wide: WideType,
+}
+
 /// Enough parameters that every level of the lookup is a level with two neighbours: the first
 /// argument keys the outermost map, the last keys the one the schema is stored in, and the three
 /// between are only reached through the two.
@@ -1104,6 +1127,26 @@ pub struct Summarised<ValueType> {
 #[test]
 fn a_parameter_with_no_default_still_expands_where_no_json_document_is_built() {
     assert_eq!(Undefaulted { id: 1_u32 }.id, 1);
+}
+
+/// A declared filling is checked against the bounds its parameter carries, and the two fixtures a
+/// bound can reach — one satisfied, one naming a neighbour and so left alone — both still expand
+/// and still hold what the author wrote into them.
+#[test]
+fn a_bounded_parameter_filled_at_a_type_its_bound_admits_still_expands() {
+    assert_eq!(
+        Labelled {
+            label: "one".to_owned()
+        }
+        .label,
+        "one"
+    );
+    let widened = Widened {
+        narrow: 'x',
+        wide: String::from('x'),
+    };
+    assert_eq!(widened.narrow, 'x');
+    assert_eq!(widened.wide, "x");
 }
 
 /// Each alias named by a value, the way every other declaration shape here is: an alias that binds

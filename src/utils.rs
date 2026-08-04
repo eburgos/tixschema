@@ -175,17 +175,18 @@ impl ZodUnionMember {
 /// no object, and `None` where nothing there proves it — a map, an object, and a name nothing has
 /// classified alike.
 ///
-/// Recorded and read under `serde` and `zod` together, which is the pair that reads
-/// `#[serde(untagged)]` and `#[serde(flatten)]` and multiplies one over the other: without both
-/// there is no merge to answer for and nothing asks.
-#[cfg(all(feature = "serde", feature = "zod"))]
+/// Recorded and read wherever `serde` meets a surface that writes a merge of its own — `zod`, which
+/// multiplies the object over the source's branches, and `typescript`, which spells the source's
+/// absence beside it. Without `serde` no field reaches a merge at all, and without either surface
+/// there is nothing that would ask.
+#[cfg(all(feature = "serde", any(feature = "zod", feature = "typescript")))]
 #[derive(Clone)]
 pub struct WireLeaf {
     pub branch: Vec<usize>,
     pub non_object: Option<&'static str>,
 }
 
-#[cfg(all(feature = "serde", feature = "zod"))]
+#[cfg(all(feature = "serde", any(feature = "zod", feature = "typescript")))]
 impl WireLeaf {
     /// Whether this leaf is the absence the name itself offers: the `null` of a choice the
     /// registration publishes at its own top level, one position in from the name and no deeper.
@@ -250,8 +251,13 @@ pub struct AliasInfo {
     /// be appended to; this answers the merge's, which is whether an object can be joined to it —
     /// two questions one word could not hold apart, an `integer` and a `number` being one shape and
     /// two documents, and an array and a map one shape and opposite answers.
-    #[cfg(all(feature = "serde", feature = "zod"))]
+    #[cfg(all(feature = "serde", any(feature = "zod", feature = "typescript")))]
     pub wire: Vec<WireLeaf>,
+    /// What an externally tagged enum's variants are spelled as where an object flattens the enum
+    /// itself, one per variant in the order the union writes them, and empty for every other item.
+    /// Filled by [`record_zod_flatten_variants`] once that enum's own expansion has rendered them.
+    #[cfg(all(feature = "serde", feature = "zod"))]
+    pub zod_flatten_variants: Vec<String>,
     /// What an untagged enum's members are spelled as on the Zod surface, and empty for every other
     /// item. Filled by [`record_zod_union_members`] once the enum's own expansion has rendered
     /// them.
@@ -622,8 +628,10 @@ pub fn register_alias_info(
                 #[cfg(feature = "zod")]
                 publishes_zod_factory: false,
                 value_shape: PublishedShape::Flat(None),
-                #[cfg(all(feature = "serde", feature = "zod"))]
+                #[cfg(all(feature = "serde", any(feature = "zod", feature = "typescript")))]
                 wire: Vec::new(),
+                #[cfg(all(feature = "serde", feature = "zod"))]
+                zod_flatten_variants: Vec::new(),
                 #[cfg(feature = "zod")]
                 zod_union_members: Vec::new(),
             },
@@ -677,7 +685,7 @@ pub fn record_value_shape(rust_ident: &str, shape: PublishedShape) {
 ///
 /// A chain resolves one link at a time and cannot cycle, because an entry is only ever built from
 /// entries registered before it.
-#[cfg(all(feature = "serde", feature = "zod"))]
+#[cfg(all(feature = "serde", any(feature = "zod", feature = "typescript")))]
 pub fn record_wire_leaves(rust_ident: &str, leaves: &[WireLeaf]) {
     ALIAS_INFO.with(|map| {
         if let Some(info) = map.borrow_mut().get_mut(rust_ident) {
@@ -709,6 +717,28 @@ pub fn record_zod_union_members(rust_ident: &str, members: &[ZodUnionMember]) {
     ALIAS_INFO.with(|map| {
         if let Some(info) = map.borrow_mut().get_mut(rust_ident) {
             info.zod_union_members = members.to_vec();
+        }
+    });
+}
+
+/// Records what an externally tagged enum's variants are spelled as where an object flattens the
+/// enum itself, on the entry that enum has already registered.
+///
+/// A variant standing alone and the same variant written into an object being merged are two
+/// spellings of one wire. serde writes a data-carrying variant as the single-key object its name
+/// tags, which is what the union already publishes; it writes a unit variant as that name alone
+/// standing on its own, and as that name holding `null` where the enum is flattened — a key set,
+/// where the union publishes a bare string no object joins. So the flatten-edge spelling is recorded
+/// beside the union's rather than read back off it.
+///
+/// Recorded for every externally tagged enum and read only where the same enum's leaves prove the
+/// merge would otherwise write a branch no payload satisfies, which is the bound the leaves are
+/// already spliced under one position further in.
+#[cfg(all(feature = "serde", feature = "zod"))]
+pub fn record_zod_flatten_variants(rust_ident: &str, variants: &[String]) {
+    ALIAS_INFO.with(|map| {
+        if let Some(info) = map.borrow_mut().get_mut(rust_ident) {
+            info.zod_flatten_variants = variants.to_vec();
         }
     });
 }
