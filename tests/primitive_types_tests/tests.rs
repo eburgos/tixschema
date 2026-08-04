@@ -182,6 +182,31 @@ fn assert_ts_fields_contain(ts_definition: &str, fields: &[&str], expected_suffi
     }
 }
 
+/// The member spelling an `Option` field written with a `skip_serializing_if` renders as.
+///
+/// serde drops the key for a `None`, so the payload has no such key and the member is written with
+/// an optional one. Only a build that reads the attribute knows that: without the `serde` feature
+/// none is read, and the key stays written with an `undefined` value.
+#[cfg(all(feature = "typescript", feature = "zod"))]
+fn omitted_member(name: &str, ts_type: &str) -> String {
+    if cfg!(feature = "serde") {
+        format!("{name}?: {ts_type};")
+    } else {
+        format!("{name}: {ts_type} | undefined;")
+    }
+}
+
+#[cfg(all(feature = "typescript", feature = "zod"))]
+fn assert_ts_omitted_fields_contain(ts_definition: &str, fields: &[&str], ts_type: &str) {
+    for field in fields {
+        let expected = omitted_member(field, ts_type);
+        assert!(
+            ts_definition.contains(&expected),
+            "missing {expected}, got: {ts_definition}"
+        );
+    }
+}
+
 #[cfg(feature = "jsonschema")]
 fn assert_hashmap_array_property(
     properties: &serde_json::Map<String, serde_json::Value>,
@@ -266,8 +291,11 @@ fn test_64bit_integers_ts_definition() {
     // Check TypeScript type mapping - should be number
     assert!(ts_definition.contains("large_unsigned: number;"));
     assert!(ts_definition.contains("large_signed: number;"));
-    assert!(ts_definition.contains("optional_large_unsigned: number | undefined;"));
-    assert!(ts_definition.contains("optional_large_signed: number | undefined;"));
+    assert_ts_omitted_fields_contain(
+        &ts_definition,
+        &["optional_large_unsigned", "optional_large_signed"],
+        "number",
+    );
     assert!(ts_definition.contains("array_of_u64: Array<number>;"));
     assert!(ts_definition.contains("array_of_i64: Array<number>;"));
 
@@ -407,12 +435,8 @@ fn test_primitive_types_typescript_generation_details() {
     ];
     assert_ts_fields_contain(&ts_definition, &numeric_fields, "number");
 
-    // Optional types should include "| undefined"
-    assert_ts_fields_contain(
-        &ts_definition,
-        &["opt_i8", "opt_u64", "opt_f64"],
-        "number | undefined",
-    );
+    // Optional types carry the key serde may drop
+    assert_ts_omitted_fields_contain(&ts_definition, &["opt_i8", "opt_u64", "opt_f64"], "number");
 
     // Arrays should use Array<number> syntax
     assert_ts_fields_contain(
@@ -421,11 +445,11 @@ fn test_primitive_types_typescript_generation_details() {
         "Array<number>",
     );
 
-    // Optional arrays should include "| undefined"
-    assert_ts_fields_contain(
+    // Optional arrays carry the key serde may drop
+    assert_ts_omitted_fields_contain(
         &ts_definition,
         &["opt_array_i8", "opt_array_u64", "opt_array_f64"],
-        "Array<number> | undefined",
+        "Array<number>",
     );
 
     // HashMap with primitive values

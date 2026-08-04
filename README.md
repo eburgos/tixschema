@@ -70,7 +70,7 @@ export const User$Schema: ZodType<User> = z.strictObject({
 
 ### Structs
 
-Any Rust struct annotated with `#[model_schema()]` generates a corresponding TypeScript type and Zod schema. Primitive types map as follows: `String` to `string`, `bool` to `boolean`, all numeric types to `number` (integers get `.int()`), `Option<T>` to `T | undefined`, `Vec<T>` to `Array<T>`, and `HashMap<String, T>` to `Partial<Record<string, T>>`.
+Any Rust struct annotated with `#[model_schema()]` generates a corresponding TypeScript type and Zod schema. Primitive types map as follows: `String` to `string`, `bool` to `boolean`, all numeric types to `number` (integers get `.int()`), `Option<T>` to `T` under a key the omission attribute decides ([Optional Fields](#optional-fields)), `Vec<T>` to `Array<T>`, and `HashMap<String, T>` to `Partial<Record<string, T>>`.
 
 ```rust
 #[model_schema()]
@@ -86,7 +86,9 @@ pub struct UserProfile {
 
 ### Optional Fields
 
-`Option<T>` fields become `T | undefined` in TypeScript and `z.union([type, z.undefined()]).prefault(undefined)` in Zod v4. The `.prefault(undefined)` makes the field default to `undefined` when omitted from the input.
+`Option<T>` fields validate as `z.union([type, z.undefined()]).prefault(undefined)` in Zod v4 and are left out of the JSON Schema's `required` list. The `.prefault(undefined)` makes the field default to `undefined` when omitted from the input.
+
+What TypeScript writes follows the wire. A field carrying `#[serde(skip_serializing_if = "Option::is_none")]` (or `skip` / `skip_serializing`) has no key at all in the payload serde writes for a `None`, so the member is written with an optional key — `field?: T`, which the absent-key payload satisfies. Every other `Option<T>` field keeps its key and carries `T | undefined`. The `serde` feature is what reads the attribute; without it no attribute is read and every `Option<T>` renders in the second form.
 
 ```rust
 #[model_schema()]
@@ -94,11 +96,25 @@ pub struct UserProfile {
 pub struct UserWithOptionals {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phone: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar_url: Option<String>,
 }
+```
+
+Generated TypeScript:
+
+```typescript
+export type UserWithOptionals = {
+  id: string;
+  name: string;
+  email?: string;
+  phone?: string;
+  avatar_url?: string;
+};
 ```
 
 ### Collections and Maps
@@ -759,11 +775,95 @@ export type DocumentRecord = {
 
 ### Type Parameters
 
-A generic alias and a generic branded newtype are the two items that can name their own type parameters, and every surface reads such a name under one rule.
+A struct, a tuple struct, an enum, an alias and a branded newtype can each name their own type parameters, and every surface reads such a name under one rule.
 
-**TypeScript binds the parameter for real.** It is a type surface, and the declaration it emits carries the parameter list: `export type WrapperType<T> = Array<T>` is a generic type, and a use site fills `T` in.
+**TypeScript binds the parameter for real.** It is a type surface, and the declaration it emits carries the parameter list: `export type Wrapper<T> = { id: T }` is a generic type, and a use site fills `T` in.
 
-**Zod and JSON Schema erase it to the opaque value** -- `z.unknown()` and `{}`. A parameter names no type until the item is instantiated, and one schema is written for every instantiation, so the parameter admits any value while the shape around it -- an array, a map's keys, a tuple's arity -- stays described. Zod could not do otherwise even in principle: it publishes *values*, and a `const` takes no type parameters, so a parameter left to render would name a `$Schema` binding no emitted module declares, and the pasted output would throw a `ReferenceError` before reading a payload. The exported binding's annotation follows its value, taking the same opaque argument the value was composed with.
+**JSON Schema describes it as the open schema** -- `{}`. A parameter names no type until the item is instantiated, and one JSON schema is written for every instantiation, so the parameter admits any value while the shape around it -- an array, a map's keys, a tuple's arity -- stays described.
+
+**Zod publishes a factory rather than a schema.** A Zod schema is a runtime value and TypeScript generics do not exist at runtime, so there is no one value a generic type could publish: the caller has to say what fills each parameter before anything can validate. A generic type therefore exports `X$SchemaFactory`, a function taking one required schema argument per parameter, and a field written with a parameter composes the argument bound for it.
+
+```rust
+#[model_schema()]
+pub struct Wrapper<IdType> {
+    pub children: Vec<IdType>,
+    pub id: IdType,
+    pub name: String,
+}
+```
+
+```typescript
+export type Wrapper<IdType> = {
+  children: Array<IdType>;
+  id: IdType;
+  name: string;
+};
+
+const buildWrapper$Schema = <IdType extends ZodType>(
+  idType: IdType,
+) =>
+  z.strictObject({
+  children: z.array(idType),
+  id: idType,
+  name: z.string(),
+
+});
+
+type Wrapper$SchemaOf<IdType extends ZodType> = ReturnType<
+  typeof buildWrapper$Schema<IdType>
+>;
+
+interface Wrapper$SchemaFactoryCache {
+  get<IdType extends ZodType>(key: IdType): Wrapper$SchemaOf<IdType> | undefined;
+  set<IdType extends ZodType>(key: IdType, value: Wrapper$SchemaOf<IdType>): this;
+}
+
+const Wrapper$SchemaFactoryCache = createSchemaCache<Wrapper$SchemaFactoryCache>();
+
+export const Wrapper$SchemaFactory = <IdType extends ZodType>(
+  idType: IdType,
+): Wrapper$SchemaOf<IdType> => {
+  const hit = Wrapper$SchemaFactoryCache.get(idType);
+  if (hit) return hit;
+
+  const schema = buildWrapper$Schema(idType);
+  Wrapper$SchemaFactoryCache.set(idType, schema);
+  return schema;
+};
+```
+
+Every parameter is a real TypeScript type parameter, never a bare `ZodType` annotation: `ZodType` defaults its own parameters, so an argument annotated with it would infer every field it validates as `unknown` and the caller would learn nothing from the schema handed back. Arguments are required -- a default would let a call site say nothing about a filling and still be handed a schema, which is exactly the silent mis-validation the factory exists to prevent.
+
+Each factory memoizes on the *identity* of the arguments it was handed, one cache level per parameter. Two calls with the same argument objects return the identical schema, and no two argument lists collide -- a change in the first argument and a change in the last each key a different level:
+
+```typescript
+const wireDocument = EcmDocument$SchemaFactory(z.string(), z.number());
+const storedDocument = EcmDocument$SchemaFactory(objectIdSchema, z.date());
+
+EcmDocument$SchemaFactory(z.string(), z.number()) === wireDocument;  // false -- fresh arguments, new key
+```
+
+A generic type that also flattens keeps the deferred read of its base, so declaration order stays irrelevant: `.and(z.lazy(() => Envelope$Schema))` composes inside the factory unchanged.
+
+#### The module preamble
+
+The factories share one helper, which every generated module carries once above its per-type definitions:
+
+```rust
+use tixschema::typescript_preamble;
+
+const PREAMBLE: &str = typescript_preamble!();
+```
+
+```typescript
+const createSchemaCache = <Cache extends object>(): Cache => new WeakMap() as unknown as Cache;
+```
+
+A cache maps an argument to the schema built from *that* argument, so its value type depends on its key type. TypeScript can declare that dependency -- each factory writes it out, one interface per parameter -- but cannot construct a map that satisfies it, since a `WeakMap` fixes both of its own parameters at construction. So the dependency is declared where it does the work and asserted exactly once, in the preamble: that line is the only assertion anywhere in the output. A module holding no generic type needs no preamble; one holding any needs it exactly once.
+
+#### The two items that still publish a `const`
+
+A generic alias and a generic branded newtype publish a plain `const`, so a parameter inside either has no argument to name and still renders as the opaque value -- `z.unknown()`, the same answer JSON Schema gives:
 
 ```rust
 #[model_schema()]
@@ -778,11 +878,7 @@ const WrapperType$RawSchema = z.array(z.unknown());
 export const WrapperType$Schema: ZodType<WrapperType<unknown>> = WrapperType$RawSchema;
 ```
 
-```json
-{ "type": "array", "items": {} }
-```
-
-Only the item's *own* parameters erase. A name the expansion cannot resolve because the type lives elsewhere keeps its `Name$Schema` reference, since that type publishes the binding.
+Only the item's *own* parameters are read this way. A name the expansion cannot resolve because the type lives elsewhere keeps its `Name$Schema` reference, since that type publishes the binding.
 
 One consequence is worth stating outright: an opaque value carries no checks, so no `model_schema_prop` bound may be spelled against a type parameter. A branded newtype cannot apply `pattern`, `minLength`, or `maxLength` to one of its own — see [Branded Newtype Validation Constraints](#branded-newtype-validation-constraints) — and a *field* typed with one is refused for the same reason, at every depth the parameter is reached through:
 
@@ -1384,7 +1480,7 @@ pub struct Event {
 
 ### Optional TypeScript Keys (`ts_optional`)
 
-By default an `Option<T>` field renders as a required key carrying `| undefined` (`field: T | undefined`). Add the bare `ts_optional` flag to render it as an optional key instead (`field?: T`).
+An `Option<T>` field whose serde attributes drop the key for a `None` already renders as an optional key ([Optional Fields](#optional-fields)). The bare `ts_optional` flag asks for that same spelling (`field?: T` rather than `field: T | undefined`) on the author's word, for a field whose key nothing else says may be absent — an `Option<T>` written where no serde attribute is read at all.
 
 This is a TypeScript-only knob -- the Zod schema and JSON Schema are unchanged (the field is already optional in both). The flag is only valid on `Option<T>` fields; applying it to a non-`Option` field is a compile error. It composes with `as = Type`, which names the type the field already renders.
 
@@ -1407,7 +1503,7 @@ export type Profile = {
 };
 ```
 
-Without `ts_optional`, `nickname` would render as `nickname: string | undefined`.
+Without `ts_optional` and without an attribute that drops the key, `nickname` would render as `nickname: string | undefined`.
 
 ## Compiler-Validated Examples
 
@@ -1787,7 +1883,7 @@ If the `serde` feature is disabled but serde attributes are present, you will se
 
 4. **Array Types**: `Vec<T>` becomes `Array<T>` in TypeScript, one `Array<...>` per level written — `Vec<Vec<T>>` is `Array<Array<T>>`.
 
-5. **Optional Fields**: `Option<T>` becomes `T | undefined` in TypeScript and `z.union([type, z.undefined()]).prefault(undefined)` in Zod v4.
+5. **Optional Fields**: `Option<T>` becomes `field?: T` in TypeScript where a serde attribute drops the key for a `None` and `field: T | undefined` where it does not, and `z.union([type, z.undefined()]).prefault(undefined)` in Zod v4 either way.
 
 6. **Complex Nesting**: The crate supports deeply nested structures including `HashMap<String, Vec<HashMap<String, T>>>` and similar patterns.
 
@@ -2088,4 +2184,4 @@ Benefits of the Zod v4 approach:
 - **JSON Schema generation**: Zod v4 can generate JSON schemas directly from the validation schemas.
 - **Cleaner code**: No complex transform functions needed.
 - **Better performance**: Eliminates runtime transform overhead.
-- **Type safety**: Maintains the same `T | undefined` TypeScript semantics.
+- **Type safety**: Validates exactly the payloads the TypeScript member admits, absent key included.

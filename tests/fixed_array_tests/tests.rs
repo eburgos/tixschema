@@ -32,6 +32,20 @@ struct FixedArraySlots {
     entry: (String, [u32; 3]),
 }
 
+/// The member spelling an `Option` field written with a `skip_serializing_if` renders as.
+///
+/// serde drops the key for a `None`, so the payload has no such key and the member is written with
+/// an optional one. Only a build that reads the attribute knows that: without the `serde` feature
+/// none is read, and the key stays written with an `undefined` value.
+#[cfg(feature = "typescript")]
+fn omitted_member(name: &str, ts_type: &str) -> String {
+    if cfg!(feature = "serde") {
+        format!("{name}?: {ts_type};")
+    } else {
+        format!("{name}: {ts_type} | undefined;")
+    }
+}
+
 fn fixed_array_fields() -> FixedArrayFields {
     FixedArrayFields {
         const_ids: [1, 2, 3],
@@ -202,13 +216,14 @@ fn test_a_fixed_array_validates_its_length_in_zod() {
 #[cfg(feature = "typescript")]
 fn test_a_fixed_array_types_as_an_unbounded_array_in_typescript() {
     let ts_definition = FixedArrayFields::ts_definition();
+    let optional_ids = omitted_member("optional_ids", "Array<number>");
     for spelling in [
         "const_ids: Array<number>;",
         "grid: Array<Array<number>>;",
         "ids: Array<number>;",
         "ids_of_rows: Array<Array<number>>;",
         "optional_elements: Array<number | null>;",
-        "optional_ids: Array<number> | undefined;",
+        optional_ids.as_str(),
         "rows_of_ids: Array<Array<number>>;",
         "set_of_ids: Array<Array<number>>;",
         "slice_ids: Array<number>;",

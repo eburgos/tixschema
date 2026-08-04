@@ -72,7 +72,14 @@ mod typescript {
             ts.contains("  by_key: Partial<Record<string, ValueType>>;"),
             "Got: {ts}"
         );
-        assert!(ts.contains("  maybe: ValueType | undefined;"), "Got: {ts}");
+        // The omission attribute is serde's, so only a serde build reads it and writes the key
+        // optional; without serde the value stays the undefined-flavored member.
+        let maybe = if cfg!(feature = "serde") {
+            "  maybe?: ValueType;"
+        } else {
+            "  maybe: ValueType | undefined;"
+        };
+        assert!(ts.contains(maybe), "Got: {ts}");
         assert!(ts.contains("  tuple: [KeyType, ValueType];"), "Got: {ts}");
     }
 
@@ -160,7 +167,10 @@ mod typescript {
 
 #[cfg(feature = "zod")]
 mod zod {
-    use super::{KeyedByParameter, Pair, Wrapper};
+    use super::{
+        Adjacent, Carried, Envelope, External, Holder, Internal, KeyedByParameter, LifetimeStruct,
+        Pair, PlainConst, Positional, Quintet, Tagged, Untagged, Wrapper,
+    };
 
     /// A record key has to produce string keys, and serde says every instantiation this map has
     /// does: it writes a JSON object key as a string or refuses the map outright at serialization.
@@ -196,67 +206,73 @@ mod zod {
         );
     }
 
-    /// A `const` cannot be parameterised, so a parameter composes into the value as the opaque
-    /// schema rather than as a `$Schema` binding no emitted module declares.
+    /// Whether the output publishes `name` as a plain exported `const` — the binding a type that
+    /// declares no parameter writes, in either build flavour. Asked this way because
+    /// `{name}$SchemaFactory` carries `{name}$Schema` inside it, so the two names cannot be told
+    /// apart by the prefix alone.
+    fn publishes_a_schema_const(zod: &str, name: &str) -> bool {
+        zod.contains(&format!("export const {name}$Schema:"))
+            || zod.contains(&format!("export const {name}$Schema ="))
+    }
+
+    /// A Zod schema is a runtime value and a `const` cannot be parameterised, so a generic type has
+    /// no one schema to publish — what it publishes is the function that builds one per filling.
     #[test]
-    fn a_parameter_composes_into_the_value_as_the_opaque_schema() {
+    fn a_generic_type_publishes_a_factory_where_a_plain_type_publishes_a_schema() {
+        let generic = Wrapper::<String>::zod_schema();
+        assert!(
+            generic.contains("export const Wrapper$SchemaFactory = "),
+            "Got: {generic}"
+        );
+        assert!(
+            !publishes_a_schema_const(&generic, "Wrapper"),
+            "Got: {generic}"
+        );
+
+        let plain = Envelope::zod_schema();
+        assert!(publishes_a_schema_const(&plain, "Envelope"), "Got: {plain}");
+        assert!(!plain.contains("$SchemaFactory"), "Got: {plain}");
+    }
+
+    /// The argument the factory binds is what a field written with a parameter composes, so the
+    /// caller's filling is what validates rather than a value that admits anything.
+    #[test]
+    fn a_parameter_composes_into_the_value_as_the_argument_bound_for_it() {
         let zod = Wrapper::<String>::zod_schema();
-        assert!(zod.contains("id: z.unknown()"), "Got: {zod}");
-        assert!(zod.contains("children: z.array(z.unknown())"), "Got: {zod}");
-        assert!(zod.contains("name: z.string()"), "Got: {zod}");
-        assert!(!zod.contains("IdType"), "Got: {zod}");
+        assert!(zod.contains("id: idType,"), "Got: {zod}");
+        assert!(zod.contains("children: z.array(idType),"), "Got: {zod}");
+        assert!(zod.contains("name: z.string(),"), "Got: {zod}");
     }
 
     #[test]
-    fn a_parameter_is_opaque_at_every_depth_it_is_written_at() {
+    fn a_parameter_is_the_argument_at_every_depth_it_is_written_at() {
         let zod = Pair::<String, u32>::zod_schema();
-        assert!(zod.contains("key: z.unknown()"), "Got: {zod}");
+        assert!(zod.contains("key: keyType,"), "Got: {zod}");
         assert!(
-            zod.contains("by_key: z.record(z.string(), z.unknown())"),
+            zod.contains("by_key: z.record(z.string(), valueType),"),
             "Got: {zod}"
         );
         assert!(
-            zod.contains("tuple: z.tuple([z.unknown(), z.unknown()])"),
+            zod.contains("tuple: z.tuple([keyType, valueType]),"),
             "Got: {zod}"
         );
-        assert!(!zod.contains("KeyType"), "Got: {zod}");
-        assert!(!zod.contains("ValueType"), "Got: {zod}");
     }
 
-    /// The annotation states the type of the value beside it, and that value was composed with
-    /// every parameter opaque — so the name it is written under is filled in the same way.
-    #[cfg(feature = "typescript")]
     #[test]
-    fn the_exported_binding_is_annotated_with_the_erased_arguments() {
-        use super::{Holder, Positional};
-
-        for (expected, zod) in [
-            (
-                "export const Wrapper$Schema: ZodType<Wrapper<unknown>> =",
-                Wrapper::<String>::zod_schema(),
-            ),
-            (
-                "export const Pair$Schema: ZodType<Pair<unknown, unknown>> =",
-                Pair::<String, u32>::zod_schema(),
-            ),
-            (
-                "export const Positional$Schema: ZodType<Positional<unknown>> =",
-                Positional::<String>::zod_schema(),
-            ),
-            (
-                "export const RenamedHolder$Schema: ZodType<RenamedHolder<unknown>> =",
-                Holder::<String>::zod_schema(),
-            ),
-        ] {
-            assert!(zod.contains(expected), "Got: {zod}");
-        }
+    fn a_generic_tuple_struct_publishes_a_factory_too() {
+        let zod = Positional::<String>::zod_schema();
+        assert!(
+            zod.contains("export const Positional$SchemaFactory = "),
+            "Got: {zod}"
+        );
+        assert!(zod.contains("z.tuple([idType, z.string()])"), "Got: {zod}");
     }
 
-    #[cfg(feature = "typescript")]
+    /// Which shape an enum's members are written in is what the tagging attributes decide, and only
+    /// `serde` reads those; that the parameter is bound by a factory is decided by the declaration,
+    /// so it is asked of every flavour in every build.
     #[test]
-    fn every_enum_flavour_annotates_its_binding_the_same_way() {
-        use super::{Adjacent, External, Internal, Untagged};
-
+    fn every_enum_flavour_publishes_a_factory() {
         for (flavour, zod) in [
             ("Adjacent", Adjacent::<String>::zod_schema()),
             ("Internal", Internal::<String>::zod_schema()),
@@ -264,14 +280,254 @@ mod zod {
             ("Untagged", Untagged::<String>::zod_schema()),
         ] {
             assert!(
-                zod.contains(&format!(
-                    "export const {flavour}$Schema: ZodType<{flavour}<unknown>> ="
-                )),
+                zod.contains(&format!("export const {flavour}$SchemaFactory = ")),
                 "Got: {zod}"
             );
-            assert!(zod.contains("z.unknown()"), "Got: {zod}");
-            assert!(!zod.contains("IdType"), "Got: {zod}");
+            assert!(zod.contains("idType"), "Got: {zod}");
+            assert!(!publishes_a_schema_const(&zod, flavour), "Got: {zod}");
         }
+    }
+
+    /// A const parameter and a lifetime name no type, so neither reaches a schema and there is
+    /// nothing for a factory to bind — the item publishes the one schema it has.
+    #[test]
+    fn an_item_binding_no_type_parameter_still_publishes_a_schema() {
+        for (name, zod) in [
+            ("PlainConst", PlainConst::<4>::zod_schema()),
+            ("LifetimeStruct", LifetimeStruct::zod_schema()),
+        ] {
+            assert!(publishes_a_schema_const(&zod, name), "Got: {zod}");
+            assert!(!zod.contains("$SchemaFactory"), "Got: {zod}");
+        }
+    }
+
+    /// Both names an item is published under carry the one binding it has, so a generic type's
+    /// re-export names the factory rather than a schema no module declares.
+    #[test]
+    fn the_ident_reexport_names_the_factory() {
+        let zod = Holder::<String>::zod_schema();
+        assert!(
+            zod.contains("export const Holder$SchemaFactory = RenamedHolder$SchemaFactory;"),
+            "Got: {zod}"
+        );
+        assert!(!publishes_a_schema_const(&zod, "Holder"), "Got: {zod}");
+    }
+
+    /// A base is read when the intersection is used rather than while the value holding it is
+    /// built, which is what leaves declaration order irrelevant. The arguments are in scope for the
+    /// whole of the builder, so the deferral composes inside the factory unchanged.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn a_generic_type_that_flattens_still_defers_its_base() {
+        let zod = Carried::<String>::zod_schema();
+        assert!(
+            zod.contains("export const Carried$SchemaFactory = "),
+            "Got: {zod}"
+        );
+        assert!(zod.contains("id: idType,"), "Got: {zod}");
+        assert!(
+            zod.contains(".and(z.lazy(() => Envelope$Schema))"),
+            "Got: {zod}"
+        );
+    }
+
+    /// Two calls with the same arguments reach the one schema: the miss path returns the very
+    /// value it stored, and the hit path returns what was stored.
+    #[test]
+    fn a_factory_returns_what_it_stored_rather_than_building_again() {
+        let zod = Wrapper::<String>::zod_schema();
+        assert!(
+            zod.contains(
+                "  const hit = Wrapper$SchemaFactoryCache.get(idType);\n  if (hit) return \
+                 hit;\n\n  const schema = buildWrapper$Schema(idType);\n  \
+                 Wrapper$SchemaFactoryCache.set(idType, schema);\n  return schema;\n};"
+            ),
+            "Got: {zod}"
+        );
+    }
+
+    /// Every argument keys a level of its own, so no two argument lists meet in one slot: a change
+    /// in the first re-keys the outermost map, and a change in the last re-keys the one the schema
+    /// is stored in.
+    #[test]
+    fn every_argument_keys_a_level_of_its_own() {
+        let zod = Quintet::<u32, u32, u32, u32, u32>::zod_schema();
+        for lookup in [
+            "  let byBType = Quintet$SchemaFactoryCache.get(aType);",
+            "  let byCType = byBType.get(bType);",
+            "  let byDType = byCType.get(cType);",
+            "  let byEType = byDType.get(dType);",
+            "  const hit = byEType.get(eType);",
+            "  const schema = buildQuintet$Schema(aType, bType, cType, dType, eType);",
+            "  byEType.set(eType, schema);",
+        ] {
+            assert!(zod.contains(lookup), "Missing {lookup:?} in: {zod}");
+        }
+    }
+
+    /// The builder holds the expression the arguments compose into and the factory's return type is
+    /// read back off it, so the two cannot come to claim different shapes.
+    #[cfg(feature = "typescript")]
+    #[test]
+    fn the_factory_return_type_is_read_back_off_the_builder() {
+        let zod = Wrapper::<String>::zod_schema();
+        assert!(
+            zod.contains(
+                "const buildWrapper$Schema = <IdType extends ZodType>(\n  idType: IdType,\n) =>"
+            ),
+            "Got: {zod}"
+        );
+        assert!(
+            zod.contains(
+                "type Wrapper$SchemaOf<IdType extends ZodType> = ReturnType<\n  typeof \
+                 buildWrapper$Schema<IdType>\n>;"
+            ),
+            "Got: {zod}"
+        );
+        assert!(
+            zod.contains(
+                "export const Wrapper$SchemaFactory = <IdType extends ZodType>(\n  idType: \
+                 IdType,\n): Wrapper$SchemaOf<IdType> => {"
+            ),
+            "Got: {zod}"
+        );
+    }
+
+    /// Each parameter is a parameter of the function for real. A bare `ZodType` annotation compiles
+    /// and infers nothing — `ZodType` defaults its own parameters — so a field validated through
+    /// one would come back as the opaque value whatever the caller supplied.
+    #[cfg(feature = "typescript")]
+    #[test]
+    fn every_parameter_is_a_type_parameter_rather_than_a_bare_annotation() {
+        let zod = Pair::<String, u32>::zod_schema();
+        assert!(
+            zod.contains("<KeyType extends ZodType, ValueType extends ZodType>"),
+            "Got: {zod}"
+        );
+        assert!(
+            zod.contains("\n  keyType: KeyType,\n  valueType: ValueType,\n)"),
+            "Got: {zod}"
+        );
+        assert!(!zod.contains("keyType: ZodType"), "Got: {zod}");
+        assert!(!zod.contains("valueType: ZodType"), "Got: {zod}");
+    }
+
+    /// One parameter collapses to a single interface and a single lookup.
+    #[cfg(feature = "typescript")]
+    #[test]
+    fn one_parameter_writes_one_cache_interface() {
+        let zod = Wrapper::<String>::zod_schema();
+        assert!(
+            zod.contains(
+                "interface Wrapper$SchemaFactoryCache {\n  get<IdType extends ZodType>(key: \
+                 IdType): Wrapper$SchemaOf<IdType> | undefined;\n  set<IdType extends \
+                 ZodType>(key: IdType, value: Wrapper$SchemaOf<IdType>): this;\n}"
+            ),
+            "Got: {zod}"
+        );
+        assert!(
+            zod.contains(
+                "const Wrapper$SchemaFactoryCache = createSchemaCache<Wrapper$SchemaFactoryCache>();"
+            ),
+            "Got: {zod}"
+        );
+        assert!(!zod.contains("Wrapper$SchemaFactoryCacheL1"), "Got: {zod}");
+    }
+
+    /// One level per parameter, each carrying the parameters resolved above it — which is what lets
+    /// a lookup come back already typed and keeps the factory body free of assertions.
+    #[cfg(feature = "typescript")]
+    #[test]
+    fn each_cache_level_carries_the_parameters_resolved_above_it() {
+        let zod = Quintet::<u32, u32, u32, u32, u32>::zod_schema();
+        for level in [
+            "interface Quintet$SchemaFactoryCacheL1<AType extends ZodType> {\n  get<BType extends \
+             ZodType>(key: BType): Quintet$SchemaFactoryCacheL2<AType, BType> | undefined;",
+            "interface Quintet$SchemaFactoryCacheL4<AType extends ZodType, BType extends ZodType, \
+             CType extends ZodType, DType extends ZodType> {\n  get<EType extends ZodType>(key: \
+             EType): Quintet$SchemaOf<AType, BType, CType, DType, EType> | undefined;",
+            "interface Quintet$SchemaFactoryCache {\n  get<AType extends ZodType>(key: AType): \
+             Quintet$SchemaFactoryCacheL1<AType> | undefined;",
+            "    byCType = createSchemaCache<Quintet$SchemaFactoryCacheL2<AType, BType>>();",
+        ] {
+            assert!(zod.contains(level), "Missing {level:?} in: {zod}");
+        }
+        assert!(!zod.contains("Quintet$SchemaFactoryCacheL5"), "Got: {zod}");
+    }
+
+    /// The one assertion the output carries lives in the shared preamble, so nothing a type
+    /// publishes for itself needs `as`, `any`, or `unknown` to say what it validates.
+    #[test]
+    fn a_generic_type_publishes_no_assertion_and_no_opaque_value() {
+        for zod in [
+            Wrapper::<String>::zod_schema(),
+            Pair::<String, u32>::zod_schema(),
+            Positional::<String>::zod_schema(),
+            Quintet::<u32, u32, u32, u32, u32>::zod_schema(),
+            Carried::<String>::zod_schema(),
+            Adjacent::<String>::zod_schema(),
+        ] {
+            assert!(!zod.contains(" as "), "Got: {zod}");
+            assert!(!zod.contains("any"), "Got: {zod}");
+            assert!(!zod.contains("unknown"), "Got: {zod}");
+        }
+    }
+
+    /// A build with no `typescript` writes plain JavaScript: the same function and the same cache,
+    /// with nothing to declare either to.
+    #[cfg(not(feature = "typescript"))]
+    #[test]
+    fn a_javascript_build_writes_the_factory_untyped() {
+        let zod = Wrapper::<String>::zod_schema();
+        assert!(
+            zod.contains("const buildWrapper$Schema = (\n  idType,\n) =>"),
+            "Got: {zod}"
+        );
+        assert!(
+            zod.contains("const Wrapper$SchemaFactoryCache = createSchemaCache();"),
+            "Got: {zod}"
+        );
+        assert!(
+            zod.contains("export const Wrapper$SchemaFactory = (\n  idType,\n) => {"),
+            "Got: {zod}"
+        );
+        assert!(!zod.contains("interface "), "Got: {zod}");
+        assert!(!zod.contains("ZodType"), "Got: {zod}");
+    }
+
+    /// The two surfaces that publish a `const` rather than a factory have no argument for a
+    /// parameter inside them to name, so both still write the opaque value there.
+    #[test]
+    fn a_surface_publishing_no_factory_keeps_the_opaque_value() {
+        let alias = super::boxed_schema::Schema::zod_schema();
+        assert!(alias.contains("z.array(z.unknown())"), "Got: {alias}");
+        assert!(!alias.contains("$SchemaFactory"), "Got: {alias}");
+
+        let brand = Tagged::<String>::zod_schema();
+        assert!(
+            brand.contains("z.unknown().brand<\"Tagged\">()"),
+            "Got: {brand}"
+        );
+        assert!(!brand.contains("$SchemaFactory"), "Got: {brand}");
+    }
+
+    /// The one helper every factory builds its cache with, and the only assertion in the output.
+    #[cfg(feature = "typescript")]
+    #[test]
+    fn the_preamble_carries_the_shared_cache_helper() {
+        assert_eq!(
+            tixschema::typescript_preamble!(),
+            "const createSchemaCache = <Cache extends object>(): Cache => new WeakMap() as unknown as Cache;"
+        );
+    }
+
+    #[cfg(not(feature = "typescript"))]
+    #[test]
+    fn the_preamble_carries_the_shared_cache_helper() {
+        assert_eq!(
+            tixschema::typescript_preamble!(),
+            "const createSchemaCache = () => new WeakMap();"
+        );
     }
 }
 
@@ -452,6 +708,45 @@ pub struct LifetimeStruct<'label> {
     pub label: Cow<'label, str>,
 }
 
+/// Enough parameters that every level of the lookup is a level with two neighbours: the first
+/// argument keys the outermost map, the last keys the one the schema is stored in, and the three
+/// between are only reached through the two.
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Quintet<AType, BType, CType, DType, EType> {
+    pub alpha: AType,
+    pub bravo: BType,
+    pub charlie: CType,
+    pub delta: DType,
+    pub echo: EType,
+}
+
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Envelope {
+    pub trace: String,
+}
+
+/// A generic alias, and a generic branded newtype: the two surfaces that publish a `const` rather
+/// than a factory, and so the two a parameter inside still reaches as the opaque value.
+#[model_schema(name = "Boxed")]
+pub type Boxed<ValueType> = Vec<ValueType>;
+
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Tagged<ValueType>(pub ValueType);
+
+/// A generic type that also flattens, which is the one shape where the parameters and the deferred
+/// read of another type's binding have to hold at once.
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Carried<IdType> {
+    #[serde(flatten)]
+    pub envelope: Envelope,
+    pub id: IdType,
+}
+
 /// The pair the attribute used to produce on any generic item: `E0107` on the emitted `impl`,
 /// which dropped the parameters the declaration binds, and `E0433` on a module named after a
 /// parameter, which names no type and so publishes none. Both are compile errors, so the suite
@@ -483,6 +778,40 @@ fn a_generic_item_expands_to_rust_that_compiles() {
     assert_eq!(positional.0, "id");
     assert_eq!(positional.1, "name");
 
+    assert_eq!(Holder { id: 1_u32 }.id, 1);
+    assert_eq!(LifetimeStruct { label: "x".into() }.label, "x");
+
+    let carried = Carried {
+        envelope: Envelope {
+            trace: "t".to_owned(),
+        },
+        id: "i".to_owned(),
+    };
+    assert_eq!(carried.envelope.trace, "t");
+    assert_eq!(carried.id, "i");
+
+    let boxed: Boxed<u32> = vec![1_u32];
+    assert_eq!(boxed.len(), 1);
+    assert_eq!(Tagged("t".to_owned()).0, "t");
+
+    let quintet = Quintet {
+        alpha: 1_u32,
+        bravo: "b".to_owned(),
+        charlie: 3_u32,
+        delta: "d".to_owned(),
+        echo: 5_u32,
+    };
+    assert_eq!(quintet.alpha, 1);
+    assert_eq!(quintet.bravo, "b");
+    assert_eq!(quintet.charlie, 3);
+    assert_eq!(quintet.delta, "d");
+    assert_eq!(quintet.echo, 5);
+}
+
+/// The enum half of the same question, in every shape the tagging attributes reach — plus the one
+/// a plain enum can bind, which is a const rather than a type.
+#[test]
+fn a_generic_enum_expands_to_rust_that_compiles() {
     assert!(matches!(Adjacent::<String>::Nothing, Adjacent::Nothing));
     assert!(matches!(Internal::<String>::Nothing, Internal::Nothing));
     assert!(matches!(External::<String>::Nothing, External::Nothing));
@@ -491,8 +820,6 @@ fn a_generic_item_expands_to_rust_that_compiles() {
         Untagged::Numbered { .. }
     ));
     assert!(matches!(PlainConst::<4>::Wide, PlainConst::Wide));
-    assert_eq!(Holder { id: 1_u32 }.id, 1);
-    assert_eq!(LifetimeStruct { label: "x".into() }.label, "x");
 }
 
 /// The evidence the string-keyed rendering rests on: serde writes a JSON object key as a string

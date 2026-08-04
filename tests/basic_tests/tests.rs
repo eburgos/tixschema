@@ -178,6 +178,20 @@ fn test_optional_fields_json_schema() {
     assert!(!required.contains(&Value::String("nickname".to_owned())));
 }
 
+/// The member spelling an `Option` field written with a `skip_serializing_if` renders as.
+///
+/// serde drops the key for a `None`, so the payload has no such key and the member is written with
+/// an optional one. Only a build that reads the attribute knows that: without the `serde` feature
+/// none is read, and the key stays written with an `undefined` value.
+#[cfg(feature = "typescript")]
+fn omitted_member(name: &str, ts_type: &str) -> String {
+    if cfg!(feature = "serde") {
+        format!("{name}?: {ts_type};")
+    } else {
+        format!("{name}: {ts_type} | undefined;")
+    }
+}
+
 #[test]
 #[cfg(feature = "typescript")]
 fn test_optional_fields_ts_definition() {
@@ -186,9 +200,9 @@ fn test_optional_fields_ts_definition() {
     // Check that optional fields are properly typed
     assert!(ts_definition.contains("id: string;"));
     assert!(ts_definition.contains("name: string;"));
-    assert!(ts_definition.contains("email: string | undefined;"));
-    assert!(ts_definition.contains("age: number | undefined;"));
-    assert!(ts_definition.contains("nickname: string | undefined;"));
+    assert!(ts_definition.contains(&omitted_member("email", "string")));
+    assert!(ts_definition.contains(&omitted_member("age", "number")));
+    assert!(ts_definition.contains(&omitted_member("nickname", "string")));
 
     // Should NOT contain Zod schema (now separated)
     assert!(!ts_definition.contains("z.union([z.string(), z.undefined()])"));
