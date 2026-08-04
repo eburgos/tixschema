@@ -5789,6 +5789,30 @@ fn member_jsdoc_block(body: &str) -> String {
     jsdoc_block(body, MEMBER_INDENT)
 }
 
+/// The spelling a member key is written as on the text surfaces.
+///
+/// A key serde writes is a wire name rather than an identifier: `#[serde(rename = "reply-to")]`
+/// spells one no JavaScript identifier can hold, and written bare it ends the object the member
+/// sits in — every member after it reads as something else. Quoting is what the wire name always
+/// needed, and a key that already reads as an identifier is left exactly as it was, so no spelling
+/// that parsed before is rewritten.
+///
+/// Identifier is read as the ASCII spelling alone, which is the same span [`name_arg_value`] admits
+/// for a name the macro is given. A key outside it is quoted rather than refused: it is legal as a
+/// string, and it is serde's to name.
+fn ts_member_key(key: &str) -> String {
+    let mut chars = key.chars();
+    let heads_an_identifier = chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_' || first == '$');
+    if heads_an_identifier
+        && chars.all(|char| char.is_ascii_alphanumeric() || char == '_' || char == '$')
+    {
+        return key.to_owned();
+    }
+    format!("\"{}\"", key.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
 /// The one-line description a set of lines is published as, escaped for the `description: "…"` it
 /// is spliced into.
 ///
@@ -7608,7 +7632,7 @@ fn render_untagged_named(
         .map(|fld| {
             format!(
                 "{}{}: {}",
-                fld.name,
+                ts_member_key(&fld.name),
                 fld.optional_key_marker(),
                 fld.typescript_typename()
             )
@@ -7623,14 +7647,11 @@ fn render_untagged_named(
         let mut body = String::from("z.strictObject({ ");
         for fld in field_defs {
             let zod_field_type = fld.zod_type();
+            let key = ts_member_key(&fld.name);
             if fld.contains_type_reference(self_type_name) {
-                let _ = write!(
-                    body,
-                    "get {}() {{ return {}; }}, ",
-                    fld.name, zod_field_type
-                );
+                let _ = write!(body, "get {key}() {{ return {zod_field_type}; }}, ");
             } else {
-                let _ = write!(body, "{}: {}, ", fld.name, zod_field_type);
+                let _ = write!(body, "{key}: {zod_field_type}, ");
             }
         }
         body.push_str("})");
@@ -7681,7 +7702,7 @@ fn close_untagged_flatten_member(member: &str, excluded: &[String]) -> String {
         if !closed.ends_with('{') {
             closed.push(';');
         }
-        let _ = write!(closed, " {key}?: never");
+        let _ = write!(closed, " {}?: never", ts_member_key(key));
     }
     closed.push_str(" }");
     closed
@@ -8592,12 +8613,13 @@ fn tagged_variant_parts(
     discriminator_value: &str,
     discriminator_docs: &str,
 ) -> VariantParts {
+    let tag_key = ts_member_key(tag_name);
     VariantParts {
         json_fields: Vec::new(),
         optional_fields: Vec::new(),
-        schema_code: format!("{{\n  {tag_name}: z.literal(\"{discriminator_value}\"),\n"),
+        schema_code: format!("{{\n  {tag_key}: z.literal(\"{discriminator_value}\"),\n"),
         type_code: format!(
-            "{{\n{}\n  {tag_name}: \"{discriminator_value}\";\n",
+            "{{\n{}\n  {tag_key}: \"{discriminator_value}\";\n",
             member_jsdoc_block(discriminator_docs)
         ),
     }
@@ -8728,12 +8750,14 @@ fn write_named_variant_fields(
     let optional_fields = &mut parts.optional_fields;
     let json_schema_variant_fields = &mut parts.json_fields;
     for fld in field_defs {
+        let key = ts_member_key(&fld.name);
+
         // Add TypeScript type definition
         let _ = writeln!(
             variant_type_code,
             "{}\n  {}{}: {};",
             member_jsdoc_block(&fld.docs),
-            fld.name,
+            key,
             fld.optional_key_marker(),
             fld.typescript_typename()
         );
@@ -8748,11 +8772,10 @@ fn write_named_variant_fields(
                 // Use getter syntax to defer the reference
                 let _ = writeln!(
                     variant_schema_code,
-                    "  get {}() {{ return {}; }},",
-                    fld.name, zod_field_type
+                    "  get {key}() {{ return {zod_field_type}; }},"
                 );
             } else {
-                let _ = writeln!(variant_schema_code, "  {}: {},", fld.name, zod_field_type);
+                let _ = writeln!(variant_schema_code, "  {key}: {zod_field_type},");
             }
         }
 
@@ -8817,11 +8840,13 @@ fn write_tuple_single_variant_fields(
         );
         return;
     };
+    let content_key = ts_member_key(content_name);
+
     // Add TypeScript type definition with JSDoc comment
     let _ = writeln!(
         variant_type_code,
         "  /** Tuple value */\n  {}: {};",
-        content_name,
+        content_key,
         fld.typescript_slot_typename()
     );
 
@@ -8835,10 +8860,10 @@ fn write_tuple_single_variant_fields(
             // Use getter syntax to defer the reference
             let _ = writeln!(
                 variant_schema_code,
-                "  get {content_name}() {{ return {zod_field_type}; }},"
+                "  get {content_key}() {{ return {zod_field_type}; }},"
             );
         } else {
-            let _ = writeln!(variant_schema_code, "  {content_name}: {zod_field_type},");
+            let _ = writeln!(variant_schema_code, "  {content_key}: {zod_field_type},");
         }
     }
 
@@ -8883,11 +8908,12 @@ fn write_tuple_multiple_variant_fields(
         .enumerate()
         .map(|(i, _)| format!("element {i}"))
         .collect();
+    let content_key = ts_member_key(content_name);
     let _ = writeln!(
         variant_type_code,
         "  /** Tuple: [{}] */\n  {}: {};",
         tuple_desc.join(", "),
-        content_name,
+        content_key,
         ts_tuple
     );
 
@@ -8909,10 +8935,10 @@ fn write_tuple_multiple_variant_fields(
             // Use getter syntax to defer the reference
             let _ = writeln!(
                 variant_schema_code,
-                "  get {content_name}() {{ return {zod_tuple}; }},"
+                "  get {content_key}() {{ return {zod_tuple}; }},"
             );
         } else {
-            let _ = writeln!(variant_schema_code, "  {content_name}: {zod_tuple},");
+            let _ = writeln!(variant_schema_code, "  {content_key}: {zod_tuple},");
         }
     }
 
@@ -10348,12 +10374,14 @@ fn write_field_type_and_schema(
     fld: &FieldDef,
     self_type_name: Option<&str>,
 ) -> String {
+    let key = ts_member_key(&fld.name);
+
     // Always write TypeScript type
     let _ = writeln!(
         type_code,
         "{}\n  {}{}: {};",
         member_jsdoc_block(&fld.docs),
-        fld.name,
+        key,
         fld.optional_key_marker(),
         fld.typescript_typename()
     );
@@ -10372,10 +10400,10 @@ fn write_field_type_and_schema(
 
         if defer {
             // Use getter syntax to defer the reference
-            format!("  get {}() {{ return {}; }},\n", fld.name, zod_type)
+            format!("  get {key}() {{ return {zod_type}; }},\n")
         } else {
             // Normal property syntax
-            format!("  {}: {},\n", fld.name, zod_type)
+            format!("  {key}: {zod_type},\n")
         }
     }
 
@@ -10383,6 +10411,7 @@ fn write_field_type_and_schema(
     {
         // When zod feature is disabled, there is no schema fragment to emit
         let _: &_ = &self_type_name; // Suppress unused variable warning
+        let _: &str = &key;
         String::new()
     }
 }
