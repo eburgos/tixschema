@@ -496,6 +496,164 @@ fn untagged_member_with_an_enumerable_map_key_is_left_alone() {
     }
 }
 
+/// The refusal every map-key spelling no surface can write earns, read off the untagged walk.
+/// Field position refuses each of these; a member is the same map, so it is refused here too — and
+/// the walk is the only thing that has to say so, the guard failure dropping the schema surface
+/// before any member rendering reaches the author.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn untagged_member_reaching_an_unwritable_map_key_is_refused() {
+    for (member_type, needle) in [
+        (quote::quote! { HashMap<Vec<String>, u32> }, "String"),
+        (quote::quote! { HashMap<[String; 2], u32> }, "String"),
+        (quote::quote! { HashMap<Option<String>, u32> }, "String"),
+        (
+            quote::quote! { HashMap<(String, u32), u32> },
+            "`(_, _)` as a JSON array",
+        ),
+        (
+            quote::quote! { HashMap<HashMap<String, u32>, u32> },
+            "`HashMap<_, _>` as a JSON object",
+        ),
+        (
+            quote::quote! { Vec<HashMap<Option<String>, u32>> },
+            "String",
+        ),
+    ] {
+        let errors = untagged_guard_errors(syn::parse_quote! {
+            enum Untagged {
+                Counts { counts: #member_type },
+            }
+        });
+        assert_eq!(errors.len(), 1, "for {member_type}, got: {errors:?}");
+        assert!(
+            errors[0].contains("compile_error"),
+            "for {member_type}: {}",
+            errors[0]
+        );
+        assert!(
+            errors[0].contains("field `counts`"),
+            "for {member_type}: {}",
+            errors[0]
+        );
+        assert!(
+            errors[0].contains(needle),
+            "for {member_type}: {}",
+            errors[0]
+        );
+    }
+}
+
+/// The JSON-schema values the untagged walk renders its members as.
+#[cfg(all(feature = "serde", feature = "jsonschema"))]
+fn untagged_member_values(mut item: syn::ItemEnum) -> Vec<String> {
+    collect_untagged_members(&mut item)
+        .2
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// A member holding a map is the map its key classification earns, at the depth it is written —
+/// the renderings field position produces from the same types, reached through the same dispatch.
+#[cfg(all(feature = "serde", feature = "jsonschema"))]
+#[test]
+fn untagged_member_holding_a_map_renders_the_field_position_map() {
+    register_alias_info("Bucket", "Bucket", "bucket_schema", AliasKind::EnumMembers);
+    for map_type in [
+        "HashMap<Bucket, u32>",
+        "HashMap<String, u32>",
+        "Vec<HashMap<String, u32>>",
+        "HashMap<String, HashMap<Bucket, u32>>",
+    ] {
+        let member_type: syn::Type = syn::parse_str(map_type).unwrap();
+        let values = untagged_member_values(syn::parse_quote! {
+            enum Untagged {
+                Counts { m: #member_type },
+            }
+        });
+        assert!(
+            values[0].contains(&inserted_field_value(map_type)),
+            "for {map_type}, got: {}",
+            values[0]
+        );
+    }
+}
+
+/// A tuple member is the fixed-arity array its own field position writes, arity bounds included:
+/// without them a shorter array serde can neither write nor read back still validates.
+#[cfg(all(feature = "serde", feature = "jsonschema"))]
+#[test]
+fn untagged_member_holding_a_tuple_renders_the_arity_bounds() {
+    let values = untagged_member_values(syn::parse_quote! {
+        enum Untagged {
+            Pair { pair: (i64, String) },
+        }
+    });
+    assert!(
+        values[0].contains(r#""minItems" : 2usize , "maxItems" : 2usize"#),
+        "got: {}",
+        values[0]
+    );
+    assert!(
+        values[0].contains(r#""items" : false"#),
+        "got: {}",
+        values[0]
+    );
+}
+
+/// An opaque member keeps the permissive empty schema: no type name reaches it to narrow with,
+/// which is the reason field position leaves it open too.
+#[cfg(all(feature = "serde", feature = "jsonschema"))]
+#[test]
+fn untagged_member_holding_an_opaque_value_stays_permissive() {
+    let values = untagged_member_values(syn::parse_quote! {
+        enum Untagged {
+            Raw { raw: serde_json::Value },
+        }
+    });
+    assert!(
+        values[0].contains("serde_json :: json ! ({ })"),
+        "got: {}",
+        values[0]
+    );
+}
+
+/// A map value the member dispatch cannot render replaces the member's whole rendering with the
+/// diagnostic, as it replaces the insertion in field position: a schema the expansion has already
+/// rejected is not one to hand the author. No guard answers for this shape, so the rendering is
+/// where it has to be said — once, naming the field and the reason, with no rendered map left
+/// beside it.
+#[cfg(all(feature = "serde", feature = "jsonschema"))]
+#[test]
+fn untagged_member_holding_an_unsupported_map_value_emits_only_the_compile_error() {
+    let values = untagged_member_values(syn::parse_quote! {
+        enum Untagged {
+            Rows { rows: HashMap<String, (String, u32)> },
+        }
+    });
+    assert_eq!(
+        values[0].matches("compile_error !").count(),
+        1,
+        "got: {}",
+        values[0]
+    );
+    assert!(values[0].contains("field `rows`"), "got: {}", values[0]);
+    assert!(
+        values[0].contains("a tuple is not supported as a map value"),
+        "got: {}",
+        values[0]
+    );
+    assert!(
+        !values[0].contains("additionalProperties\" :"),
+        "got: {}",
+        values[0]
+    );
+}
+
 /// Collects the internally tagged path's guard failures as rendered `compile_error!` token strings.
 #[cfg(feature = "serde")]
 fn internal_guard_errors(item: &syn::ItemEnum) -> Vec<String> {
