@@ -94,6 +94,12 @@ A bare `#[serde(skip)]` is not that. serde writes the key into no payload *and* 
 
 `#[serde(skip_deserializing)]` on its own drops neither surface's key: serde writes it in every payload, so the member keeps a required key, and the value a payload supplies under it is discarded on the way in.
 
+A positional slot answers by that same wire, read in the place a tuple writes rather than under a key. A slot carrying a bare `#[serde(skip)]` is absent from the array serde writes *and* from every array serde reads, and the slots behind it move up: `struct Pair(#[serde(skip)] Option<String>, String)` holding `(Some("s"), "x")` writes `["x"]`, reads that back, and refuses `["s","x"]`. So the described tuple is the slots that remain — `[string]` in TypeScript, `z.tuple([z.string()])` in Zod, and one `prefixItems` entry under `minItems`/`maxItems` of 1. Dropping every slot leaves `[]`, which is the array serde writes there.
+
+A slot dropped from only one of the two directions has no such description and is refused where it is declared. `skip_serializing` alone writes `["x"]` and reads only `["s","x"]`; `skip_deserializing` alone writes `["s","x"]` and reads only `["x"]`. A named field in that position is still describable — the key is absent from one payload and present in the other, which an optional key covers — but a slot is written by its place, so the two payloads differ in their arity and no fixed-arity tuple describes both.
+
+A struct declaring a single slot keeps it whatever these attributes say: serde writes and reads a newtype struct's only slot regardless, so nothing there is dropped.
+
 Which key a field writes is read off the attribute in every build, `serde` feature or not — one declaration describes one wire under every toggle. What the feature buys is the renaming, the tagging and the guards.
 
 ```rust
@@ -1688,6 +1694,7 @@ Key points:
 - If multiple examples are present, only the **first one** is used.
 - Examples respect Serde attributes (field renaming, etc.).
 - Being Rust source, the example block is dropped from the JSDoc comment above the generated `export type`, whatever the type is declared as. On a struct or an enum it reaches the Zod `example` field; on a type alias, which publishes no `example` field, it reaches no generated surface at all.
+- A generic struct or enum has its example built at one instantiation, with every type parameter filled at `String`. A lifetime elides there and needs no filling, but a **const parameter takes none** -- `String` names a type, a const is a value, and no value is the one every example would be written at. So a struct or an enum that declares a const parameter and writes an example is refused, naming the const; drop the example or the const parameter. Nothing is owed where no example is written, on a type alias, or with the `zod` feature off, `zod` being the only surface that reads one.
 - The example code is executed at compile time and serialized to JSON.
 - Wrong types produce compile errors, ensuring examples stay in sync with your types.
 
@@ -1975,7 +1982,12 @@ Supported Serde attributes:
 - `#[serde(untagged)]` -- untagged enums generate a union (`A | B`) / Zod `z.union([...])` / JSON Schema `anyOf`
 - `#[serde(flatten)]` -- flatten a field into the parent as an intersection type (`A & B`) / Zod `.and(...)`
 - `#[serde(transparent)]` -- transparent wrappers (used for branded newtypes)
-- `#[serde(skip_serializing_if = "...")]` -- respected but does not affect generated types
+- `#[serde(skip_serializing_if = "...")]` -- the key is left out of the payload when the predicate fires, so the member is described under an optional key: `roles?: Array<string>;` in TypeScript, `roles: z.array(z.string()).optional(),` in Zod, and no `required` entry in the JSON Schema
+- `#[serde(skip)]` -- the key is written into no payload and read out of none, so no surface describes the member at all: no TypeScript member, no Zod key, and neither a `properties` nor a `required` entry. On a tuple-struct slot it takes the slot out of the described tuple, which shortens the arity
+- `#[serde(skip_serializing)]` -- the write half of `skip`: the key is left out of every payload while a supplied one is still read, so the member is described under an optional key, as `skip_serializing_if` is
+- `#[serde(skip_deserializing)]` -- the read half: the key is written into every payload while a supplied one is discarded, so the member keeps a required key
+
+The three `skip` spellings are three different wires, and [Optional Fields](#optional-fields) reads each one in both directions, positional slots included.
 
 If the `serde` feature is disabled but serde attributes are present, you will see compile-time warnings and field names will not be transformed.
 

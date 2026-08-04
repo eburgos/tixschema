@@ -34,10 +34,23 @@ use super::tuple_struct_zod_body;
 #[cfg(feature = "jsonschema")]
 use super::tuple_struct_json_body;
 
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+use super::{check_slot_wire_is_readable, parse_serde_key_omission, tuple_struct_shape};
+
 use syn::spanned::Spanned as _;
 
 /// The variants of [`rendered_discriminated_union`]'s enum, in the order they are declared.
 const DECLARED_VARIANTS: [&str; 6] = ["Upload", "Generate", "Delete", "Rename", "Move", "Archive"];
+
+/// The doc attributes carrying a ` ```rust example ` block that the const-parameter probes are
+/// written under. Held apart from them so every probe writes the same block and only the
+/// declaration beneath it varies.
+#[cfg(feature = "zod")]
+const EXAMPLE_DOC_BLOCK: &str = "/// An item carrying an example block.\n\
+                                 ///\n\
+                                 /// ```rust example\n\
+                                 /// Probe::Held\n\
+                                 /// ```\n";
 
 /// Every pattern the `pattern` guards must decide, invalid ones first, then the valid shapes the
 /// shipped tests write.
@@ -67,6 +80,19 @@ const UNPORTABLE_PROBE_PATTERNS: [(&str, &str); 6] = [
     ("^[[:alpha:]]+$", "POSIX class"),
     (r"[\w&&\d]", "`&&` class intersection"),
     (r"\x{41}", "braced code point escape"),
+];
+
+/// Every slot spelling the refusal reads, beside whether it is refused. A slot dropped from one of
+/// serde's directions and not the other is; the pair that drops both is the wire the description
+/// already answers for, and everything else is a slot written in its place.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+const SLOT_OMISSION_SPELLINGS: [(&str, bool); 6] = [
+    ("skip_serializing", true),
+    ("skip_serializing_if = \"Option::is_none\"", true),
+    ("skip_deserializing", true),
+    ("skip", false),
+    ("skip_serializing, skip_deserializing", false),
+    ("default", false),
 ];
 
 /// The covered wrappers, under the names a dispatch reads them by.
@@ -2513,15 +2539,20 @@ fn the_cfg_probe_sees_an_emitted_cfg_attribute() {
 fn struct_schema_example_carries_no_cfg_attribute() {
     let name: syn::Ident = syn::parse_quote!(Report);
     let generics = syn::Generics::default();
-    let tokens =
-        super::item_schema_example_method(Some(&"Report { id: 1 }".to_owned()), &name, &generics)
-            .unwrap();
+    let tokens = super::item_schema_example_method(
+        Some(&"Report { id: 1 }".to_owned()),
+        &name,
+        &generics,
+        &super::ModelSchemaArgs::default(),
+    )
+    .unwrap();
     assert_no_cfg_attribute(&tokens, "item_schema_example_method");
 }
 
 /// The type the example is bound at carries one argument per declared parameter, the way a brand's
 /// already does — a bare ident on a generic item is `E0107` before the example is ever read. A
 /// lifetime and a const are not parameters a filling is chosen for, so neither reaches the list.
+/// With nothing declared, every argument is the `String` fallback.
 #[cfg(feature = "zod")]
 #[test]
 fn struct_schema_example_instantiates_every_type_parameter() {
@@ -2536,11 +2567,71 @@ fn struct_schema_example_instantiates_every_type_parameter() {
         ),
         (syn::parse_quote!(<'a>), "let value : Report ="),
     ] {
-        let rendered = super::item_schema_example_method(Some(&example), &name, &generics)
+        let rendered = super::item_schema_example_method(
+            Some(&example),
+            &name,
+            &generics,
+            &super::ModelSchemaArgs::default(),
+        )
+        .unwrap()
+        .to_string();
+        assert!(rendered.contains(expected), "Got: {rendered}");
+    }
+}
+
+/// Each argument is read off the `default_types` entry naming that parameter, so an item is
+/// annotated at the concrete types its author declared and in the order the parameters were
+/// written. A parameter no entry names keeps the `String` fallback, which is why a partly declared
+/// item mixes the two.
+#[cfg(feature = "zod")]
+#[test]
+fn struct_schema_example_instantiates_each_parameter_at_its_declared_filling() {
+    let name: syn::Ident = syn::parse_quote!(Report);
+    let example = "Report { id: 1 }".to_owned();
+    let generics: syn::Generics = syn::parse_quote!(<A, B>);
+    let count: (syn::Ident, syn::Type) = (syn::parse_quote!(A), syn::parse_quote!(u32));
+    let held: (syn::Ident, syn::Type) = (syn::parse_quote!(B), syn::parse_quote!(Vec<u8>));
+    for (default_types, expected) in [
+        (vec![count.clone()], "let value : Report < u32 , String > ="),
+        (
+            vec![held.clone()],
+            "let value : Report < String , Vec < u8 > > =",
+        ),
+        (
+            vec![held, count],
+            "let value : Report < u32 , Vec < u8 > > =",
+        ),
+    ] {
+        let args = super::ModelSchemaArgs {
+            default_types,
+            ..Default::default()
+        };
+        let rendered = super::item_schema_example_method(Some(&example), &name, &generics, &args)
             .unwrap()
             .to_string();
         assert!(rendered.contains(expected), "Got: {rendered}");
     }
+}
+
+/// A filling written as `String` is exactly what an unfilled parameter falls back to, so an item
+/// declaring one and an item declaring none are annotated with the same tokens — reading the
+/// declaration leaves every item the old convention already got right byte for byte as it was.
+#[cfg(feature = "zod")]
+#[test]
+fn a_string_filling_annotates_the_example_as_no_filling_does() {
+    let name: syn::Ident = syn::parse_quote!(Report);
+    let example = "Report { id: 1 }".to_owned();
+    let generics: syn::Generics = syn::parse_quote!(<A>);
+    let filled = super::ModelSchemaArgs {
+        default_types: vec![(syn::parse_quote!(A), syn::parse_quote!(String))],
+        ..Default::default()
+    };
+    let render = |args: &super::ModelSchemaArgs| {
+        super::item_schema_example_method(Some(&example), &name, &generics, args)
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(render(&filled), render(&super::ModelSchemaArgs::default()));
 }
 
 #[cfg(feature = "jsonschema")]
@@ -2581,7 +2672,12 @@ fn branded_schema_example_carries_no_cfg_attribute() {
         vec!["A".to_owned()],
         vec!["A".to_owned(), "B".to_owned()],
     ] {
-        let tokens = super::build_branded_schema_example(Some(&example), &name, &generic_params);
+        let tokens = super::build_branded_schema_example(
+            Some(&example),
+            &name,
+            &generic_params,
+            &super::ModelSchemaArgs::default(),
+        );
         assert_no_cfg_attribute(&tokens, "build_branded_schema_example");
     }
 }
@@ -2601,10 +2697,39 @@ fn branded_schema_example_instantiates_every_parameter() {
             "let value : DocumentId < String , String > =",
         ),
     ] {
-        let rendered =
-            super::build_branded_schema_example(Some(&example), &name, &generic_params).to_string();
+        let rendered = super::build_branded_schema_example(
+            Some(&example),
+            &name,
+            &generic_params,
+            &super::ModelSchemaArgs::default(),
+        )
+        .to_string();
         assert!(rendered.contains(expected), "Got: {rendered}");
     }
+}
+
+/// A brand reads its declaration through the same seam a declared struct does, so its example is
+/// annotated at the fillings its author wrote rather than at the fallback.
+#[cfg(feature = "zod")]
+#[test]
+fn branded_schema_example_instantiates_each_parameter_at_its_declared_filling() {
+    let name: syn::Ident = syn::parse_quote!(DocumentId);
+    let example = "DocumentId(\"abc\".to_string())".to_owned();
+    let args = super::ModelSchemaArgs {
+        default_types: vec![(syn::parse_quote!(A), syn::parse_quote!(u32))],
+        ..Default::default()
+    };
+    let rendered = super::build_branded_schema_example(
+        Some(&example),
+        &name,
+        &["A".to_owned(), "B".to_owned()],
+        &args,
+    )
+    .to_string();
+    assert!(
+        rendered.contains("let value : DocumentId < u32 , String > ="),
+        "Got: {rendered}"
+    );
 }
 
 #[cfg(feature = "typescript")]
@@ -3924,6 +4049,107 @@ fn a_parameter_with_no_default_is_accepted_where_no_json_document_is_built() {
         );
         assert!(messages.is_empty(), "for {args:?}: {messages:?}");
     }
+}
+
+/// The `compile_error!` tokens `source` earns for the example it carries against the parameters it
+/// declares. Parsed from text so the tokens carry file locations and each refusal's span can be
+/// read back as the source it points at.
+#[cfg(feature = "zod")]
+fn const_example_refusals(source: &str) -> Vec<proc_macro2::TokenStream> {
+    super::const_parameter_example_errors(&syn::parse_str(source).unwrap())
+}
+
+/// The refusals `source` earns, rendered.
+#[cfg(feature = "zod")]
+fn const_example_messages(source: &str) -> Vec<String> {
+    const_example_refusals(source)
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// A doc example is Rust compiled at one instantiation, and no value is the one every
+/// const-parameterised example is written at, so an item that writes one while declaring a const
+/// is refused instead of expanded into a `schema_example()` that cannot compile. Both shapes that
+/// publish an example answer alike, the branded newtype among them.
+#[cfg(feature = "zod")]
+#[test]
+fn a_doc_example_on_a_const_declaring_item_is_refused() {
+    for (source, label) in [
+        (
+            format!("{EXAMPLE_DOC_BLOCK}pub enum Probe<const WIDTH: usize> {{ Held }}"),
+            "type `Probe`",
+        ),
+        (
+            format!("{EXAMPLE_DOC_BLOCK}pub struct Probe<const WIDTH: usize>(pub String);"),
+            "type `Probe`",
+        ),
+    ] {
+        let messages = const_example_messages(&source);
+        assert_eq!(messages.len(), 1, "for {source}: {messages:?}");
+        for needle in [
+            "compile_error",
+            "WIDTH",
+            "const parameter",
+            "```rust example",
+            "`zod` feature",
+            label,
+        ] {
+            assert!(
+                messages[0].contains(needle),
+                "{needle} missing for {source}: {}",
+                messages[0]
+            );
+        }
+    }
+}
+
+/// The refusal is the one the item earned, not one per parameter: an item writes a single example,
+/// so a second const adds a name to the message rather than a second diagnostic. It points at the
+/// first const declared, the example itself having no one token to sit on.
+#[cfg(feature = "zod")]
+#[test]
+fn a_doc_example_is_refused_once_and_names_every_const_declared() {
+    let source = format!(
+        "{EXAMPLE_DOC_BLOCK}pub struct Probe<'label, ValueType, const WIDTH: usize, const DEPTH: \
+         usize> {{ pub value: ValueType }}"
+    );
+    let refusals = const_example_refusals(&source);
+    assert_eq!(refusals.len(), 1, "got: {refusals:?}");
+    assert_eq!(refusals[0].span().source_text().as_deref(), Some("WIDTH"));
+    let rendered = refusals[0].to_string();
+    for needle in ["WIDTH", "DEPTH"] {
+        assert!(rendered.contains(needle), "{needle} missing: {rendered}");
+    }
+}
+
+/// What a const costs is the example, not the declaration: an item that writes none is expanded
+/// exactly as before, and so is one whose parameters are all kinds a filling exists for — a
+/// lifetime elides in the annotation and a type parameter takes `String`.
+#[cfg(feature = "zod")]
+#[test]
+fn an_item_the_example_convention_covers_earns_no_refusal() {
+    for source in [
+        "pub enum Probe<const WIDTH: usize> { Held }".to_owned(),
+        "pub struct Probe<const WIDTH: usize>(pub String);".to_owned(),
+        format!("{EXAMPLE_DOC_BLOCK}pub struct Probe<'label> {{ pub label: &'label str }}"),
+        format!("{EXAMPLE_DOC_BLOCK}pub struct Probe<ValueType> {{ pub value: ValueType }}"),
+        format!("{EXAMPLE_DOC_BLOCK}pub enum Probe {{ Held }}"),
+        format!("{EXAMPLE_DOC_BLOCK}pub struct Probe {{ pub value: String }}"),
+    ] {
+        let messages = const_example_messages(&source);
+        assert!(messages.is_empty(), "for {source}: {messages:?}");
+    }
+}
+
+/// An alias publishes no `schema_example()` — the expansion never reads its example — so a const
+/// on one costs nothing and is left alone. The refusal is owed exactly where the method is built.
+#[cfg(feature = "zod")]
+#[test]
+fn a_const_declaring_alias_is_left_alone() {
+    let source = format!("{EXAMPLE_DOC_BLOCK}pub type Probe<const WIDTH: usize> = [u8; WIDTH];");
+    let messages = const_example_messages(&source);
+    assert!(messages.is_empty(), "got: {messages:?}");
 }
 
 /// Builds the `Display` assertion for the sole field of `source`, parsed from text so its spans
@@ -6500,15 +6726,21 @@ fn tuple_slots(spellings: &[&str]) -> Vec<super::FieldDef> {
         .collect()
 }
 
+/// The shape a struct declaring exactly the given slots publishes, none of them off the wire.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn whole_tuple(spellings: &[&str]) -> super::TupleStructShape {
+    tuple_struct_shape(spellings.len(), tuple_slots(spellings))
+}
+
 /// One slot is the slot's own type — serde writes a newtype struct as that value alone — and every
 /// other arity is the fixed tuple serde writes as an array.
 #[cfg(feature = "typescript")]
 #[test]
 fn a_tuple_struct_describes_as_its_arity_in_typescript() {
-    assert_eq!(tuple_struct_ts_body(&tuple_slots(&[])), "[]");
-    assert_eq!(tuple_struct_ts_body(&tuple_slots(&["String"])), "string");
+    assert_eq!(tuple_struct_ts_body(&whole_tuple(&[])), "[]");
+    assert_eq!(tuple_struct_ts_body(&whole_tuple(&["String"])), "string");
     assert_eq!(
-        tuple_struct_ts_body(&tuple_slots(&["String", "u32"])),
+        tuple_struct_ts_body(&whole_tuple(&["String", "u32"])),
         "[string, number]"
     );
 }
@@ -6517,13 +6749,13 @@ fn a_tuple_struct_describes_as_its_arity_in_typescript() {
 #[cfg(feature = "zod")]
 #[test]
 fn a_tuple_struct_describes_as_its_arity_in_zod() {
-    assert_eq!(tuple_struct_zod_body(&tuple_slots(&[])), "z.tuple([])");
+    assert_eq!(tuple_struct_zod_body(&whole_tuple(&[])), "z.tuple([])");
     assert_eq!(
-        tuple_struct_zod_body(&tuple_slots(&["String"])),
+        tuple_struct_zod_body(&whole_tuple(&["String"])),
         "z.string()"
     );
     assert_eq!(
-        tuple_struct_zod_body(&tuple_slots(&["String", "u32"])),
+        tuple_struct_zod_body(&whole_tuple(&["String", "u32"])),
         "z.tuple([z.string(), z.number().int()])"
     );
 }
@@ -6533,17 +6765,101 @@ fn a_tuple_struct_describes_as_its_arity_in_zod() {
 #[cfg(feature = "jsonschema")]
 #[test]
 fn a_tuple_struct_describes_as_its_arity_in_json_schema() {
-    let empty = tuple_struct_json_body("Nothing", &tuple_slots(&[])).to_string();
+    let empty = tuple_struct_json_body("Nothing", &whole_tuple(&[])).to_string();
     assert!(empty.contains("prefixItems"), "Got: {empty}");
     assert!(empty.contains("minItems"), "Got: {empty}");
 
-    let single = tuple_struct_json_body("Plain", &tuple_slots(&["String"])).to_string();
+    let single = tuple_struct_json_body("Plain", &whole_tuple(&["String"])).to_string();
     assert!(single.contains("string"), "Got: {single}");
     assert!(!single.contains("prefixItems"), "Got: {single}");
 
-    let pair = tuple_struct_json_body("Pair", &tuple_slots(&["String", "u32"])).to_string();
+    let pair = tuple_struct_json_body("Pair", &whole_tuple(&["String", "u32"])).to_string();
     assert!(pair.contains("prefixItems"), "Got: {pair}");
     assert!(pair.contains("maxItems"), "Got: {pair}");
+}
+
+/// The bare value is the *declared* arity's, not the described list's. Captured from serde: a
+/// struct declaring two slots with the first one taken off the wire writes `["x"]` — a one-element
+/// array, not the bare `"x"` a struct declaring one slot writes — so a described list that has
+/// shrunk to one still describes as an array.
+#[cfg(feature = "typescript")]
+#[test]
+fn a_slot_dropped_off_the_wire_leaves_the_tuple_an_array() {
+    let shrunk = tuple_struct_shape(2, tuple_slots(&["String"]));
+    assert_eq!(tuple_struct_ts_body(&shrunk), "[string]");
+    assert_eq!(
+        tuple_struct_ts_body(&tuple_struct_shape(1, tuple_slots(&["String"]))),
+        "string"
+    );
+}
+
+/// The same reading on the JSON surface, where the arity is written twice as its own bounds.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_slot_dropped_off_the_wire_shrinks_the_described_arity() {
+    let shrunk = tuple_struct_json_body("Pair", &tuple_struct_shape(2, tuple_slots(&["u32"])));
+    let rendered = shrunk.to_string();
+    assert!(rendered.contains("prefixItems"), "Got: {rendered}");
+    assert!(rendered.contains("1usize"), "Got: {rendered}");
+    assert!(!rendered.contains("2usize"), "Got: {rendered}");
+}
+
+/// A two-slot struct whose second slot is written at the given spelling.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn slot_pair(spelling: &str) -> syn::ItemStruct {
+    syn::parse_str(&format!(
+        "struct Pair(String, #[serde({spelling})] Option<String>);"
+    ))
+    .unwrap()
+}
+
+/// Runs the slot refusal over that struct's second slot, with the declared arity supplied rather
+/// than counted, so the lone-slot exemption can be read off the same declaration.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn slot_guard_result(item: &syn::ItemStruct, declared_slots: usize) -> Result<(), syn::Error> {
+    let field = item.fields.iter().nth(1).unwrap();
+    check_slot_wire_is_readable(
+        field,
+        1,
+        declared_slots,
+        "Pair",
+        parse_serde_key_omission(&field.attrs),
+    )
+}
+
+/// The refusal message for the slot at that spelling, and `None` where it is left alone.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn slot_refusal(spelling: &str, declared_slots: usize) -> Option<String> {
+    slot_guard_result(&slot_pair(spelling), declared_slots)
+        .err()
+        .map(|err| err.to_string())
+}
+
+/// Captured from serde on `struct S(#[serde(...)] Option<String>, String)`: `skip_serializing`
+/// alone writes `["x"]` and reads only `["s","x"]`, `skip_deserializing` alone writes `["s","x"]`
+/// and reads only `["x"]`. The array serde writes is not an array serde reads, and a slot has no
+/// optional spelling to describe both, so the declaration is refused.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_slot_dropped_from_one_direction_only_is_refused() {
+    for (spelling, refused) in SLOT_OMISSION_SPELLINGS {
+        let refusal = slot_refusal(spelling, 2);
+        assert_eq!(refusal.is_some(), refused, "{spelling}: {refusal:?}");
+        if let Some(message) = refusal {
+            assert!(message.contains("slot 1"), "{spelling}: {message}");
+            assert!(message.contains("`Pair`"), "{spelling}: {message}");
+        }
+    }
+}
+
+/// Captured from serde: a struct declaring exactly one slot writes and reads that slot's value
+/// whatever the skip spellings say, so none of them has a wire to be refused for there.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_lone_slot_is_refused_for_no_spelling() {
+    for (spelling, _) in SLOT_OMISSION_SPELLINGS {
+        assert_eq!(slot_refusal(spelling, 1), None, "for: {spelling}");
+    }
 }
 
 /// A path writes a string on the wire, which is the value the rendered constraint describes, so
@@ -7285,6 +7601,125 @@ fn flattening_a_union_with_a_named_nullable_member_is_refused_naming_the_trail()
     assert_eq!(
         named.replace("WireNamedNullableChoice", "CHOICE"),
         written.replace("WireWrittenNullableChoice", "CHOICE")
+    );
+}
+
+/// A member naming an externally tagged enum carries one leaf per variant, at the positions the
+/// JSON-schema merge names the same variants by. serde writes a data-carrying variant as the
+/// single-key object its name tags and writes a unit variant as that name alone — a bare string —
+/// so the choice behind the member holds a leaf no object can be merged with, one level in from
+/// where the member stands.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_union_member_naming_a_tagged_enum_carries_one_leaf_per_variant() {
+    seed_external_registration(&syn::parse_quote! {
+        enum WireExtBare {
+            Bare,
+            Wrapped(Holder),
+        }
+    });
+    assert_eq!(
+        recorded_member_trails(syn::parse_quote! {
+            enum WireExtBareChoice {
+                Obj(Holder),
+                Ext(WireExtBare),
+            }
+        }),
+        vec![
+            ("1".to_owned(), None),
+            ("2.1".to_owned(), Some("string")),
+            ("2.2".to_owned(), None),
+        ]
+    );
+}
+
+/// And a tagged enum whose every variant carries data keeps the one unmarked leaf it always had.
+/// Every branch of that choice is an object the merge joins, and the operand it would join is the
+/// name whichever branch matched — so writing one member per branch would put three where one stood
+/// and say nothing the single leaf did not.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_union_member_naming_an_all_object_tagged_enum_keeps_its_one_leaf() {
+    seed_external_registration(&syn::parse_quote! {
+        enum WireExtObjects {
+            One(Holder),
+            Two(Other),
+        }
+    });
+    assert_eq!(
+        recorded_member_trails(syn::parse_quote! {
+            enum WireExtObjChoice {
+                Obj(Holder),
+                Ext(WireExtObjects),
+            }
+        }),
+        vec![("1".to_owned(), None), ("2".to_owned(), None)]
+    );
+}
+
+/// So flattening a union whose member names one is refused at the leaf the bare string sits at —
+/// `2.1`, a position below the member, which is where the enum's own choice puts it and not where
+/// the member stands — and in the words the JSON-schema merge refuses the same declaration in.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn flattening_a_union_with_a_tagged_enum_member_is_refused_naming_the_trail() {
+    seed_external_registration(&syn::parse_quote! {
+        enum FlatWireExtBare {
+            Bare,
+            Wrapped(Holder),
+        }
+    });
+    let refusal = recorded_union_flatten_error(
+        "WireExtFlatChoice",
+        syn::parse_quote! {
+            enum WireExtFlatChoice {
+                Obj(Holder),
+                Ext(FlatWireExtBare),
+            }
+        },
+        &syn::parse_quote! { #[serde(flatten)] either: WireExtFlatChoice },
+    )
+    .unwrap();
+    assert!(
+        refusal
+            .contains("`#[serde(flatten)]` of `WireExtFlatChoice` writes a union member that is"),
+        "got: {refusal}"
+    );
+    assert!(
+        refusal.contains("its branch 2.1 describes a `string`, which has no members to merge"),
+        "got: {refusal}"
+    );
+    seed_external_registration(&syn::parse_quote! {
+        enum FlatWireExtObjects {
+            One(Holder),
+            Two(Other),
+        }
+    });
+    assert!(
+        recorded_union_flatten_error(
+            "WireExtObjFlatChoice",
+            syn::parse_quote! {
+                enum WireExtObjFlatChoice {
+                    Obj(Holder),
+                    Ext(FlatWireExtObjects),
+                }
+            },
+            &syn::parse_quote! { #[serde(flatten)] either: WireExtObjFlatChoice },
+        )
+        .is_none()
+    );
+}
+
+/// Runs the registration an externally tagged enum's own expansion runs, so the leaves the registry
+/// answers with for the name are ones a declaration put there rather than words written by hand.
+#[cfg(all(feature = "serde", feature = "zod"))]
+fn seed_external_registration(item: &syn::ItemEnum) {
+    let rust_ident = item.ident.to_string();
+    let _: (String, syn::Ident) = super::enum_module_idents(
+        &item.ident,
+        &rust_ident,
+        AliasKind::NoEnumMembers,
+        super::Surface::externally_tagged(&item.variants),
     );
 }
 
