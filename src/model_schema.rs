@@ -5092,9 +5092,9 @@ fn register_branded_newtype(
     .record(rust_ident);
 }
 
-#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 /// Registers the brand, then records the consult question its own registration could not answer —
 /// in that order, so a brand naming itself cannot answer its own.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn register_brand_with_questions(
     item_struct: &syn::ItemStruct,
     args: &ModelSchemaArgs,
@@ -5108,6 +5108,7 @@ fn register_brand_with_questions(
     }
 }
 
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> TokenStream {
     if let Some(output) = branded_guard_failure_output(&item_struct, args) {
         return output;
