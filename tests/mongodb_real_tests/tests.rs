@@ -89,7 +89,7 @@ fn test_real_objectid_basic_types() {
 
     // Zod schema should use the MongoDB ObjectId structure with regex validation - now in separate method
     let zod_schema = RealUser::zod_schema();
-    assert!(zod_schema.contains("id: z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/i, { message: \"Invalid ObjectId\" }) }),"));
+    assert!(zod_schema.contains("id: z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: \"Invalid ObjectId\" }) }),"));
     assert!(zod_schema.contains("name: z.string(),"));
     assert!(
         zod_schema.contains("email: z.union([z.string(), z.undefined()]).prefault(undefined),")
@@ -182,7 +182,7 @@ fn test_real_objectid_complex_structures() {
 
     // Zod schema should handle all ObjectId variations with regex validation - now in separate method
     let zod_schema = RealDocument::zod_schema();
-    let regex_pattern = "z.string().regex(/^[a-f0-9]{24}$/i, { message: \"Invalid ObjectId\" })";
+    let regex_pattern = "z.string().regex(/^[a-f0-9]{24}$/, { message: \"Invalid ObjectId\" })";
     assert!(zod_schema.contains(&format!("id: z.object({{ $oid: {regex_pattern} }}),")));
     assert!(zod_schema.contains(&format!(
         "author_id: z.object({{ $oid: {regex_pattern} }}),"
@@ -476,6 +476,56 @@ fn test_real_objectid_serialization() {
     assert_eq!(deserialized.email, Some("test@example.com".to_owned()));
 }
 
+/// The hex a real `ObjectId` round-trips through serde, held to both generated surfaces at once.
+///
+/// The `pattern` keyword is a flagless ECMA-262 regex, so the Zod literal's flags are read here
+/// rather than dropped: a flag on one surface and not on the other is two contracts for one member,
+/// whatever the source spelling says. Lower-case is the only case there is to pin, because
+/// `ObjectId::to_hex()` is the only thing that writes this member.
+#[test]
+#[cfg(all(feature = "object_id", feature = "jsonschema", feature = "zod"))]
+fn a_real_object_id_hex_satisfies_the_zod_literal_and_the_json_schema_pattern_alike() {
+    let real_oid = ObjectId::new();
+    let user = RealUser {
+        id: real_oid,
+        name: "Test User".to_owned(),
+        email: Some("test@example.com".to_owned()),
+    };
+
+    let wire = serde_json::to_value(&user).unwrap();
+    let hex = wire["id"]["$oid"].as_str().unwrap().to_owned();
+    assert_eq!(hex, real_oid.to_hex());
+    assert_eq!(
+        serde_json::from_value::<RealUser>(wire).unwrap(),
+        user,
+        "the `$oid` object serde wrote does not read back"
+    );
+
+    let pattern = RealUser::json_schema()["properties"]["id"]["properties"]["$oid"]["pattern"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let zod_schema = RealUser::zod_schema();
+    let literal = zod_schema.split_once(".regex(/").unwrap().1;
+    let (source, after) = literal.split_once('/').unwrap();
+    let (flags, _) = after.split_once(',').unwrap();
+    assert_eq!(
+        source, pattern,
+        "the two surfaces spell the `$oid` hex differently"
+    );
+    assert_eq!(
+        flags, "",
+        "the Zod literal carries flags the `pattern` keyword has nowhere to hold"
+    );
+
+    let hex_pattern = regex::Regex::new(&pattern).unwrap();
+    assert!(
+        hex_pattern.is_match(&hex),
+        "the one hex both surfaces read rejects what serde wrote: {hex}"
+    );
+}
+
 #[test]
 fn test_real_objectid_validation_compatibility() {
     // Test that real ObjectIds produce valid hex strings that match our regex
@@ -485,7 +535,7 @@ fn test_real_objectid_validation_compatibility() {
     // Should be exactly 24 characters
     assert_eq!(hex_string.len(), 24);
 
-    // Should match our regex pattern: /^[a-f0-9]{24}$/i
+    // Should match our regex pattern: /^[a-f0-9]{24}$/
     let regex = regex::Regex::new("^[a-f0-9]{24}$").unwrap();
     assert!(
         regex.is_match(&hex_string),

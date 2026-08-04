@@ -580,7 +580,26 @@ z.union([z.strictObject({ x: z.string(), }), z.strictObject({ y: z.number().int(
 
 Untagged enums compose with `#[serde(flatten)]`: a flattened variant carrying `Vec<DateValue>` renders `sampleValues: z.array(DateValue$Schema)` (TypeScript `Array<DateValue>`), and the JSON-schema `items` for that field is the `DateValue` `anyOf`.
 
-A member of an untagged variant carries `#[model_schema_prop(...)]` exactly as the same field written in a tagged variant does: the constraint reaches the Zod schema and the JSON Schema, and every guard the attribute earns is reported at the member. The one difference is the Rust side -- an untagged enum generates no per-field validators, so a constrained member has no `validate()` contribution and no deserialization check.
+A member of an untagged variant carries `#[model_schema_prop(...)]` exactly as the same field written in a tagged variant does: the constraint reaches the Zod schema, the JSON Schema and the Rust side alike -- the same per-member validator, the same `deserialize_with` hook, and the same [`validate()` accessor](#the-validate-method) -- and every guard the attribute earns is reported at the member.
+
+What differs is the position, and it costs the read its diagnosis. Serde tries an untagged enum's variants in declaration order, and a member whose bound fails takes its variant out of the candidate set rather than ending the read -- which is exactly what the same declaration means under `anyOf` and under `z.union`. So a value the bound rejects lands on the next variant that accepts it, and when none does, serde's derived `Deserialize` has already discarded each candidate's own error and answers with one sentence of its own:
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SoleConstrained {
+    Slug {
+        #[model_schema_prop(minLength = 2)]
+        slug: String,
+    },
+}
+
+let refused = serde_json::from_str::<SoleConstrained>(r#"{"slug":"A"}"#).unwrap_err();
+assert_eq!(refused.to_string(), "data did not match any variant of untagged enum SoleConstrained");
+```
+
+The tagged twin of that declaration reads back `'slug' is too short: minimum length is 2, got 1`, because its tag names the variant before its members are read. To learn which bound refused an untagged value, ask a surface that answers per member rather than per variant: validate the payload against the generated Zod schema or JSON Schema for a diagnosable verdict, or -- once the value is in hand -- call the enum's `validate()`, or the schema module's `validate_{variant}_{member}_value` directly.
 
 A member holding a map or a tuple describes as the struct field written from the same type does, on every surface. A map is dispatched on the classification its key earns -- enumerated properties for a key whose members the expansion knows, `additionalProperties` for an open one -- and a key no surface can write is refused at the member, at whatever depth the map sits at. A tuple is the fixed-arity array Serde writes, `prefixItems` and the arity bounds included. A member the parser could not classify at all is the one shape that stays permissive: it carries no type name to narrow with, so it admits any value, exactly as the same field does.
 
@@ -1118,6 +1137,34 @@ The macro also generates into the type's schema module:
 
 A constrained field of an enum variant is named for its variant too -- `validate_{variant}_{field}_value` and `deserialize_{variant}_{field}`, with `{variant}` in `snake_case`. One schema module holds every variant's helpers, and a field name is unique only within the variant that declares it, so two variants naming one field carry their own constraints.
 
+An enum whose members carry constraints publishes the same `validate(&self) -> Result<(), Vec<String>>`, under every tagging serde offers (externally, internally and adjacently tagged, and `#[serde(untagged)]`). A value holds one variant at a time, so the check runs that variant's members and no other's, collecting every violation in the words a struct's field is answered in:
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum Action {
+    Delete {
+        #[model_schema_prop(minLength = 5)]
+        note: String,
+    },
+    Upload {
+        #[model_schema_prop(minLength = 3)]
+        note: String,
+    },
+}
+
+let deleting = Action::Delete { note: "abc".to_string() };
+assert_eq!(
+    deleting.validate().unwrap_err(),
+    vec!["'note' is too short: minimum length is 5, got 3".to_string()],
+);
+// The same value read as an `Upload` is held to that variant's own minimum, and passes.
+assert!(Action::Upload { note: "abc".to_string() }.validate().is_ok());
+```
+
+Parity with structs runs both ways: an enum no member of which carries a constraint publishes no `validate()`, exactly as a constraint-free struct publishes none.
+
 #### Constraints under `Option`, wrappers, and sequences
 
 A constraint describes the value the field puts on the wire, wherever it was written. `validate()` therefore reaches through everything the parser reads through -- an `Option`, a transparent wrapper (`Box`, `Rc`, `Arc`, `Cow`), and every sequence level (`Vec`, `VecDeque`, `HashSet`, `BTreeSet`, `LinkedList`, `BinaryHeap`, arrays and slices) -- and checks the innermost value, which is the same place the Zod, TypeScript and JSON Schema surfaces put it.
@@ -1398,13 +1445,13 @@ export type Document = {
 };
 
 export const Document$Schema = z.strictObject({
-  id: z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/i, { message: "Invalid ObjectId" }) }),
+  id: z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) }),
   title: z.string(),
-  author_id: z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/i, { message: "Invalid ObjectId" }) }),
-  tags: z.array(z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/i, { message: "Invalid ObjectId" }) })),
-  metadata: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/i, { message: "Invalid ObjectId" }) })),
-  parent_id: z.union([z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/i, { message: "Invalid ObjectId" }) }), z.undefined()]).prefault(undefined),
-  related_docs: z.record(z.string(), z.array(z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/i, { message: "Invalid ObjectId" }) }))),
+  author_id: z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) }),
+  tags: z.array(z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) })),
+  metadata: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) })),
+  parent_id: z.union([z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) }), z.undefined()]).prefault(undefined),
+  related_docs: z.record(z.string(), z.array(z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) }))),
 });
 ```
 
