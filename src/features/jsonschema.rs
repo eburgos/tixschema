@@ -218,6 +218,19 @@ fn merge_readers() -> proc_macro2::TokenStream {
             }
             None
         }
+
+        // The variant name a branch of an externally tagged enum's `oneOf` pins, and `None` for
+        // every branch that pins none.
+        //
+        // The two spellings a union is written under say which enum wrote it: `oneOf` is the
+        // exclusive choice a tagged enum publishes, where a branch describing a bare string is a
+        // unit variant and the description pins the name serde writes it as. `anyOf` is the
+        // first-match choice an untagged enum publishes and a nullable value's own, where a string
+        // branch is a value serde writes as that string and nothing tags.
+        fn tagged_unit_variant(schema: &serde_json::Value) -> Option<&str> {
+            (described_type(schema)? == "string").then_some(())?;
+            schema.get("const")?.as_str()
+        }
     }
 }
 
@@ -243,6 +256,10 @@ fn merged_tree() -> proc_macro2::TokenStream {
             // members, so the branch names exactly the keys the object writes on its own.
             Absent,
             Object(&'defs serde_json::Map<String, serde_json::Value>),
+            // An externally tagged enum's unit variant, which the description pins as the bare name
+            // serde writes for it standing alone. Merged, serde writes that name as a key holding
+            // `null` — one member, which the branch carries as the name it is.
+            Tagged(&'defs str),
             Union(&'static str, Vec<Branches<'defs>>),
         }
 
@@ -264,6 +281,23 @@ fn merged_tree() -> proc_macro2::TokenStream {
                         Merged::Object(merge_object_schemas(base, &serde_json::Map::new()))
                     }
                     Self::Object(members) => Merged::Object(merge_object_schemas(base, members)),
+                    Self::Tagged(name) => {
+                        let mut properties = serde_json::Map::new();
+                        properties
+                            .insert(name.to_string(), serde_json::json!({ "type": "null" }));
+                        let mut written = serde_json::Map::new();
+                        written.insert(
+                            "properties".to_string(),
+                            serde_json::Value::Object(properties),
+                        );
+                        written.insert(
+                            "required".to_string(),
+                            serde_json::Value::Array(vec![serde_json::Value::String(
+                                name.to_string(),
+                            )]),
+                        );
+                        Merged::Object(merge_object_schemas(base, &written))
+                    }
                     Self::Union(spelling, ref branches) => {
                         let mut merged: Vec<Merged> = branches
                             .iter()
@@ -476,7 +510,19 @@ fn branch_expansion() -> proc_macro2::TokenStream {
             let mut expanded: Vec<Branches<'defs>> = Vec::new();
             for (index, branch) in branches.iter().enumerate() {
                 position.push(index + 1);
-                let below = expanded_branches(branch, hoisted_defs, expanding, position, label);
+                // A unit variant of the choice the flatten edge itself offers, which is the one
+                // depth at which the enum being flattened *is* the source. serde writes the
+                // variant's name into the object being merged there, so the branch is a key set
+                // like any other. One level down the enum is a member of a choice serde matched by
+                // shape, where the same value is the bare string it was written as and joins
+                // nothing — the refusal that position already carries.
+                let tagged = (position.len() == 1 && spelling == "oneOf")
+                    .then(|| tagged_unit_variant(branch))
+                    .flatten();
+                let below = match tagged {
+                    Some(name) => Some(Branches::Tagged(name)),
+                    None => expanded_branches(branch, hoisted_defs, expanding, position, label),
+                };
                 position.pop();
                 expanded.extend(below);
             }

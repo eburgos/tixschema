@@ -21,9 +21,7 @@ use super::{
 };
 
 #[cfg(all(feature = "serde", feature = "zod"))]
-use super::{
-    WireLeaf, flattened_union_member_guard_error, record_wire_leaves, record_zod_union_members,
-};
+use super::{WireLeaf, flatten_edge_guard_error, record_wire_leaves, record_zod_union_members};
 
 #[cfg(feature = "typescript")]
 use super::tuple_struct_ts_body;
@@ -7083,7 +7081,7 @@ fn flattening_a_union_of_objects_is_not_refused() {
         .is_none()
     );
     let unrecorded: syn::Field = syn::parse_quote! { #[serde(flatten)] base: NeverRecorded };
-    assert!(flattened_union_member_guard_error(&unrecorded, "Host").is_none());
+    assert!(flatten_edge_guard_error(&unrecorded, "Host").is_none());
 }
 
 /// Records an untagged enum's members the way its own expansion does, then asks the flatten guard
@@ -7104,7 +7102,7 @@ fn recorded_union_flatten_error(
         AliasKind::NoEnumMembers,
     );
     record_zod_union_members(rust_ident, &merge_parts);
-    flattened_union_member_guard_error(field, "Host").map(|error| error.to_string())
+    flatten_edge_guard_error(field, "Host").map(|error| error.to_string())
 }
 
 /// The branch trails one untagged enum's members are recorded at, beside what each is proved to
@@ -7358,6 +7356,100 @@ fn a_union_member_naming_an_object_or_an_unregistered_type_stays_admitted() {
             &syn::parse_quote! { #[serde(flatten)] either: NamedChoice },
         )
         .is_none()
+    );
+}
+
+/// What the flatten guard is asked about a field naming one item directly, with no union between.
+#[cfg(all(feature = "serde", feature = "zod"))]
+fn direct_flatten_error(field: &syn::Field) -> Option<String> {
+    flatten_edge_guard_error(field, "Host").map(|error| error.to_string())
+}
+
+/// The same refusal one position further out. A `#[serde(flatten)]` field naming an item whose own
+/// published wire is no object is the shape the member-position refusal was landed to stop, with the
+/// intersection written directly rather than through a union: serde refuses the value at runtime and
+/// the JSON-schema merge refuses the declaration, so the guard names it in the words that merge uses
+/// for a source at no position of its own.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn flattening_a_registered_scalar_wire_is_refused_where_the_field_was_written() {
+    seed_registered_wire("Counted", AliasKind::NoEnumMembers, Some("integer"));
+    let error = direct_flatten_error(&syn::parse_quote! { #[serde(flatten)] c: Counted }).unwrap();
+    assert!(
+        error.contains("`#[serde(flatten)]` of `Counted` is not written as an object"),
+        "got: {error}"
+    );
+    assert!(
+        error.contains("its schema describes a `integer`"),
+        "got: {error}"
+    );
+    assert!(
+        error.contains("write the field as a named member so the value gets a key of its own"),
+        "got: {error}"
+    );
+}
+
+/// Every keyword a registration can prove reaches the same refusal, each named by the word its own
+/// published document carries — the array a fixed-arity tuple struct writes among them, which serde
+/// refuses to flatten for the reason it refuses the scalar.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn flattening_a_registered_string_boolean_or_array_wire_is_refused_by_its_own_keyword() {
+    for (rust_ident, kind, keyword) in [
+        ("DirectSlug", AliasKind::StringWire, "string"),
+        ("DirectSwitch", AliasKind::Stringified, "boolean"),
+        ("DirectPair", AliasKind::NoEnumMembers, "array"),
+    ] {
+        seed_registered_wire(rust_ident, kind, Some(keyword));
+        let named: syn::Type = syn::parse_str(rust_ident).unwrap();
+        let error =
+            direct_flatten_error(&syn::parse_quote! { #[serde(flatten)] v: #named }).unwrap();
+        assert!(
+            error.contains(&format!("its schema describes a `{keyword}`")),
+            "got: {error}"
+        );
+    }
+}
+
+/// The three the direct position leaves exactly as they stand: an item the registry says publishes
+/// an object, a name it has never seen — the declaration-order fallback, which answers for a source
+/// written below the object no differently than for a foreign type — and an array of a proved
+/// scalar, where the array is what the field wrote rather than anything the name proves.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_direct_flatten_of_an_object_an_unregistered_name_or_an_array_stays_admitted() {
+    seed_registered_wire("DirectDoc", AliasKind::NoEnumMembers, None);
+    seed_registered_wire("DirectCount", AliasKind::NoEnumMembers, Some("integer"));
+    for admitted in [
+        syn::parse_quote! { #[serde(flatten)] base: DirectDoc },
+        syn::parse_quote! { #[serde(flatten)] base: NeverRegisteredDirectly },
+        syn::parse_quote! { #[serde(flatten)] counts: Vec<DirectCount> },
+    ] {
+        let field: syn::Field = admitted;
+        assert!(
+            direct_flatten_error(&field).is_none(),
+            "got a rejection for {}",
+            quote::ToTokens::to_token_stream(&field)
+        );
+    }
+}
+
+/// A plain enum proves the same `string` and keeps the refusal written for it: those words name the
+/// variant key serde writes into the object, which is what the author of that declaration acts on.
+/// Two guards firing on one field would put two diagnostics on one line, each answering for the same
+/// thing in different words.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_direct_flatten_of_a_plain_enum_is_left_to_the_guard_written_for_it() {
+    seed_registered_wire("DirectHue", AliasKind::EnumMembers, Some("string"));
+    let field: syn::Field = syn::parse_quote! { #[serde(flatten)] tone: DirectHue };
+    assert!(direct_flatten_error(&field).is_none());
+    let written = super::flattened_field_guard_error(&field, "Host")
+        .map(|error| error.to_string())
+        .unwrap();
+    assert!(
+        written.contains("a plain enum writes its"),
+        "got: {written}"
     );
 }
 
