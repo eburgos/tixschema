@@ -2641,7 +2641,7 @@ fn a_string_filling_annotates_the_example_as_no_filling_does() {
 }
 
 /// The three shapes a declared default renders as: a primitive's ordinary Zod expression, another
-/// primitive's, and a reference to a generic sibling read back through [`super::default_zod_argument`]
+/// primitive's, and a reference to a generic sibling read back through [`super::default_zod_rendering`]
 /// rather than reconstructed. The third row is the one that matters — `DocumentId` is registered as
 /// a factory publisher whose own `$SchemaDefault` was recorded at exactly `z.string()`, and
 /// `IdType = DocumentId<String>` names it at that identical argument, so the render folds onto
@@ -2676,7 +2676,7 @@ fn declared_default_renders_each_shape_the_table_describes() {
         )];
         let field = super::declared_default_field(parameter, &default_types);
         assert_eq!(
-            super::default_zod_argument(&field),
+            super::default_zod_rendering(&field).into_argument(),
             expected,
             "for `{parameter} = {filled_at}`"
         );
@@ -2704,7 +2704,7 @@ fn a_default_naming_a_sibling_at_other_than_its_own_default_calls_the_factory() 
     let default_types = vec![(syn::parse_quote!(IdType), ty)];
     let field = super::declared_default_field("IdType", &default_types);
     assert_eq!(
-        super::default_zod_argument(&field),
+        super::default_zod_rendering(&field).into_argument(),
         "z.lazy(() => DocumentId$SchemaFactory(z.number().int()))"
     );
 }
@@ -2716,7 +2716,10 @@ fn a_default_naming_a_sibling_at_other_than_its_own_default_calls_the_factory() 
 #[test]
 fn a_parameter_with_no_declared_default_falls_back_to_string() {
     let field = super::declared_default_field("IdType", &[]);
-    assert_eq!(super::default_zod_argument(&field), "z.string()");
+    assert_eq!(
+        super::default_zod_rendering(&field).into_argument(),
+        "z.string()"
+    );
 }
 
 #[cfg(feature = "jsonschema")]
