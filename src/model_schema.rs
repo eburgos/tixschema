@@ -37,6 +37,9 @@ use crate::utils::safe_type_name;
 #[cfg(feature = "zod")]
 use crate::utils::{escape_js_regex_literal, extract_example_from_docs};
 
+#[cfg(all(feature = "zod", feature = "object_id"))]
+use crate::features::object_id::get_object_id_zod_schema_with;
+
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::{AliasKind, lookup_alias_info, regex_rejection};
 
@@ -182,6 +185,17 @@ struct BrandedValidation {
     checked_inner: proc_macro2::TokenStream,
     deserialize_fn: proc_macro2::TokenStream,
     validate_fn: proc_macro2::TokenStream,
+}
+
+/// The JSON schema shape a branded newtype's inner field describes.
+#[cfg(feature = "jsonschema")]
+enum BrandedJsonInner {
+    /// The `$oid` object an `ObjectId` writes, whose hex member carries the brand's string
+    /// constraints.
+    #[cfg(feature = "object_id")]
+    ObjectId,
+    /// A `"type"` keyword those constraints sit beside.
+    Scalar(String),
 }
 
 /// What a field bottoms out in, under the wrappers it was written beneath.
@@ -1155,8 +1169,12 @@ fn branded_constraint_inner_error(
     )
 }
 
-/// Names the non-string schema shape an inner type resolves to, or `None` when it renders as a
-/// string and so can carry the string constraints.
+/// Names the shape an inner type resolves to that has no string for the constraints to measure, or
+/// `None` when it writes exactly one and so can carry them.
+///
+/// An `ObjectId` answers `None` on that reading rather than on its schema's shape: it writes the
+/// `$oid` object, whose single hex member is both what `Display` renders and where every surface
+/// puts the checks.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 const fn non_string_inner_shape(inner: &FieldDef) -> Option<&'static str> {
     if inner.is_array() {
@@ -1919,12 +1937,12 @@ fn branded_checked_value(
     }
 }
 
-/// Builds the `json_schema()` method for a branded newtype's schema module.
+/// Builds the string schema a branded newtype's constraints are written into: `type_name` as the
+/// `"type"`, then one insert per constraint the brand declares.
 #[cfg(feature = "jsonschema")]
-fn build_branded_json_schema_method(
+fn branded_constrained_schema_obj(
     args: &ModelSchemaArgs,
-    json_inner_type: &str,
-    def_name: &str,
+    type_name: &str,
 ) -> proc_macro2::TokenStream {
     let mut constraint_inserts: Vec<proc_macro2::TokenStream> = Vec::new();
 
@@ -1944,12 +1962,28 @@ fn build_branded_json_schema_method(
         });
     }
 
-    let body = quote! {
+    quote! {
         {
             let mut schema_obj = serde_json::Map::new();
-            schema_obj.insert("type".to_string(), serde_json::Value::String(#json_inner_type.to_string()));
+            schema_obj.insert("type".to_string(), serde_json::Value::String(#type_name.to_string()));
             #(#constraint_inserts)*
             serde_json::Value::Object(schema_obj)
+        }
+    }
+}
+
+/// Builds the `json_schema()` method for a branded newtype's schema module.
+#[cfg(feature = "jsonschema")]
+fn build_branded_json_schema_method(
+    args: &ModelSchemaArgs,
+    json_inner: &BrandedJsonInner,
+    def_name: &str,
+) -> proc_macro2::TokenStream {
+    let body = match json_inner {
+        BrandedJsonInner::Scalar(type_name) => branded_constrained_schema_obj(args, type_name),
+        #[cfg(feature = "object_id")]
+        BrandedJsonInner::ObjectId => {
+            object_id_json_schema_value(&branded_constrained_schema_obj(args, "string"))
         }
     };
     json_schema_methods(def_name, &body)
@@ -1972,7 +2006,7 @@ fn branded_generic_params(generics: &syn::Generics) -> Vec<String> {
 }
 
 /// Resolves the TypeScript inner type name and generic parameter list for a branded newtype.
-#[cfg(any(feature = "typescript", feature = "zod"))]
+#[cfg(feature = "typescript")]
 fn branded_ts_type_and_generics(
     is_generic: bool,
     generic_params: &[String],
@@ -1991,46 +2025,95 @@ fn branded_ts_type_and_generics(
     (ts_inner_type, ts_generics)
 }
 
-/// Resolves the JSON schema type for a branded newtype's inner field.
+/// Resolves the JSON schema shape for a branded newtype's inner field.
 ///
-/// For generic newtypes this is always `"string"` (mirrors the Zod logic); for non-generic
-/// newtypes it maps from the resolved TypeScript type name.
+/// For generic newtypes this is always `"string"` (mirrors the Zod logic). An `ObjectId` is read
+/// off its own `FieldDef`, because the object it writes has no `"type"` keyword that describes it;
+/// every other non-generic inner maps from the resolved TypeScript type name.
 #[cfg(feature = "jsonschema")]
-fn branded_json_inner_type(is_generic: bool, inner_ty: &syn::Type) -> String {
+fn branded_json_inner(is_generic: bool, inner_ty: &syn::Type) -> BrandedJsonInner {
     if is_generic {
-        "string".to_owned()
-    } else {
-        match get_field_def("_inner", inner_ty, "")
-            .typescript_typename()
-            .as_str()
-        {
-            "number" => "number".to_owned(),
-            "boolean" => "boolean".to_owned(),
-            _ => "string".to_owned(),
-        }
+        return BrandedJsonInner::Scalar("string".to_owned());
     }
+    let inner = get_field_def("_inner", inner_ty, "");
+    #[cfg(feature = "object_id")]
+    if branded_inner_is_object_id(&inner) {
+        return BrandedJsonInner::ObjectId;
+    }
+    BrandedJsonInner::Scalar(match inner.typescript_typename().as_str() {
+        "number" => "number".to_owned(),
+        "boolean" => "boolean".to_owned(),
+        _ => "string".to_owned(),
+    })
 }
 
-/// Resolves the Zod base schema for a branded newtype's inner type, applying string constraints.
+/// The Zod string checks a branded newtype's `minLength`, `maxLength`, and `pattern` render to,
+/// or the empty string when it carries none.
 #[cfg(feature = "zod")]
-fn branded_zod_inner(args: &ModelSchemaArgs, is_generic: bool, inner_ty: &syn::Type) -> String {
-    let base = if is_generic {
-        "z.string()".to_owned()
-    } else {
-        get_field_def("_inner", inner_ty, "").zod_type()
-    };
-    let mut result = base;
+fn branded_zod_string_checks(args: &ModelSchemaArgs) -> String {
+    let mut checks = String::new();
     if let Some(min_len) = args.min_length {
-        result = format!("{result}.min({min_len})");
+        checks = format!("{checks}.min({min_len})");
     }
     if let Some(max_len) = args.max_length {
-        result = format!("{result}.max({max_len})");
+        checks = format!("{checks}.max({max_len})");
     }
     if let Some(pattern) = &args.pattern {
         let literal_body = escape_js_regex_literal(pattern);
-        result = format!("{result}.check(z.regex(/{literal_body}/))");
+        checks = format!("{checks}.check(z.regex(/{literal_body}/))");
     }
-    result
+    checks
+}
+
+/// Whether a branded newtype's inner is an `ObjectId` written on its own, and so reaches the wire
+/// as the `$oid` object rather than as any string.
+///
+/// An arrayed inner is excluded: what it writes is the array around that object, which is not a
+/// shape this dispatch describes.
+#[cfg(all(feature = "object_id", any(feature = "zod", feature = "jsonschema")))]
+const fn branded_inner_is_object_id(inner: &FieldDef) -> bool {
+    matches!(inner.field_type, FieldDefType::ObjectId) && !inner.is_array()
+}
+
+/// Resolves the Zod base schema for a branded newtype's inner type, applying string constraints.
+///
+/// The constraints measure the inner's `Display` rendering, which for every inner but an
+/// `ObjectId` is the value the schema itself describes. An `ObjectId` writes `{"$oid": hex}`, so
+/// its `Display` is the `$oid` member and the checks land there.
+#[cfg(feature = "zod")]
+fn branded_zod_inner(args: &ModelSchemaArgs, is_generic: bool, inner_ty: &syn::Type) -> String {
+    let checks = branded_zod_string_checks(args);
+    if is_generic {
+        return format!("z.string(){checks}");
+    }
+    let inner = get_field_def("_inner", inner_ty, "");
+    #[cfg(feature = "object_id")]
+    if branded_inner_is_object_id(&inner) {
+        return get_object_id_zod_schema_with(&checks);
+    }
+    format!("{}{checks}", inner.zod_type())
+}
+
+/// The Zod class a branded newtype's base schema is an instance of, for the exported binding's
+/// type annotation.
+///
+/// Read off the inner's own `FieldDef` rather than off its TypeScript name, so a user type merely
+/// spelled `ObjectId` is not mistaken for the `$oid` object.
+#[cfg(all(feature = "zod", feature = "typescript"))]
+fn branded_zod_type_name(is_generic: bool, inner_ty: &syn::Type) -> String {
+    if is_generic {
+        return "ZodString".to_owned();
+    }
+    let inner = get_field_def("_inner", inner_ty, "");
+    #[cfg(feature = "object_id")]
+    if branded_inner_is_object_id(&inner) {
+        return "ZodObject".to_owned();
+    }
+    match inner.typescript_typename().as_str() {
+        "number" => "ZodNumber".to_owned(),
+        "boolean" => "ZodBoolean".to_owned(),
+        _ => "ZodString".to_owned(),
+    }
 }
 
 /// Builds the `ts_definition()` method for a branded newtype's schema module.
@@ -2070,21 +2153,13 @@ fn build_branded_ts_definition_method(
 fn build_branded_zod_schema_method(
     item_name: &str,
     is_generic: bool,
-    ts_inner_type: &str,
+    inner_ty: &syn::Type,
     zod_inner: &str,
     plain_description: &str,
 ) -> proc_macro2::TokenStream {
     #[cfg(feature = "typescript")]
     {
-        let zod_type_name = if is_generic {
-            "ZodString".to_owned()
-        } else {
-            match ts_inner_type {
-                "number" => "ZodNumber".to_owned(),
-                "boolean" => "ZodBoolean".to_owned(),
-                _ => "ZodString".to_owned(),
-            }
-        };
+        let zod_type_name = branded_zod_type_name(is_generic, inner_ty);
         let zod_type_annotation = format!("$ZodBranded<{zod_type_name}, \"{item_name}\">");
         quote! {
             pub fn zod_schema() -> String {
@@ -2097,7 +2172,7 @@ fn build_branded_zod_schema_method(
     }
     #[cfg(not(feature = "typescript"))]
     {
-        let _: &_ = &(is_generic, ts_inner_type);
+        let _: &_ = &(is_generic, inner_ty);
         quote! {
             pub fn zod_schema() -> String {
                 format!(
@@ -2481,16 +2556,15 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
     let inner_field = item_struct.fields.iter().next().unwrap();
     let inner_ty = &inner_field.ty;
 
-    // `ts_pair`: (ts_inner_type, ts_generics). Bound whole so zod-only builds (which use only the
-    // inner type) don't trip an unused-variable warning on the generics half.
-    #[cfg(any(feature = "typescript", feature = "zod"))]
+    // `ts_pair`: (ts_inner_type, ts_generics).
+    #[cfg(feature = "typescript")]
     let ts_pair = branded_ts_type_and_generics(is_generic, &generic_params, inner_ty);
 
     #[cfg(not(any(feature = "typescript", feature = "zod")))]
     let _: &_ = &inner_ty;
 
     #[cfg(feature = "jsonschema")]
-    let json_inner_type = branded_json_inner_type(is_generic, inner_ty);
+    let json_inner = branded_json_inner(is_generic, inner_ty);
 
     #[cfg(feature = "zod")]
     let zod_inner = branded_zod_inner(args, is_generic, inner_ty);
@@ -2505,7 +2579,7 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
     let zod_schema_method = build_branded_zod_schema_method(
         &item_name,
         is_generic,
-        &ts_pair.0,
+        inner_ty,
         &zod_inner,
         &plain_description,
     );
@@ -2516,7 +2590,7 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
 
     // --- Build schema module impl items ---
     #[cfg(feature = "jsonschema")]
-    let json_schema_method = build_branded_json_schema_method(args, &json_inner_type, &item_name);
+    let json_schema_method = build_branded_json_schema_method(args, &json_inner, &item_name);
 
     let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![
         #[cfg(feature = "jsonschema")]
@@ -5691,21 +5765,31 @@ fn build_sibling_type_field_schema(
     }
 }
 
+/// The JSON schema an `ObjectId` describes — the closed `$oid` object serde writes — with
+/// `hex_schema` as the schema of the hex string it holds.
+///
+/// Field position and the branded path read this one spelling, so the transparent brand and the
+/// inner it wraps cannot drift apart. The map-member positions still carry their own renderings.
+#[cfg(all(feature = "jsonschema", feature = "object_id"))]
+fn object_id_json_schema_value(hex_schema: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    quote! {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "$oid": (#hex_schema)
+            },
+            "required": ["$oid"],
+            "additionalProperties": false
+        })
+    }
+}
+
 /// Builds the JSON schema for a `MongoDB` `ObjectId` field (`{ "$oid": string }`).
 #[cfg(all(feature = "jsonschema", feature = "object_id"))]
 fn build_object_id_field_schema(fld: &FieldDef, field_name_str: &str) -> proc_macro2::TokenStream {
     let schema = arrayed_json_schema_value(
         fld,
-        quote! {
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "$oid": { "type": "string" }
-                },
-                "required": ["$oid"],
-                "additionalProperties": false
-            })
-        },
+        object_id_json_schema_value(&quote! { serde_json::json!({ "type": "string" }) }),
     );
     quote! {
         properties.insert(#field_name_str.to_string(), { #schema });

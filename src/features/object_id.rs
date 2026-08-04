@@ -15,8 +15,18 @@ pub fn get_object_id_typescript_type() -> String {
 
 #[cfg(all(feature = "object_id", any(test, feature = "zod")))]
 pub fn get_object_id_zod_schema() -> String {
-    "z.object({ $oid: z.string().regex(/^[a-f\\d]{24}$/i, { message: \"Invalid ObjectId\" }) })"
-        .to_owned()
+    get_object_id_zod_schema_with("")
+}
+
+/// The `$oid` object's Zod schema with `hex_checks` appended to the hex string it holds.
+///
+/// String checks belong on that member and never on the object around it: `$oid` is the only
+/// string an `ObjectId` writes, and a `z.object` has no string check to take.
+#[cfg(all(feature = "object_id", any(test, feature = "zod")))]
+pub fn get_object_id_zod_schema_with(hex_checks: &str) -> String {
+    format!(
+        "z.object({{ $oid: z.string().regex(/^[a-f\\d]{{24}}$/i, {{ message: \"Invalid ObjectId\" }}){hex_checks} }})"
+    )
 }
 
 /// Check if we should handle this type as `ObjectId`.
