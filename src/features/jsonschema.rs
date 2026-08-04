@@ -238,7 +238,8 @@ fn merge_readers() -> proc_macro2::TokenStream {
 fn merged_tree() -> proc_macro2::TokenStream {
     quote::quote! {
         enum Branches<'defs> {
-            // What a source reached through an `Option` contributes when it is not there: no
+            // What a source contributes when it is not there — reached through an `Option`, or
+            // naming an item whose own published surface offers a `null` beside its value: no
             // members, so the branch names exactly the keys the object writes on its own.
             Absent,
             Object(&'defs serde_json::Map<String, serde_json::Value>),
@@ -448,6 +449,16 @@ fn branch_expansion() -> proc_macro2::TokenStream {
             };
 
             if let Some(named) = described_type(body) {
+                // A `null` among the choices the flatten edge itself offers is the absence rather
+                // than a refusal: the source is nullable, serde writes no member of it for that
+                // value, and the payload carrying none of them is the one serde reads back as that
+                // value — the same two key sets a source reached through an `Option` writes. A
+                // `null` below that level is a member of a choice serde matched by shape, where the
+                // absent form is one serde writes and then matches no member for, and the refusal
+                // stands.
+                if named == "null" && position.len() == 1 {
+                    return Some(Branches::Absent);
+                }
                 if named != "object" {
                     refuse_non_object(label, position, named);
                 }
@@ -496,8 +507,9 @@ fn branch_expansion() -> proc_macro2::TokenStream {
 /// always tell which types those are — a name reaches the merge without saying what it writes. The
 /// schema it produces does say, so the merge reads it there: a description naming any type but
 /// `object` is refused rather than merged, which is the last point at which the wrong schema can
-/// still be stopped. A flatten edge that closes a cycle is refused on the same terms, named for the
-/// frame that read it.
+/// still be stopped. The one exception is the `null` of a choice the edge itself offers, which is
+/// the source's own absence written out and is read as that. A flatten edge that closes a cycle is
+/// refused on the same terms, named for the frame that read it.
 ///
 /// The reading itself is the tokens [`merge_readers`] emits, and what the multiplication is carried
 /// in is [`merged_tree`]; both are written into the block this returns, so the whole merge is one

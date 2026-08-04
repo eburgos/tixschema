@@ -41,6 +41,29 @@ pub struct SerdeKeyOmission {
     pub skips_deserializing: bool,
 }
 
+impl SerdeKeyOmission {
+    /// Whether the attributes take the member out of both of serde's directions at once: nothing
+    /// serde writes carries it, and nothing serde reads keeps what a payload put there.
+    ///
+    /// The conjunction is what is read rather than the word `skip`, because `skip_serializing` and
+    /// `skip_deserializing` written side by side are that same wire spelled out.
+    pub const fn absent_from_wire(self) -> bool {
+        self.omits_key && self.skips_deserializing
+    }
+
+    /// Whether the attributes take the member out of exactly one of serde's two directions, which
+    /// leaves what serde writes and what serde reads two different payloads.
+    ///
+    /// Where the member has a key, the two payloads still overlap — the key is simply absent from
+    /// one of them, which an optional key describes. Where it has only a place in a tuple there is
+    /// no such spelling, and the two payloads differ in their arity. So the question is asked only
+    /// by the builds that describe a tuple, which is what the gate below says.
+    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+    pub const fn drops_one_direction_only(self) -> bool {
+        self.omits_key != self.skips_deserializing
+    }
+}
+
 /// Metadata for serde attributes applied to a struct or enum.
 #[cfg(feature = "serde")]
 #[derive(Clone, Debug, Default)]
