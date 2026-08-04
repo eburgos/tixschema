@@ -568,11 +568,11 @@ export const Document$Schema: ZodType<Document> = Document$RawSchema;
 /// non-`Display` type argument is rejected where the brand is used, not where it is declared.
 ///
 /// String constraints stop at the brand's own type parameters. TypeScript binds a parameter for
-/// real, but the two validating surfaces read it as the opaque value — one schema is written for
-/// every instantiation — and an opaque value takes no string checks: Zod 4's `z.unknown()` carries
-/// no `.min`/`.max`, and `.brand()` returns that same schema rather than a wrapper that could. So
-/// `#[model_schema(minLength = 3, default_types(T = String))] struct Slug<T>(pub T);` is refused at
-/// the inner field. Constrain a string-typed inner instead.
+/// real and Zod reaches it through the argument the brand's own factory binds, but the one JSON
+/// document a brand publishes covers every instantiation and so describes a parameter as `{}`,
+/// where `minLength` goes inert while `validate()` still measures `Display` — three surfaces, three
+/// answers. So `#[model_schema(minLength = 3, default_types(T = String))] struct Slug<T>(pub T);`
+/// is refused at the inner field. Constrain a string-typed inner instead.
 ///
 /// A named inner is judged by what that name publishes, since that is the schema the checks are
 /// appended to: `#[model_schema(minLength = 3)] struct Outer(pub Blob);` over
