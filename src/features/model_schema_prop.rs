@@ -73,7 +73,12 @@ const KNOWN_KEYS: &[&str] = &[
 ///   or the value under its wrappers (`as = String` on a `Vec<String>`); any other target is a
 ///   compile error. Cannot be written beside `preprocess`.
 /// - `literal = "value"` — emit as a string literal type instead of `string`.
-/// - `ts_optional` — for an `Option<T>` field, emit `field?: T` instead of `field: T | undefined` (TypeScript only; a non-`Option` field is a compile error).
+/// - `ts_optional` — for an `Option<T>` field, emit `field?: T` instead of `field: T | undefined`
+///   (TypeScript only; a non-`Option` field is a compile error). It decides the key only on a field
+///   no serde key-omission attribute speaks for, since such an attribute already writes the
+///   optional key off the wire in every build. Under the `serde` feature that field does not
+///   compile — the `Option`-null guard refuses it — so the one shape the flag is live on is a build
+///   with the feature off.
 ///
 /// ## Zod preprocessing
 ///
