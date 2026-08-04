@@ -2309,3 +2309,47 @@ fn test_readme_branded_validate_example_prints_what_the_generator_writes() {
         );
     }
 }
+
+/// The shipped rustdoc quotes the messages a failed `validate()` prints, so the block is checked
+/// against a run of the very type it declares rather than against memory. It sits in a `text` fence
+/// no doctest reaches, which is why the check lives out here.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_crate_rustdoc_quotes_the_messages_the_generator_writes() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize)]
+    pub struct RegistrationJson {
+        #[model_schema_prop(minimum = 0, maximum = 120)]
+        pub age: u32,
+
+        #[model_schema_prop(minLength = 3, maxLength = 30)]
+        pub username: String,
+    }
+
+    let errors = RegistrationJson {
+        age: 150,
+        username: "ab".to_owned(),
+    }
+    .validate()
+    .unwrap_err();
+
+    assert_eq!(
+        errors,
+        vec![
+            "'age' is too large: maximum is 120, got 150".to_owned(),
+            "'username' is too short: minimum length is 3, got 2".to_owned(),
+        ]
+    );
+
+    let rustdoc = include_str!("../../src/lib.rs");
+    for message in &errors {
+        let shown = format!("// \"{message}\"");
+        assert!(
+            rustdoc.contains(&shown),
+            "src/lib.rs no longer shows {shown}"
+        );
+    }
+}

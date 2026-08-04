@@ -3262,16 +3262,18 @@ fn branded_guard_failure_output(
     )
 }
 
-/// Processes a branded newtype (transparent single-field tuple struct) and generates
-/// TypeScript branded type definitions and Zod brand schemas.
+/// Processes a branded newtype — a `#[serde(transparent)]` struct holding exactly one unnamed
+/// field — into the parts [`assemble_branded_output`] joins: the struct itself, the `Display` impl
+/// it earns, its schema module, and the delegate impl forwarding to that module.
 ///
-/// A branded newtype is detected when a struct has **both** `#[serde(transparent)]` and exactly
-/// one unnamed field. The generated output depends on the active features:
-///
-/// - With `zod` + `typescript`: emits a Zod `.brand<"Name">()` schema and a
-///   `type Name<T> = T & z.$brand<"Name">` alias.
-/// - With `typescript` only (no `zod`): emits a `unique symbol` brand pattern and an
-///   `assertName()` type-assertion helper function.
+/// A brand adds its own name to what its inner already writes, and each surface says so in the
+/// spelling that surface has for the marker. TypeScript intersects the inner's rendering with
+/// `$brand<"Name">`, the marker the `zod` runtime supplies; without `zod` there is no such marker
+/// to name, so the intersection is written against a `unique symbol` declared beside the type, and
+/// those two lines are the whole emission. Zod brands the inner's own schema with
+/// `.brand<"Name">()`, carries the item's description in the `.meta({ description })` every item
+/// carries it in, and annotates the exported binding `$ZodBranded<Class, "Name">` for the `Class`
+/// read off the very inner that rendering was built from.
 ///
 /// Generic parameters on the struct are preserved in the TypeScript output, whose declaration
 /// binds them. The two validating surfaces read the inner off the erased def instead, so a
