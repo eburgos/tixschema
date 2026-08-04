@@ -2214,8 +2214,9 @@ fn missing_default_message(name: &syn::Ident, declared: &[&syn::Ident]) -> Strin
     )
 }
 
-/// The compile-time check every `default_types` filling earns against the bounds its parameter
-/// declares — one per bounded parameter, emitted beside the expansion rather than in place of it.
+/// The compile-time checks a `default_types` declaration earns against the bounds its parameters
+/// declare — one per bounded parameter, and one more carrying jointly whatever bound reads a
+/// neighbour — emitted beside the expansion rather than in place of it.
 ///
 /// A filling is the author's statement of what the item holds; a parameter's bounds are the item's
 /// statement of what it can hold. The two can disagree, and nothing here can tell them apart: a
@@ -2230,46 +2231,142 @@ fn missing_default_message(name: &syn::Ident, declared: &[&syn::Ident]) -> Strin
 /// value of the parameter can take describes an item that is uninhabitable at it, which is as true
 /// in a build that generates no document as in one that does.
 ///
-/// Two declarations earn nothing. A parameter with no bounds admits every filling, so the expansion
-/// is left exactly as it was. And a bound naming another parameter of the item holds only where
-/// that one is filled too — a joint statement this per-filling check does not make, and one whose
-/// name reproduced here would resolve to nothing — so it is left to the item's own use sites.
+/// A parameter with no bounds earns nothing: it admits every filling, so the expansion is left
+/// exactly as it was. A bound naming another parameter of the item earns nothing *here* — the
+/// neighbour's name reproduced beside a single filling would resolve to nothing — and is carried
+/// instead by [`joint_bound_check`], which declares the whole parameter list at once so every name
+/// the bound reads stands at the filling declared for it.
+///
+/// An alias earns nothing at all. Rust does not enforce a bound written on a type alias's
+/// parameter — `type_alias_bounds` exists to say the bound is inert and to offer its deletion — so
+/// a filling that fails one still names a type every use site of the alias accepts, and a refusal
+/// here would refuse a program the language admits. Saying an alias's bound is empty is that lint's
+/// job, not this attribute's.
 fn default_types_bound_checks(
     item: &Item,
     args: &ModelSchemaArgs,
 ) -> Vec<proc_macro2::TokenStream> {
+    if matches!(item, Item::Type(_)) {
+        return Vec::new();
+    }
     let Some(generics) = item_generics(item) else {
         return Vec::new();
     };
-    args.default_types
+    let mut checks: Vec<proc_macro2::TokenStream> = args
+        .default_types
         .iter()
         .filter_map(|(name, filling)| filling_bound_check(generics, name, filling))
-        .collect()
+        .collect();
+    checks.extend(joint_bound_check(generics, args));
+    checks
 }
 
-/// The check one filling earns, or `None` where its parameter declares nothing to check it against.
+/// The check one filling earns against the bounds its parameter declares alone, or `None` where it
+/// declares none such.
 ///
 /// The parameter keeps the ident the author declared it under, so a bound written in terms of the
 /// parameter itself still reads, and the bounds keep the spans they were written at, so the
 /// compiler's `required by this bound` note points at the declaration rather than at anything
 /// emitted here.
+///
+/// A bound reading a neighbour is left out of this function rather than taking the whole parameter
+/// out of it: the two kinds partition the parameter's bounds, so a parameter bounded both ways is
+/// checked against each half exactly once — the neighbour-free half here, the rest in
+/// [`joint_bound_check`].
 fn filling_bound_check(
     generics: &syn::Generics,
     name: &syn::Ident,
     filling: &syn::Type,
 ) -> Option<proc_macro2::TokenStream> {
-    let bounds = declared_bounds(generics, name);
-    if bounds.is_empty()
-        || bounds
-            .iter()
-            .any(|bound| mentions_another_parameter(bound, generics, name))
-    {
+    let bounds: Vec<&syn::TypeParamBound> = declared_bounds(generics, name)
+        .into_iter()
+        .filter(|bound| !mentions_another_parameter(bound, generics, name))
+        .collect();
+    if bounds.is_empty() {
         return None;
     }
     Some(quote! {
         const _: fn() = || {
             fn default_type_filling<#name: #(#bounds)+*>() {}
             default_type_filling::<#filling>();
+        };
+    })
+}
+
+/// The one check carrying every bound the per-filling pass left behind for reading a neighbour, or
+/// `None` where it left none behind or where the item cannot be spelled jointly.
+///
+/// A bound like `WideType: From<NarrowType>` is a statement about two fillings at once, so it is
+/// asked of both at once: one function declaring the item's whole parameter list, carrying in its
+/// `where` clause exactly the bounds the per-filling functions could not, called at every declared
+/// filling in declaration order. Every name such a bound reads is then in scope, and the failure
+/// arrives as an `E0277` on the argument that fails — the entry the author wrote — with the
+/// `required by this bound` note on the bound as written.
+///
+/// Lifetimes are declared as written, bounds and all, and left out of the call, where they elide.
+/// Consts are declared nowhere: a const takes no filling from a convention that names types, so a
+/// joint function declaring one could not be called at all (`E0107` with the const omitted,
+/// `E0284` with it inferred). A bound reading a const is therefore still left to the item's own use
+/// sites, as every bound reading a neighbour was before.
+///
+/// The whole check is withheld unless every type parameter has a filling to stand at. A parameter
+/// left without one is only possible where no JSON document is built, and a bound joining it to its
+/// neighbours states nothing about fillings the author declared — inventing one to complete the
+/// call would ask the compiler a question nobody asked.
+fn joint_bound_check(
+    generics: &syn::Generics,
+    args: &ModelSchemaArgs,
+) -> Option<proc_macro2::TokenStream> {
+    let consts: Vec<String> = generics
+        .params
+        .iter()
+        .filter_map(|param| match param {
+            syn::GenericParam::Const(const_param) => Some(const_param.ident.to_string()),
+            syn::GenericParam::Type(_) | syn::GenericParam::Lifetime(_) => None,
+        })
+        .collect();
+    let mut predicates: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut declared: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut fillings: Vec<&syn::Type> = Vec::new();
+    for param in &generics.params {
+        match param {
+            syn::GenericParam::Lifetime(lifetime_param) => {
+                declared.push(quote! { #lifetime_param });
+            }
+            syn::GenericParam::Const(_) => {}
+            syn::GenericParam::Type(type_param) => {
+                let name = &type_param.ident;
+                let filling = args
+                    .default_types
+                    .iter()
+                    .find(|(declared_name, _)| declared_name == name)
+                    .map(|(_, filling)| filling)?;
+                declared.push(quote! { #name });
+                fillings.push(filling);
+                let joint: Vec<&syn::TypeParamBound> = declared_bounds(generics, name)
+                    .into_iter()
+                    .filter(|bound| {
+                        mentions_another_parameter(bound, generics, name)
+                            && !reads_any_name(quote::ToTokens::to_token_stream(bound), &consts)
+                    })
+                    .collect();
+                if !joint.is_empty() {
+                    predicates.push(quote! { #name: #(#joint)+* });
+                }
+            }
+        }
+    }
+    if predicates.is_empty() {
+        return None;
+    }
+    Some(quote! {
+        const _: fn() = || {
+            fn default_type_fillings<#(#declared),*>()
+            where
+                #(#predicates),*
+            {
+            }
+            default_type_fillings::<#(#fillings),*>();
         };
     })
 }

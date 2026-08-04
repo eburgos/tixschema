@@ -1097,12 +1097,33 @@ where
 }
 
 /// A parameter whose bound names the item's other parameter, which holds only where that one is
-/// filled too — a joint statement the per-filling check does not make, and one whose name
-/// reproduced beside a single filling would resolve to nothing. The fixture compiling is the whole
-/// of the assertion that such a bound is left to the item's own use sites.
+/// filled too. Both fillings are declared, so the bound is checked at both at once — `String`
+/// implements `From<String>` through the reflexive impl — and the fixture compiling is the whole
+/// of the assertion that a satisfying joint filling is let through.
 #[model_schema(default_types(WideType = String, NarrowType = String))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Widened<WideType: From<NarrowType>, NarrowType: Clone> {
+    pub narrow: NarrowType,
+    pub wide: WideType,
+}
+
+/// A parameter bounded both ways at once: `Clone` reads no neighbour and is checked at the filling
+/// alone, `Into<Cow<'label, str>>` reads the item's lifetime and is checked at the whole parameter
+/// list. Both hold at the declared filling, so the fixture compiling asserts the two halves are
+/// each checked and neither is checked twice.
+#[model_schema(default_types(LabelType = String))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Annotated<'label, LabelType: Clone + Into<Cow<'label, str>>> {
+    pub label: LabelType,
+    pub source: Cow<'label, str>,
+}
+
+/// A const beside a bound that reads only type parameters. A const takes no filling, so it is
+/// declared nowhere in the joint check and left out of its call; the fixture compiling asserts its
+/// presence leaves that check standing.
+#[model_schema(default_types(WideType = String, NarrowType = String))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Padded<WideType: From<NarrowType>, NarrowType: Clone, const WIDTH: usize> {
     pub narrow: NarrowType,
     pub wide: WideType,
 }
@@ -1279,9 +1300,10 @@ fn a_parameter_with_no_default_still_expands_where_no_json_document_is_built() {
     assert_eq!(Undefaulted { id: 1_u32 }.id, 1);
 }
 
-/// A declared filling is checked against the bounds its parameter carries, and the two fixtures a
-/// bound can reach — one satisfied, one naming a neighbour and so left alone — both still expand
-/// and still hold what the author wrote into them.
+/// A declared filling is checked against the bounds its parameter carries, and every shape a bound
+/// can reach — satisfied at the filling alone, satisfied jointly with a neighbour, both at once,
+/// and beside a const that takes no filling — still expands and still holds what the author wrote
+/// into it.
 #[test]
 fn a_bounded_parameter_filled_at_a_type_its_bound_admits_still_expands() {
     assert_eq!(
@@ -1297,6 +1319,20 @@ fn a_bounded_parameter_filled_at_a_type_its_bound_admits_still_expands() {
     };
     assert_eq!(widened.narrow, 'x');
     assert_eq!(widened.wide, "x");
+
+    let annotated = Annotated {
+        label: "two".to_owned(),
+        source: Cow::Borrowed("three"),
+    };
+    assert_eq!(annotated.label, "two");
+    assert_eq!(annotated.source, "three");
+
+    let padded: Padded<String, char, 4> = Padded {
+        narrow: 'y',
+        wide: String::from('y'),
+    };
+    assert_eq!(padded.narrow, 'y');
+    assert_eq!(padded.wide, "y");
 }
 
 /// Each alias named by a value, the way every other declaration shape here is: an alias that binds

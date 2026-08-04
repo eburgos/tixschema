@@ -4328,28 +4328,204 @@ fn an_unbounded_parameter_earns_no_check() {
 }
 
 /// A bound naming another parameter of the item holds only where that one is filled too, which is a
-/// joint statement this per-filling check does not make — and the neighbour's name reproduced
-/// beside a single filling would resolve to nothing. So the bound is left to the item's own use
-/// sites, whether it names a type parameter, a lifetime or a const.
+/// joint statement no per-filling check makes — and the neighbour's name reproduced beside a single
+/// filling would resolve to nothing. So it earns no check of its own, and is carried instead by the
+/// one check that declares the whole parameter list.
 #[test]
-fn a_bound_naming_another_parameter_of_the_item_earns_no_check() {
+fn a_bound_naming_another_parameter_of_the_item_earns_no_check_of_its_own() {
+    let checks = filling_bound_check_text(
+        "pub struct Pair<AType: From<BType>, BType> { pub a: AType, pub b: BType }",
+        "default_types(AType = String, BType = char)",
+    );
+    assert_eq!(checks.len(), 1, "got: {checks:?}");
+    assert!(
+        !checks[0].contains("fn default_type_filling <"),
+        "the bound reads a neighbour, so no per-filling check carries it: {}",
+        checks[0]
+    );
+}
+
+/// The joint check declares every type parameter the item declares, carries the bounds that read a
+/// neighbour, and is called at every declared filling in the order they were declared — so each
+/// name such a bound reads stands at the filling the author declared for it.
+#[test]
+fn a_bound_naming_another_parameter_is_checked_at_the_whole_parameter_list_at_once() {
+    let checks = filling_bound_check_text(
+        "pub struct Pair<AType: From<BType>, BType> { pub a: AType, pub b: BType }",
+        "default_types(AType = String, BType = char)",
+    );
+    assert_eq!(checks.len(), 1, "got: {checks:?}");
+    for needle in [
+        "fn default_type_fillings < AType , BType > ()",
+        "where AType : From < BType >",
+        "default_type_fillings :: < String , char > ()",
+    ] {
+        assert!(
+            checks[0].contains(needle),
+            "{needle} missing: {}",
+            checks[0]
+        );
+    }
+}
+
+/// The joint call follows the parameter list, not the order the entries were written in: the
+/// arguments stand at positions, and an entry written out of order still fills its own.
+#[test]
+fn the_joint_check_is_called_in_the_order_the_parameters_were_declared() {
+    let checks = filling_bound_check_text(
+        "pub struct Pair<AType: From<BType>, BType> { pub a: AType, pub b: BType }",
+        "default_types(BType = char, AType = String)",
+    );
+    assert_eq!(checks.len(), 1, "got: {checks:?}");
+    assert!(
+        checks[0].contains("default_type_fillings :: < String , char > ()"),
+        "got: {}",
+        checks[0]
+    );
+}
+
+/// A parameter no bound reads is still declared and still filled, so the argument list lines up
+/// with the parameter list however few of them a bound actually joins.
+#[test]
+fn the_joint_check_declares_and_fills_the_parameters_no_bound_reads() {
+    let checks = filling_bound_check_text(
+        "pub struct Trio<AType: From<BType>, BType, CType> { pub a: AType, pub b: BType, pub c: CType }",
+        "default_types(AType = String, BType = char, CType = u8)",
+    );
+    assert_eq!(checks.len(), 1, "got: {checks:?}");
+    assert!(
+        checks[0].contains("fn default_type_fillings < AType , BType , CType > ()")
+            && checks[0].contains("default_type_fillings :: < String , char , u8 > ()"),
+        "got: {}",
+        checks[0]
+    );
+}
+
+/// A lifetime a bound reads is declared as it was written and left out of the call, where it
+/// elides — so a bound joining a parameter to a lifetime is reached like any other.
+#[test]
+fn a_lifetime_a_bound_reads_is_declared_as_written_and_left_out_of_the_call() {
+    let checks = filling_bound_check_text(
+        "pub struct Held<'label, ValueType: Into<&'label str>> { pub held: ValueType }",
+        "default_types(ValueType = String)",
+    );
+    assert_eq!(checks.len(), 1, "got: {checks:?}");
+    for needle in [
+        "fn default_type_fillings < 'label , ValueType > ()",
+        "where ValueType : Into < & 'label str >",
+        "default_type_fillings :: < String > ()",
+    ] {
+        assert!(
+            checks[0].contains(needle),
+            "{needle} missing: {}",
+            checks[0]
+        );
+    }
+}
+
+/// A const takes no filling from a convention that names types, so a joint function declaring one
+/// could not be called at all. A bound reading a const is left to the item's own use sites, as
+/// every bound reading a neighbour was before.
+#[test]
+fn a_bound_reading_a_const_parameter_earns_no_check() {
+    let checks = filling_bound_check_text(
+        "pub struct Bounded<ValueType: Fits<WIDTH>, const WIDTH: usize> { pub held: ValueType }",
+        "default_types(ValueType = String)",
+    );
+    assert!(checks.is_empty(), "got: {checks:?}");
+}
+
+/// A const beside a bound that does not read it costs the joint check nothing: it is declared
+/// nowhere and the call still lines up with the type parameters.
+#[test]
+fn a_const_no_bound_reads_leaves_the_joint_check_standing() {
+    let checks = filling_bound_check_text(
+        "pub struct Sized<AType: From<BType>, BType, const WIDTH: usize> { pub a: AType, pub b: BType }",
+        "default_types(AType = String, BType = char)",
+    );
+    assert_eq!(checks.len(), 1, "got: {checks:?}");
+    assert!(
+        checks[0].contains("fn default_type_fillings < AType , BType > ()")
+            && !checks[0].contains("WIDTH"),
+        "got: {}",
+        checks[0]
+    );
+}
+
+/// A parameter left without a filling — which only a build generating no JSON document allows —
+/// leaves nothing for the joint call to stand at, and a filling nobody declared would ask the
+/// compiler a question nobody asked. So the whole check is withheld.
+#[test]
+fn a_parameter_left_without_a_filling_withholds_the_joint_check() {
+    let checks = filling_bound_check_text(
+        "pub struct Pair<AType: From<BType>, BType> { pub a: AType, pub b: BType }",
+        "default_types(AType = String)",
+    );
+    assert!(checks.is_empty(), "got: {checks:?}");
+}
+
+/// The two kinds of bound partition a parameter's own: the half that reads no neighbour is checked
+/// at the filling alone, the half that does is checked jointly, and neither is checked twice.
+#[test]
+fn a_parameter_bounded_both_ways_is_checked_once_against_each_half() {
+    let checks = filling_bound_check_text(
+        "pub struct Pair<AType: Copy + From<BType>, BType> { pub a: AType, pub b: BType }",
+        "default_types(AType = u8, BType = char)",
+    );
+    assert_eq!(checks.len(), 2, "got: {checks:?}");
+    assert!(
+        checks[0].contains("fn default_type_filling < AType : Copy > ()")
+            && !checks[0].contains("From"),
+        "the per-filling check keeps only the neighbour-free half: {}",
+        checks[0]
+    );
+    assert!(
+        checks[1].contains("where AType : From < BType >") && !checks[1].contains("Copy"),
+        "the joint check holds exactly the complement: {}",
+        checks[1]
+    );
+}
+
+/// A declaration no bound joins earns no joint check, so an item that had none before is left
+/// exactly as it was.
+#[test]
+fn a_declaration_with_no_cross_parameter_bound_earns_no_joint_check() {
     for (source, args) in [
         (
-            "pub struct Pair<AType: From<BType>, BType> { pub a: AType, pub b: BType }",
-            "default_types(AType = String, BType = char)",
+            "pub struct Counted<CountType: Copy> { pub count: CountType }",
+            "default_types(CountType = String)",
         ),
         (
-            "pub struct Held<'label, ValueType: Into<&'label str>> { pub held: ValueType }",
-            "default_types(ValueType = String)",
-        ),
-        (
-            "pub struct Bounded<ValueType: Fits<WIDTH>, const WIDTH: usize> { pub held: ValueType }",
-            "default_types(ValueType = String)",
+            "pub struct Both<IdType, DateType> { pub id: IdType, pub at: DateType }",
+            "default_types(IdType = String, DateType = f64)",
         ),
     ] {
         let checks = filling_bound_check_text(source, args);
-        assert!(checks.is_empty(), "for {source}: {checks:?}");
+        assert!(
+            checks.iter().all(|check| !check.contains("fillings")),
+            "for {source}: {checks:?}"
+        );
     }
+}
+
+/// Rust does not enforce a bound written on a type alias's parameter, so a filling that fails one
+/// still names a type every use site of the alias accepts. Refusing it would refuse a program the
+/// language admits, so the alias earns no check of either kind.
+#[test]
+fn an_alias_earns_no_check_for_a_bound_rust_leaves_unenforced() {
+    for args in [
+        "default_types(ValueType = String)",
+        "default_types(ValueType = u32)",
+    ] {
+        let checks =
+            filling_bound_check_text("pub type Boxed<ValueType: Copy> = Vec<ValueType>;", args);
+        assert!(checks.is_empty(), "for {args}: {checks:?}");
+    }
+    let joint = filling_bound_check_text(
+        "pub type Paired<AType: From<BType>, BType> = (AType, BType);",
+        "default_types(AType = String, BType = char)",
+    );
+    assert!(joint.is_empty(), "got: {joint:?}");
 }
 
 /// A bound written in terms of the parameter it bounds names no neighbour, so it is checked like
@@ -4389,25 +4565,23 @@ fn every_bounded_filling_earns_its_own_check() {
     );
 }
 
-/// The three shapes the attribute expands answer alike: the check is read off the item's own
-/// parameters, which every one of them binds the same way.
+/// The two shapes whose parameters Rust binds answer alike: the check is read off the item's own
+/// parameters, which a struct and an enum bind the same way. The third — an alias, whose parameters
+/// bind nothing Rust checks — is left out entirely.
 #[test]
-fn every_expanded_shape_checks_its_fillings_alike() {
+fn every_expanded_shape_whose_bounds_rust_enforces_checks_its_fillings_alike() {
     let expected = filling_bound_check_text(
         "pub struct Held<ValueType: Copy> { pub held: ValueType }",
         "default_types(ValueType = String)",
     );
     assert_eq!(expected.len(), 1, "got: {expected:?}");
-    for source in [
-        "pub enum Held<ValueType: Copy> { Named { held: ValueType } }",
-        "pub type Held<ValueType: Copy> = Vec<ValueType>;",
-    ] {
-        assert_eq!(
-            filling_bound_check_text(source, "default_types(ValueType = String)"),
-            expected,
-            "for {source}"
-        );
-    }
+    assert_eq!(
+        filling_bound_check_text(
+            "pub enum Held<ValueType: Copy> { Named { held: ValueType } }",
+            "default_types(ValueType = String)",
+        ),
+        expected
+    );
 }
 
 /// The `compile_error!` tokens `source` earns for the example it carries against the parameters it
