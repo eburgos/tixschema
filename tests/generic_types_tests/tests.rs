@@ -1100,7 +1100,7 @@ where
 /// filled too — a joint statement the per-filling check does not make, and one whose name
 /// reproduced beside a single filling would resolve to nothing. The fixture compiling is the whole
 /// of the assertion that such a bound is left to the item's own use sites.
-#[model_schema(default_types(WideType = String, NarrowType = char))]
+#[model_schema(default_types(WideType = String, NarrowType = String))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Widened<WideType: From<NarrowType>, NarrowType: Clone> {
     pub narrow: NarrowType,
