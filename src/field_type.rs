@@ -388,11 +388,13 @@ impl FieldDef {
     /// enclosing item's *own* parameters are rewritten: a genuinely unresolved sibling type keeps
     /// its `$Schema` reference, because the type it names does publish that binding.
     ///
-    /// The rewrite carries into what a schema surface may then claim about the value. An opaque
-    /// value takes no string checks — Zod 4's `z.unknown()` carries no `.min`/`.max`, and
-    /// `.brand()` hands back the very same instance rather than a wrapper that could — so a
-    /// branded newtype constraining one of its own parameters is refused, through the opaque arm
-    /// of `non_string_inner_shape` this rewrite puts it in front of.
+    /// The rewrite carries into what a schema surface may then claim about the value. A parameter
+    /// is a value on one surface and no value at all on the other — Zod reaches it through the
+    /// argument the enclosing factory binds, while the one JSON document written covers every
+    /// instantiation and so describes it as `{}` — so a branded newtype constraining one of its
+    /// own parameters is refused, through the opaque arm of `non_string_inner_shape` this rewrite
+    /// puts it in front of. Three surfaces answering three ways is the refusal: `minLength` goes
+    /// inert beside a `{}`, while `validate()` still measures `Display`.
     ///
     /// Recurses through `SiblingType` generics, `Map` keys/values, and `Tuple` elements. Applied
     /// after the field guards have read the field, so every guard asks its question of the type
@@ -578,17 +580,6 @@ impl FieldDef {
             | FieldDefType::NaiveTime
             | FieldDefType::NaiveDateTime
             | FieldDefType::DateTime => Vec::new(),
-        }
-    }
-
-    #[cfg(feature = "zod")]
-    fn opaque_type_parameters(&mut self) {
-        if matches!(self.field_type, FieldDefType::TypeParam(_)) {
-            self.field_type = FieldDefType::Unknown;
-            return;
-        }
-        for nested in self.nested_type_positions() {
-            nested.opaque_type_parameters();
         }
     }
 
@@ -928,20 +919,6 @@ impl FieldDef {
         value
     }
 
-    /// The same def with every [`FieldDefType::TypeParam`] written back as the opaque value.
-    ///
-    /// Zod names a parameter through the argument the enclosing factory binds for it, which only a
-    /// type that publishes a factory has. An alias and a branded newtype publish a plain `const`,
-    /// so there is no argument for a parameter inside either to name and the opaque value is still
-    /// all either can write — the answer [`Self::erase_type_parameters`] describes, kept for the
-    /// two surfaces that have not moved off it.
-    #[cfg(feature = "zod")]
-    #[must_use]
-    pub fn with_opaque_type_parameters(mut self) -> Self {
-        self.opaque_type_parameters();
-        self
-    }
-
     /// The type match plus one `z.array(…)` per array level, each carrying the `z.nullable(…)` of
     /// the level it wraps and the `.length(N)` of a level written as a fixed-size `[T; N]`, before
     /// the preprocess wrap.
@@ -957,10 +934,9 @@ impl FieldDef {
     fn zod_array_base(&self) -> String {
         let result = match &self.field_type {
             FieldDefType::Unknown => "z.unknown()".to_owned(),
-            // A `const` cannot be parameterised, so a generic type publishes a factory and a
+            // A `const` cannot be parameterised, so every generic publisher writes a factory and a
             // parameter composes the argument that factory binds for it — see
-            // [`zod_factory_argument`]. A surface with no factory to bind one opaques the
-            // parameter first, through [`FieldDef::with_opaque_type_parameters`].
+            // [`zod_factory_argument`].
             FieldDefType::TypeParam(name) => zod_factory_argument(name),
             FieldDefType::Tuple(lst) => {
                 let elements = lst
@@ -977,11 +953,10 @@ impl FieldDef {
                     // The element carries this field's own array levels, so it applies the wrap.
                     return self.collection_element_field(element).zod_array_base();
                 } else if let Some(info) = lookup_alias_info(name) {
-                    // What the named type published is what this can name. A generic struct or
-                    // enum published a factory, so the arguments written here are the call's; an
-                    // alias and a branded newtype published the one `const` they have whatever
-                    // they were declared with, and that `const` is the whole of what a reference
-                    // to either can say.
+                    // What the named type published is what this can name: a factory where the
+                    // type declares parameters, and the one schema it has where it declares none.
+                    // Read off the registry rather than off the arguments written here, because a
+                    // name carrying arguments says nothing about which of the two it published.
                     if info.publishes_zod_factory {
                         zod_factory_call(&info.export_name, lst)
                     } else {
