@@ -2041,11 +2041,23 @@ fn branded_option_inner_error(
 ///
 /// One of the brand's *own* type parameters is not such a name: it says its shape outright too,
 /// because both validating surfaces have already settled that it has none. Reading the inner off
-/// [`value_surface_field_def`] puts it in front of the opaque arm, where it belongs — Zod 4's
+/// [`surface_field_def`] puts it in front of the opaque arm, where it belongs — Zod 4's
 /// `z.unknown()` carries no `.min`/`.max` at all, and `.brand()` returns the same instance rather
 /// than a wrapper that could, so there is nothing for the checks to attach to; JSON Schema's
 /// string keywords go inert beside the `{}` a parameter describes as; and `validate()` still
 /// measures `Display`. Three surfaces, three answers — the disagreement this guard exists to stop.
+///
+/// A name written *over* one of those parameters is the same answer reached one module out, and is
+/// the one absence the registry's silence must not be read as consent for. `Later<T>` names a type
+/// whose schema the brand composes from the argument the caller supplies, so the checks land on
+/// whatever that argument turns out to be: Zod appends them to a shape the call site decides, the
+/// one JSON document written for every instantiation still holds the `{}` a parameter describes as,
+/// and `validate()` still measures `Display` — a numeric filling being rejected for its digit count
+/// rather than for its value. Refusing it is what keeps the guard's answer a fact about the
+/// declaration: the same two items written in the other order already refuse, the registry having
+/// classified the inner by then, and an author cannot act on a diagnostic that fires on where a
+/// type is written. What stays admitted is the unresolved *concrete* name, whose instantiation the
+/// declaration has already fixed.
 ///
 /// Resolved through the same `get_field_def` call the renderers make, so the guard and the
 /// contract cannot disagree about what a shape is.
@@ -2060,9 +2072,8 @@ fn branded_constraint_inner_error(
         return None;
     }
     let inner = branded_inner_value_surface(generics, inner_field);
-    let shape = non_string_inner_shape(&inner)?;
-    let message = if let FieldDefType::SiblingType(inner_name, _) = &inner.field_type {
-        format!(
+    let message = match (&inner.field_type, non_string_inner_shape(&inner)) {
+        (FieldDefType::SiblingType(inner_name, _), Some(shape)) => format!(
             "model_schema: branded newtype `{name}` applies string constraints (pattern, \
              minLength, maxLength) to `{inner_name}`, which this crate writes as the {shape} \
              value the checks are then appended to — and that binding carries no string for them \
@@ -2071,16 +2082,29 @@ fn branded_constraint_inner_error(
              outside `\"type\": \"string\"`, and `validate()` measures the inner's `Display` \
              rendering — three surfaces, three answers. Brand a string-typed inner, or drop the \
              constraints."
-        )
-    } else {
-        format!(
+        ),
+        (FieldDefType::SiblingType(inner_name, _), None) => {
+            let parameter = inner.argument_parameter_name()?;
+            format!(
+                "model_schema: branded newtype `{name}` applies string constraints (pattern, \
+                 minLength, maxLength) to `{inner_name}`, whose schema this crate builds from the \
+                 type parameter `{parameter}` — so the checks land on whatever the instantiation \
+                 supplies for it, and one declaration covers every instantiation: Zod appends \
+                 `.min`/`.max` to a schema the call site decides the shape of, JSON Schema writes \
+                 them beside the `{{}}` a parameter describes as, where they go inert, and \
+                 `validate()` measures the inner's `Display` rendering — three surfaces, three \
+                 answers. Brand a string-typed inner, or drop the constraints."
+            )
+        }
+        (_, Some(shape)) => format!(
             "model_schema: branded newtype `{name}` applies string constraints (pattern, \
              minLength, maxLength) to a {shape} inner type, which cannot carry them: Zod reads \
              `.min`/`.max` as bounds on the value itself and has no regex check for a non-string \
              schema, JSON Schema ignores `minLength`/`maxLength`/`pattern` outside `\"type\": \
              \"string\"`, and `validate()` measures the inner's `Display` rendering — three \
              surfaces, three answers. Brand a string-typed inner, or drop the constraints."
-        )
+        ),
+        (_, None) => return None,
     };
     Some(syn::Error::new_spanned(inner_field, message).to_compile_error())
 }
@@ -2285,7 +2309,7 @@ fn branded_pattern_error(name: &Ident, args: &ModelSchemaArgs) -> Option<proc_ma
 /// for and what it records for the next brand to read cannot come apart.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn branded_inner_value_surface(generics: &syn::Generics, inner_field: &Field) -> FieldDef {
-    value_surface_field_def(generics, &get_field_def("_inner", &inner_field.ty, ""))
+    surface_field_def(generics, &get_field_def("_inner", &inner_field.ty, ""))
 }
 
 /// What the registry records for a brand.
@@ -3356,24 +3380,30 @@ fn build_branded_json_schema_method(
     json_schema_methods(def_name, &body)
 }
 
-/// The `FieldDef` a value-level surface renders from: the written one with every reference to the
-/// enclosing item's own type parameters replaced by the opaque type.
+/// The `FieldDef` every surface renders from: the written one with each name that is one of the
+/// enclosing item's own type parameters classified as the parameter it is.
 ///
-/// The one seam the Zod and JSON surfaces share for a parameter, and so the reason an alias and a
-/// brand cannot drift apart over one — see [`FieldDef::erase_type_parameters`] for the rule and
-/// for why TypeScript reads the written def instead.
+/// All three surfaces read this one def, which is why a parameter cannot come to mean two things
+/// about one declaration. What each of them then makes of it differs — the two validating surfaces
+/// describe it as the opaque value, TypeScript renders the name its own declaration binds — and
+/// that difference is [`FieldDef::erase_type_parameters`]'s to state rather than this seam's. A
+/// name left unclassified reads as a reference to a generated type of that name on every surface at
+/// once, which is what puts a parameter in a `Record<…>` key position TypeScript cannot bind.
+///
+/// A struct reaches the same def by erasing each field as it is collected; this is where the item
+/// shapes holding a single written target — an alias, a brand — reach it.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-fn value_surface_field_def(generics: &syn::Generics, written: &FieldDef) -> FieldDef {
+fn surface_field_def(generics: &syn::Generics, written: &FieldDef) -> FieldDef {
     let mut erased = written.clone();
     erased.erase_type_parameters(&type_parameters_in_scope(generics));
     erased
 }
 
 /// The one def both validating surfaces read a branded newtype's inner off, so neither can render
-/// a type parameter the other has erased — see [`value_surface_field_def`].
+/// a type parameter the other has erased — see [`surface_field_def`].
 #[cfg(any(feature = "zod", feature = "jsonschema"))]
 fn branded_value_inner(generics: &syn::Generics, inner_ty: &syn::Type) -> FieldDef {
-    value_surface_field_def(generics, &get_field_def("_inner", inner_ty, ""))
+    surface_field_def(generics, &get_field_def("_inner", inner_ty, ""))
 }
 
 /// Resolves the TypeScript inner type name and generic parameter list for a branded newtype.
@@ -3402,7 +3432,7 @@ fn branded_ts_type_and_generics(
 }
 
 /// Resolves the JSON schema shape for a branded newtype's inner field, read off the def
-/// [`value_surface_field_def`] has already erased the brand's own type parameters out of.
+/// [`surface_field_def`] has already erased the brand's own type parameters out of.
 ///
 /// So a parameter admits any value while the shape it sits in — an array, a map's keys, a tuple's
 /// arity — is still described, which is what `#[serde(transparent)]` puts on the wire.
@@ -3531,7 +3561,7 @@ fn branded_inner_composite(inner: &FieldDef) -> Option<BrandedComposite> {
 /// `ObjectId` is the value the schema itself describes. An `ObjectId` writes `{"$oid": hex}`, so
 /// its `Display` is the `$oid` member and the checks land there.
 ///
-/// The inner is the def [`value_surface_field_def`] has already erased the brand's own type
+/// The inner is the def [`surface_field_def`] has already erased the brand's own type
 /// parameters out of, so a parameter composes into the value as `z.unknown()` rather than as a
 /// binding nothing declares. The checks never land on one: an opaque inner carries no string for
 /// them to measure and is refused by [`branded_constraint_inner_error`] before this.
@@ -10603,6 +10633,13 @@ fn generate_discriminated_enum_zod_schema_method(
 /// Builds the alias module's `ts_definition()`, or nothing when `typescript` is off. The doc
 /// block and the generic parameter list are only meaningful to TypeScript, so they are gathered
 /// inside the gate rather than by the caller.
+///
+/// The target is read through [`surface_field_def`], the same seam the two validating methods
+/// beside this one read it through, so the alias classifies its own parameters exactly as a struct
+/// classifies its fields. TypeScript still renders each parameter as the name the declaration binds
+/// — that is what a classified parameter renders as here — with the one exception the declaration
+/// itself forces: a parameter reached in a map's key position states the string keys serde writes,
+/// because `Record<K, V>` binds `K extends keyof any` and a parameter satisfies no such bound.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn generate_alias_ts_definition_method(
     alias: &ItemType,
@@ -10618,7 +10655,7 @@ fn generate_alias_ts_definition_method(
             export_name,
             &alias.ident.to_string(),
             &ts_generic_params(&alias.generics),
-            field_def,
+            &surface_field_def(&alias.generics, field_def),
         )
     }
     #[cfg(not(feature = "typescript"))]
@@ -10688,9 +10725,8 @@ fn generate_alias_json_schema_method(
 ) -> proc_macro2::TokenStream {
     #[cfg(feature = "jsonschema")]
     {
-        let body =
-            build_tuple_element_json_schema(&value_surface_field_def(&alias.generics, field_def))
-                .unwrap_or_else(|rejection| alias_json_schema_rejection(export_name, &rejection));
+        let body = build_tuple_element_json_schema(&surface_field_def(&alias.generics, field_def))
+            .unwrap_or_else(|rejection| alias_json_schema_rejection(export_name, &rejection));
         json_schema_methods(export_name, &body)
     }
     #[cfg(not(feature = "jsonschema"))]
@@ -10704,7 +10740,7 @@ fn generate_alias_json_schema_method(
 
 /// Builds the alias module's `zod_schema()`, or nothing when `zod` is off.
 ///
-/// The value is rendered from the target read through [`value_surface_field_def`], so a parameter
+/// The value is rendered from the target read through [`surface_field_def`], so a parameter
 /// is the argument the alias's own factory binds for it rather than the `Name$Schema` binding an
 /// unresolved type is named after — a binding no emitted module declares.
 ///
@@ -10726,7 +10762,7 @@ fn generate_alias_zod_method(
         // The alias's rendered Zod is its FieldDef expression (a tuple alias yields
         // the null-flavored `z.tuple([...])`, a scalar yields `z.string()`, a sibling
         // yields `Name$Schema`).
-        let schema_code = value_surface_field_def(&alias.generics, field_def).zod_type();
+        let schema_code = surface_field_def(&alias.generics, field_def).zod_type();
         let parameters = type_parameters_in_scope(&alias.generics);
         let reexport = ident_reexport_zod(
             rust_ident,
