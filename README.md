@@ -987,7 +987,7 @@ const buildWrapperType$Schema = <T extends ZodType>(
 
 Only the item's *own* parameters are read this way. A name the expansion cannot resolve because the type lives elsewhere keeps its `Name$Schema` reference, since that type publishes the binding.
 
-One consequence is worth stating outright: a parameter is a value only where a factory binds one for it, and a JSON document is written at one filling rather than for the type as declared — so no `model_schema_prop` bound may be spelled against a type parameter. A branded newtype cannot apply `pattern`, `minLength`, or `maxLength` to one of its own — see [Branded Newtype Validation Constraints](#branded-newtype-validation-constraints) — and a *field* typed with one is refused for the same reason, at every depth the parameter is reached through:
+One consequence is worth stating outright: a parameter is a value only where a factory binds one for it, and a JSON document is written at one filling rather than for the type as declared — so no `model_schema_prop` bound may be spelled against a type parameter, and a *field* typed with one is refused for the same reason, at every depth the parameter is reached through. A branded newtype's own `pattern`/`minLength`/`maxLength` are the one exception: applied directly to a bare-parameter inner, they read the parameter's *declared default* rather than the parameter itself — see [Branded Newtype Validation Constraints](#branded-newtype-validation-constraints).
 
 ```rust
 #[model_schema(default_types(IdType = String))]
@@ -1148,21 +1148,38 @@ You can add `pattern`, `minLength`, and `maxLength` constraints directly on the 
 
 That answer comes from the type's own expansion, so it is only available once that expansion has run: a brand written **above** the type it names, or over a type this crate never expands at all, is admitted with the emission it has always had. Declaration order is not a diagnostic — moving a declaration must not turn a compiling program into a rejected one — so keep a constrained brand below the type it constrains if you want the check.
 
-An opaque inner is `serde_json::Value` **or one of the brand's own type parameters**, which both validating surfaces read as the opaque value (see [Type Parameters](#type-parameters)). There is nothing there for the checks to attach to: Zod 4's `z.unknown()` carries no `.min`/`.max` at all, and `.brand()` hands back that same schema rather than a wrapper that could. Constrain a string-typed inner instead, or brand at the instantiation:
+An opaque inner is `serde_json::Value`, which both validating surfaces read as the opaque value (see [Type Parameters](#type-parameters)) and which the checks are refused against outright — there is nothing there for them to attach to.
+
+**One of the brand's own type parameters is different: it reads its declared default instead of being refused.** A bare parameter is not itself a type the checks could measure, but `#[model_schema]` already requires (for `jsonschema`) or defaults (elsewhere) a concrete filling for every parameter — see [Declaring the default type](#declaring-the-default-type) — and that filling is exactly as concrete as a named type's own schema. So the guard asks the same question of the declared default it asks of a named inner: a string-shaped default carries the checks, a non-string one is refused in its place. The checks land once, on `$SchemaDefault`'s argument for that parameter; the factory itself stays unconstrained, so a caller filling the parameter with something else — an `ObjectId` schema, say — is never held to bounds meant for the default:
 
 ```rust
-// Rejected: the checks would have to measure a value no surface has a shape for.
-#[model_schema(minLength = 3, default_types(T = String))]
+// Accepted: `IdType`'s declared default is `String`, so the checks land there.
+#[model_schema(minLength = 24, maxLength = 24, pattern = "^[a-f0-9]{24}$", default_types(IdType = String))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct GenericSlug<T>(pub T);
+pub struct DocumentId<IdType>(pub IdType);
 
-// Accepted: the inner is a string, and the brand says so.
-#[model_schema(minLength = 3)]
+// Rejected: `IdType`'s declared default is `u32`, which cannot carry them.
+#[model_schema(minLength = 3, default_types(IdType = u32))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct Slug(pub String);
+pub struct GenericCount<IdType>(pub IdType);
 ```
+
+```typescript
+const buildDocumentId$Schema = <IdType extends ZodType>(idType: IdType) =>
+  idType.brand<"DocumentId">();
+
+// The factory itself carries no check — a non-default filling is not held to it.
+export const DocumentId$SchemaFactory = <IdType extends ZodType>(idType: IdType) => { /* ... */ };
+
+// $SchemaDefault composes the factory with the constrained default argument.
+export const DocumentId$SchemaDefault = DocumentId$SchemaFactory(
+  z.string().min(24).max(24).check(z.regex(/^[a-f0-9]{24}$/)),
+);
+```
+
+An entry `default_types` leaves out falls back to `String`, the same fallback a parameter with no declared filling gets everywhere else the declaration is read — so a constrained bare-parameter brand with no `default_types` at all still compiles. Only the `jsonschema` feature actually requires a declared entry for every parameter, through the unrelated requirement in the table above.
 
 **A name written over one of those parameters is rejected too**, whether or not the named type has expanded yet. `Tagged<T>` is not a type the declaration fixed — the instantiation fixes it — so the checks land on whatever the caller supplies: Zod appends them to a schema the call site decides the shape of, the one JSON document written for every instantiation still holds the `{}` a parameter describes as, and `validate()` measures the inner's `Display` rendering, which rejects `TaggedSlug(Tagged(7))` for having one decimal digit rather than for its value. This is the one place the registry's silence is not read as consent, and it is what keeps declaration order out of the diagnostic: the same two declarations written in the other order are rejected through the registry, so admitting this order would decide one program two ways.
 

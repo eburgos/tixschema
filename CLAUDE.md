@@ -463,6 +463,33 @@ untouched — that is the one position it renders in, as an unbounded array.
 There is no fallback filling. A guessed one produces a document that silently rejects valid
 payloads, which is what the declaration exists to prevent.
 
+### String Constraints on a Generic Brand's Declared Default
+
+A branded newtype's own `pattern`/`minLength`/`maxLength` normally have no inner to measure when
+the inner is one of the brand's own bare type parameters — a parameter is the opaque value on
+every surface, and `z.unknown()` carries no `.min`/`.max`. `branded_constraint_inner_error` reads
+the declared default for that parameter instead of refusing outright: `declared_default_field`
+resolves the same `default_types` entry `zod_default_block` reads, and `non_string_inner_shape`
+asks of it the same question asked of a concrete argument — string-shaped, the checks compose onto
+the default; not string-shaped, the refusal names the default rather than the parameter, through
+`declared_default_constraint_message`. An entry the declaration left out falls back to `String`,
+the same fallback `schema_example_value_type` uses for the identical gap, so the guard alone
+requires nothing; only `jsonschema`'s own separate requirement (above) forces every parameter to
+declare one.
+
+The checks never reach the factory's own parameter — `branded_zod_inner` renders a bare-parameter
+inner with no check appended regardless of genericness, since a caller filling the parameter with
+something other than the default (an `ObjectId` schema, say) must not inherit bounds meant for it.
+They land once, on `$SchemaDefault`'s argument for that one parameter: `zod_default_block` and
+`zod_factory_block` both take a `ZodDefaultInputs` bundling `default_types` with the optional
+`(parameter, checks)` pair a branded newtype's own expansion supplies — `None` for every ordinary
+generic struct, tuple struct, enum and alias, which carry no type-level string constraint of their
+own. The JSON surface needs no separate change: a bare parameter's document is already the runtime
+argument bound to the parameter's declared filling (`json_argument_value`, defaulting through
+`declared_filling_json_schema_value`), which `branded_layered_over` narrows with the brand's own
+bounds through the same `allOf` a named inner is narrowed through — never the inert `{}` a
+parameter with no default at all would describe as.
+
 ### Adding Examples to Types
 
 To add examples to your types for inclusion in Zod schemas:

@@ -828,6 +828,37 @@ mod branded_constrained_json_schema_tests {
     #[serde(transparent)]
     pub struct ShortId(pub String);
 
+    /// A generic brand's bare-parameter inner has no type of its own to describe, so its document
+    /// is the declared default's — `{"type": "string"}` for `default_types(IdType = String)` —
+    /// narrowed by the brand's own bounds through the same `allOf` a named inner is narrowed
+    /// through. Not the inert `{}` a parameter with no default at all would describe as.
+    #[model_schema(
+        minLength = 24,
+        maxLength = 24,
+        pattern = "^[a-f\\d]{24}$",
+        default_types(IdType = String)
+    )]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct GenericConstrainedId<IdType>(pub IdType);
+
+    #[test]
+    fn test_constrained_generic_branded_json_schema_carries_the_defaults_document() {
+        assert_eq!(
+            GenericConstrainedId::<String>::json_schema(),
+            serde_json::json!({
+                "allOf": [
+                    { "type": "string" },
+                    {
+                        "minLength": 24_u32,
+                        "maxLength": 24_u32,
+                        "pattern": "^[a-f0-9]{24}$"
+                    }
+                ]
+            })
+        );
+    }
+
     #[test]
     fn test_constrained_branded_json_schema() {
         // The `\d` the brand is declared with reaches the schema as the members it stands for: a
@@ -852,6 +883,68 @@ mod branded_constrained_json_schema_tests {
         assert_eq!(schema["maxLength"], 50_i64, "Got: {schema}");
         // No pattern constraint — should not be present
         assert!(schema.get("pattern").is_none(), "Got: {schema}");
+    }
+}
+
+/// A generic branded newtype whose inner is a bare type parameter, carrying string constraints.
+/// The constraints have nowhere to land on the parameter itself, so they land on the parameter's
+/// *declared default* instead: `StrictDocumentId$SchemaDefault` enforces the 24-hex bounds,
+/// `StrictDocumentId$SchemaFactory` stays unconstrained for every other filling.
+#[cfg(all(feature = "zod", feature = "typescript", feature = "serde"))]
+mod constrained_generic_branded_tests {
+    use super::*;
+
+    #[model_schema(
+        minLength = 24,
+        maxLength = 24,
+        pattern = "^[a-f\\d]{24}$",
+        default_types(IdType = String)
+    )]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct StrictDocumentId<IdType>(pub IdType);
+
+    /// The builder every call to the factory runs through carries no string check at all: a caller
+    /// filling `IdType` with something other than the declared default — an `ObjectId` schema, say
+    /// — must not inherit bounds meant for the default.
+    #[test]
+    fn the_factorys_own_parameter_carries_no_check() {
+        let zod = StrictDocumentId::<String>::zod_schema();
+        let builder_end = zod.find("StrictDocumentId$SchemaFactoryCache").unwrap();
+        let builder = &zod[..builder_end];
+        for check in [".min(", ".max(", ".check("] {
+            assert!(
+                !builder.contains(check),
+                "found {check} in builder:\n{builder}"
+            );
+        }
+        assert!(builder.contains("idType.meta({"), "Got:\n{builder}");
+    }
+
+    /// `$SchemaDefault` is the factory called at the declared default argument, with the checks
+    /// composed onto that argument — exactly the shape the design settled on.
+    #[test]
+    fn the_default_composes_the_factory_with_the_constrained_argument() {
+        let zod = StrictDocumentId::<String>::zod_schema();
+        assert!(
+            zod.contains(
+                "export const StrictDocumentId$SchemaDefault: ZodType<StrictDocumentId<string>> = \
+                 StrictDocumentId$SchemaFactory(z.string().min(24).max(24).check(z.regex(/^[a-f0-9]{24}$/)));"
+            ),
+            "Got:\n{zod}"
+        );
+    }
+
+    /// A value at the declared default validates against the 24-hex bounds through Rust's own
+    /// `validate()`/serde path, which reads the same constraints the Zod surface enforces.
+    #[test]
+    fn the_default_instantiation_enforces_the_bounds_through_serde() {
+        let valid: StrictDocumentId<String> =
+            serde_json::from_str("\"64de3d95ff45b119e5b53a7e\"").unwrap();
+        valid.validate().unwrap();
+
+        let too_short: Result<StrictDocumentId<String>, _> = serde_json::from_str("\"abc\"");
+        assert!(too_short.is_err(), "Should reject a too-short id via serde");
     }
 }
 

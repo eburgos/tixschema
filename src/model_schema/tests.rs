@@ -3800,17 +3800,17 @@ fn a_tuple_struct_records_the_value_surface_its_slots_publish() {
     }
 }
 
-/// A brand constraining one of its own type parameters has nothing to hang the checks on.
-///
-/// Both validating surfaces read a parameter as the opaque value, and an opaque value takes no
-/// string checks: Zod 4's `z.unknown()` carries no `.min`/`.max`, and `.brand()` hands back that
-/// same instance rather than a wrapper that could; JSON Schema's string keywords go inert beside
-/// the `{}` a parameter describes as; and `validate()` still measures `Display`. So the parameter
-/// reaches the same refusal `serde_json::Value` reaches, through the same opaque arm — the erasure
-/// is what puts it there, and is why the guard does not have to name parameters itself.
+/// A brand constraining one of its own type parameters no longer has nothing to hang the checks
+/// on: it consults the parameter's *declared default* instead of the parameter itself, the same
+/// way a concrete argument is consulted through the registry. A `String` default carries the
+/// checks fine, and an entry the declaration left out falls back to `String` —
+/// [`super::declared_default_field`]'s own fallback, [`super::schema_example_value_type`]'s for the
+/// identical gap — so `pattern_args()`, which declares no `default_types` at all, is admitted here
+/// too: this guard alone requires nothing, and `jsonschema` is what actually requires an entry,
+/// through the unrelated `default_types_guard_errors`.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
-fn string_constraints_over_the_brands_own_type_parameter_are_rejected() {
+fn string_constraints_over_the_brands_own_type_parameter_consult_the_declared_default() {
     for inner in ["T", "U"] {
         let ty: syn::Type = syn::parse_str(inner).unwrap();
         let errors = branded_errors_with(
@@ -3820,11 +3820,54 @@ fn string_constraints_over_the_brands_own_type_parameter_are_rejected() {
             },
             &pattern_args(),
         );
-        assert_eq!(errors.len(), 1, "for {inner}, got: {errors:?}");
-        assert!(errors[0].contains("`Branded`"), "got: {}", errors[0]);
+        assert!(errors.is_empty(), "for {inner}, got: {errors:?}");
+    }
+}
+
+/// A bare-parameter inner with an *explicitly* declared string-shaped default is admitted the same
+/// way the fallback is — `String` is not special-cased, it is simply the shape a `String` default
+/// resolves to like any other.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn string_constraints_over_the_brands_own_type_parameter_with_a_string_default_pass() {
+    let errors = branded_errors_with(
+        &syn::parse_quote! {
+            #[serde(transparent)]
+            struct Branded<T>(pub T);
+        },
+        &super::parse_model_schema_args(quote::quote! {
+            pattern = "^[a-z]+$", default_types(T = String)
+        }),
+    );
+    assert!(errors.is_empty(), "got: {errors:?}");
+}
+
+/// A bare-parameter inner whose declared default is not string-shaped is refused exactly where a
+/// concrete non-string argument is refused, except the message names the *default* rather than the
+/// parameter — that is what the author has to change, since the parameter itself is never asked.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn string_constraints_over_the_brands_own_type_parameter_with_a_non_string_default_are_rejected() {
+    let errors = branded_errors_with(
+        &syn::parse_quote! {
+            #[serde(transparent)]
+            struct Branded<T>(pub T);
+        },
+        &super::parse_model_schema_args(quote::quote! {
+            pattern = "^[a-z]+$", default_types(T = u32)
+        }),
+    );
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    for needle in [
+        "compile_error",
+        "`Branded`",
+        "`T`",
+        "`u32`",
+        "declared default",
+    ] {
         assert!(
-            errors[0].contains("opaque"),
-            "for {inner}, got: {}",
+            errors[0].contains(needle),
+            "{needle} missing: {}",
             errors[0]
         );
     }
@@ -4258,9 +4301,11 @@ fn distinct_entries_are_read_unchanged() {
 }
 
 /// The argument shares the list with the string constraints and the name override, and reading it
-/// costs none of them. This is the only place the coexistence can be asked: a type-level string
-/// constraint is a brand's alone, and a brand over a type parameter is already refused at its
-/// inner field, so no one item reaches an emitter carrying both.
+/// costs none of them. This is the one place their coexistence at the *parser* can be asked
+/// without also asking what the guard makes of it — see
+/// `string_constraints_over_the_brands_own_type_parameter_consult_the_declared_default` for that,
+/// now that a brand's bare-parameter inner reads its declared default rather than being refused
+/// outright.
 #[test]
 fn default_types_coexists_with_every_other_argument() {
     let args = super::parse_model_schema_args(quote::quote! {
