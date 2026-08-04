@@ -12215,8 +12215,29 @@ fn declared_default_field(parameter: &str, default_types: &[(syn::Ident, syn::Ty
 }
 
 /// The Zod argument one declared default composes: the ordinary rendering [`FieldDef::zod_type`]
-/// gives every field, or — where the default names another generic item at exactly the arguments
-/// that item calls its own — that item's own `$SchemaDefault`.
+/// gives every field, deferred through [`deferred_zod_operand`] wherever that rendering names
+/// another item's own module-scope binding — its factory, called with fresh arguments exactly as
+/// an ordinary field naming it does, or, where the default names that item at exactly the
+/// arguments it calls its own, that item's `$SchemaDefault` directly (the fold).
+///
+/// Either shape is deferred for the reason [`deferred_zod_operand`]'s own doc comment states for a
+/// flattened base: `{name}$SchemaFactory` and `{name}$SchemaDefault` are each another module-scope
+/// `const`, one macro invocation sees one type, and a generated module concatenates one string per
+/// type in whatever order the consuming project's entity list produces — so nothing here can know
+/// whether that `const` is written above this one or below it. `X$SchemaDefault` still goes
+/// through `X$SchemaFactory` either way — the deferral only wraps the argument, never bypasses the
+/// call — so the identity guarantee that composes never turns on which of the two names the
+/// argument; only the moment the name is read moves, from the instant this `const`'s initializer
+/// runs to the first time something asks the resulting schema to validate. A self-contained
+/// expression like `z.string()` names no sibling `const` at all, so it is left eager.
+///
+/// Deferring both shapes — not only the fold — is also what ends a cycle between two declared
+/// defaults without a diagnostic refusing either side: two generic items whose defaults name each
+/// other compile fine (Rust resolves types in a module regardless of declaration order), but
+/// neither can have registered the other's `$SchemaDefault` arguments yet when it is itself
+/// expanded, so neither side folds and both would otherwise call the other's factory eagerly, at
+/// the top of a `const` initializer, with nothing to say which of the two names the module either
+/// side ends up written into declares first.
 ///
 /// The fold matters beyond spelling: the factory's memo keys on argument identity, so two
 /// `z.string()` literals written at two call sites are two different objects and share nothing,
@@ -12224,21 +12245,21 @@ fn declared_default_field(parameter: &str, default_types: &[(syn::Ident, syn::Ty
 /// pinned to — which is also what carries in whatever checks and brand the sibling's own default
 /// declared, rather than reconstructing a plain instantiation beside them. See
 /// [`record_zod_default_arguments`].
-///
-/// Left alone otherwise: a default written with different arguments still validates through the
-/// sibling's factory, exactly as a struct field of the same type does.
 #[cfg(feature = "zod")]
 fn default_zod_argument(field: &FieldDef) -> String {
     if field.array_depth == 0
         && !field.is_optional()
         && let FieldDefType::SiblingType(name, args) = &field.field_type
-        && publishes_zod_factory(name)
-        && let Some(info) = lookup_alias_info(name)
     {
-        let rendered: Vec<String> = args.iter().map(FieldDef::zod_type).collect();
-        if zod_default_arguments(name).as_deref() == Some(rendered.as_slice()) {
-            return format!("{}$SchemaDefault", info.export_name);
+        if publishes_zod_factory(name)
+            && let Some(info) = lookup_alias_info(name)
+        {
+            let rendered: Vec<String> = args.iter().map(FieldDef::zod_type).collect();
+            if zod_default_arguments(name).as_deref() == Some(rendered.as_slice()) {
+                return deferred_zod_operand(&format!("{}$SchemaDefault", info.export_name));
+            }
         }
+        return deferred_zod_operand(&field.zod_type());
     }
     field.zod_type()
 }

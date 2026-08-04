@@ -865,6 +865,15 @@ EcmDocument$SchemaFactory(z.string(), z.number()) === wireDocument;  // false --
 
 That is why `$SchemaDefault` is written as a call through the factory rather than composed inline: a declared default that itself names another generic item -- `default_types(IdType = DocumentId<String>)` -- reads back `DocumentId`'s own `$SchemaDefault` rather than reconstructing `DocumentId$SchemaFactory(z.string())` from scratch. The two calls would key different cache entries even though they mean the same filling, so reading the sibling's binding back is what keeps `EcmDocument$SchemaDefault` sharing the one `DocumentId` schema everything else that asks for the ordinary filling shares too.
 
+That reference is deferred, exactly like a flattened base's is: `DocumentId$SchemaDefault` is a module-scope `const`, a generated module concatenates one type's output after another in whatever order the consuming project's entity list produces, and one macro invocation sees one type -- so nothing here can know whether `DocumentId`'s `const` is written above `EcmDocument`'s in the emitted module or below it.
+
+```typescript
+export const EcmDocument$SchemaDefault: ZodType<EcmDocument<DocumentId<string>, number>> =
+  EcmDocument$SchemaFactory(z.lazy(() => DocumentId$SchemaDefault), z.number());
+```
+
+The same deferral covers an argument that does not fold -- a declared default naming a sibling at arguments other than that sibling's own default still calls its factory, behind the identical `z.lazy(() => …)` -- which is what keeps a cycle between two declared defaults from throwing at import: neither side can have registered the other's arguments yet when it is expanded, so neither folds, and both read the other's factory lazily rather than at the top of a `const` initializer.
+
 A generic type that also flattens keeps the deferred read of its base, so declaration order stays irrelevant: `.and(z.lazy(() => Envelope$Schema))` composes inside the factory unchanged.
 
 #### A generic type may reach itself

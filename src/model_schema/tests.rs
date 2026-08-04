@@ -2646,7 +2646,8 @@ fn a_string_filling_annotates_the_example_as_no_filling_does() {
 /// a factory publisher whose own `$SchemaDefault` was recorded at exactly `z.string()`, and
 /// `IdType = DocumentId<String>` names it at that identical argument, so the render folds onto
 /// `DocumentId$SchemaDefault` instead of composing `DocumentId$SchemaFactory(z.string())` a second
-/// time.
+/// time — deferred, since `DocumentId$SchemaDefault` is a module-scope `const` this one's own
+/// `const` cannot be known to be written above or below.
 #[cfg(feature = "zod")]
 #[test]
 fn declared_default_renders_each_shape_the_table_describes() {
@@ -2665,7 +2666,7 @@ fn declared_default_renders_each_shape_the_table_describes() {
         (
             "IdType",
             quote::quote! { DocumentId<String> },
-            "DocumentId$SchemaDefault",
+            "z.lazy(() => DocumentId$SchemaDefault)",
         ),
     ] {
         let ty: syn::Type = syn::parse2(filled_at.clone()).unwrap();
@@ -2684,7 +2685,9 @@ fn declared_default_renders_each_shape_the_table_describes() {
 
 /// The fold only fires where the written arguments match the sibling's own recorded default; a
 /// reference to the same generic sibling at a *different* argument still calls its factory, exactly
-/// as an ordinary field naming it does.
+/// as an ordinary field naming it does — and that call is deferred exactly as the fold's own
+/// reference is, since `DocumentId$SchemaFactory` is one more module-scope `const` this one cannot
+/// know is declared above it or below.
 #[cfg(feature = "zod")]
 #[test]
 fn a_default_naming_a_sibling_at_other_than_its_own_default_calls_the_factory() {
@@ -2702,7 +2705,7 @@ fn a_default_naming_a_sibling_at_other_than_its_own_default_calls_the_factory() 
     let field = super::declared_default_field("IdType", &default_types);
     assert_eq!(
         super::default_zod_argument(&field),
-        "DocumentId$SchemaFactory(z.number().int())"
+        "z.lazy(() => DocumentId$SchemaFactory(z.number().int()))"
     );
 }
 

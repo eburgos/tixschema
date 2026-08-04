@@ -238,11 +238,40 @@ mod zod {
     #[cfg(all(feature = "chrono", feature = "object_id"))]
     use super::MixedArguments;
     use super::{
-        Adjacent, Carried, EchoedDefault, EcmDocument, Envelope, External, FolderTree, Holder,
-        Internal, KeyedByParameter, LifetimeStruct, OverriddenDefault, Pair, PlainConst,
-        Positional, Quintet, Referrer, Summarised, Tagged, Untagged, WireFolder, Wrapper,
-        keyed_alias_schema,
+        Adjacent, Carried, CycleFollower, CycleLeader, EchoedDefault, EcmDocument, Envelope,
+        External, FolderTree, Holder, Internal, KeyedByParameter, LifetimeStruct,
+        OverriddenDefault, Pair, PlainConst, Positional, Quintet, Referrer, Summarised, Tagged,
+        Untagged, WireFolder, Wrapper, keyed_alias_schema,
     };
+
+    /// Two generic items whose declared defaults name each other: `CycleLeader`'s names
+    /// `CycleFollower` and `CycleFollower`'s names `CycleLeader` back, at arguments neither can have
+    /// registered yet when the other is expanded — one macro invocation sees one type, so neither
+    /// side can know at expansion time that the other's declared default will turn out to name it
+    /// back. Nothing folds, both sides call the other's factory, and both calls are deferred exactly
+    /// as an unfolded reference to any other sibling's factory already is: the module loads and
+    /// resolves each side's read only once something asks the resulting schema to validate, so
+    /// which of the two names is written first in the generated module is never asked.
+    #[test]
+    fn a_cycle_between_two_defaults_is_deferred_on_both_sides() {
+        let leader = CycleLeader::<u32>::zod_schema();
+        assert!(
+            leader.contains(
+                "= CycleLeader$SchemaFactory(z.lazy(() => \
+                 CycleFollower$SchemaFactory(z.number().int())));"
+            ),
+            "Got: {leader}"
+        );
+
+        let follower = CycleFollower::<u32>::zod_schema();
+        assert!(
+            follower.contains(
+                "= CycleFollower$SchemaFactory(z.lazy(() => \
+                 CycleLeader$SchemaFactory(z.number().int())));"
+            ),
+            "Got: {follower}"
+        );
+    }
 
     /// A record key has to produce string keys, and serde says every instantiation this map has
     /// does: it writes a JSON object key as a string or refuses the map outright at serialization.
@@ -484,24 +513,32 @@ mod zod {
     /// own default folds the argument onto that item's own `$SchemaDefault`, so the checks and
     /// brand it declared are carried in by reference instead of rebuilt under a `z.string()` the
     /// memo would not share with it.
+    ///
+    /// The folded reference is deferred through `z.lazy` — `Tagged$SchemaDefault` is a module-scope
+    /// `const` like `EchoedDefault$SchemaDefault` itself, and a generated module concatenates one
+    /// string per type in whatever order the consuming project's entity list produces, so nothing
+    /// here can know whether `Tagged`'s `const` is written above this one or below it.
     #[test]
     fn a_default_naming_a_siblings_own_default_folds_onto_its_binding() {
         let zod = EchoedDefault::<String>::zod_schema();
         assert!(
-            zod.contains("= EchoedDefault$SchemaFactory(Tagged$SchemaDefault);"),
+            zod.contains("= EchoedDefault$SchemaFactory(z.lazy(() => Tagged$SchemaDefault));"),
             "Got: {zod}"
         );
     }
 
     /// The same shape at a filling that names the sibling at an argument other than its own
     /// default — the fold does not fire, and the reference still calls the sibling's factory
-    /// exactly as an ordinary field naming it does.
+    /// exactly as an ordinary field naming it does, deferred exactly as the fold's own reference
+    /// is: `Tagged$SchemaFactory` is a module-scope `const` this one's own `const` cannot know is
+    /// declared above it or below.
     #[test]
     fn a_default_naming_a_sibling_at_another_filling_still_calls_its_factory() {
         let zod = OverriddenDefault::<String>::zod_schema();
         assert!(
             zod.contains(
-                "= OverriddenDefault$SchemaFactory(Tagged$SchemaFactory(z.number().int()));"
+                "= OverriddenDefault$SchemaFactory(z.lazy(() => \
+                 Tagged$SchemaFactory(z.number().int())));"
             ),
             "Got: {zod}"
         );
@@ -1617,6 +1654,20 @@ pub struct EchoedDefault<HolderType> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OverriddenDefault<HolderType> {
     pub held: HolderType,
+}
+
+#[cfg(feature = "zod")]
+#[model_schema(default_types(ValueType = CycleFollower<u32>))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CycleLeader<ValueType> {
+    pub value: ValueType,
+}
+
+#[cfg(feature = "zod")]
+#[model_schema(default_types(ValueType = CycleLeader<u32>))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CycleFollower<ValueType> {
+    pub value: ValueType,
 }
 
 /// A generic type that names itself, at the filling it was entered at — the cycle a document
