@@ -352,6 +352,42 @@ fn an_unrenamed_item_publishes_the_same_module_under_either_derivation() {
     );
 }
 
+/// The ident re-export answers at the same spelling the module seam answers at: whatever a
+/// reference falls back to when the registry cannot help it, which is the ident with the `Json`
+/// suffix read through. An item exported under that spelling already answers there and publishes
+/// nothing.
+#[cfg(feature = "typescript")]
+#[test]
+fn a_ts_reexport_is_written_only_where_the_export_moved_off_the_ident() {
+    assert_eq!(
+        ident_reexport_ts("LaterAlias", "LaterAliasType", ""),
+        "\n\nexport type LaterAlias = LaterAliasType;"
+    );
+    assert_eq!(
+        ident_reexport_ts("LaterItem", "RenamedLater", ""),
+        "\n\nexport type LaterItem = RenamedLater;"
+    );
+    assert_eq!(
+        ident_reexport_ts("Pair", "PairType", "<A, B>"),
+        "\n\nexport type Pair<A, B> = PairType<A, B>;"
+    );
+    for (ident, export) in [("PlainItem", "PlainItem"), ("PlainItemJson", "PlainItem")] {
+        assert_eq!(ident_reexport_ts(ident, export, ""), "", "for: {ident}");
+    }
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn a_zod_reexport_is_written_only_where_the_export_moved_off_the_ident() {
+    assert_eq!(
+        ident_reexport_zod("LaterAlias", "LaterAliasType"),
+        "\n\nexport const LaterAlias$Schema = LaterAliasType$Schema;"
+    );
+    for (ident, export) in [("PlainItem", "PlainItem"), ("PlainItemJson", "PlainItem")] {
+        assert_eq!(ident_reexport_zod(ident, export), "", "for: {ident}");
+    }
+}
+
 /// Runs the `pattern` guard over `pattern` written as the literal an author would have written,
 /// which is what the guard spans its refusals on.
 fn portable(pattern: &str) -> Result<String, String> {

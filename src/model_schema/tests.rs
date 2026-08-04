@@ -15,7 +15,8 @@ use super::{
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use super::{
-    AliasKind, alias_map_key_guard_error, branded_guard_errors, check_map_key, register_alias_info,
+    AliasKind, alias_map_key_guard_error, branded_guard_errors, check_map_key,
+    ident_schema_module_name, register_alias_info,
 };
 
 #[cfg(feature = "typescript")]
@@ -894,6 +895,45 @@ fn an_alias_targeting_a_map_key_with_no_members_is_refused() {
     assert!(error.contains("Doc"), "got: {error}");
 }
 
+/// A refused item still publishes the schema module every reference to it addresses.
+///
+/// The address is derived from the Rust ident and nothing else, so it is the same whatever became
+/// of the item — which is what lets a reference stand before it. An expansion that emitted no
+/// module left every referencing type with an `E0433` naming a module the author never wrote,
+/// sitting on top of the refusal they can act on.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_refused_item_publishes_the_module_a_reference_to_it_resolves_to() {
+    let ident = syn::Ident::new("CountsByDoc", proc_macro2::Span::call_site());
+    let module = super::refused_item_schema_module(&ident).to_string();
+    assert!(
+        module.contains(&format!(
+            "pub mod {}",
+            ident_schema_module_name("CountsByDoc")
+        )),
+        "got: {module}"
+    );
+    // The refusal is the one diagnostic the author reads, so the module adds none of its own.
+    assert!(!module.contains("compile_error"), "got: {module}");
+}
+
+/// And it publishes the call a reference emits: a sibling in field position asks the module it
+/// resolves to for `json_schema_within`, so that is the method that has to be there for the
+/// reference to compile.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_refused_items_module_answers_the_call_a_reference_emits() {
+    let span = proc_macro2::Span::call_site();
+    let ident = syn::Ident::new("CountsByRefusedDoc", span);
+    let module = super::refused_item_schema_module(&ident).to_string();
+    let addressed = super::sibling_schema_module_ident("CountsByRefusedDoc", span).to_string();
+    assert!(
+        module.contains(&format!("pub mod {addressed}")),
+        "got: {module}"
+    );
+    assert!(module.contains("json_schema_within"), "got: {module}");
+}
+
 /// Runs the field walk the way [`super::process_field`] does and renders the guard failures its
 /// `model_schema_prop` attributes earn, so a refused key and an unparseable `pattern` are read off
 /// the same channel that carries them to the emitted item.
@@ -1182,15 +1222,17 @@ fn branded_schema_example_carries_no_cfg_attribute() {
 #[cfg(feature = "typescript")]
 #[test]
 fn plain_enum_ts_definition_carries_no_cfg_attribute() {
-    let tokens = super::generate_plain_enum_ts_definition_method(" * Status", "Status", "  'a'");
+    let tokens =
+        super::generate_plain_enum_ts_definition_method(" * Status", "Status", "Status", "  'a'");
     assert_no_cfg_attribute(&tokens, "generate_plain_enum_ts_definition_method");
 }
 
 #[cfg(feature = "typescript")]
 #[test]
 fn discriminated_enum_ts_definition_carries_no_cfg_attribute() {
-    let tokens =
-        super::generate_discriminated_enum_ts_definition_method(" * Shape", "Shape", "  'a'");
+    let tokens = super::generate_discriminated_enum_ts_definition_method(
+        " * Shape", "Shape", "Shape", "  'a'",
+    );
     assert_no_cfg_attribute(&tokens, "generate_discriminated_enum_ts_definition_method");
 }
 
@@ -1290,7 +1332,7 @@ fn no_json_schema_emission_carries_a_warning_key() {
 fn alias_zod_method_carries_no_cfg_attribute() {
     let ty: syn::Type = syn::parse_quote!(String);
     let field_def = super::get_field_def("AliasType", &ty, "");
-    let tokens = super::generate_alias_zod_method("AliasType", &field_def);
+    let tokens = super::generate_alias_zod_method("AliasType", "Alias", &field_def);
     assert_no_cfg_attribute(&tokens, "generate_alias_zod_method");
 }
 
