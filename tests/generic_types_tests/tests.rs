@@ -770,6 +770,58 @@ mod jsonschema {
         ecm_document_schema,
     };
 
+    /// `#[serde(flatten)]` is read only where `serde` is, so the merge these pin is only written
+    /// there.
+    #[cfg(feature = "serde")]
+    mod flattened_parameter {
+        use super::super::{Carried, FlatCarrier, FlatReferrer};
+
+        /// A flattened parameter is a flattened value like any other: the object its filling
+        /// describes contributes its members to the one being written, beside the ones that object
+        /// writes itself. The filling reaches the merge through the one binding every other
+        /// position reads the parameter through, so the merge never sees which end filled it.
+        #[test]
+        fn a_flattened_parameter_merges_the_members_the_reference_site_filled_it_with() {
+            assert_eq!(
+                FlatReferrer::json_schema()["properties"]["held"],
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "tag": { "type": "string" },
+                        "value": { "type": "integer" }
+                    },
+                    "required": ["tag", "value"],
+                    "additionalProperties": false
+                })
+            );
+        }
+
+        /// A filling that is not an object has no members to merge, and what serde writes for it
+        /// never joins the object being written. The declaration cannot say so — which type fills
+        /// the parameter is the reference site's to name — so the merge answers where the filling
+        /// is finally known, in the words it answers for every other source in.
+        #[test]
+        #[should_panic(
+            expected = "`FlatCarrier`: `#[serde(flatten)]` of `held` is not written as \
+                        an object — its schema describes a `string`, which has no \
+                        members to merge"
+        )]
+        fn a_flattened_parameter_filled_by_a_scalar_is_refused_where_the_filling_is_known() {
+            let _: serde_json::Value = FlatCarrier::<String>::json_schema();
+        }
+
+        /// A flatten source naming a type rather than a parameter is untouched by any of this.
+        #[test]
+        fn a_named_flatten_source_beside_a_parameter_describes_as_it_always_has() {
+            assert_eq!(
+                serde_json::to_string(&Carried::<String>::json_schema()).unwrap(),
+                "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},\
+                 \"trace\":{\"type\":\"string\"}},\"required\":[\"id\",\"trace\"],\
+                 \"additionalProperties\":false}"
+            );
+        }
+    }
+
     /// A key every instantiation writes as a string leaves the value side describable, so the
     /// object says what it holds instead of opening entirely — the answer the concrete
     /// `String`-keyed member beside it already gave.
@@ -997,7 +1049,7 @@ mod jsonschema {
                     this reference names [{\"type\":\"boolean\"}]"
     )]
     fn a_cycle_that_changes_filling_is_refused_naming_both_fillings() {
-        let _ = super::Refilled::<String>::json_schema();
+        let _: serde_json::Value = super::Refilled::<String>::json_schema();
     }
 
     /// The refusal states what stands in the way and what would move it, so an author meeting it
@@ -1010,59 +1062,7 @@ mod jsonschema {
                     each filling gets a definition of its own"
     )]
     fn the_refused_cycle_states_the_limitation_and_the_way_past_it() {
-        let _ = super::Refilled::<String>::json_schema();
-    }
-
-    /// `#[serde(flatten)]` is read only where `serde` is, so the merge these pin is only written
-    /// there.
-    #[cfg(feature = "serde")]
-    mod flattened_parameter {
-        use super::super::{Carried, FlatCarrier, FlatReferrer};
-
-        /// A flattened parameter is a flattened value like any other: the object its filling
-        /// describes contributes its members to the one being written, beside the ones that object
-        /// writes itself. The filling reaches the merge through the one binding every other
-        /// position reads the parameter through, so the merge never sees which end filled it.
-        #[test]
-        fn a_flattened_parameter_merges_the_members_the_reference_site_filled_it_with() {
-            assert_eq!(
-                FlatReferrer::json_schema()["properties"]["held"],
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "tag": { "type": "string" },
-                        "value": { "type": "integer" }
-                    },
-                    "required": ["tag", "value"],
-                    "additionalProperties": false
-                })
-            );
-        }
-
-        /// A filling that is not an object has no members to merge, and what serde writes for it
-        /// never joins the object being written. The declaration cannot say so — which type fills
-        /// the parameter is the reference site's to name — so the merge answers where the filling
-        /// is finally known, in the words it answers for every other source in.
-        #[test]
-        #[should_panic(
-            expected = "`FlatCarrier`: `#[serde(flatten)]` of `held` is not written as \
-                        an object — its schema describes a `string`, which has no \
-                        members to merge"
-        )]
-        fn a_flattened_parameter_filled_by_a_scalar_is_refused_where_the_filling_is_known() {
-            let _ = FlatCarrier::<String>::json_schema();
-        }
-
-        /// A flatten source naming a type rather than a parameter is untouched by any of this.
-        #[test]
-        fn a_named_flatten_source_beside_a_parameter_describes_as_it_always_has() {
-            assert_eq!(
-                serde_json::to_string(&Carried::<String>::json_schema()).unwrap(),
-                "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},\
-                 \"trace\":{\"type\":\"string\"}},\"required\":[\"id\",\"trace\"],\
-                 \"additionalProperties\":false}"
-            );
-        }
+        let _: serde_json::Value = super::Refilled::<String>::json_schema();
     }
 }
 
@@ -1395,7 +1395,7 @@ pub struct Summarised<ValueType> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Recurring<ValueType> {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next: Option<Box<Recurring<ValueType>>>,
+    pub next: Option<Box<Self>>,
     pub value: ValueType,
 }
 
