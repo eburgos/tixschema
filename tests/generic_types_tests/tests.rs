@@ -730,7 +730,7 @@ use alloc::borrow::Cow;
 use core::hash::Hash;
 use std::collections::{HashMap, HashSet};
 
-#[cfg(feature = "chrono")]
+#[cfg(all(feature = "chrono", feature = "object_id"))]
 use chrono::{DateTime, Utc};
 #[cfg(feature = "object_id")]
 use mongodb::bson::oid::ObjectId;
