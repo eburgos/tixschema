@@ -264,6 +264,15 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 ///
 /// Generated JSON Schema: `{ "type": "string", "minLength": 3, "maxLength": 50, "pattern": "^[a-z0-9_]+$" }`.
 ///
+/// One `pattern` string reaches three engines — the Rust validator's `regex::Regex`, the Zod
+/// schema's JavaScript regex literal, and the JSON Schema `pattern` keyword, which ECMA-262
+/// defines as a JavaScript regex — so it has to be a regex all three read the same way. A pattern
+/// only the `regex` crate reads is refused at expansion, with the construct named: Unicode classes
+/// (`\p{L}`), POSIX classes (`[[:alpha:]]`), class set operators (`&&`, `--`, `~~`), nested
+/// classes, `\A` and `\z`, `\b{start}`, `\<` and `\>`, braced code point escapes (`\x{41}`), `\a`,
+/// and inline flag directives (`(?i)`). `(?P<name>...)` is accepted and emitted as the
+/// `(?<name>...)` both grammars read.
+///
 /// A `PathBuf` field carries these too, as does the `Path` borrow behind a wrapper: serde writes a
 /// path as a JSON string, and the checks measure that string — the path's `to_string_lossy`
 /// rendering, which is the exact wire value for every path serde can write.
