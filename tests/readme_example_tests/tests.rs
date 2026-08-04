@@ -442,7 +442,7 @@ fn test_the_documented_branded_newtype_example_is_declarable_and_shows_what_it_e
     /// Generic document identifier.
     ///
     /// - `DocumentId<String>` for API/HTTP layer
-    /// - `DocumentId<ObjectId>` for MongoDB layer
+    /// - `DocumentId<ObjectId>` for `MongoDB` layer
     ///
     /// ```rust example
     /// DocumentId("64de3d95ff45b119e5b53a7e".to_string())

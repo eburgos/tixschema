@@ -1292,7 +1292,7 @@ Branded newtypes support doc comments (for Zod `.meta({ description })`) and com
 /// Generic document identifier.
 ///
 /// - `DocumentId<String>` for API/HTTP layer
-/// - `DocumentId<ObjectId>` for MongoDB layer
+/// - `DocumentId<ObjectId>` for `MongoDB` layer
 ///
 /// ```rust example
 /// DocumentId("64de3d95ff45b119e5b53a7e".to_string())
@@ -1310,7 +1310,7 @@ const buildDocumentId$Schema = <IdType extends ZodType>(
   idType: IdType,
 ) =>
   idType.meta({
-  description: "Generic document identifier.\n- `DocumentId<String>` for API/HTTP layer\n- `DocumentId<ObjectId>` for MongoDB layer",
+  description: "Generic document identifier.\n- `DocumentId<String>` for API/HTTP layer\n- `DocumentId<ObjectId>` for `MongoDB` layer",
   example: "64de3d95ff45b119e5b53a7e",
 }).brand<"DocumentId">();
 

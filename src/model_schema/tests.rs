@@ -9135,3 +9135,52 @@ fn a_flatten_source_with_no_name_of_its_own_keeps_the_placeholder() {
         "serde_json :: json ! ({ \"type\" : \"object\" })"
     );
 }
+
+/// A key an identifier can hold is written bare, which is every key the emission wrote before the
+/// rule existed.
+#[test]
+fn an_identifier_member_key_is_written_bare() {
+    for key in ["id", "userId", "_private", "$ref", "a1", "A", "_", "$"] {
+        assert_eq!(
+            super::ts_member_key(key),
+            key,
+            "expected `{key}` written bare"
+        );
+    }
+}
+
+/// A wire name no identifier can hold is written as the string it is, so the object it sits in still
+/// closes after it.
+#[test]
+fn a_non_identifier_member_key_is_written_as_a_string() {
+    assert_eq!(super::ts_member_key("reply-to"), "\"reply-to\"");
+    assert_eq!(super::ts_member_key("content-type"), "\"content-type\"");
+    assert_eq!(super::ts_member_key("2fa"), "\"2fa\"");
+    assert_eq!(super::ts_member_key(""), "\"\"");
+    assert_eq!(super::ts_member_key("a b"), "\"a b\"");
+    assert_eq!(super::ts_member_key("caf\u{e9}"), "\"caf\u{e9}\"");
+}
+
+/// A key carrying the two characters the string form itself is written with is escaped, so quoting
+/// cannot be what ends the string early.
+#[test]
+fn a_member_key_carrying_a_quote_or_a_backslash_is_escaped() {
+    assert_eq!(super::ts_member_key("a\"b"), "\"a\\\"b\"");
+    assert_eq!(super::ts_member_key("a\\b"), "\"a\\\\b\"");
+}
+
+/// The untagged member's sibling exclusions are keys the same rule applies to: one an identifier
+/// cannot hold is denied under the string serde writes it as.
+#[cfg(all(feature = "serde", feature = "typescript"))]
+#[test]
+fn an_untagged_sibling_exclusion_writes_a_non_identifier_key_as_a_string() {
+    let closed = super::close_untagged_flatten_member(
+        "{ subject: string }",
+        &["reply-to".to_owned(), "sent_at".to_owned()],
+    );
+
+    assert_eq!(
+        closed,
+        "{ subject: string; \"reply-to\"?: never; sent_at?: never }"
+    );
+}

@@ -105,6 +105,54 @@ struct UserWithSerde {
     user_id: String,
 }
 
+// ========================================================================
+// Wire Names That No Identifier Can Hold
+// ========================================================================
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(untagged)]
+enum Body {
+    Fresh { subject: String },
+    Reply { reply_to: String },
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "kind")]
+enum Delivery {
+    Sent {
+        #[serde(rename = "sent-at")]
+        sent_at: String,
+    },
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct Envelope {
+    #[serde(flatten)]
+    body: Body,
+    id: String,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct Message {
+    id: String,
+    #[serde(rename = "reply-to", default, skip_serializing_if = "Option::is_none")]
+    reply_to: Option<String>,
+}
+
+/// A key an identifier can hold is written as it always was, on both text surfaces.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct PlainKeys {
+    #[serde(rename = "$ref")]
+    reference: String,
+    #[serde(rename = "user_id2")]
+    user_id: String,
+}
+
 #[test]
 fn test_serde_types_constructible() {
     let color = Color::Red;
@@ -135,6 +183,27 @@ fn test_serde_types_constructible() {
         user_id: String::new(),
     };
     assert!(user.user_id.is_empty());
+    let message = Message {
+        id: String::new(),
+        reply_to: None,
+    };
+    assert!(message.reply_to.is_none());
+    let delivery = Delivery::Sent {
+        sent_at: String::new(),
+    };
+    assert!(matches!(delivery, Delivery::Sent { .. }));
+    let envelope = Envelope {
+        body: Body::Reply {
+            reply_to: String::new(),
+        },
+        id: String::new(),
+    };
+    assert!(matches!(envelope.body, Body::Reply { .. }));
+    let plain = PlainKeys {
+        reference: String::new(),
+        user_id: String::new(),
+    };
+    assert!(plain.reference.is_empty());
 }
 
 #[test]
@@ -354,5 +423,92 @@ fn test_compliant_optionals_serialize_absent_and_parse_absent() {
     assert_eq!(
         serde_json::to_string(&some).unwrap(),
         r#"{"name":"n","note":"here"}"#
+    );
+}
+
+/// The struct-field seam: a renamed key is the string serde writes, which is what the object needs
+/// to still close after it.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_a_hyphenated_field_key_is_written_as_a_string() {
+    let ts = Message::ts_definition();
+
+    assert!(
+        ts.lines().any(|line| line == r#"  "reply-to"?: string;"#),
+        "expected the key as a string member:\n{ts}"
+    );
+    assert!(
+        ts.lines().any(|line| line == "  id: string;"),
+        "an identifier-legal key stays bare:\n{ts}"
+    );
+}
+
+/// The same key on the Zod surface, which is object-literal syntax and refuses a bare hyphen for
+/// the same reason the type does.
+#[test]
+#[cfg(feature = "zod")]
+fn test_a_hyphenated_field_key_is_written_as_a_string_in_zod() {
+    let zod = Message::zod_schema();
+
+    assert!(
+        zod.contains(r#"  "reply-to": "#),
+        "expected the key as a string member:\n{zod}"
+    );
+    assert!(
+        zod.contains("  id: z.string(),"),
+        "an identifier-legal key stays bare:\n{zod}"
+    );
+}
+
+/// The struct-variant seam: a variant's own fields are members of the variant's object and are
+/// written by their own seam, which needs the same rule.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_a_hyphenated_variant_field_key_is_written_as_a_string() {
+    let ts = Delivery::ts_definition();
+
+    assert!(
+        ts.lines().any(|line| line == r#"  "sent-at": string;"#),
+        "expected the key as a string member:\n{ts}"
+    );
+    assert!(
+        ts.lines().any(|line| line == r#"  kind: "Sent";"#),
+        "an identifier-legal tag stays bare:\n{ts}"
+    );
+}
+
+/// The flatten-operand seam and the sibling exclusion beside it, both written from keys an
+/// identifier can hold: the whole intersection is spelled as it always was.
+///
+/// The quoted half of this seam is held in the unit tests, against the closer directly. It cannot be
+/// reached from here: a key on this path is the field's own name whatever serde was told to rename
+/// it to, so no rename spells one an identifier cannot hold.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_a_flatten_operand_and_its_sibling_exclusions_stay_bare_for_identifier_keys() {
+    let ts = Envelope::ts_definition();
+
+    assert!(
+        ts.contains(
+            "} & ({ subject: string; reply_to?: never } | { reply_to: string; subject?: never });"
+        ),
+        "expected the intersection unchanged:\n{ts}"
+    );
+}
+
+/// The rule reads the key, not the rename: `$` and a trailing digit are identifier-legal and are
+/// left exactly as they were written.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_identifier_legal_renamed_keys_stay_bare() {
+    let ts = PlainKeys::ts_definition();
+
+    assert!(
+        ts.lines().any(|line| line == "  $ref: string;"),
+        "expected a bare `$ref`:\n{ts}"
+    );
+    assert!(
+        ts.lines().any(|line| line == "  user_id2: string;"),
+        "expected a bare `user_id2`:\n{ts}"
     );
 }
