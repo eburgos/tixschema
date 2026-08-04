@@ -1,5 +1,58 @@
 use super::*;
 
+/// The pattern shapes the shipped tests write, none of which the two grammars spell differently.
+/// Every one of them has to come back byte for byte: the guard is there to stop a pattern only one
+/// grammar reads, not to touch the ones both already read the same way.
+const PORTABLE_PATTERNS: [&str; 10] = [
+    "^[a-z]+$",
+    "^[0-9a-fA-F]{24}$",
+    r"^\d{3}\.\d{3}\.\d{3}-\d{2}$",
+    r"^\/[a-z]+$",
+    "^/[a-z]+$",
+    r"^a\n[a-z]+$",
+    "(?<word>[a-z]+)",
+    // `(?P<` inside a class is four ordinary members, and the rename must not reach into one.
+    "[(?P<]",
+    "[--/]",
+    r"[a\]b]",
+];
+
+/// Every construct the guard refuses, beside the words the refusal has to name it by.
+///
+/// The list is the inventory of what `regex::Regex::new` accepts and a JavaScript regex literal
+/// either fails to parse or reads as something else, so it doubles as the record of what was
+/// checked against both grammars.
+const UNPORTABLE_PATTERNS: [(&str, &str); 22] = [
+    ("(?i)abc", "inline flag directive"),
+    ("abc(?i)def", "inline flag directive"),
+    ("(?x:a b)", "ignore-whitespace flag"),
+    ("(?U:a+)", "swap-greed flag"),
+    ("(?u:a)", "Unicode flag"),
+    ("(?R:a)", "CRLF flag"),
+    (r"\Aabc", r"`\A` anchor"),
+    (r"abc\z", r"`\z` anchor"),
+    (r"\b{start}a", "word boundary"),
+    (r"\<a", "word boundary"),
+    (r"\p{L}", "Unicode class"),
+    (r"\pL", "Unicode class"),
+    (r"[\p{L}]", "Unicode class"),
+    ("[[:alpha:]]", "POSIX class"),
+    (r"[\w&&\d]", "`&&` class intersection"),
+    ("[+--]", "`--` class difference"),
+    (r"[\d~~\w]", "`~~` class symmetric difference"),
+    ("[a[b]]", "class nested inside another class"),
+    (r"\x{41}", "braced code point escape"),
+    ("[]]", "unescaped `]` opening a character class"),
+    ("[^]]", "unescaped `]` opening a character class"),
+    ("[]-a]", "unescaped `]` opening a character class"),
+];
+
+/// The haystacks a rewritten pattern is held to: whatever the original matched among them, the
+/// rewrite has to match too.
+const REWRITE_HAYSTACKS: [&str; 12] = [
+    "", "a", "abc", "]", "]]", "a]", "-", "/", "a-b", "word-42", "AB", "[",
+];
+
 #[cfg(feature = "zod")]
 #[test]
 fn test_extract_example_simple() {
@@ -250,4 +303,115 @@ fn test_escape_js_regex_literal_leaves_an_authored_line_terminator_escape_alone(
 fn test_escape_js_regex_literal_rewrites_an_identity_escaped_line_terminator() {
     assert_eq!(escape_js_regex_literal("^a\\\nb$"), r"^a\nb$");
     assert_eq!(escape_js_regex_literal("^a\\\\\nb$"), r"^a\\\nb$");
+}
+
+/// Runs the `pattern` guard over `pattern` written as the literal an author would have written,
+/// which is what the guard spans its refusals on.
+fn portable(pattern: &str) -> Result<String, String> {
+    let lit = LitStr::new(pattern, proc_macro2::Span::call_site());
+    portable_pattern(&lit).map_err(|rejection| rejection.to_string())
+}
+
+/// `(?P<name>` is Rust's and Python's spelling of the group JavaScript spells `(?<name>`, and the
+/// `regex` crate reads both, so the one spelling that reaches every surface is the shared one.
+#[test]
+fn test_portable_pattern_translates_the_rust_named_group_spelling() {
+    assert_eq!(portable("(?P<w>[a-z]+)").unwrap(), "(?<w>[a-z]+)");
+    assert_eq!(
+        portable("^(?P<w>[a-z]+)-(?P<n>[0-9]+)$").unwrap(),
+        "^(?<w>[a-z]+)-(?<n>[0-9]+)$"
+    );
+    assert_eq!(
+        portable("(?P<outer>(?P<inner>a))").unwrap(),
+        "(?<outer>(?<inner>a))"
+    );
+    // The group's span is a byte offset, so a multi-byte character ahead of it must not shift the
+    // `P` the rewrite drops.
+    assert_eq!(portable("\u{e9}(?P<w>a)").unwrap(), "\u{e9}(?<w>a)");
+}
+
+/// A class-opening `]` is refused rather than escaped because escaping it is not local: `[]-a]` is
+/// the three members `]`, `-` and `a`, and `[\]-a]` is the range `]` to `a`. Pinned here so a
+/// later attempt to "just escape it" fails instead of quietly widening the constraint.
+#[test]
+fn test_portable_pattern_does_not_escape_a_class_opening_bracket() {
+    let escaped = regex::Regex::new(r"[\]-a]").unwrap();
+    let written = regex::Regex::new("[]-a]").unwrap();
+    assert!(escaped.is_match("_"));
+    assert!(!written.is_match("_"));
+    portable("[]-a]").unwrap_err();
+}
+
+/// A pattern both grammars already read the same way comes back untouched, byte for byte.
+#[test]
+fn test_portable_pattern_leaves_a_shared_pattern_byte_identical() {
+    for pattern in PORTABLE_PATTERNS {
+        assert_eq!(portable(pattern).as_deref(), Ok(pattern), "for {pattern}");
+    }
+}
+
+/// `.`, `\d`, `\w`, `\s` and `\b` are in both grammars and part ways only over what counts as a
+/// digit, a word character or a boundary. That is a divergence in what they match, not in what
+/// they are, and the guard deliberately leaves it alone.
+#[test]
+fn test_portable_pattern_admits_the_classes_both_grammars_spell() {
+    for pattern in [r"^\d+$", r"^\w+$", r"^\s+$", "^.$", r"\ba", r"\Ba"] {
+        assert_eq!(portable(pattern).as_deref(), Ok(pattern), "for {pattern}");
+    }
+}
+
+/// Every refusal names the construct that earned it and the surface that cannot carry it.
+#[test]
+fn test_portable_pattern_names_the_construct_javascript_cannot_carry() {
+    for (pattern, construct) in UNPORTABLE_PATTERNS {
+        assert!(
+            regex::Regex::new(pattern).is_ok(),
+            "{pattern} is not a pattern the `regex` crate accepts, so it probes nothing"
+        );
+        let rejection = portable(pattern).unwrap_err();
+        for needle in [construct, "JavaScript regex literal", "Zod", "JSON Schema"] {
+            assert!(
+                rejection.contains(needle),
+                "{needle} missing for {pattern}: {rejection}"
+            );
+        }
+    }
+}
+
+/// A rewrite is a change of spelling, not of meaning: what the pattern matched before it, it
+/// matches after — read off `regex::Regex` itself rather than restated here.
+#[test]
+fn test_portable_pattern_rewrite_keeps_what_the_pattern_matched() {
+    for pattern in [
+        "(?P<w>[a-z]+)",
+        "^(?P<w>[a-z]+)-(?P<n>[0-9]+)$",
+        "(?P<outer>(?P<inner>a))",
+        r"(?P<w>[a-z]+)|(?P<n>\d+)",
+    ] {
+        let rewritten = portable(pattern).unwrap();
+        let before = regex::Regex::new(pattern).unwrap();
+        let after = regex::Regex::new(&rewritten).unwrap();
+        for haystack in REWRITE_HAYSTACKS {
+            assert_eq!(
+                before.is_match(haystack),
+                after.is_match(haystack),
+                "{pattern} and {rewritten} part ways over {haystack:?}"
+            );
+        }
+    }
+}
+
+/// A pattern the `regex` crate cannot parse is still refused with the crate's own words, ahead of
+/// any question of what JavaScript would make of it.
+#[test]
+fn test_portable_pattern_quotes_the_regex_crate_on_a_pattern_it_refuses() {
+    let rejection = portable(r"^ab\").unwrap_err();
+    for needle in [
+        "pattern",
+        "regex parse error",
+        "incomplete escape sequence",
+        "panic",
+    ] {
+        assert!(rejection.contains(needle), "{needle} missing: {rejection}");
+    }
 }
