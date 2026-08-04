@@ -323,14 +323,15 @@ pub fn safe_type_name(key: &str) -> String {
     }
 }
 
-/// The schema module a `#[model_schema()]` type alias publishes, which is also the module a
-/// reference assumes for a name the registry does not hold.
+/// The schema module a `#[model_schema()]` item publishes — an alias, a struct, an enum, a branded
+/// newtype alike — which is also the module a reference assumes for a name the registry does not
+/// hold.
 ///
-/// A reference written *before* the alias expands has nothing but the Rust ident to name a module
-/// from — the registry is empty of the alias, and the exported name is not recoverable from the
+/// A reference written *before* the item expands has nothing but the Rust ident to name a module
+/// from — the registry is empty of the item, and the exported name is not recoverable from the
 /// ident once a `name = "…"` override is in play. So the module is named from the ident on both
-/// sides, and the two spellings agree in either declaration order. A rename moves what the alias
-/// is exported as; it does not move where the alias's schema lives.
+/// sides, and the two spellings agree in either declaration order. A rename moves what the item is
+/// exported as; it does not move where the item's schema lives.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 pub fn ident_schema_module_name(rust_ident: &str) -> String {
     format!("{}_schema", to_snake_case(&safe_type_name(rust_ident)))
