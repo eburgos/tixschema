@@ -6,12 +6,13 @@ use super::{
 
 #[cfg(feature = "serde")]
 use super::{
-    ConstraintLeaf, MemberAccess, ModelSchemaPropMeta, build_field_validation,
-    cfg_attr_guard_error, check_omitted_key_is_readable, check_optional_field_serialization,
-    collect_untagged_members, constrained_shape, enum_cfg_attr_guard_errors,
-    generate_field_validation, generate_numeric_validation_code, generate_string_validation_code,
-    has_serde_default, helper_name_stem, internally_tagged_guard_errors, needs_injected_default,
-    parse_serde_field_attributes, parse_serde_type_attributes, render_untagged_variant,
+    ConstraintLeaf, MemberAccess, ModelSchemaPropMeta, adjacent_collapsed_slot_guard_errors,
+    build_field_validation, cfg_attr_guard_error, check_omitted_key_is_readable,
+    check_optional_field_serialization, collect_untagged_members, constrained_shape,
+    enum_cfg_attr_guard_errors, generate_field_validation, generate_numeric_validation_code,
+    generate_string_validation_code, has_serde_default, helper_name_stem,
+    internally_tagged_guard_errors, needs_injected_default, parse_serde_field_attributes,
+    parse_serde_type_attributes, render_untagged_variant,
 };
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -7212,6 +7213,89 @@ fn every_other_declared_arity_keeps_the_kind_it_declared() {
     }
 }
 
+/// The adjacent-form refusals a declaration earns, one per variant that earns one, as rendered
+/// `compile_error!` token strings.
+#[cfg(feature = "serde")]
+fn adjacent_refusals(declaration: &str) -> Vec<String> {
+    let item: syn::ItemEnum = syn::parse_str(declaration).unwrap();
+    adjacent_collapsed_slot_guard_errors(&item, "type", "value")
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// Captured from serde under `#[serde(tag = "type", content = "value")]`: the variant whose lone
+/// slot is off the wire writes `{"type":"One"}` and serde then refuses to read that back (missing
+/// field `value`), while only `{"type":"One","value":null}` reads. The write set and the read set
+/// have no common member, so the declaration is refused rather than described.
+#[cfg(feature = "serde")]
+#[test]
+fn an_adjacent_variant_whose_lone_slot_is_dropped_is_refused() {
+    let refusals = adjacent_refusals("enum Wire { One(#[serde(skip)] String) }");
+    assert_eq!(refusals.len(), 1, "got: {refusals:?}");
+    for needle in [
+        "`One`",
+        "`Wire`",
+        r#"{\"type\":\"One\"}"#,
+        r#"{\"type\":\"One\",\"value\":null}"#,
+        "Declare `One` as a unit variant",
+    ] {
+        assert!(
+            refusals[0].contains(needle),
+            "{needle} missing from: {}",
+            refusals[0]
+        );
+    }
+}
+
+/// Every other declared arity keeps the landed shrink: captured, a two-slot variant with one slot
+/// off the wire writes and reads `{"type":"One","value":[7]}` and with both off writes and reads
+/// `{"type":"One","value":[]}`, so each has a payload to be described by.
+#[cfg(feature = "serde")]
+#[test]
+fn every_other_adjacent_arity_is_left_alone() {
+    for declaration in [
+        "enum Wire { One(#[serde(skip)] String, u32) }",
+        "enum Wire { One(#[serde(skip)] String, #[serde(skip)] u32) }",
+        "enum Wire { One(String) }",
+        "enum Wire { One { #[serde(skip)] a: String } }",
+        "enum Wire { One }",
+        "enum Wire { One() }",
+    ] {
+        let refusals = adjacent_refusals(declaration);
+        assert!(refusals.is_empty(), "{declaration}: {refusals:?}");
+    }
+}
+
+/// The refusal points at the variant it is about, not at the enum's tagging attribute: an enum with
+/// many variants otherwise sends its author to the wrong line.
+#[cfg(feature = "serde")]
+#[test]
+fn the_adjacent_collapse_refusal_points_at_the_variant() {
+    let item: syn::ItemEnum =
+        syn::parse_str("enum Wire { Kept(u8, bool), Lone(#[serde(skip)] String) }").unwrap();
+    let errors = adjacent_collapsed_slot_guard_errors(&item, "type", "value");
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert_eq!(
+        errors[0].span().source_text().as_deref(),
+        Some("Lone(#[serde(skip)] String)")
+    );
+}
+
+/// The refusal quotes the keys the declaration named, so the payloads it prints are the author's
+/// own rather than serde's defaults.
+#[cfg(feature = "serde")]
+#[test]
+fn the_adjacent_collapse_refusal_quotes_the_declared_keys() {
+    let item: syn::ItemEnum = syn::parse_str("enum Wire { One(#[serde(skip)] String) }").unwrap();
+    let refusal = adjacent_collapsed_slot_guard_errors(&item, "kind", "payload")[0].to_string();
+    assert!(refusal.contains(r#"{\"kind\":\"One\"}"#), "Got: {refusal}");
+    assert!(
+        refusal.contains(r#"{\"kind\":\"One\",\"payload\":null}"#),
+        "Got: {refusal}"
+    );
+}
+
 /// The member spelling an untagged variant is refused with, run over the kind it publishes.
 #[cfg(feature = "serde")]
 fn untagged_refusal(declaration: &str, members: &[super::FieldDef]) -> String {
@@ -7222,12 +7306,61 @@ fn untagged_refusal(declaration: &str, members: &[super::FieldDef]) -> String {
 
 /// Captured from serde: an untagged variant whose lone slot is off the wire writes and reads `null`
 /// — the payload a declared unit variant writes there — so it takes the refusal a unit variant
-/// takes rather than describing the value nothing carries.
+/// takes rather than describing the value nothing carries. The words are the collapse's own: a
+/// declaration holding one inner type must not be told that inner types are what the union supports.
 #[cfg(feature = "serde")]
 #[test]
-fn an_untagged_variant_whose_lone_slot_is_dropped_is_refused_as_a_unit() {
+fn an_untagged_variant_whose_lone_slot_is_dropped_is_refused_for_the_collapse() {
     let refusal = untagged_refusal("enum Wire { One(#[serde(skip)] String) }", &[]);
-    assert!(refusal.contains("is a unit variant"), "Got: {refusal}");
+    for needle in [
+        "`One`",
+        "off the wire in both directions",
+        "`null`",
+        "Keep the slot on the wire",
+        "remove `One` from the union",
+    ] {
+        assert!(refusal.contains(needle), "{needle} missing from: {refusal}");
+    }
+    assert!(
+        !refusal.contains("supports newtype"),
+        "the collapse must not be told what the union supports: {refusal}"
+    );
+}
+
+/// The collapse's refusal points at the variant it is about, the way the shape refusal beside it
+/// does: an author sent to the enum's attribute is sent to the wrong line.
+#[cfg(feature = "serde")]
+#[test]
+fn the_untagged_collapse_refusal_points_at_the_variant() {
+    let variant = declared_variant("enum Wire { One(#[serde(skip)] String) }");
+    let error =
+        render_untagged_variant(&variant_wire_kind(&variant), &variant, &[], "Wire").unwrap_err();
+    assert_eq!(
+        error.span().source_text().as_deref(),
+        Some("One(#[serde(skip)] String)")
+    );
+}
+
+/// The standing refusal is untouched: a variant declared as a unit — and the empty tuple serde
+/// writes the same way — still reads the words the union has always answered them with.
+#[cfg(feature = "serde")]
+#[test]
+fn a_declared_untagged_unit_variant_keeps_its_own_refusal() {
+    // The ellipsis and em dash are spelled by escape so the pin stays byte-exact without writing a
+    // non-ASCII literal into the source.
+    let expected = "model_schema: variant `One`: `#[serde(untagged)]` supports newtype (`V(T)`) \
+                    and struct (`V { \u{2026} }`) variants only \u{2014} `One` is a unit variant, \
+                    which the union has no member spelling for: a member is written as the inner \
+                    type or as an object of named fields, and a variant that is neither has \
+                    nothing to be written as. Give it a single inner type or named fields, or drop \
+                    `#[serde(untagged)]`.";
+    for declaration in ["enum Wire { One }", "enum Wire { One() }"] {
+        assert_eq!(
+            untagged_refusal(declaration, &[]),
+            expected,
+            "{declaration}"
+        );
+    }
 }
 
 /// A refused tuple variant is named by the arity the author declared, not by the slots that reached
