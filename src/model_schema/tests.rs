@@ -74,6 +74,11 @@ const SEQUENCE_WRAPPERS: [&str; 6] = [
     "VecDeque",
 ];
 
+/// The module name a generated hook is written against, standing in for the one the enum's own
+/// expansion registers.
+#[cfg(feature = "serde")]
+const UNTAGGED_MODULE: Option<&str> = Some("choice_schema");
+
 #[test]
 fn ts_optional_ok_on_option_field() {
     validate_ts_optional_flag(true, true).unwrap();
@@ -286,11 +291,16 @@ fn positional_option_field_is_exempt() {
     guard_result(&item).unwrap();
 }
 
+/// Collects the untagged-path guard failures as rendered `compile_error!` token streams.
+#[cfg(feature = "serde")]
+fn untagged_guard_error_tokens(item: &mut syn::ItemEnum) -> Vec<proc_macro2::TokenStream> {
+    collect_untagged_members(item, UNTAGGED_MODULE).3
+}
+
 /// Collects the untagged-path guard failures as rendered `compile_error!` token strings.
 #[cfg(feature = "serde")]
 fn untagged_guard_errors(mut item: syn::ItemEnum) -> Vec<String> {
-    collect_untagged_members(&mut item)
-        .3
+    untagged_guard_error_tokens(&mut item)
         .iter()
         .map(ToString::to_string)
         .collect()
@@ -334,6 +344,68 @@ fn untagged_tuple_variant_option_is_exempt() {
     let errors = untagged_guard_errors(syn::parse_quote! {
         enum Choice {
             Maybe(Option<i64>),
+        }
+    });
+    assert!(errors.is_empty(), "got: {errors:?}");
+}
+
+/// Every shape the untagged rendering has no member spelling for is refused the way every other
+/// misuse is — as an error the enum reports for each offender, rather than a panic that stops the
+/// expansion at the first one and demotes its sentence to a `help:` note.
+#[cfg(feature = "serde")]
+#[test]
+fn untagged_unsupported_variant_shapes_are_all_reported() {
+    let errors = untagged_guard_errors(syn::parse_quote! {
+        enum Choice {
+            Bare,
+            Pair(String, String),
+            Note { id: String },
+            Empty(),
+        }
+    });
+    assert_eq!(errors.len(), 3, "got: {errors:?}");
+    for (error, needles) in errors.iter().zip([
+        ["`Bare`", "a unit variant"],
+        ["`Pair`", "a tuple variant with 2 fields"],
+        ["`Empty`", "a unit variant"],
+    ]) {
+        assert!(error.contains("compile_error"), "got: {error}");
+        for needle in needles {
+            assert!(error.contains(needle), "got: {error}");
+        }
+        assert!(
+            error.contains("supports newtype (`V(T)`) and struct"),
+            "got: {error}"
+        );
+    }
+}
+
+/// The refusal points at the variant it is about, not at the attribute on the enum: an enum with
+/// many variants otherwise sends its author to the wrong line.
+#[cfg(feature = "serde")]
+#[test]
+fn untagged_unsupported_variant_refusal_points_at_the_variant() {
+    use syn::spanned::Spanned as _;
+
+    let mut item: syn::ItemEnum =
+        syn::parse_str("enum Choice { Note { id: String }, Pair(String, String) }").unwrap();
+    let errors = untagged_guard_error_tokens(&mut item);
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert_eq!(
+        errors[0].span().source_text().as_deref(),
+        Some("Pair(String, String)")
+    );
+}
+
+/// The supported shapes are untouched: a newtype and a struct variant still render, and neither
+/// earns a word from the shape guard.
+#[cfg(feature = "serde")]
+#[test]
+fn untagged_supported_variant_shapes_are_left_alone() {
+    let errors = untagged_guard_errors(syn::parse_quote! {
+        enum Choice {
+            Note { id: String },
+            Plain(i64),
         }
     });
     assert!(errors.is_empty(), "got: {errors:?}");
@@ -402,12 +474,86 @@ fn untagged_member_carries_its_constraint_to_the_surfaces() {
             },
         }
     };
-    let (_, zod_parts, _, errors) = collect_untagged_members(&mut item);
+    let (_, zod_parts, _, errors, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
     assert!(errors.is_empty(), "got: {errors:?}");
     assert!(
         zod_parts[0].contains("z.string().min(2).check(z.regex(/^[a-z]+$/))"),
         "got: {}",
         zod_parts[0]
+    );
+}
+
+/// The same member reaches the Rust side through the generation the tagged twin uses: the validator
+/// and its deserializer, named for the variant, hung on the member by the injected attribute.
+#[cfg(feature = "serde")]
+#[test]
+fn untagged_member_constraint_generates_the_validator_and_hangs_it_on_the_member() {
+    let mut item: syn::ItemEnum = syn::parse_quote! {
+        enum Choice {
+            Named {
+                #[model_schema_prop(minLength = 2)]
+                name: String,
+            },
+        }
+    };
+    let (_, _, _, errors, validation_fns) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
+    assert!(errors.is_empty(), "got: {errors:?}");
+    assert_eq!(validation_fns.len(), 1, "got: {validation_fns:?}");
+    let rendered = validation_fns[0].to_string();
+    assert!(
+        rendered.contains("fn validate_named_name_value"),
+        "got: {rendered}"
+    );
+    assert!(
+        rendered.contains("fn deserialize_named_name"),
+        "got: {rendered}"
+    );
+
+    let attrs = &item.variants[0].fields.iter().next().unwrap().attrs;
+    let rendered_attrs = quote::quote!(#(#attrs)*).to_string();
+    assert!(
+        rendered_attrs.contains(r#"deserialize_with = "choice_schema::deserialize_named_name""#),
+        "got: {rendered_attrs}"
+    );
+}
+
+/// Without a schema module there is nothing for a `deserialize_with` to name, so the member is left
+/// exactly as written — the same subset in which a struct field generates no validator either.
+#[cfg(feature = "serde")]
+#[test]
+fn untagged_member_constraint_generates_nothing_without_a_schema_module() {
+    let mut item: syn::ItemEnum = syn::parse_quote! {
+        enum Choice {
+            Named {
+                #[model_schema_prop(minLength = 2)]
+                name: String,
+            },
+        }
+    };
+    let (_, _, _, errors, validation_fns) = collect_untagged_members(&mut item, None);
+    assert!(errors.is_empty(), "got: {errors:?}");
+    assert!(validation_fns.is_empty(), "got: {validation_fns:?}");
+    let attrs = &item.variants[0].fields.iter().next().unwrap().attrs;
+    assert!(attrs.is_empty(), "got: {}", quote::quote!(#(#attrs)*));
+}
+
+/// A newtype member has no ident for the two helpers and the accessor to be named from, so the
+/// bound is refused here for the reason it is refused on a tuple field — the position the generation
+/// this path now shares has always answered for.
+#[cfg(feature = "serde")]
+#[test]
+fn untagged_newtype_member_constraint_is_refused() {
+    let errors = untagged_guard_errors(syn::parse_quote! {
+        enum Choice {
+            Slug(#[model_schema_prop(minLength = 2)] String),
+        }
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(errors[0].contains("tuple field"), "got: {}", errors[0]);
+    assert!(
+        errors[0].contains("unsupported on a positional field"),
+        "got: {}",
+        errors[0]
     );
 }
 
@@ -426,7 +572,7 @@ fn untagged_member_prop_attribute_is_stripped_from_the_emitted_item() {
             },
         }
     };
-    collect_untagged_members(&mut item);
+    collect_untagged_members(&mut item, UNTAGGED_MODULE);
     let attrs = &item.variants[0].fields.iter().next().unwrap().attrs;
     assert!(
         !attrs
@@ -1496,6 +1642,102 @@ fn a_fixed_shape_field_without_a_bound_is_left_alone() {
             }
         });
         assert!(errors.is_empty(), "for {field}: {errors:?}");
+    }
+}
+
+/// A map and a tuple render their members, never themselves, so a bound written beside one reaches
+/// no surface either — the same loss the whole-schema types answer for, refused where it is written.
+#[test]
+fn a_bound_on_a_map_or_tuple_field_is_refused() {
+    for (constraint, key) in [
+        (quote::quote! { minLength = 30 }, "minLength"),
+        (quote::quote! { maxLength = 30 }, "maxLength"),
+        (quote::quote! { pattern = "^[a-z]+$" }, "pattern"),
+        (quote::quote! { minimum = 5 }, "minimum"),
+        (quote::quote! { maximum = 5 }, "maximum"),
+    ] {
+        for (field_type, shape) in [
+            (quote::quote! { HashMap<String, String> }, "a map"),
+            (quote::quote! { Option<HashMap<String, u32>> }, "a map"),
+            (quote::quote! { Vec<HashMap<String, u32>> }, "a map"),
+            (quote::quote! { (String, String) }, "a tuple"),
+            (quote::quote! { Option<(String, u32)> }, "a tuple"),
+        ] {
+            let errors = field_prop_guard_errors(&syn::parse_quote! {
+                struct Report {
+                    #[model_schema_prop(#constraint)]
+                    labels: #field_type,
+                }
+            });
+            assert_eq!(errors.len(), 1, "for {key} on {field_type}: {errors:?}");
+            for needle in ["compile_error", "field `labels`", key, shape, "brand"] {
+                assert!(
+                    errors[0].contains(needle),
+                    "{needle} missing for {key} on {field_type}: {}",
+                    errors[0]
+                );
+            }
+        }
+    }
+}
+
+/// A map or tuple field carrying no bound must not acquire one of these errors, and neither must the
+/// keys that name or wrap the rendering rather than constrain a value.
+#[test]
+fn a_map_or_tuple_field_without_a_bound_is_left_alone() {
+    for field in [
+        quote::quote! { labels: HashMap<String, String> },
+        quote::quote! { pair: (String, u32) },
+        quote::quote! { #[model_schema_prop(preprocess = ["trim"])] pair: (String, u32) },
+    ] {
+        let errors = field_prop_guard_errors(&syn::parse_quote! {
+            struct Report {
+                #field
+            }
+        });
+        assert!(errors.is_empty(), "for {field}: {errors:?}");
+    }
+}
+
+/// The docs a field's meta earns, read off the walk that writes them.
+fn field_docs_after_meta(item: &syn::ItemStruct) -> String {
+    let field = item.fields.iter().next().unwrap();
+    let name = field
+        .ident
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    let mut field_def = get_field_def(&name, &field.ty, "");
+    let meta = super::parse_model_schema_prop_attributes(&field.attrs);
+    super::apply_model_schema_prop_meta(&mut field_def, meta, &name);
+    field_def.docs
+}
+
+/// The `JSDoc` states the bound as a rule the value is held to, so it is written only where
+/// something holds the value to it — never for a placement the guard refuses, which was the one
+/// place the sentence appeared over nothing at all.
+#[test]
+fn the_constraint_docs_are_written_only_where_the_bound_is_kept() {
+    assert!(
+        field_docs_after_meta(&syn::parse_quote! {
+            struct Report {
+                #[model_schema_prop(minLength = 30)]
+                name: String,
+            }
+        })
+        .contains("Minimum length: 30"),
+        "a bound the surfaces render says so in the docs"
+    );
+    for field in [
+        quote::quote! { #[model_schema_prop(minLength = 30)] labels: HashMap<String, String> },
+        quote::quote! { #[model_schema_prop(maximum = 5)] pair: (u32, u32) },
+    ] {
+        let docs = field_docs_after_meta(&syn::parse_quote! {
+            struct Report {
+                #field
+            }
+        });
+        assert!(docs.is_empty(), "for {field}, got: {docs}");
     }
 }
 

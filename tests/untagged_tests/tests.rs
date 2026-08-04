@@ -114,6 +114,33 @@ enum ConstrainedTagged {
     },
 }
 
+// An untagged union whose only member carries a bound: with no other branch to fall to, a value the
+// bound rejects is a value the whole union rejects.
+#[model_schema()]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum SoleConstrainedUnion {
+    Slug {
+        #[model_schema_prop(minLength = 2, pattern = "^[a-z]+$")]
+        slug: String,
+    },
+}
+
+// The same member written twice, bound first and bare second: what a failing bound costs is the
+// branch, not the read.
+#[model_schema()]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum CheckedThenLooseUnion {
+    Checked {
+        #[model_schema_prop(minLength = 2)]
+        name: String,
+    },
+    Loose {
+        name: String,
+    },
+}
+
 // An untagged member is written by a dispatch of its own, so it is a position an `ObjectId` can be
 // spelled in.
 #[cfg(all(feature = "jsonschema", feature = "object_id"))]
@@ -486,6 +513,53 @@ fn test_untagged_member_constraint_json_schema() {
     assert_eq!(
         tagged["oneOf"][0]["properties"]["slug"], *member,
         "the tagged twin must render the same member"
+    );
+}
+
+/// The member's bound reaches the Rust side too, so a payload both schema surfaces reject stops
+/// being one serde reads back without a word.
+#[test]
+fn test_untagged_member_constraint_is_enforced_on_deserialize() {
+    serde_json::from_str::<SoleConstrainedUnion>(r#"{"slug":"a"}"#).unwrap_err();
+    serde_json::from_str::<SoleConstrainedUnion>(r#"{"slug":"AB"}"#).unwrap_err();
+    assert_eq!(
+        serde_json::from_str::<SoleConstrainedUnion>(r#"{"slug":"ab"}"#).unwrap(),
+        SoleConstrainedUnion::Slug {
+            slug: "ab".to_owned()
+        }
+    );
+}
+
+/// What a bound means in this position, pinned: serde tries the variants in order and a member the
+/// bound rejects takes its variant out of the running rather than ending the read — the same thing
+/// the union member's own schema does under `anyOf` and under `z.union`. So a violating value lands
+/// on the next branch that accepts it, and errors only when none does.
+#[test]
+fn test_untagged_member_constraint_decides_which_variant_is_read() {
+    assert_eq!(
+        serde_json::from_str::<CheckedThenLooseUnion>(r#"{"name":"ab"}"#).unwrap(),
+        CheckedThenLooseUnion::Checked {
+            name: "ab".to_owned()
+        }
+    );
+    assert_eq!(
+        serde_json::from_str::<CheckedThenLooseUnion>(r#"{"name":"A"}"#).unwrap(),
+        CheckedThenLooseUnion::Loose {
+            name: "A".to_owned()
+        }
+    );
+}
+
+/// Serialization is untouched: the hook is a deserializer, and the value it refuses on the way in
+/// is one the type can still be built with and written out.
+#[test]
+fn test_untagged_member_constraint_leaves_serialization_alone() {
+    let violating = SoleConstrainedUnion::Slug {
+        slug: "A".to_owned(),
+    };
+    assert_eq!(
+        serde_json::to_string(&violating).unwrap(),
+        r#"{"slug":"A"}"#
     );
 }
 

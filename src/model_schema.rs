@@ -150,12 +150,13 @@ type RenderedVariants = (
 );
 
 /// Per-member data collected from an untagged enum: the TypeScript member types, the Zod member
-/// schemas, the JSON-schema value tokens, and the `compile_error!` tokens for any field-level
-/// guard violations.
+/// schemas, the JSON-schema value tokens, the `compile_error!` tokens for any field-level guard
+/// violations, and the per-member serde validation functions.
 #[cfg(feature = "serde")]
 type UntaggedMemberData = (
     Vec<String>,
     Vec<String>,
+    Vec<proc_macro2::TokenStream>,
     Vec<proc_macro2::TokenStream>,
     Vec<proc_macro2::TokenStream>,
 );
@@ -4481,32 +4482,50 @@ fn process_internally_tagged_enum(
 /// - `zod` is the member schema (e.g. `DateString$Schema`, `z.number().int()`)
 /// - `json_value` is a standalone `serde_json::Value` token expression (cfg jsonschema)
 ///
-/// Only `TupleSingle` (`S(T)`) and `Named` (`{ a: A }`) variant kinds are supported; `Unit` and
-/// `TupleMultiple` produce a clear compile-time `panic!` because an untagged choice has no
-/// discriminator to carry them.
+/// Only `TupleSingle` (`S(T)`) and `Named` (`{ a: A }`) variant kinds have a member spelling here;
+/// every other shape is refused as an error spanned on the variant, which the caller collects so
+/// one expansion reports every offender rather than stopping at the first.
+///
+/// The single-member pattern is what rules out a `TupleSingle` carrying no field. That shape is
+/// unreachable — [`classify_variant`] sends an empty `Foo()` to `Unit` — and a slice pattern says
+/// so structurally, where a length assertion would have to be written and then never fire.
 #[cfg(feature = "serde")]
 fn render_untagged_variant(
     kind: &VariantKind,
-    variant_name: &str,
+    variant: &syn::Variant,
     field_defs: &[FieldDef],
     self_type_name: &str,
-) -> (String, String, proc_macro2::TokenStream) {
-    match kind {
-        VariantKind::TupleSingle => {
-            render_untagged_tuple_single(variant_name, field_defs, self_type_name)
-        }
-        VariantKind::Named => render_untagged_named(field_defs, self_type_name),
-        VariantKind::Unit | VariantKind::TupleMultiple => {
-            // An untagged choice has no discriminator to carry these shapes. The assert fails
-            // unconditionally here (the match already proved `kind` is Unit/TupleMultiple),
-            // surfacing a clear compile-time error during macro expansion.
-            assert!(
-                matches!(kind, VariantKind::TupleSingle | VariantKind::Named),
-                "#[serde(untagged)] supports newtype and struct variants only; `{variant_name}` is unsupported"
-            );
-            (String::new(), String::new(), quote! {})
+) -> Result<(String, String, proc_macro2::TokenStream), syn::Error> {
+    match (kind, field_defs) {
+        (VariantKind::TupleSingle, [fld]) => Ok(render_untagged_tuple_single(fld, self_type_name)),
+        (VariantKind::Named, _) => Ok(render_untagged_named(field_defs, self_type_name)),
+        (VariantKind::Unit, _) => Err(unsupported_untagged_variant_error(
+            variant,
+            "a unit variant",
+        )),
+        (VariantKind::TupleSingle | VariantKind::TupleMultiple, fields) => {
+            Err(unsupported_untagged_variant_error(
+                variant,
+                &format!("a tuple variant with {} fields", fields.len()),
+            ))
         }
     }
+}
+
+/// Refuses a variant shape the untagged union has no member spelling for, spanned on the variant.
+#[cfg(feature = "serde")]
+fn unsupported_untagged_variant_error(variant: &syn::Variant, shape: &str) -> syn::Error {
+    let variant_name = &variant.ident;
+    syn::Error::new_spanned(
+        variant,
+        format!(
+            "model_schema: variant `{variant_name}`: `#[serde(untagged)]` supports newtype \
+             (`V(T)`) and struct (`V {{ … }}`) variants only — `{variant_name}` is {shape}, which \
+             the union has no member spelling for: a member is written as the inner type or as an \
+             object of named fields, and a variant that is neither has nothing to be written as. \
+             Give it a single inner type or named fields, or drop `#[serde(untagged)]`."
+        ),
+    )
 }
 
 /// Renders a `TupleSingle` (`S(T)`) untagged variant as a union member (`T` / `T$Schema` / value).
@@ -4516,16 +4535,9 @@ fn render_untagged_variant(
 /// going absent. All three surfaces read it through the slot spellings for that reason.
 #[cfg(feature = "serde")]
 fn render_untagged_tuple_single(
-    variant_name: &str,
-    field_defs: &[FieldDef],
+    fld: &FieldDef,
     self_type_name: &str,
 ) -> (String, String, proc_macro2::TokenStream) {
-    assert!(
-        !field_defs.is_empty(),
-        "#[serde(untagged)] newtype variant `{variant_name}` has no inner field"
-    );
-    let fld = &field_defs[0];
-
     let ts = fld.typescript_slot_typename();
 
     #[cfg(feature = "zod")]
@@ -4750,13 +4762,27 @@ fn field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
 /// [`process_field`] strips it: it is this crate's own and inert to every derive, so a copy left on
 /// the emitted item is one rustc reports as an attribute that does not exist, pointing at the
 /// user's line with a diagnostic naming the wrong macro.
+///
+/// A member's bound reaches the Rust side through the very generation the tagged twin uses — the
+/// validator, the deserializer, and the `deserialize_with` that hangs the one on the other — under
+/// the variant-scoped helper naming. What the hook costs in this position is the variant, not the
+/// read: serde tries the variants in order, and a member whose bound fails takes its variant out of
+/// the candidate set, so a violating value lands on the next branch that accepts it and errors only
+/// when none does — under serde's own `data did not match any variant` rather than the bound's
+/// sentence. That is what the member's schema already means on the other two surfaces, where the
+/// same declaration is one branch of an `anyOf` and one member of a `z.union`; leaving the hook out
+/// is what would have made the Rust side the odd one, reading back values both schemas reject.
 #[cfg(feature = "serde")]
-fn collect_untagged_members(item_enum: &mut syn::ItemEnum) -> UntaggedMemberData {
+fn collect_untagged_members(
+    item_enum: &mut syn::ItemEnum,
+    schema_module_name: Option<&str>,
+) -> UntaggedMemberData {
     let enum_type_name = item_enum.ident.to_string();
     let mut ts_parts: Vec<String> = Vec::new();
     let mut zod_parts: Vec<String> = Vec::new();
     let mut json_parts: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut guard_errors: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut validation_fns: Vec<proc_macro2::TokenStream> = Vec::new();
 
     for variant in &mut item_enum.variants {
         let kind = classify_variant(variant);
@@ -4770,18 +4796,32 @@ fn collect_untagged_members(item_enum: &mut syn::ItemEnum) -> UntaggedMemberData
                 .map(ToString::to_string)
                 .unwrap_or_default();
             let prop_meta = parse_model_schema_prop_attributes(&field.attrs);
-            field
+            let serde_field_meta = parse_serde_field_attributes(&field.attrs);
+
+            let mut new_attrs: Vec<syn::Attribute> = field
                 .attrs
-                .retain(|attr| !attr.path().is_ident("model_schema_prop"));
+                .iter()
+                .filter(|attr| !attr.path().is_ident("model_schema_prop"))
+                .cloned()
+                .collect();
+            let (validation_fn, _, positional_constraint_error) = generate_field_validation(
+                field,
+                schema_module_name,
+                &field_name,
+                Some(&variant_name),
+                &prop_meta,
+                &mut new_attrs,
+            );
+            field.attrs = new_attrs;
+            validation_fns.extend(validation_fn);
 
             let mut field_def = get_field_def(&field_name, &field.ty, "");
-            let serde_field_meta = parse_serde_field_attributes(&field.attrs);
             let serde_guard_errors = field_guard_errors(
                 field,
                 &field_name,
                 field_def.is_optional(),
                 &serde_field_meta,
-                None,
+                positional_constraint_error,
             );
             guard_errors.extend(collect_field_guard_errors(
                 field,
@@ -4796,14 +4836,23 @@ fn collect_untagged_members(item_enum: &mut syn::ItemEnum) -> UntaggedMemberData
             field_defs.push(field_def);
         }
 
-        let (ts, zod, json_val) =
-            render_untagged_variant(&kind, &variant_name, &field_defs, &enum_type_name);
-        ts_parts.push(ts);
-        zod_parts.push(zod);
-        json_parts.push(json_val);
+        match render_untagged_variant(&kind, variant, &field_defs, &enum_type_name) {
+            Ok((ts, zod, json_val)) => {
+                ts_parts.push(ts);
+                zod_parts.push(zod);
+                json_parts.push(json_val);
+            }
+            Err(err) => guard_errors.push(err.to_compile_error()),
+        }
     }
 
-    (ts_parts, zod_parts, json_parts, guard_errors)
+    (
+        ts_parts,
+        zod_parts,
+        json_parts,
+        guard_errors,
+        validation_fns,
+    )
 }
 
 /// Processes an untagged enum (`#[serde(untagged)]`) and generates its definitions.
@@ -4818,7 +4867,7 @@ fn process_untagged_enum(
 ) -> TokenStream {
     // Compute the schema module name and register the enum so other types can find it.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    let (_, module_ident) = enum_module_idents(name, item_name, AliasKind::NoEnumMembers);
+    let (module_name, module_ident) = enum_module_idents(name, item_name, AliasKind::NoEnumMembers);
 
     // Extract docs early for example extraction
     #[cfg(any(feature = "typescript", feature = "zod"))]
@@ -4829,8 +4878,14 @@ fn process_untagged_enum(
         .as_ref()
         .and_then(|docs| extract_example_from_docs(docs));
 
+    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+    let enum_module_name_opt = Some(module_name.as_str());
+    #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+    let enum_module_name_opt = None;
+
     // Render each variant into its union member (TS / Zod / JSON parts).
-    let (ts_parts, zod_parts, json_parts, guard_errors) = collect_untagged_members(&mut item_enum);
+    let (ts_parts, zod_parts, json_parts, guard_errors, enum_validation_fns) =
+        collect_untagged_members(&mut item_enum, enum_module_name_opt);
 
     // A violated field guard makes the whole contract unsound, so the schema surface is dropped
     // and only the original item plus the errors are emitted.
@@ -4907,9 +4962,6 @@ fn process_untagged_enum(
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     let delegate_impl_items =
         build_struct_delegate_items(&module_ident, schema_example_method.as_ref(), None);
-
-    // Untagged enums have no per-field serde validation functions.
-    let enum_validation_fns: Vec<proc_macro2::TokenStream> = Vec::new();
 
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     {
@@ -7260,34 +7312,49 @@ fn written_constraint_keys(prop_meta: &ModelSchemaPropMeta) -> Vec<&'static str>
     .collect()
 }
 
-/// Rejects a length, pattern or range written on a field whose schema this crate writes whole.
+/// Rejects a length, pattern or range written on a field no surface reads one beside.
 ///
-/// The types [`FieldDef::fixed_shape_name`] answers for render a shape fixed in this crate rather
-/// than the plain string or number a bound is spelled against, and every surface writes that shape
-/// without ever reading the meta — so the bound is accepted at expansion and reaches nothing, which
-/// leaves the author holding a contract that says the value is checked when nothing checks it.
+/// Two shapes earn it. The types [`FieldDef::fixed_shape_name`] answers for render a shape fixed in
+/// this crate rather than the plain string or number a bound is spelled against; the ones
+/// [`FieldDef::composite_shape_name`] answers for render their members, which are built from inner
+/// field defs that carry no meta. Either way every surface writes the field without ever reading the
+/// bound — so it is accepted at expansion and reaches nothing, which leaves the author holding a
+/// contract that says the value is checked when nothing checks it.
 fn check_fixed_shape_constraints(
     field: &Field,
     field_def: &FieldDef,
     prop_meta: &ModelSchemaPropMeta,
     label: &str,
 ) -> Result<(), syn::Error> {
-    let Some(name) = field_def.fixed_shape_name() else {
-        return Ok(());
-    };
-    let keys = written_constraint_keys(prop_meta);
-    if keys.is_empty() {
+    let written = written_constraint_keys(prop_meta);
+    if written.is_empty() {
         return Ok(());
     }
+    let keys = written.join("`, `");
+    if let Some(name) = field_def.fixed_shape_name() {
+        return Err(syn::Error::new_spanned(
+            field,
+            format!(
+                "model_schema: {label}: `{keys}` cannot apply to `{name}` — this crate writes that \
+                 type's schema whole, not as the plain string or number a bound is spelled \
+                 against, and no surface reads a bound beside it: the constraint would reach \
+                 neither Zod, nor the JSON schema, nor the generated validator. Drop it, or carry \
+                 the value in a `String` field the bound can measure."
+            ),
+        ));
+    }
+    let Some(shape) = field_def.composite_shape_name() else {
+        return Ok(());
+    };
     Err(syn::Error::new_spanned(
         field,
         format!(
-            "model_schema: {label}: `{}` cannot apply to `{name}` — this crate writes that type's \
-             schema whole, not as the plain string or number a bound is spelled against, and no \
-             surface reads a bound beside it: the constraint would reach neither Zod, nor the JSON \
-             schema, nor the generated validator. Drop it, or carry the value in a `String` field \
-             the bound can measure.",
-            keys.join("`, `")
+            "model_schema: {label}: `{keys}` cannot apply to {shape} — a map renders its keys and \
+             its values, a tuple renders each of its elements, and every surface builds those from \
+             the members: the bound names no value here, and `model_schema_prop` has no way to say \
+             which member it meant, so the constraint would reach neither Zod, nor the JSON schema, \
+             nor the generated validator. Constrain the member instead — declare its type as a \
+             branded newtype carrying the bound — or drop it."
         ),
     ))
 }
@@ -7639,7 +7706,15 @@ fn apply_model_schema_prop_meta(
 }
 
 /// Appends length/range constraint information to a field's generated docs.
+///
+/// The sentence states the bound as a rule the value is held to, so it is written only where
+/// something holds the value to it. A placement [`check_fixed_shape_constraints`] refuses gets
+/// none: there the bound reaches no surface, and the doc would be the only place it appeared at all
+/// — the claim standing exactly where nothing backs it.
 fn apply_constraint_docs(field_def: &mut FieldDef, final_name: &str) {
+    if field_def.constraints_reach_nothing() {
+        return;
+    }
     let Some(meta) = &field_def.model_schema_prop_meta else {
         return;
     };
