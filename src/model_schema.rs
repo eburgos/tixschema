@@ -25,7 +25,7 @@ use crate::{
     field_type::{
         FieldDef, FieldDefType, VariantKind, classify_variant, get_field_def, is_plain_enum,
     },
-    utils::{get_field_docs, get_variant_docs},
+    utils::{get_field_docs, get_variant_docs, strip_examples_from_docs},
 };
 
 // The item paths take their exported name from `compute_item_export_name` and their module name
@@ -74,7 +74,7 @@ use crate::features::jsonschema::{
 use crate::features::jsonschema::{MergeDiagnostic, merged_object_value};
 
 #[cfg(any(feature = "typescript", feature = "zod"))]
-use crate::utils::{get_enum_docs, get_struct_docs, strip_examples_from_docs};
+use crate::utils::{get_enum_docs, get_struct_docs};
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::{compute_alias_export_name, ident_schema_module_name};
@@ -114,6 +114,11 @@ const FLATTENED_PLAIN_ENUM_SCOPE: &str = "Only a type the registry has already c
 const WRITTEN_AS_ARRAY: &str = "a JSON array";
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 const WRITTEN_AS_OBJECT: &str = "a JSON object";
+
+/// The 24-character hex an `ObjectId`'s `$oid` member holds, as a JSON-schema `pattern`. Written
+/// once so no position can describe the same string a different way.
+#[cfg(all(feature = "jsonschema", feature = "object_id"))]
+const OBJECT_ID_HEX_PATTERN: &str = r"^[a-f\d]{24}$";
 
 /// One variant of a discriminated enum, carrying everything its union member is rendered from.
 struct DiscriminatedVariant {
@@ -782,18 +787,19 @@ fn has_serde_transparent(attrs: &[syn::Attribute]) -> bool {
 }
 
 /// Builds the `JSDoc` comment body (lines prefixed with ` * `) that precedes an item's
-/// `export type`. Serves the shapes that publish no zod `description` of their own — structs,
-/// tuple structs, and the tagged and untagged enums; the shapes that publish both surfaces spell
-/// them from the same lines in `build_item_docs_and_description`.
+/// `export type`, and the one each field and enum variant inside it is emitted under. The item
+/// shapes that publish a zod `description` alongside spell both from the same lines in
+/// `build_item_docs_and_description`; a member publishes no second surface.
 ///
-/// An item's ` ```rust example ` block is dropped before its lines reach the body, the way
+/// The no-docs fallback names what is documented as it is exported, not as it is declared in Rust,
+/// so a `JSDoc` header never contradicts the line under it.
+///
+/// A ` ```rust example ` block is dropped before its lines reach the body, the way
 /// `item_plain_doc_lines` drops it: the block is Rust source, and nothing reads it as such once it
 /// is sitting in a `TypeScript` comment. A consumer after the example reads the Rust docs. What is
-/// left reaches the body as written — this is the one surface that publishes an item's docs
-/// unflattened.
-#[cfg(feature = "typescript")]
-fn build_item_jsdoc(docs_vec: Option<&[String]>, item_name: &str) -> String {
-    item_jsdoc_body(&item_lines_or_name(docs_vec, item_name, |doc_lines| {
+/// left reaches the body as written — this is the one surface that publishes docs unflattened.
+fn build_jsdoc_body(docs_vec: Option<&[String]>, fallback_name: &str) -> String {
+    item_jsdoc_body(&item_lines_or_name(docs_vec, fallback_name, |doc_lines| {
         strip_examples_from_docs(doc_lines)
             .iter()
             .flat_map(|v| v.lines().map(ToOwned::to_owned).collect::<Vec<_>>())
@@ -1633,7 +1639,7 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
     }
 
     #[cfg(feature = "typescript")]
-    let docs = build_item_jsdoc(docs_and_example.0.as_deref(), &item_name);
+    let docs = build_jsdoc_body(docs_and_example.0.as_deref(), &item_name);
     #[cfg(all(
         not(feature = "typescript"),
         any(feature = "zod", feature = "jsonschema")
@@ -1856,7 +1862,7 @@ fn process_tuple_struct(
         json_schema_methods(&item_name, &tuple_struct_json_body(&item_name, &slots)),
         #[cfg(feature = "typescript")]
         build_tuple_struct_ts_definition_method(
-            &build_item_jsdoc(docs_and_example.0.as_deref(), &item_name),
+            &build_jsdoc_body(docs_and_example.0.as_deref(), &item_name),
             &item_name,
             &tuple_struct_ts_body(&slots),
         ),
@@ -2046,12 +2052,14 @@ fn branded_checked_value(
     }
 }
 
-/// Builds the string schema a branded newtype's constraints are written into: `type_name` as the
-/// `"type"`, then one insert per constraint the brand declares.
+/// Builds the schema a branded newtype's constraints are written into: `base_inserts` first — what
+/// the inner type describes as before the brand narrows it — then one insert per constraint the
+/// brand declares. A keyword the base already states is written over rather than beside it, one
+/// string carrying one `pattern`.
 #[cfg(feature = "jsonschema")]
-fn branded_constrained_schema_obj(
+fn branded_schema_obj_over(
     args: &ModelSchemaArgs,
-    type_name: &str,
+    base_inserts: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
     let mut constraint_inserts: Vec<proc_macro2::TokenStream> = Vec::new();
 
@@ -2074,11 +2082,40 @@ fn branded_constrained_schema_obj(
     quote! {
         {
             let mut schema_obj = serde_json::Map::new();
-            schema_obj.insert("type".to_string(), serde_json::Value::String(#type_name.to_string()));
+            #base_inserts
             #(#constraint_inserts)*
             serde_json::Value::Object(schema_obj)
         }
     }
+}
+
+/// Builds the string schema a branded newtype's constraints are written into: `type_name` as the
+/// `"type"`, then one insert per constraint the brand declares.
+#[cfg(feature = "jsonschema")]
+fn branded_constrained_schema_obj(
+    args: &ModelSchemaArgs,
+    type_name: &str,
+) -> proc_macro2::TokenStream {
+    branded_schema_obj_over(
+        args,
+        &quote! {
+            schema_obj.insert("type".to_string(), serde_json::Value::String(#type_name.to_string()));
+        },
+    )
+}
+
+/// The `$oid` member an `ObjectId` brand carries: the hex string the type always holds, narrowed by
+/// the brand's own constraints, so a brand that declares none still describes the hex the type it
+/// wraps describes wherever else it is written.
+#[cfg(all(feature = "jsonschema", feature = "object_id"))]
+fn branded_object_id_hex_schema(args: &ModelSchemaArgs) -> proc_macro2::TokenStream {
+    branded_schema_obj_over(
+        args,
+        &quote! {
+            schema_obj.insert("type".to_string(), serde_json::Value::String("string".to_string()));
+            schema_obj.insert("pattern".to_string(), serde_json::Value::String(#OBJECT_ID_HEX_PATTERN.to_string()));
+        },
+    )
 }
 
 /// The description a brand carries for an inner no `"type"` keyword names: the one the slot
@@ -2113,7 +2150,7 @@ fn build_branded_json_schema_method(
         BrandedJsonInner::Scalar(type_name) => branded_constrained_schema_obj(args, type_name),
         #[cfg(feature = "object_id")]
         BrandedJsonInner::ObjectId => {
-            object_id_json_schema_value(&branded_constrained_schema_obj(args, "string"))
+            object_id_json_schema_value(&branded_object_id_hex_schema(args))
         }
         BrandedJsonInner::Slot(inner) => branded_slot_json_schema(inner, def_name),
     };
@@ -3000,10 +3037,10 @@ fn item_plain_doc_lines(doc_lines: &[String]) -> Vec<String> {
 /// under, so a `JSDoc` header never contradicts the `export type` one line beneath it and a
 /// description never names an item something no surface exports.
 ///
-/// Every item shape reaches that fallback through here, so no shape can drift from the rest by
-/// spelling it separately. What a shape brings of its own is `flatten` — how its docs reach the
-/// surface, not what it says when it has none.
-#[cfg(any(feature = "typescript", feature = "zod"))]
+/// Every item shape and member reaches that fallback through here, so no path can drift from the
+/// rest by spelling it separately. What a caller brings of its own is `flatten` — how its docs
+/// reach the surface, not what it says when it has none. Ungated because the member call sites
+/// are: a field's docs are read whatever features are on.
 fn item_lines_or_name(
     docs_vec: Option<&[String]>,
     item_name: &str,
@@ -3013,8 +3050,7 @@ fn item_lines_or_name(
 }
 
 /// The `JSDoc` body a set of lines is written as: each prefixed with ` * `, the block closed by a
-/// bare ` * ` so it ends on an empty line.
-#[cfg(any(feature = "typescript", feature = "zod"))]
+/// bare ` * ` so it ends on an empty line. Ungated for the reason [`item_lines_or_name`] is.
 fn item_jsdoc_body(lines: &[String]) -> String {
     lines
         .iter()
@@ -3090,8 +3126,12 @@ fn collect_plain_enum_options(
 
         #[cfg(feature = "typescript")]
         {
-            let variant_docs =
-                get_variant_docs(item).map_or_else(String::new, |doc_lines| doc_lines.join("\n"));
+            // The one member body not written as ` * ` lines: a plain enum's variants are commented
+            // inside the union rather than over a property. The example is dropped the same way,
+            // and a variant documented with nothing else is left as an undocumented one.
+            let variant_docs = get_variant_docs(item).map_or_else(String::new, |doc_lines| {
+                strip_examples_from_docs(&doc_lines).join("\n")
+            });
             enum_variant_docs.push(variant_docs);
         }
     }
@@ -3309,24 +3349,7 @@ fn collect_discriminated_variants(
             field_defs.push(f_def);
         }
 
-        let discriminator_docs = get_variant_docs(item).map_or_else(
-            || {
-                [final_name.clone(), String::new()]
-                    .into_iter()
-                    .map(|l| format!(" * {l}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            },
-            |doc_lines| {
-                doc_lines
-                    .into_iter()
-                    .flat_map(|v| v.lines().map(ToOwned::to_owned).collect::<Vec<_>>())
-                    .chain(vec![String::new()])
-                    .map(|l| format!(" * {l}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            },
-        );
+        let discriminator_docs = build_jsdoc_body(get_variant_docs(item).as_deref(), &final_name);
         variants.push(DiscriminatedVariant {
             discriminator_value: final_name,
             docs: discriminator_docs,
@@ -3448,7 +3471,7 @@ fn process_discriminated_enum(
     );
 
     #[cfg(feature = "typescript")]
-    let docs = build_item_jsdoc(docs_vec.as_deref(), item_name);
+    let docs = build_jsdoc_body(docs_vec.as_deref(), item_name);
 
     // Generate schema module methods
     #[cfg(feature = "jsonschema")]
@@ -3846,7 +3869,7 @@ fn process_externally_tagged_enum(
     let _: &_ = &name;
 
     #[cfg(feature = "typescript")]
-    let docs = build_item_jsdoc(docs_vec.as_deref(), item_name);
+    let docs = build_jsdoc_body(docs_vec.as_deref(), item_name);
 
     #[cfg(feature = "jsonschema")]
     let json_schema_method =
@@ -4241,7 +4264,7 @@ fn process_internally_tagged_enum(
     let _: &_ = &name;
 
     #[cfg(feature = "typescript")]
-    let docs = build_item_jsdoc(docs_vec.as_deref(), item_name);
+    let docs = build_jsdoc_body(docs_vec.as_deref(), item_name);
 
     #[cfg(feature = "jsonschema")]
     let json_schema_method =
@@ -4543,15 +4566,7 @@ fn field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
         }
         FieldDefType::Boolean => quote! { serde_json::json!({ "type": "boolean" }) },
         #[cfg(feature = "object_id")]
-        FieldDefType::ObjectId => quote! {
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "$oid": { "type": "string", "pattern": "^[a-f\\d]{24}$" }
-                },
-                "required": ["$oid"]
-            })
-        },
+        FieldDefType::ObjectId => object_id_json_schema_value(&object_id_hex_json_schema()),
         #[cfg(feature = "chrono")]
         FieldDefType::NaiveDate => {
             quote! { serde_json::json!({ "type": "string", "format": "date" }) }
@@ -4698,7 +4713,7 @@ fn process_untagged_enum(
     let schema_code = format!("z.union([{}])", zod_parts.join(", "));
 
     #[cfg(feature = "typescript")]
-    let docs = build_item_jsdoc(docs_vec.as_deref(), item_name);
+    let docs = build_jsdoc_body(docs_vec.as_deref(), item_name);
 
     // Generate schema module methods
     #[cfg(feature = "jsonschema")]
@@ -5236,13 +5251,7 @@ fn scalar_field_json_schema_item(fld: &FieldDef) -> Option<proc_macro2::TokenStr
             quote! { { "type": "string", "format": "date-time" } }
         }
         #[cfg(feature = "object_id")]
-        FieldDefType::ObjectId => quote! { {
-            "type": "object",
-            "properties": {
-                "$oid": { "type": "string", "pattern": "^[a-f\\d]{24}$" }
-            },
-            "required": ["$oid"]
-        } },
+        FieldDefType::ObjectId => object_id_json_schema_item(&object_id_hex_json_schema()),
         FieldDefType::Unknown
         | FieldDefType::SiblingType(..)
         | FieldDefType::Map(..)
@@ -5251,23 +5260,15 @@ fn scalar_field_json_schema_item(fld: &FieldDef) -> Option<proc_macro2::TokenStr
     Some(item_schema)
 }
 
-/// [`build_map_member_item`] for a tuple element, which differs for exactly two value types.
-///
-/// An `ObjectId` here carries the field-position `$oid` object — patterned, and open — where a
-/// `String`-keyed map member carries the closed, unpatterned one; which of the two a slot should
-/// carry is unsettled, so this position keeps the rendering it has. A tuple renders as the
-/// fixed-arity array its own field position renders, which is the one value the map path has no
-/// renderer for: an element is dispatched by the tuple builder itself, so the nesting costs
-/// nothing but the recursion.
+/// [`build_map_member_item`] for a tuple element, which differs for exactly one value type: a tuple
+/// renders as the fixed-arity array its own field position renders, which is the one value the map
+/// path has no renderer for. An element is dispatched by the tuple builder itself, so the nesting
+/// costs nothing but the recursion.
 ///
 /// Every other value is the member the map path renders, at every depth, so a type describes the
 /// same in either slot.
 #[cfg(feature = "jsonschema")]
 fn build_tuple_element_item(value: &FieldDef) -> Result<MapMemberItem, MapMemberRejection> {
-    #[cfg(feature = "object_id")]
-    if matches!(value.field_type, FieldDefType::ObjectId) {
-        return Ok(MapMemberItem::Fragment(scalar_slot_item(value)?));
-    }
     if let FieldDefType::Tuple(elements) = &value.field_type {
         return Ok(MapMemberItem::Value(tuple_json_schema_value(elements)?));
     }
@@ -5833,15 +5834,11 @@ fn build_map_member_item(value: &FieldDef) -> Result<MapMemberItem, MapMemberRej
             );
             MapMemberItem::Value(sibling_json_schema_value(value_type_name, value.type_span))
         }
-        // A map member's `$oid` object is closed and unpatterned, where the shared mapping's
-        // field-position rendering carries the hex pattern and leaves the object open.
+        // The one `$oid` object every position spells, which a member carries as written.
         #[cfg(feature = "object_id")]
-        FieldDefType::ObjectId => MapMemberItem::Fragment(quote! { {
-            "type": "object",
-            "properties": { "$oid": { "type": "string" } },
-            "required": ["$oid"],
-            "additionalProperties": false
-        } }),
+        FieldDefType::ObjectId => {
+            MapMemberItem::Fragment(object_id_json_schema_item(&object_id_hex_json_schema()))
+        }
         // An opaque value carries no type name to narrow with, so a member admits any value: the
         // permissive empty schema, as in field position.
         FieldDefType::Unknown => MapMemberItem::Fragment(quote! { {} }),
@@ -5936,19 +5933,6 @@ fn string_key_map_json_schema_value(
     })
 }
 
-/// [`build_map_member_item`] for a member of an enum-keyed map, which differs for exactly one value
-/// type: an `ObjectId` member here carries the field-position `$oid` object — patterned, and open —
-/// where a `String`-keyed member carries the closed, unpatterned one. Which of the two a map member
-/// should carry is unsettled, so each key path keeps the rendering it has.
-#[cfg(feature = "jsonschema")]
-fn build_enum_key_map_member_item(value: &FieldDef) -> Result<MapMemberItem, MapMemberRejection> {
-    #[cfg(feature = "object_id")]
-    if matches!(value.field_type, FieldDefType::ObjectId) {
-        return Ok(MapMemberItem::Fragment(scalar_slot_item(value)?));
-    }
-    build_map_member_item(value)
-}
-
 /// The object an enum-keyed map describes as, as a standalone `serde_json::Value` expression: one
 /// property per member the key enumerates, each carrying the value type's own rendering, and closed
 /// to every other key. `Err` when the value has no rendering here, or when the registry proves the
@@ -5985,7 +5969,7 @@ fn enum_key_map_json_schema_value(
     }
 
     let normalized = normalized_slot_value(value);
-    let member_value = build_enum_key_map_member_item(&normalized)?.into_member_value(&normalized);
+    let member_value = build_map_member_item(&normalized)?.into_member_value(&normalized);
     let key_type_name_ident = Ident::new(key_type_name, key_span);
     let key_members = quote_spanned! {key_span=> #key_type_name_ident::enum_members() };
     Ok(quote! {
@@ -6169,23 +6153,41 @@ fn build_sibling_type_field_schema(
     }
 }
 
-/// The JSON schema an `ObjectId` describes — the closed `$oid` object serde writes — with
+/// The `json!` literal an `ObjectId` describes as — the closed `$oid` object serde writes — with
 /// `hex_schema` as the schema of the hex string it holds.
 ///
-/// Field position and the branded path read this one spelling, so the transparent brand and the
-/// inner it wraps cannot drift apart. The map-member positions still carry their own renderings.
+/// Every position reads this one spelling: a field, a slot (a tuple element, a tuple struct, a
+/// brand over a container), a member of a map on either key path, and an untagged member. So the
+/// same `ObjectId` cannot describe two ways depending on where it is written, and a brand cannot
+/// drift from the inner it wraps.
+///
+/// The object is closed because serde writes that one member and every other object this crate
+/// emits is closed, and the hex member is patterned because that is what the string always holds —
+/// both are true of every payload serde writes, so neither turns one away.
+#[cfg(all(feature = "jsonschema", feature = "object_id"))]
+fn object_id_json_schema_item(hex_schema: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    quote! { {
+        "type": "object",
+        "properties": {
+            "$oid": (#hex_schema)
+        },
+        "required": ["$oid"],
+        "additionalProperties": false
+    } }
+}
+
+/// [`object_id_json_schema_item`] as a standalone `serde_json::Value` expression, for the positions
+/// that hold the `$oid` object as a value rather than writing it into a literal.
 #[cfg(all(feature = "jsonschema", feature = "object_id"))]
 fn object_id_json_schema_value(hex_schema: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
-    quote! {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "$oid": (#hex_schema)
-            },
-            "required": ["$oid"],
-            "additionalProperties": false
-        })
-    }
+    let item = object_id_json_schema_item(hex_schema);
+    quote! { serde_json::json!(#item) }
+}
+
+/// The hex string an `ObjectId`'s `$oid` member holds, where no brand narrows it further.
+#[cfg(all(feature = "jsonschema", feature = "object_id"))]
+fn object_id_hex_json_schema() -> proc_macro2::TokenStream {
+    quote! { serde_json::json!({ "type": "string", "pattern": #OBJECT_ID_HEX_PATTERN }) }
 }
 
 /// Builds the JSON schema for a `MongoDB` `ObjectId` field (`{ "$oid": string }`).
@@ -6193,7 +6195,7 @@ fn object_id_json_schema_value(hex_schema: &proc_macro2::TokenStream) -> proc_ma
 fn build_object_id_field_schema(fld: &FieldDef, field_name_str: &str) -> proc_macro2::TokenStream {
     let schema = arrayed_json_schema_value(
         fld,
-        object_id_json_schema_value(&quote! { serde_json::json!({ "type": "string" }) }),
+        object_id_json_schema_value(&object_id_hex_json_schema()),
     );
     quote! {
         properties.insert(#field_name_str.to_string(), { #schema });
@@ -7093,7 +7095,7 @@ fn process_field(
     let field_type: &syn::Type = &field.ty;
 
     let final_name = get_final_field_name(&raw_field_ident, field_rename.as_deref(), rename_all);
-    let field_docs = build_field_docs(field, &final_name);
+    let field_docs = build_jsdoc_body(get_field_docs(field).as_deref(), &final_name);
 
     // Create the field definition and apply any model_schema_prop overrides
     let mut field_def = get_field_def(&final_name, field_type, &field_docs);
@@ -7289,28 +7291,6 @@ fn generate_field_validation(
         Some(validation_code.module_items),
         Some(validation_code.validate_body),
         None,
-    )
-}
-
-/// Builds the JSDoc-style doc string for a field from its doc comments (or a fallback).
-fn build_field_docs(field: &Field, final_name: &str) -> String {
-    get_field_docs(field).map_or_else(
-        || {
-            [final_name.to_owned(), String::new()]
-                .into_iter()
-                .map(|l| format!(" * {l}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        },
-        |doc_lines| {
-            doc_lines
-                .into_iter()
-                .flat_map(|v| v.lines().map(ToOwned::to_owned).collect::<Vec<_>>())
-                .chain(vec![String::new()])
-                .map(|l| format!(" * {l}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        },
     )
 }
 

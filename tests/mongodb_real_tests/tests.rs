@@ -47,6 +47,26 @@ struct NestedRefMaps {
     run_batches: HashMap<String, Vec<HashMap<String, ObjectId>>>,
 }
 
+// Every position an `ObjectId` can be written in, gathered into one item: a field, an array item, a
+// tuple element, and a member of a map on each key path.
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct EveryOidPosition {
+    by_name: HashMap<String, ObjectId>,
+    by_slot: HashMap<RefSlot, ObjectId>,
+    many: Vec<ObjectId>,
+    nested: HashMap<String, HashMap<String, ObjectId>>,
+    one: ObjectId,
+    pair: (ObjectId, String),
+}
+
+// A tuple struct's lone element is a slot, not a field.
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct OidSlot(ObjectId);
+
 // Basic struct with real ObjectId
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -268,32 +288,22 @@ fn test_enum_keyed_objectid_map_json_schema() {
         "in: {by_slot}"
     );
     for member in members {
-        let value = &by_slot["properties"][&member];
-        assert_eq!(value["type"], "object", "member {member} in: {by_slot}");
         assert_eq!(
-            value["properties"]["$oid"]["type"], "string",
-            "member {member} in: {by_slot}"
-        );
-        assert_eq!(
-            value["required"][0], "$oid",
+            by_slot["properties"][&member],
+            unified_oid_object(),
             "member {member} in: {by_slot}"
         );
     }
 }
 
-/// The member schema a nested map carries is the value type's own — for an `ObjectId` the closed
-/// `$oid` object, at whatever depth the map nests.
+/// The member schema a nested map carries is the value type's own — for an `ObjectId` the one
+/// `$oid` object every position spells, at whatever depth the map nests.
 #[test]
 #[cfg(all(feature = "object_id", feature = "jsonschema"))]
 fn test_nested_objectid_map_json_schema() {
     let schema = NestedRefMaps::json_schema();
     let properties = schema["properties"].as_object().unwrap();
-    let oid_member = serde_json::json!({
-        "type": "object",
-        "properties": { "$oid": { "type": "string" } },
-        "required": ["$oid"],
-        "additionalProperties": false
-    });
+    let oid_member = unified_oid_object();
 
     for (field_name, expected_value_schema) in [
         (
@@ -319,6 +329,124 @@ fn test_nested_objectid_map_json_schema() {
         assert_eq!(
             field["additionalProperties"], expected_value_schema,
             "in: {field}"
+        );
+    }
+}
+
+/// The one `$oid` object every position spells: closed, because that is the object serde writes and
+/// every other object this crate emits is closed, and carrying the hex pattern, because that is what
+/// the string inside it always holds.
+#[cfg(all(feature = "object_id", feature = "jsonschema"))]
+fn unified_oid_object() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": { "$oid": { "type": "string", "pattern": r"^[a-f\d]{24}$" } },
+        "required": ["$oid"],
+        "additionalProperties": false
+    })
+}
+
+/// An `ObjectId` describes the same wherever it is written — a field, an array item, a tuple
+/// element, a tuple struct's own slot, and a map member on either key path all read one builder, so
+/// no position can spell the `$oid` object its own way.
+#[test]
+#[cfg(all(feature = "object_id", feature = "jsonschema"))]
+fn every_position_spells_the_same_oid_object() {
+    let unified = unified_oid_object();
+    let schema = EveryOidPosition::json_schema();
+    let properties = &schema["properties"];
+
+    for (position, spelled) in [
+        ("field", &properties["one"]),
+        ("array item", &properties["many"]["items"]),
+        ("tuple element", &properties["pair"]["prefixItems"][0]),
+        (
+            "String-keyed map member",
+            &properties["by_name"]["additionalProperties"],
+        ),
+        (
+            "enum-keyed map member",
+            &properties["by_slot"]["properties"]["Author"],
+        ),
+        (
+            "nested map member",
+            &properties["nested"]["additionalProperties"]["additionalProperties"],
+        ),
+    ] {
+        assert_eq!(*spelled, unified, "{position} in: {schema}");
+    }
+
+    assert_eq!(OidSlot::json_schema(), unified);
+}
+
+/// Every object carrying a `$oid` member anywhere in `value`, at any depth.
+#[cfg(all(feature = "object_id", feature = "jsonschema"))]
+fn collect_oid_objects(value: &serde_json::Value, found: &mut Vec<serde_json::Value>) {
+    match value {
+        serde_json::Value::Object(members) => {
+            if members.contains_key("$oid") {
+                found.push(value.clone());
+            }
+            for member in members.values() {
+                collect_oid_objects(member, found);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_oid_objects(item, found);
+            }
+        }
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {}
+    }
+}
+
+/// The closure and the pattern are only true information if serde never writes anything else: every
+/// `$oid` object it writes, in every position, holds that one member and a hex the pattern matches.
+#[test]
+#[cfg(all(feature = "object_id", feature = "jsonschema"))]
+fn every_serde_written_oid_payload_satisfies_the_unified_spelling() {
+    let unified = unified_oid_object();
+    let hex_pattern =
+        regex::Regex::new(unified["properties"]["$oid"]["pattern"].as_str().unwrap()).unwrap();
+
+    let mut written = Vec::new();
+    for _ in 0_u32..64_u32 {
+        let payload = EveryOidPosition {
+            by_name: HashMap::from([("a".to_owned(), ObjectId::new())]),
+            by_slot: HashMap::from([
+                (RefSlot::Author, ObjectId::new()),
+                (RefSlot::Reviewer, ObjectId::new()),
+            ]),
+            many: vec![ObjectId::new(), ObjectId::new()],
+            nested: HashMap::from([(
+                "group".to_owned(),
+                HashMap::from([("a".to_owned(), ObjectId::new())]),
+            )]),
+            one: ObjectId::new(),
+            pair: (ObjectId::new(), "x".to_owned()),
+        };
+        collect_oid_objects(&serde_json::to_value(&payload).unwrap(), &mut written);
+        collect_oid_objects(
+            &serde_json::to_value(OidSlot(ObjectId::new())).unwrap(),
+            &mut written,
+        );
+    }
+    assert!(!written.is_empty());
+
+    for oid_object in written {
+        let members = oid_object.as_object().unwrap();
+        assert_eq!(
+            members.keys().collect::<Vec<_>>(),
+            vec!["$oid"],
+            "a closed schema admits no other member: {oid_object}"
+        );
+        let hex = members["$oid"].as_str().unwrap();
+        assert!(
+            hex_pattern.is_match(hex),
+            "the pattern rejects a hex serde wrote: {hex}"
         );
     }
 }
