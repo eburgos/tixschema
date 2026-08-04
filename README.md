@@ -133,6 +133,7 @@ pub struct UserWithCollections {
     pub tags: Vec<String>,
     pub scores: Vec<u32>,
     pub metadata: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<HashMap<String, String>>,
 }
 ```
@@ -808,7 +809,6 @@ const buildWrapper$Schema = <IdType extends ZodType>(
   children: z.array(idType),
   id: idType,
   name: z.string(),
-
 });
 
 type Wrapper$SchemaOf<IdType extends ZodType> = ReturnType<
@@ -1518,6 +1518,7 @@ This is a TypeScript-only knob -- the Zod schema and JSON Schema are unchanged (
 pub struct Profile {
     pub name: String,
     #[model_schema_prop(ts_optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nickname: Option<String>,
 }
 ```
@@ -1632,6 +1633,7 @@ pub struct Document {
     pub author_id: ObjectId,
     pub tags: Vec<ObjectId>,
     pub metadata: HashMap<String, ObjectId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<ObjectId>,
     pub related_docs: HashMap<String, Vec<ObjectId>>,
 }
@@ -1646,7 +1648,7 @@ export type Document = {
   author_id: ObjectId;
   tags: Array<ObjectId>;
   metadata: Partial<Record<string, ObjectId>>;
-  parent_id: ObjectId | undefined;
+  parent_id?: ObjectId;
   related_docs: Partial<Record<string, Array<ObjectId>>>;
 };
 
@@ -1721,6 +1723,7 @@ pub struct Event {
     pub created_at: DateTime<Utc>,
     #[model_schema_prop(as_number)]
     pub epoch_ms: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<DateTime<Utc>>,
 }
 ```
@@ -1735,7 +1738,7 @@ export type Event = {
   local_datetime: string;
   created_at: Date;
   epoch_ms: number;
-  updated_at: Date | undefined;
+  updated_at?: Date;
 };
 ```
 

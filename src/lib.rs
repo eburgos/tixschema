@@ -87,36 +87,33 @@ use proc_macro::TokenStream;
  *     "roles"
  *   ]
  * }
- **/
-
-
+ */
 export type User = {
   /**
- * age
- * 
-**/
+   * age
+   * 
+   */
   age?: number;
   /**
- * firstName
- * 
-**/
+   * firstName
+   * 
+   */
   firstName: string;
   /**
- * id
- * 
-**/
+   * id
+   * 
+   */
   id: string;
   /**
- * lastName
- * 
-**/
+   * lastName
+   * 
+   */
   lastName: string;
   /**
- * roles
- * 
-**/
+   * roles
+   * 
+   */
   roles: Array<string>;
-
 };
 ```"#]
 ///
@@ -129,7 +126,6 @@ const User$RawSchema = z.strictObject({
   id: z.string(),
   lastName: z.string(),
   roles: z.array(z.string()),
-
 });
 
 export const User$Schema: ZodType<User> = User$RawSchema;
@@ -167,7 +163,7 @@ export const User$Schema: ZodType<User> = User$RawSchema;
  *     "pending"
  *   ]
  * }
- **/
+ */
 export type Status =
   | "active"
   | "inactive"
@@ -258,36 +254,38 @@ export const Status$Schema: ZodType<Status> = Status$RawSchema;
  *     }
  *   ]
  * }
- **/
-export type Event = {  /**
- * userCreated
- * 
-**/
+ */
+export type Event = {
+  /**
+   * userCreated
+   * 
+   */
   type: "userCreated";
   /**
- * timestamp
- * 
-**/
+   * timestamp
+   * 
+   */
   timestamp: string;
   /**
- * userId
- * 
-**/
+   * userId
+   * 
+   */
   userId: string;
-} | {  /**
- * userDeleted
- * 
-**/
+} | {
+  /**
+   * userDeleted
+   * 
+   */
   type: "userDeleted";
   /**
- * reason
- * 
-**/
+   * reason
+   * 
+   */
   reason?: string;
   /**
- * userId
- * 
-**/
+   * userId
+   * 
+   */
   userId: string;
 };
 ```"#]
@@ -431,41 +429,38 @@ pub struct Document {
  *     "title"
  *   ]
  * }
- **/
-
-
+ */
 export type Document = {
   /**
- * author_id
- * 
-**/
+   * author_id
+   * 
+   */
   author_id: ObjectId;
   /**
- * id
- * 
-**/
+   * id
+   * 
+   */
   id: ObjectId;
   /**
- * metadata
- * 
-**/
+   * metadata
+   * 
+   */
   metadata: Partial<Record<string, ObjectId>>;
   /**
- * parent_id
- * 
-**/
+   * parent_id
+   * 
+   */
   parent_id?: ObjectId;
   /**
- * tags
- * 
-**/
+   * tags
+   * 
+   */
   tags: Array<ObjectId>;
   /**
- * title
- * 
-**/
+   * title
+   * 
+   */
   title: string;
-
 };
 ```
 
@@ -479,7 +474,6 @@ const Document$RawSchema = z.strictObject({
   parent_id: z.union([z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) }), z.undefined()]).prefault(undefined),
   tags: z.array(z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) })),
   title: z.string(),
-
 });
 
 export const Document$Schema: ZodType<Document> = Document$RawSchema;

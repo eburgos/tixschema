@@ -20,8 +20,8 @@
 #[cfg(feature = "typescript")]
 mod typescript {
     use super::{
-        Adjacent, External, Holder, Internal, KeyedByParameter, LifetimeStruct, Pair, PlainConst,
-        Positional, Untagged, Wrapper,
+        Adjacent, External, FolderTree, Holder, Internal, KeyedByParameter, LifetimeStruct, Pair,
+        PlainConst, Positional, Untagged, WireFolder, Wrapper,
     };
 
     /// TypeScript is a type surface and the declaration binds the parameter for real, so the key
@@ -77,14 +77,9 @@ mod typescript {
             ts.contains("  by_key: Partial<Record<string, ValueType>>;"),
             "Got: {ts}"
         );
-        // The omission attribute is serde's, so only a serde build reads it and writes the key
-        // optional; without serde the value stays the undefined-flavored member.
-        let maybe = if cfg!(feature = "serde") {
-            "  maybe?: ValueType;"
-        } else {
-            "  maybe: ValueType | undefined;"
-        };
-        assert!(ts.contains(maybe), "Got: {ts}");
+        // serde drops the key for a `None`, which every build reads off the attribute on the
+        // field.
+        assert!(ts.contains("  maybe?: ValueType;"), "Got: {ts}");
         assert!(ts.contains("  tuple: [KeyType, ValueType];"), "Got: {ts}");
     }
 
@@ -155,6 +150,32 @@ mod typescript {
         assert!(ts.contains("  label: string;"), "Got: {ts}");
     }
 
+    /// A reference is a type name on this surface whatever it carries, because a TypeScript
+    /// generic is written and not called. Only the validating surface has a factory to reach.
+    #[test]
+    fn a_reference_carrying_arguments_is_still_written_as_a_type_name() {
+        let concrete = WireFolder::ts_definition();
+        assert!(
+            concrete.contains("  doc: EcmDocument<string, number>;"),
+            "Got: {concrete}"
+        );
+        assert!(concrete.contains("  plain: Envelope;"), "Got: {concrete}");
+
+        let forwarded = FolderTree::<String>::ts_definition();
+        for member in [
+            "  labels: Array<string>;",
+            "  many: Array<EcmDocument<IdType, number>>;",
+            "  nested: Outer<Inner<string>>;",
+            "  root: EcmDocument<IdType, number>;",
+        ] {
+            assert!(
+                forwarded.contains(member),
+                "Missing {member:?}: {forwarded}"
+            );
+        }
+        assert!(!forwarded.contains("$SchemaFactory"), "Got: {forwarded}");
+    }
+
     /// The line an item publishes under its own Rust ident is written after the declaration it
     /// refers to, and repeats the parameter list on both sides — a generic type named bare on
     /// either would be a TypeScript error of its own.
@@ -172,9 +193,12 @@ mod typescript {
 
 #[cfg(feature = "zod")]
 mod zod {
+    #[cfg(all(feature = "chrono", feature = "object_id"))]
+    use super::MixedArguments;
     use super::{
-        Adjacent, Carried, Envelope, External, Holder, Internal, KeyedByParameter, LifetimeStruct,
-        Pair, PlainConst, Positional, Quintet, Tagged, Untagged, Wrapper,
+        Adjacent, Carried, Envelope, External, FolderTree, Holder, Internal, KeyedByParameter,
+        LifetimeStruct, Pair, PlainConst, Positional, Quintet, Referrer, Tagged, Untagged,
+        WireFolder, Wrapper,
     };
 
     /// A record key has to produce string keys, and serde says every instantiation this map has
@@ -521,6 +545,83 @@ mod zod {
         assert!(!brand.contains("$SchemaFactory"), "Got: {brand}");
     }
 
+    /// A field naming a generic type has no schema to name — the type publishes a factory — so it
+    /// calls that factory with what fills each parameter, and the plain sibling beside it still
+    /// names the one schema its own type publishes.
+    #[test]
+    fn a_reference_carrying_arguments_calls_the_factory() {
+        let zod = WireFolder::zod_schema();
+        assert!(
+            zod.contains("doc: EcmDocument$SchemaFactory(z.string(), z.number()),"),
+            "Got: {zod}"
+        );
+        assert!(zod.contains("plain: Envelope$Schema,"), "Got: {zod}");
+    }
+
+    /// A forwarded parameter and a concrete type reach the call the same way: the parameter is the
+    /// argument the enclosing factory binds, so there is no forwarding rule of its own.
+    #[test]
+    fn a_forwarded_parameter_is_an_argument_like_any_other() {
+        let zod = FolderTree::<String>::zod_schema();
+        assert!(
+            zod.contains("root: EcmDocument$SchemaFactory(idType, z.number()),"),
+            "Got: {zod}"
+        );
+    }
+
+    /// An argument is rendered by the renderer that renders the reference, so an argument that is
+    /// itself a reference composes at whatever depth it is written at.
+    #[test]
+    fn an_argument_that_is_itself_generic_nests() {
+        let zod = FolderTree::<String>::zod_schema();
+        assert!(
+            zod.contains("nested: Outer$SchemaFactory(Inner$SchemaFactory(z.string())),"),
+            "Got: {zod}"
+        );
+    }
+
+    /// A set is a name carrying one argument, which is the shape a reference to a generic type is
+    /// written in too — so the collection reading has to keep coming first, and the array it
+    /// writes has to keep carrying whatever its element renders as.
+    #[test]
+    fn a_set_is_still_read_as_the_collection_it_is() {
+        let zod = FolderTree::<String>::zod_schema();
+        assert!(zod.contains("labels: z.array(z.string()),"), "Got: {zod}");
+        assert!(
+            zod.contains("many: z.array(EcmDocument$SchemaFactory(idType, z.number())),"),
+            "Got: {zod}"
+        );
+        assert!(!zod.contains("HashSet$SchemaFactory"), "Got: {zod}");
+    }
+
+    /// Every argument reaches the call through whatever already answers for its type, so a date,
+    /// a database identifier and a number are each written exactly as they are written anywhere
+    /// else and none of the three is reached by a rule of its own.
+    #[cfg(all(feature = "chrono", feature = "object_id"))]
+    #[test]
+    fn an_argument_renders_through_the_renderer_that_already_answers_for_it() {
+        let zod = MixedArguments::zod_schema();
+        for call in [
+            "keyed: Inner$SchemaFactory(z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { \
+             message: \"Invalid ObjectId\" }) })),",
+            "sized: Inner$SchemaFactory(z.number().int()),",
+            "stamped: Inner$SchemaFactory(z.coerce.date()),",
+        ] {
+            assert!(zod.contains(call), "Missing {call:?} in: {zod}");
+        }
+    }
+
+    /// A reference names what the type it names publishes. An alias and a branded newtype publish
+    /// a `const` whatever they were written with, so a field supplying either an argument still
+    /// names that `const` rather than calling a factory neither declares.
+    #[test]
+    fn a_reference_to_a_type_publishing_a_const_still_names_it() {
+        let zod = Referrer::zod_schema();
+        assert!(zod.contains("boxed: Boxed$Schema,"), "Got: {zod}");
+        assert!(zod.contains("tagged: Tagged$Schema,"), "Got: {zod}");
+        assert!(!zod.contains("$SchemaFactory("), "Got: {zod}");
+    }
+
     /// The one helper every factory builds its cache with, and the only assertion in the output.
     #[cfg(feature = "typescript")]
     #[test]
@@ -632,8 +733,12 @@ use alloc::borrow::Cow;
     feature = "jsonschema"
 ))]
 use core::hash::Hash;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+#[cfg(all(feature = "chrono", feature = "object_id"))]
+use chrono::{DateTime, Utc};
+#[cfg(all(feature = "chrono", feature = "object_id"))]
+use mongodb::bson::oid::ObjectId;
 use serde::{Deserialize, Serialize};
 use tixschema::model_schema;
 
@@ -793,6 +898,70 @@ fn a_parameter_with_no_default_still_expands_where_no_json_document_is_built() {
     assert_eq!(Undefaulted { id: 1_u32 }.id, 1);
 }
 
+/// The item the reference-site fixtures below point at. A generic type publishes a factory rather
+/// than a schema, so a field naming it has nothing to name — it has to call that factory with what
+/// fills each parameter.
+#[model_schema(default_types(IdType = String, DateType = String))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EcmDocument<IdType, DateType> {
+    pub created_at: DateType,
+    pub document_id: IdType,
+}
+
+/// The inner half of a reference whose own argument is generic.
+#[model_schema(default_types(ValueType = String))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Inner<ValueType> {
+    pub value: ValueType,
+}
+
+#[model_schema(default_types(ValueType = String))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Outer<ValueType> {
+    pub held: ValueType,
+}
+
+/// A referrer that declares no parameter of its own: every argument it supplies is a concrete
+/// type, and the plain sibling beside them still names the one schema that one publishes.
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireFolder {
+    pub doc: EcmDocument<String, f64>,
+    pub plain: Envelope,
+}
+
+/// A referrer that forwards its own parameter into a reference beside a concrete argument, holds a
+/// reference whose argument is itself generic, and names a set — the shape a sibling carrying one
+/// argument could be mistaken for.
+#[model_schema(default_types(IdType = String))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FolderTree<IdType> {
+    pub labels: HashSet<String>,
+    pub many: Vec<EcmDocument<IdType, f64>>,
+    pub nested: Outer<Inner<String>>,
+    pub root: EcmDocument<IdType, f64>,
+}
+
+/// A date, a database identifier and a number in argument position. Each is rendered by whatever
+/// already answers for it everywhere else, so none of the three is reached by a rule of its own.
+#[cfg(all(feature = "chrono", feature = "object_id"))]
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MixedArguments {
+    pub keyed: Inner<ObjectId>,
+    pub sized: Inner<u32>,
+    pub stamped: Inner<DateTime<Utc>>,
+}
+
+/// The two surfaces that publish a `const` whatever they were written with, named from a field
+/// that supplies each of them an argument.
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Referrer {
+    pub boxed: Boxed<u32>,
+    pub tagged: Tagged<String>,
+}
+
 /// The pair the attribute used to produce on any generic item: `E0107` on the emitted `impl`,
 /// which dropped the parameters the declaration binds, and `E0433` on a module named after a
 /// parameter, which names no type and so publishes none. Both are compile errors, so the suite
@@ -852,6 +1021,66 @@ fn a_generic_item_expands_to_rust_that_compiles() {
     assert_eq!(quintet.charlie, 3);
     assert_eq!(quintet.delta, "d");
     assert_eq!(quintet.echo, 5);
+}
+
+/// The reference-site shapes, each named by a value: a concrete filling, a forwarded parameter, an
+/// argument that is itself generic, and an argument supplied to a type that publishes a `const`.
+#[test]
+fn a_reference_carrying_arguments_expands_to_rust_that_compiles() {
+    let document = |id: &str| EcmDocument {
+        created_at: 1.0_f64,
+        document_id: id.to_owned(),
+    };
+
+    let folder = WireFolder {
+        doc: document("d"),
+        plain: Envelope {
+            trace: "t".to_owned(),
+        },
+    };
+    assert!(folder.doc.created_at > 0.0_f64);
+    assert_eq!(folder.doc.document_id, "d");
+    assert_eq!(folder.plain.trace, "t");
+
+    let tree = FolderTree {
+        labels: HashSet::from(["l".to_owned()]),
+        many: vec![document("m")],
+        nested: Outer {
+            held: Inner {
+                value: "v".to_owned(),
+            },
+        },
+        root: document("r"),
+    };
+    assert_eq!(tree.labels.len(), 1);
+    assert_eq!(tree.many[0].document_id, "m");
+    assert_eq!(tree.nested.held.value, "v");
+    assert_eq!(tree.root.document_id, "r");
+
+    let referrer = Referrer {
+        boxed: vec![1_u32],
+        tagged: Tagged("t".to_owned()),
+    };
+    assert_eq!(referrer.boxed.len(), 1);
+    assert_eq!(referrer.tagged.0, "t");
+}
+
+/// The two argument kinds no build reaches without their own feature, named the same way.
+#[cfg(all(feature = "chrono", feature = "object_id"))]
+#[test]
+fn a_dated_and_an_identified_argument_expand_to_rust_that_compiles() {
+    let mixed = MixedArguments {
+        keyed: Inner {
+            value: ObjectId::new(),
+        },
+        sized: Inner { value: 1_u32 },
+        stamped: Inner {
+            value: DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+        },
+    };
+    assert_eq!(mixed.sized.value, 1);
+    assert_eq!(mixed.stamped.value.timestamp(), 0);
+    assert!(!mixed.keyed.value.to_hex().is_empty());
 }
 
 /// The enum half of the same question, in every shape the tagging attributes reach — plus the one

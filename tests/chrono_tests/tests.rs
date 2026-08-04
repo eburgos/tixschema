@@ -314,13 +314,8 @@ fn test_datetime_local_typescript() {
 #[cfg(feature = "typescript")]
 fn test_optional_datetime_typescript() {
     let ts = OptionalTimestamp::ts_definition();
-    // The omission attribute is serde's, so only a serde build reads it and writes the key
-    // optional; without serde the value stays the undefined-flavored member.
-    let expected = if cfg!(feature = "serde") {
-        "updated_at?: Date;"
-    } else {
-        "updated_at: Date | undefined;"
-    };
+    // serde drops the key for a `None`, which every build reads off the attribute on the field.
+    let expected = "updated_at?: Date;";
     assert!(
         ts.contains(expected),
         "Option<DateTime<Utc>> should map to {expected}. Got: {ts}"

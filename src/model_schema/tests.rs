@@ -7,11 +7,11 @@ use super::{
 #[cfg(feature = "serde")]
 use super::{
     ConstraintLeaf, MemberAccess, ModelSchemaPropMeta, build_field_validation,
-    cfg_attr_guard_error, check_optional_field_serialization, collect_untagged_members,
-    constrained_shape, enum_cfg_attr_guard_errors, generate_field_validation,
-    generate_numeric_validation_code, generate_string_validation_code, helper_name_stem,
-    internally_tagged_guard_errors, needs_injected_default, parse_serde_field_attributes,
-    parse_serde_type_attributes,
+    cfg_attr_guard_error, check_omitted_key_is_readable, check_optional_field_serialization,
+    collect_untagged_members, constrained_shape, enum_cfg_attr_guard_errors,
+    generate_field_validation, generate_numeric_validation_code, generate_string_validation_code,
+    has_serde_default, helper_name_stem, internally_tagged_guard_errors, needs_injected_default,
+    parse_serde_field_attributes, parse_serde_type_attributes,
 };
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -130,8 +130,25 @@ fn guard_result(item: &syn::ItemStruct) -> Result<(), syn::Error> {
         .map(ToString::to_string)
         .unwrap_or_default();
     let field_def = get_field_def(&field_name, &field.ty, "");
-    let meta = parse_serde_field_attributes(&field.attrs);
-    check_optional_field_serialization(field, field_def.is_optional(), &meta)
+    check_optional_field_serialization(field, field_def.is_optional())
+}
+
+/// Runs the omitted-key readability guard over the sole field of `item`, with the container's own
+/// `default` read off the item the way the generator reads it.
+#[cfg(feature = "serde")]
+fn omitted_key_guard_result(item: &syn::ItemStruct) -> Result<(), syn::Error> {
+    let field = item.fields.iter().next().unwrap();
+    let field_name = field
+        .ident
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    let field_def = get_field_def(&field_name, &field.ty, "");
+    check_omitted_key_is_readable(
+        field,
+        field_def.is_optional(),
+        has_serde_default(&item.attrs),
+    )
 }
 
 #[cfg(feature = "serde")]
@@ -145,6 +162,65 @@ fn bare_option_field_is_rejected() {
     let message = guard_result(&item).unwrap_err().to_string();
     assert!(message.contains("note"));
     assert!(message.contains("skip_serializing_if = \"Option::is_none\""));
+}
+
+/// Read off serde itself: a `Vec` behind a `skip_serializing_if` and nothing else serializes to
+/// `{"id":"1"}` and then fails to deserialize that payload, reporting the field as missing. The
+/// surfaces now admit the absent key, so the spelling that writes a payload it cannot read back is
+/// refused rather than described.
+#[cfg(feature = "serde")]
+#[test]
+fn a_non_option_omitted_key_with_no_default_is_rejected() {
+    for spelling in [
+        "skip_serializing_if = \"Vec::is_empty\"",
+        "skip_serializing",
+    ] {
+        let item: syn::ItemStruct = syn::parse_str(&format!(
+            "struct Report {{ #[serde({spelling})] roles: Vec<String> }}"
+        ))
+        .unwrap();
+        let message = omitted_key_guard_result(&item).unwrap_err().to_string();
+        assert!(message.contains("roles"), "{spelling}: {message}");
+        assert!(message.contains("default"), "{spelling}: {message}");
+    }
+}
+
+/// Every spelling serde can already read a missing key back from. Each is left alone, because the
+/// guard's subject is a payload with no reader — not an omitted key as such.
+#[cfg(feature = "serde")]
+#[test]
+fn an_omitted_key_serde_can_read_back_is_left_alone() {
+    for item_source in [
+        // `default` on the field writes the value the missing key does not carry.
+        "struct Report { #[serde(default, skip_serializing_if = \"Vec::is_empty\")] roles: Vec<String> }",
+        "struct Report { #[serde(default = \"mk\", skip_serializing_if = \"Vec::is_empty\")] roles: Vec<String> }",
+        // A bare `skip` stops serde reading the field at all, so it supplies `Default` itself.
+        "struct Report { #[serde(skip)] roles: Vec<String> }",
+        // serde reads a missing `Option` field back as `None` with no `default` written.
+        "struct Report { #[serde(skip_serializing_if = \"Option::is_none\")] note: Option<String> }",
+        // A `default` on the container answers for every field under it.
+        "#[serde(default)] struct Report { #[serde(skip_serializing_if = \"Vec::is_empty\")] roles: Vec<String> }",
+        // No omission at all.
+        "struct Report { roles: Vec<String> }",
+    ] {
+        let item: syn::ItemStruct = syn::parse_str(item_source).unwrap();
+        let refusal = omitted_key_guard_result(&item)
+            .err()
+            .map(|err| err.to_string());
+        assert_eq!(refusal, None, "for: {item_source}");
+    }
+}
+
+/// A positional slot has no key to drop — it is written by its place in the tuple — so the guard
+/// has no subject there whatever the attribute says.
+#[cfg(feature = "serde")]
+#[test]
+fn a_positional_slot_is_not_subject_to_the_omitted_key_guard() {
+    let item: syn::ItemStruct = syn::parse_str(
+        "struct Report(#[serde(skip_serializing_if = \"Vec::is_empty\")] Vec<String>);",
+    )
+    .unwrap();
+    omitted_key_guard_result(&item).unwrap();
 }
 
 /// The single-field `Report` written with `notes` at the given spelling.
@@ -1574,6 +1650,7 @@ fn a_refused_pattern_leaves_no_hook_naming_the_dropped_module() {
         Some("probe_caret_schema"),
         "ProbeCaret",
         &syn::Generics::default(),
+        false,
     )
     .4;
     assert_eq!(errors.len(), 1, "got: {errors:?}");
@@ -1661,6 +1738,7 @@ fn a_field_that_clears_the_guards_carries_the_hook_it_earned() {
         Some("report_schema"),
         "Report",
         &syn::Generics::default(),
+        false,
     )
     .4;
     assert!(errors.is_empty(), "got: {errors:?}");
@@ -5211,7 +5289,7 @@ fn wrapped_u32_value(wrapper: &str) -> super::FieldDef {
         model_schema_prop_meta: None,
         nullable_levels: Vec::new(),
         name: "items".to_owned(),
-        omits_none: false,
+        omits_value: false,
         type_span: proc_macro2::Span::call_site(),
     }
 }

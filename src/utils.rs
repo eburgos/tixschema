@@ -172,6 +172,11 @@ pub struct AliasInfo {
     pub kind: AliasKind,
     #[cfg(feature = "jsonschema")]
     pub module_name: String,
+    /// Whether the Zod binding published under this name is a factory rather than a `const`, which
+    /// is what a reference to the name has to know to write itself. Filled by
+    /// [`record_zod_factory`] as the item decides which of the two it publishes.
+    #[cfg(feature = "zod")]
+    pub publishes_zod_factory: bool,
     /// What the value surface written under this name is, in the vocabulary a constrained brand's
     /// refusal names shapes by — and `None` both when that surface is one string checks land on and
     /// when nothing has been recorded at all. Filled by [`record_value_shape`] as each item
@@ -545,6 +550,8 @@ pub fn register_alias_info(
                 kind,
                 #[cfg(feature = "jsonschema")]
                 module_name: module_name.to_owned(),
+                #[cfg(feature = "zod")]
+                publishes_zod_factory: false,
                 value_shape: None,
                 #[cfg(feature = "zod")]
                 zod_union_members: Vec::new(),
@@ -601,6 +608,26 @@ pub fn record_zod_union_members(rust_ident: &str, members: &[ZodUnionMember]) {
     ALIAS_INFO.with(|map| {
         if let Some(info) = map.borrow_mut().get_mut(rust_ident) {
             info.zod_union_members = members.to_vec();
+        }
+    });
+}
+
+/// Records which of the two Zod bindings a name publishes, on the entry that name has already
+/// registered.
+///
+/// A reference cannot read it off the spelling it was written in. `Held<String>` says a type named
+/// `Held` takes one argument and nothing about what `Held` published for it: a generic struct or
+/// enum publishes a factory that has to be called, while an alias and a branded newtype publish the
+/// one `const` they have whatever they were declared with. So each item answers for itself as it
+/// decides, and a reference reads the answer back rather than guessing from its own arguments.
+///
+/// A name not registered before the reference reading it leaves no answer at all, which is the same
+/// regime the export name already runs under — see [`ident_schema_module_name`].
+#[cfg(feature = "zod")]
+pub fn record_zod_factory(rust_ident: &str, publishes: bool) {
+    ALIAS_INFO.with(|map| {
+        if let Some(info) = map.borrow_mut().get_mut(rust_ident) {
+            info.publishes_zod_factory = publishes;
         }
     });
 }

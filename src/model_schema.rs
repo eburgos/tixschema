@@ -33,7 +33,9 @@ use crate::utils::type_parameters_in_scope;
 use core::iter::once;
 
 #[cfg(feature = "zod")]
-use crate::utils::{escape_js_regex_literal, extract_example_from_docs, zod_factory_argument};
+use crate::utils::{
+    escape_js_regex_literal, extract_example_from_docs, record_zod_factory, zod_factory_argument,
+};
 
 #[cfg(all(feature = "zod", feature = "object_id"))]
 use crate::features::object_id::get_object_id_zod_schema_with;
@@ -53,7 +55,8 @@ use crate::utils::{
 use crate::utils::{TrivialPattern, trivial_pattern};
 
 #[cfg(feature = "serde")]
-use crate::features::serde::{SerdeFieldMeta, SerdeTypeMeta, has_serde_default};
+use crate::features::serde::{SerdeFieldMeta, SerdeTypeMeta};
+use crate::features::serde::{has_serde_default, parse_serde_key_omission};
 
 #[cfg(feature = "serde")]
 use crate::field_type::{parse_serde_field_attributes, parse_serde_type_attributes};
@@ -163,6 +166,10 @@ const TYPESCRIPT_PREAMBLE: &str = "const createSchemaCache = <Cache extends obje
 /// JavaScript, which declares no types and so has nothing to assert.
 #[cfg(all(feature = "zod", not(feature = "typescript")))]
 const TYPESCRIPT_PREAMBLE: &str = "const createSchemaCache = () => new WeakMap();";
+
+/// The indent every member of an emitted object is written at, and so the indent its `JSDoc` block
+/// is written at.
+const MEMBER_INDENT: &str = "  ";
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 const WRITTEN_AS_ARRAY: &str = "a JSON array";
@@ -531,6 +538,20 @@ struct MergedOperand {
     members: Vec<ZodUnionMember>,
     optional: bool,
     spelling: String,
+}
+
+/// What the item around a field says about it: everything [`process_field`] needs that is not the
+/// field itself, bundled so the walk hands one context down instead of six loose parameters.
+struct FieldContext<'ctx> {
+    /// Whether the container carries `#[serde(default)]`, which supplies a value for every field
+    /// under it whose key the payload leaves out.
+    container_defaulted: bool,
+    rename_all: Option<&'ctx str>,
+    schema_module_name: Option<&'ctx str>,
+    type_name: &'ctx str,
+    type_parameters: &'ctx [String],
+    /// The variant this field belongs to, or `None` for a struct's own field.
+    variant_ident: Option<&'ctx str>,
 }
 
 /// Mutable output buffers shared by the discriminated-enum variant writers. Bundled so each writer
@@ -1081,7 +1102,11 @@ fn build_struct_delegate_items(
     #[cfg(feature = "zod")]
     let has_example = schema_example_method.is_some();
     #[cfg(feature = "zod")]
-    let reexport = ident_reexport_zod(rust_ident, item_name, zod_binding_suffix(parameters));
+    let reexport = ident_reexport_zod(
+        rust_ident,
+        item_name,
+        zod_binding_suffix(rust_ident, parameters),
+    );
     #[cfg(not(feature = "zod"))]
     let _: &_ = &(item_name, rust_ident, parameters);
     #[cfg(not(feature = "zod"))]
@@ -2279,6 +2304,7 @@ fn collect_struct_fields(
     module_name_opt: Option<&str>,
     type_name: &str,
     generics: &syn::Generics,
+    container_defaulted: bool,
 ) -> StructFieldData {
     let type_parameters = type_parameters_in_scope(generics);
     let mut field_defs = Vec::new();
@@ -2309,12 +2335,15 @@ fn collect_struct_fields(
         }
 
         let (f_def, validation_fn, validate_body, field_guard_errors) = process_field(
-            rename_all,
+            &FieldContext {
+                container_defaulted,
+                rename_all,
+                schema_module_name: module_name_opt,
+                type_name,
+                type_parameters: &type_parameters,
+                variant_ident: None,
+            },
             field,
-            module_name_opt,
-            None,
-            type_name,
-            &type_parameters,
             &mut deferred_attrs,
         );
 
@@ -2442,6 +2471,17 @@ fn struct_cfg_attr_guard_output(
         &[cfg_attr_guard_error(rejection?, &format!("type `{ident}`"))],
     )
 }
+/// The struct's own `rename_all`, or the `cfg_attr` refusal that pre-empts reading anything.
+#[cfg(feature = "serde")]
+fn struct_rename_all(item_struct: &syn::ItemStruct) -> Result<Option<String>, TokenStream> {
+    let serde_type_meta = parse_serde_type_attributes(&item_struct.attrs);
+    if let Some(output) =
+        struct_cfg_attr_guard_output(item_struct, serde_type_meta.cfg_attr_rejection.as_ref())
+    {
+        return Err(output);
+    }
+    Ok(serde_type_meta.rename_all)
+}
 
 fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> TokenStream {
     // Check if this is a branded newtype (transparent single-field tuple struct)
@@ -2457,19 +2497,16 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
     let rust_ident = name.to_string();
 
     #[cfg(feature = "serde")]
-    let serde_type_meta = parse_serde_type_attributes(&item_struct.attrs);
-
-    #[cfg(feature = "serde")]
-    if let Some(output) =
-        struct_cfg_attr_guard_output(&item_struct, serde_type_meta.cfg_attr_rejection.as_ref())
-    {
-        return output;
-    }
-
-    #[cfg(feature = "serde")]
-    let rename_all = serde_type_meta.rename_all;
+    let rename_all = match struct_rename_all(&item_struct) {
+        Ok(rename_all) => rename_all,
+        Err(output) => return output,
+    };
     #[cfg(not(feature = "serde"))]
     let rename_all: Option<String> = None;
+
+    // A `default` on the container answers a missing key for every field under it, which is one of
+    // the things that makes a dropped key readable.
+    let container_defaulted = has_serde_default(&item_struct.attrs);
 
     // A tuple struct's slots have no keys, so the named-field emitters below would render every
     // one of them under the empty ident it carries.
@@ -2504,6 +2541,7 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
         module_name_opt,
         &rust_ident,
         &item_struct.generics,
+        container_defaulted,
     );
     #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
     let _: &_ = &&collected;
@@ -2601,6 +2639,7 @@ fn collect_tuple_slots(
     module_name: &str,
     type_name: &str,
     generics: &syn::Generics,
+    container_defaulted: bool,
 ) -> (Vec<FieldDef>, Vec<proc_macro2::TokenStream>) {
     let type_parameters = type_parameters_in_scope(generics);
     let mut slots: Vec<FieldDef> = Vec::new();
@@ -2608,12 +2647,15 @@ fn collect_tuple_slots(
     let mut deferred_attrs: Vec<Vec<syn::Attribute>> = Vec::new();
     for field in fields.iter_mut() {
         let (slot, _, _, slot_guard_errors) = process_field(
-            rename_all,
+            &FieldContext {
+                container_defaulted,
+                rename_all,
+                schema_module_name: Some(module_name),
+                type_name,
+                type_parameters: &type_parameters,
+                variant_ident: None,
+            },
             field,
-            Some(module_name),
-            None,
-            type_name,
-            &type_parameters,
             &mut deferred_attrs,
         );
         guard_errors.extend(slot_guard_errors);
@@ -2690,8 +2732,10 @@ fn build_tuple_struct_ts_definition_method(
     ts_body: &str,
 ) -> proc_macro2::TokenStream {
     let reexport = ident_reexport_ts(rust_ident, item_name, ts_generics);
-    let type_str =
-        format!("/**\n{docs}\n **/\nexport type {item_name}{ts_generics} = {ts_body};{reexport}");
+    let type_str = format!(
+        "{}\nexport type {item_name}{ts_generics} = {ts_body};{reexport}",
+        jsdoc_block(docs, "")
+    );
     quote! {
         pub fn ts_definition() -> String {
             #type_str.to_owned()
@@ -2709,7 +2753,11 @@ fn build_tuple_struct_zod_schema_method(
     parameters: &[String],
     zod_body: &str,
 ) -> proc_macro2::TokenStream {
-    let reexport = ident_reexport_zod(rust_ident, item_name, zod_binding_suffix(parameters));
+    let reexport = ident_reexport_zod(
+        rust_ident,
+        item_name,
+        zod_binding_suffix(rust_ident, parameters),
+    );
     let schema_str = zod_published_binding(item_name, parameters, "", zod_body, &reexport);
     quote! {
         pub fn zod_schema() -> String {
@@ -2756,6 +2804,7 @@ fn process_tuple_struct(
         &module_name,
         &name.to_string(),
         &item_struct.generics,
+        has_serde_default(&item_struct.attrs),
     );
 
     // A violated slot guard makes the whole contract unsound, so the schema surface is dropped and
@@ -4169,6 +4218,29 @@ fn item_jsdoc_body(lines: &[String]) -> String {
         .join("\n")
 }
 
+/// The complete `JSDoc` block a body is written as, at the indent of whatever it documents: the
+/// opener, the body's own lines carried to that indent, and the `*/` that closes it.
+///
+/// Every surface splices this whole. Spelling the delimiters beside each member instead is what let
+/// a block open at its member's indent and continue at column 0, and let one writer close with a
+/// `**/` that closes nothing — a block comment already ended by the `*/` inside it, trailed by a
+/// stray `/`. The body arrives already prefixed with ` * ` per line, so the indent is all that is
+/// added and the text a block carries is untouched.
+fn jsdoc_block(body: &str, indent: &str) -> String {
+    let mut block = format!("{indent}/**\n");
+    for line in body.lines() {
+        let _ = writeln!(block, "{indent}{line}");
+    }
+    let _ = write!(block, "{indent} */");
+    block
+}
+
+/// The `JSDoc` block a member is written under: [`jsdoc_block`] at the one indent every emitted
+/// member sits at.
+fn member_jsdoc_block(body: &str) -> String {
+    jsdoc_block(body, MEMBER_INDENT)
+}
+
 /// The one-line description a set of lines is published as, escaped for the `description: "…"` it
 /// is spliced into.
 ///
@@ -4459,6 +4531,9 @@ fn collect_discriminated_variants(
         let final_name =
             get_final_variant_name(&variant_ident, field_rename.as_deref(), rename_all);
         let variant_kind = classify_variant(item);
+        // A struct variant is where serde accepts a container-level `default`, so it is the
+        // container its own fields' omissions are read against.
+        let variant_defaulted = has_serde_default(&item.attrs);
 
         let mut field_defs: Vec<FieldDef> = Vec::new();
         let mut bound: Vec<(proc_macro2::Ident, proc_macro2::Ident)> = Vec::new();
@@ -4466,12 +4541,15 @@ fn collect_discriminated_variants(
         let total_fields = item.fields.len();
         for field in &mut item.fields {
             let (f_def, validation_fn, validate_body, field_guard_errors) = process_field(
-                rename_all,
+                &FieldContext {
+                    container_defaulted: variant_defaulted,
+                    rename_all,
+                    schema_module_name: enum_module_name_opt,
+                    type_name: &enum_type_name,
+                    type_parameters: &type_parameters,
+                    variant_ident: Some(&variant_ident),
+                },
                 field,
-                enum_module_name_opt,
-                Some(&variant_ident),
-                &enum_type_name,
-                &type_parameters,
                 &mut deferred_attrs,
             );
             if let Some(vfn) = validation_fn {
@@ -4857,7 +4935,7 @@ fn render_external_variant(
         let json = quote! {};
 
         return (
-            format!("/**\n{docs}\n**/\n  \"{key}\""),
+            format!("{}\n  \"{key}\"", member_jsdoc_block(docs)),
             format!("z.literal(\"{key}\")"),
             json,
         );
@@ -4921,7 +4999,10 @@ fn render_external_variant(
     };
 
     (
-        format!("{{  /**\n{docs}\n**/\n  \"{key}\": {content_ts};\n}}"),
+        format!(
+            "{{\n{}\n  \"{key}\": {content_ts};\n}}",
+            member_jsdoc_block(docs)
+        ),
         zod,
         json,
     )
@@ -5653,12 +5734,12 @@ fn untagged_named_json_value(field_defs: &[FieldDef]) -> proc_macro2::TokenStrea
     let property_inserts = field_defs.iter().map(|fld| {
         let name_str = fld.name.clone();
         let value = field_json_schema_value(fld);
-        let required_insert = if fld.is_optional() {
-            quote! {}
-        } else {
+        let required_insert = if fld.key_is_required() {
             quote! {
                 required.push(serde_json::Value::String(#name_str.to_string()));
             }
+        } else {
+            quote! {}
         };
         quote! {
             properties.insert(#name_str.to_string(), #value);
@@ -5841,62 +5922,61 @@ fn untagged_member_field_defs(
     rendered.erase_type_parameters(type_parameters);
     (rendered, written)
 }
-
-/// The guard verdicts one untagged member earns, serde's and this crate's own combined — the
-/// checks [`process_field`] runs through its own channels, asked here by the walk that builds its
-/// field defs directly.
+/// The [`FieldContext`] one untagged variant hands each of its members: the variant is the
+/// container the omission is read against, and the enum is the type the names resolve in.
 #[cfg(feature = "serde")]
-fn untagged_member_guard_errors(
-    field: &Field,
-    field_def: &FieldDef,
-    written_def: &FieldDef,
-    field_name: &str,
-    prop_meta: &ModelSchemaPropMeta,
-    serde_field_meta: &SerdeFieldMeta,
-    positional_constraint_error: Option<proc_macro2::TokenStream>,
-) -> Vec<proc_macro2::TokenStream> {
-    let serde_guard_errors = field_guard_errors(
-        field,
-        field_name,
-        field_def.is_optional(),
-        serde_field_meta,
-        positional_constraint_error,
-    );
-    collect_field_guard_errors(
-        field,
-        field_def,
-        written_def,
-        field_name,
-        prop_meta,
-        serde_guard_errors,
-    )
+const fn untagged_variant_context<'ctx>(
+    variant_defaulted: bool,
+    schema_module_name: Option<&'ctx str>,
+    enum_type_name: &'ctx str,
+    type_parameters: &'ctx [String],
+    variant_name: &'ctx str,
+) -> FieldContext<'ctx> {
+    FieldContext {
+        container_defaulted: variant_defaulted,
+        rename_all: None,
+        schema_module_name,
+        type_name: enum_type_name,
+        type_parameters,
+        variant_ident: Some(variant_name),
+    }
 }
+
 /// One untagged member's finished def, beside the guard verdicts it earned: built next to its
-/// written twin, stamped, guarded, resolved, and carrying its meta — the whole of what the
-/// collector's loop needs back for the field.
+/// written twin, stamped, guarded (serde's checks and this crate's own combined), resolved, and
+/// carrying its meta — the whole of what the collector's loop needs back for the field.
+///
+/// The context's `container_defaulted` is the variant's own `#[serde(default)]`: a struct variant
+/// is where serde accepts one, and it is the container this member's omission is read against.
 #[cfg(feature = "serde")]
 fn untagged_member_field_def(
+    ctx: &FieldContext<'_>,
     field: &Field,
     field_name: &str,
-    type_parameters: &[String],
-    enum_type_name: &str,
     prop_meta: ModelSchemaPropMeta,
     serde_field_meta: &SerdeFieldMeta,
     positional_constraint_error: Option<proc_macro2::TokenStream>,
 ) -> (FieldDef, Vec<proc_macro2::TokenStream>) {
     let (mut field_def, written_def) =
-        untagged_member_field_defs(field, field_name, type_parameters);
-    apply_serde_key_omission(&mut field_def, field, serde_field_meta);
-    let member_guard_errors = untagged_member_guard_errors(
+        untagged_member_field_defs(field, field_name, ctx.type_parameters);
+    apply_serde_key_omission(&mut field_def, field);
+    let serde_guard_errors = field_guard_errors(
+        field,
+        field_name,
+        field_def.is_optional(),
+        serde_field_meta,
+        ctx.container_defaulted,
+        positional_constraint_error,
+    );
+    let member_guard_errors = collect_field_guard_errors(
         field,
         &field_def,
         &written_def,
         field_name,
         &prop_meta,
-        serde_field_meta,
-        positional_constraint_error,
+        serde_guard_errors,
     );
-    field_def.resolve_self_references(enum_type_name);
+    field_def.resolve_self_references(ctx.type_name);
     apply_model_schema_prop_meta(&mut field_def, prop_meta, field_name);
     (field_def, member_guard_errors)
 }
@@ -5949,17 +6029,14 @@ fn collect_untagged_members(
     for variant in &mut item_enum.variants {
         let kind = classify_variant(variant);
         let variant_name = variant.ident.to_string();
+        let variant_defaulted = has_serde_default(&variant.attrs);
 
         let mut field_defs: Vec<FieldDef> = Vec::new();
         let mut bound: Vec<(proc_macro2::Ident, proc_macro2::Ident)> = Vec::new();
         let mut checks: Vec<proc_macro2::TokenStream> = Vec::new();
         let total_fields = variant.fields.len();
         for field in &mut variant.fields {
-            let field_name = field
-                .ident
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_default();
+            let field_name = field_ident_string(field);
             let prop_meta = parse_model_schema_prop_attributes(&field.attrs);
             let serde_field_meta = parse_serde_field_attributes(&field.attrs);
 
@@ -5982,11 +6059,17 @@ fn collect_untagged_members(
                 checks.push(body);
             }
 
+            let member_ctx = untagged_variant_context(
+                variant_defaulted,
+                schema_module_name,
+                &enum_type_name,
+                &type_parameters,
+                &variant_name,
+            );
             let (member_def, member_guard_errors) = untagged_member_field_def(
+                &member_ctx,
                 field,
                 &field_name,
-                &type_parameters,
-                &enum_type_name,
                 prop_meta,
                 &serde_field_meta,
                 positional_constraint_error,
@@ -6376,7 +6459,8 @@ fn tagged_variant_parts(
         optional_fields: Vec::new(),
         schema_code: format!("{{\n  {tag_name}: z.literal(\"{discriminator_value}\"),\n"),
         type_code: format!(
-            "{{  /**\n{discriminator_docs}\n**/\n  {tag_name}: \"{discriminator_value}\";\n"
+            "{{\n{}\n  {tag_name}: \"{discriminator_value}\";\n",
+            member_jsdoc_block(discriminator_docs)
         ),
     }
 }
@@ -6509,8 +6593,8 @@ fn write_named_variant_fields(
         // Add TypeScript type definition
         let _ = writeln!(
             variant_type_code,
-            "  /**\n{}\n**/\n  {}{}: {};",
-            fld.docs,
+            "{}\n  {}{}: {};",
+            member_jsdoc_block(&fld.docs),
             fld.name,
             fld.optional_key_marker(),
             fld.typescript_typename()
@@ -7961,12 +8045,12 @@ fn build_field_schema(fld: &FieldDef) -> proc_macro2::TokenStream {
     let field_name_str = fld.name.clone();
     let schema_code = build_field_type_schema(fld, &field_name_str);
 
-    let required_code = if fld.is_optional() {
-        quote! {}
-    } else {
+    let required_code = if fld.key_is_required() {
         quote! {
             required.push(serde_json::Value::String(#field_name_str.to_string()));
         }
+    } else {
+        quote! {}
     };
 
     quote! {
@@ -7989,8 +8073,8 @@ fn write_field_type_and_schema(
     // Always write TypeScript type
     let _ = writeln!(
         type_code,
-        "  /**\n{}\n**/\n  {}{}: {};",
-        fld.docs,
+        "{}\n  {}{}: {};",
+        member_jsdoc_block(&fld.docs),
         fld.name,
         fld.optional_key_marker(),
         fld.typescript_typename()
@@ -8639,15 +8723,28 @@ fn validate_ts_optional_flag(field_optional: bool, flag_set: bool) -> Result<(),
     Ok(())
 }
 
-/// Hands the field def the one serde fact the object surfaces spend: whether a `None` leaves the
-/// key out of the serialized object rather than writing it.
+/// The field's ident as a string, empty for a positional slot that has none.
+fn field_ident_string(field: &Field) -> String {
+    field
+        .ident
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_default()
+}
+
+/// Hands the field def the one serde fact the object surfaces spend: whether the field's value
+/// leaves the key out of the serialized object rather than writing it.
 ///
 /// Only a named field has a key to leave out. A positional one is written by its place in a tuple,
 /// where nothing can be dropped and a `None` reaches the wire as a `null`, so the omission the
 /// attribute names never happens there and the slot spellings stand as written.
-#[cfg(feature = "serde")]
-const fn apply_serde_key_omission(field_def: &mut FieldDef, field: &Field, meta: &SerdeFieldMeta) {
-    field_def.omits_none = field.ident.is_some() && meta.omits_none;
+///
+/// Not gated on the `serde` feature. The attribute is on the field in every build and the surfaces
+/// claim to describe the payload serde writes in every build, so a toggle that changed the answer
+/// would make one declaration describe two different wires.
+fn apply_serde_key_omission(field_def: &mut FieldDef, field: &Field) {
+    field_def.omits_value =
+        field.ident.is_some() && parse_serde_key_omission(&field.attrs).omits_key;
 }
 
 /// Rejects a named `Option` field whose serde attributes let a `None` reach the wire as `null`.
@@ -8663,15 +8760,11 @@ const fn apply_serde_key_omission(field_def: &mut FieldDef, field: &Field, meta:
 /// array around it is always written, so the key is always present and the `None` is an item, which
 /// the field's own schema describes as nullable.
 #[cfg(feature = "serde")]
-fn check_optional_field_serialization(
-    field: &Field,
-    is_optional: bool,
-    meta: &SerdeFieldMeta,
-) -> Result<(), syn::Error> {
+fn check_optional_field_serialization(field: &Field, is_optional: bool) -> Result<(), syn::Error> {
     let Some(ident) = field.ident.as_ref() else {
         return Ok(());
     };
-    if !is_optional || meta.omits_none {
+    if !is_optional || parse_serde_key_omission(&field.attrs).omits_key {
         return Ok(());
     }
     Err(syn::Error::new_spanned(
@@ -8681,6 +8774,51 @@ fn check_optional_field_serialization(
              while the generated schema only accepts the key being absent. Add \
              #[serde(skip_serializing_if = \"Option::is_none\")] (plus `default` if the type \
              derives Deserialize), or `skip` / `skip_serializing`."
+        ),
+    ))
+}
+
+/// Rejects a named field whose serde attributes drop its key on the way out while serde still
+/// insists on finding that key on the way in.
+///
+/// `skip_serializing` and `skip_serializing_if` suppress the key but leave deserialization alone,
+/// so the field is still looked for by name — and a field with no `default` behind it has nothing
+/// to be when the key is missing. Recorded from serde itself: a `Vec` field carrying
+/// `skip_serializing_if = "Vec::is_empty"` and nothing else serializes to `{"id":"1"}` and then
+/// fails to deserialize that very payload, reporting the field as missing. The generated surfaces
+/// are now written to admit the absent key, so leaving this spelling alone would publish a
+/// contract whose own author cannot read what it describes.
+///
+/// Three spellings are exempt, each because serde already answers the missing key:
+/// - a bare `skip`, which stops deserializing too and so supplies `Default` itself;
+/// - an `Option` field, which serde reads back as `None` from a missing key with no `default`
+///   written (the `Option`-null guard above is what polices those);
+/// - a `default` on the field or on the container, either of which writes the value.
+#[cfg(feature = "serde")]
+fn check_omitted_key_is_readable(
+    field: &Field,
+    is_optional: bool,
+    container_defaulted: bool,
+) -> Result<(), syn::Error> {
+    let Some(ident) = field.ident.as_ref() else {
+        return Ok(());
+    };
+    let omission = parse_serde_key_omission(&field.attrs);
+    if is_optional
+        || container_defaulted
+        || omission.defaulted
+        || omission.skips_deserializing
+        || !omission.omits_key
+    {
+        return Ok(());
+    }
+    Err(syn::Error::new_spanned(
+        field,
+        format!(
+            "model_schema: field `{ident}` is left out of the serialized object by its serde \
+             attribute, but serde still requires the key when deserializing, so the payload it \
+             writes cannot be read back. Add #[serde(default)] to the field (or to the type), or \
+             use `skip` if the field should never be read from the payload."
         ),
     ))
 }
@@ -8696,13 +8834,17 @@ fn field_guard_errors(
     raw_field_ident: &str,
     is_optional: bool,
     serde_field_meta: &SerdeFieldMeta,
+    container_defaulted: bool,
     positional_constraint_error: Option<proc_macro2::TokenStream>,
 ) -> Vec<proc_macro2::TokenStream> {
     positional_constraint_error
         .into_iter()
         .chain(serde_field_meta.cfg_attr_rejection.as_ref().map_or_else(
             || {
-                check_optional_field_serialization(field, is_optional, serde_field_meta)
+                check_optional_field_serialization(field, is_optional)
+                    .and_then(|()| {
+                        check_omitted_key_is_readable(field, is_optional, container_defaulted)
+                    })
                     .err()
                     .map(|err| err.to_compile_error())
             },
@@ -8999,12 +9141,8 @@ fn check_os_string_field(
 /// and inert to every derive, so a copy left on the emitted item is one rustc reports as an
 /// attribute that does not exist.
 fn process_field(
-    rename_all: Option<&str>,
+    ctx: &FieldContext<'_>,
     field: &mut Field,
-    schema_module_name: Option<&str>,
-    variant_ident: Option<&str>,
-    type_name: &str,
-    type_parameters: &[String],
     deferred_attrs: &mut Vec<Vec<syn::Attribute>>,
 ) -> (
     FieldDef,
@@ -9026,11 +9164,7 @@ fn process_field(
     let field_rename: Option<String> = None;
 
     // Get raw field ident (before renaming) for validation function name
-    let raw_field_ident = field
-        .ident
-        .as_ref()
-        .map(ToString::to_string)
-        .unwrap_or_default();
+    let raw_field_ident = field_ident_string(field);
 
     // Parse model_schema_prop attributes before filtering them out
     let model_schema_prop_meta = parse_model_schema_prop_attributes(&field.attrs);
@@ -9041,9 +9175,9 @@ fn process_field(
     #[cfg(feature = "serde")]
     let (validation_fn, validate_body, positional_constraint_error) = generate_field_validation(
         field,
-        schema_module_name,
+        ctx.schema_module_name,
         &raw_field_ident,
-        variant_ident,
+        ctx.variant_ident,
         &model_schema_prop_meta,
         &mut injected_attrs,
     );
@@ -9054,14 +9188,15 @@ fn process_field(
         Option<proc_macro2::TokenStream>,
     ) = (None, None);
     #[cfg(not(feature = "serde"))]
-    let _: &_ = &(schema_module_name, variant_ident);
+    let _: &_ = &(ctx.schema_module_name, ctx.variant_ident);
 
     field.attrs = new_attrs;
     deferred_attrs.push(injected_attrs);
 
     let field_type: &syn::Type = &field.ty;
 
-    let final_name = get_final_field_name(&raw_field_ident, field_rename.as_deref(), rename_all);
+    let final_name =
+        get_final_field_name(&raw_field_ident, field_rename.as_deref(), ctx.rename_all);
     let field_docs = build_jsdoc_body(get_field_docs(field).as_deref(), &final_name);
 
     // Create the field definition and apply any model_schema_prop overrides
@@ -9070,7 +9205,7 @@ fn process_field(
     // Resolve `Self` references to the concrete type name so recursive fields
     // (e.g. `Vec<Self>`) are treated exactly like `Vec<EnclosingType>`. Resolved before the guards
     // read the field so each one asks its question of the type the surfaces will render.
-    field_def.resolve_self_references(type_name);
+    field_def.resolve_self_references(ctx.type_name);
 
     // The field as the author spelled it, kept for the one guard that reads a written *name*: an
     // `as = Type` may name one of the item's own parameters, and the target it is compared against
@@ -9080,10 +9215,9 @@ fn process_field(
     // Every other guard, and the constraint docs below, ask what the surfaces will render — where
     // one of the item's own parameters is the opaque value rather than a reference to a type of
     // that name. Erased here so a guard and the renderer standing behind it read one def.
-    field_def.erase_type_parameters(type_parameters);
+    field_def.erase_type_parameters(ctx.type_parameters);
 
-    #[cfg(feature = "serde")]
-    apply_serde_key_omission(&mut field_def, field, &serde_field_meta);
+    apply_serde_key_omission(&mut field_def, field);
 
     #[cfg(feature = "serde")]
     let serde_guard_errors = field_guard_errors(
@@ -9091,10 +9225,14 @@ fn process_field(
         &raw_field_ident,
         field_def.is_optional(),
         &serde_field_meta,
+        ctx.container_defaulted,
         positional_constraint_error,
     );
     #[cfg(not(feature = "serde"))]
-    let serde_guard_errors: Vec<proc_macro2::TokenStream> = Vec::new();
+    let serde_guard_errors: Vec<proc_macro2::TokenStream> = {
+        let _: bool = ctx.container_defaulted;
+        Vec::new()
+    };
 
     let guard_errors = collect_field_guard_errors(
         field,
@@ -9425,34 +9563,31 @@ fn generate_ts_definition_method(
     let typescript_type_gen = if fields_empty {
         if has_flatten {
             quote::quote! {
-                format!("{}\n\nexport type {}{} = {};{}", docs, #item_name, #ts_generics, #intersection_only, #reexport)
+                format!("{}export type {}{} = {};{}", docs, #item_name, #ts_generics, #intersection_only, #reexport)
             }
         } else {
             quote::quote! {
-                format!(r#"/**\n{}\n**/\nexport type {}{} = Record<string, never>;{}"#, docs, #item_name, #ts_generics, #reexport)
+                format!("{}export type {}{} = Record<string, never>;{}", docs, #item_name, #ts_generics, #reexport)
             }
         }
     } else if has_flatten {
         quote::quote! {
-            format!("{}\n\nexport type {}{} = {{\n{}\n}}{};{}", docs, #item_name, #ts_generics, #type_code, #intersection_suffix, #reexport)
+            format!("{}export type {}{} = {{\n{}}}{};{}", docs, #item_name, #ts_generics, #type_code, #intersection_suffix, #reexport)
         }
     } else {
         quote::quote! {
-            format!("{}\n\nexport type {}{} = {{\n{}\n}};{}", docs, #item_name, #ts_generics, #type_code, #reexport)
+            format!("{}export type {}{} = {{\n{}}};{}", docs, #item_name, #ts_generics, #type_code, #reexport)
         }
     };
 
-    #[cfg(all(feature = "jsonschema", feature = "typescript"))]
-    let json_docs_gen = generate_json_docs_part();
+    #[cfg(feature = "jsonschema")]
+    let json_docs_gen = bind_item_jsdoc_local(docs, true);
 
     #[cfg(not(feature = "jsonschema"))]
-    let json_docs_gen = quote::quote! {
-        let docs = format!("/**\n{docs}\n **/\n");
-    };
+    let json_docs_gen = bind_item_jsdoc_local(docs, false);
 
     quote::quote! {
         pub fn ts_definition() -> String {
-            let docs = #docs;
             #json_docs_gen
             #typescript_type_gen
         }
@@ -9490,8 +9625,13 @@ pub fn typescript_preamble_tokens(input: proc_macro2::TokenStream) -> proc_macro
 /// The suffix the binding an item publishes is named with. A generic type publishes a factory —
 /// one schema per filling, built on demand — where a type that declares no parameter publishes the
 /// one schema it has.
+///
+/// Recorded on the item's registry entry as it is decided, because a reference to the item is
+/// written from it too and cannot read it off its own spelling — see [`record_zod_factory`]. This
+/// is the one place the decision is taken, so the binding and every reference to it move together.
 #[cfg(feature = "zod")]
-const fn zod_binding_suffix(parameters: &[String]) -> &'static str {
+fn zod_binding_suffix(rust_ident: &str, parameters: &[String]) -> &'static str {
+    record_zod_factory(rust_ident, !parameters.is_empty());
     if parameters.is_empty() {
         "$Schema"
     } else {
@@ -9841,8 +9981,12 @@ fn generate_zod_schema_method(
 ) -> proc_macro2::TokenStream {
     #[cfg(feature = "zod")]
     {
-        let reexport = ident_reexport_zod(rust_ident, item_name, zod_binding_suffix(parameters));
-        let own = format!("z.strictObject({{\n{schema_code}\n}}){show_opts}");
+        let reexport = ident_reexport_zod(
+            rust_ident,
+            item_name,
+            zod_binding_suffix(rust_ident, parameters),
+        );
+        let own = format!("z.strictObject({{\n{schema_code}}}){show_opts}");
         let (preamble, expression) = zod_merged_statements(item_name, &own, flatten_schemas);
         // Note: Example injection is handled by the delegating method on the type itself.
         let body = zod_published_binding(item_name, parameters, &preamble, &expression, &reexport);
@@ -9872,36 +10016,36 @@ fn generate_zod_schema_method(
     }
 }
 
-#[cfg(all(feature = "jsonschema", feature = "typescript"))]
-fn generate_json_docs_part() -> proc_macro2::TokenStream {
-    quote::quote! {
-        let prettified = serde_json::to_string_pretty(&Self::json_schema()).unwrap().lines().map(|l| format!(" * {l}")).collect::<Vec<_>>().join("\n");
-        let docs = format!("/**\n{docs}\n * JSON Schema:\n{prettified}\n **/\n");
+/// Binds the `docs` local an item's `ts_definition()` opens with: the item's `JSDoc` block, its
+/// body enriched with the item's JSON schema where the caller says this build can produce one, and
+/// a trailing newline, so what the block documents is the line straight beneath it.
+///
+/// The block cannot be built by [`jsdoc_block`] here — the JSON schema is only there once the
+/// expanded code runs — so this is where its shape is spelled for the runtime side, once, rather
+/// than once per item kind.
+#[cfg(feature = "typescript")]
+fn bind_item_jsdoc_local(docs: &str, with_json_schema: bool) -> proc_macro2::TokenStream {
+    if with_json_schema {
+        quote::quote! {
+            let prettified = serde_json::to_string_pretty(&Self::json_schema()).unwrap().lines().map(|l| format!(" * {l}")).collect::<Vec<_>>().join("\n");
+            let docs = format!("/**\n{}\n * JSON Schema:\n{}\n */\n", #docs, prettified);
+        }
+    } else {
+        quote::quote! {
+            let docs = format!("/**\n{}\n */\n", #docs);
+        }
     }
 }
 
-/// Binds the `docs` local that an enum's `ts_definition()` renders, enriched with the JSON
-/// schema when this build of tixschema can produce one.
+/// Binds the `docs` local an enum's `ts_definition()` renders, enriched with the JSON schema when
+/// this build of tixschema can produce one.
 ///
 /// The enrichment reads `Self::json_schema()`, so it may only be emitted when tixschema's own
 /// features put that method in the schema module — deciding here rather than emitting a `cfg`
 /// keeps the reader and the method in agreement regardless of the consumer's feature table.
 #[cfg(feature = "typescript")]
 fn generate_enum_json_docs_part(docs: &str) -> proc_macro2::TokenStream {
-    #[cfg(all(feature = "jsonschema", feature = "zod"))]
-    {
-        quote::quote! {
-            let prettified = serde_json::to_string_pretty(&Self::json_schema()).unwrap().lines().map(|l| format!(" * {l}")).collect::<Vec<_>>().join("\n");
-            let docs = format!("/**\n{}\n * JSON Schema:\n{}\n **/\n", #docs, prettified);
-        }
-    }
-
-    #[cfg(not(all(feature = "jsonschema", feature = "zod")))]
-    {
-        quote::quote! {
-            let docs = format!("/**\n{}\n**/\n", #docs);
-        }
-    }
+    bind_item_jsdoc_local(docs, cfg!(all(feature = "jsonschema", feature = "zod")))
 }
 
 #[cfg(feature = "jsonschema")]
@@ -10064,7 +10208,11 @@ fn generate_discriminated_enum_zod_schema_method(
 ) -> proc_macro2::TokenStream {
     #[cfg(feature = "zod")]
     {
-        let reexport = ident_reexport_zod(rust_ident, item_name, zod_binding_suffix(parameters));
+        let reexport = ident_reexport_zod(
+            rust_ident,
+            item_name,
+            zod_binding_suffix(rust_ident, parameters),
+        );
         let schema_str = zod_published_binding(item_name, parameters, "", schema_code, &reexport);
         quote::quote! {
             pub fn zod_schema() -> String {
@@ -10124,12 +10272,12 @@ fn generate_ts_alias_method(
     let target_ts = field_def.typescript_typename();
     let reexport = ident_reexport_ts(rust_ident, export_name, ts_generics);
 
-    let docs_block = docs.to_owned();
+    let docs_block = jsdoc_block(docs, "");
 
     quote! {
         pub fn ts_definition() -> String {
             format!(
-                "/**\n{}\n**/\nexport type {} = {};{}",
+                "{}\nexport type {} = {};{}",
                 #docs_block,
                 #alias_name_ts,
                 #target_ts,
