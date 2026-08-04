@@ -10,10 +10,12 @@ use regex_syntax::ast::{
 };
 use regex_syntax::hir;
 use std::collections::HashMap;
-use syn::{Attribute, Expr, Field, Lit, LitStr, Meta, Variant};
+use syn::{Attribute, Expr, Field, GenericParam, Generics, Lit, LitStr, Meta, Variant};
 
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+use syn::ItemEnum;
 #[cfg(any(feature = "typescript", feature = "zod"))]
-use syn::{ItemEnum, ItemStruct};
+use syn::ItemStruct;
 
 /// The JavaScript engine generation the emitted Zod regex literals and JSON Schema `pattern`
 /// keywords are written for, and therefore the line the guard admits and refuses along.
@@ -170,6 +172,12 @@ pub struct AliasInfo {
     pub kind: AliasKind,
     #[cfg(feature = "jsonschema")]
     pub module_name: String,
+    /// What the value surface written under this name is, in the vocabulary a constrained brand's
+    /// refusal names shapes by — and `None` both when that surface is one string checks land on and
+    /// when nothing has been recorded at all. Filled by [`record_value_shape`] as each item
+    /// registers.
+    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+    pub value_shape: Option<&'static str>,
     /// What an untagged enum's members are spelled as on the Zod surface, and empty for every other
     /// item. Filled by [`record_zod_union_members`] once the enum's own expansion has rendered
     /// them.
@@ -537,10 +545,36 @@ pub fn register_alias_info(
                 kind,
                 #[cfg(feature = "jsonschema")]
                 module_name: module_name.to_owned(),
+                value_shape: None,
                 #[cfg(feature = "zod")]
                 zod_union_members: Vec::new(),
             },
         );
+    });
+}
+
+/// Records what the value surface written under a name is, on the entry that name has just
+/// registered.
+///
+/// The question is the constrained-brand guard's: a brand appends `.min`/`.max`/a regex check to
+/// its inner's own schema binding, and a name is the one inner spelling whose binding this
+/// expansion cannot read off the declaration — the schema lives in the module the *named* item
+/// published. So each item answers for itself as it registers, and a brand over a name reads the
+/// answer back rather than guessing at it.
+///
+/// `None` is what an unanswered name and a string-checked one both leave, and the guard treats them
+/// alike: a name it cannot classify keeps the emission it has always had. That is the same regime
+/// the map-key registry already runs — `AliasKind::Unknown` is a name that was not registered
+/// before the type reading it — rather than a second one.
+///
+/// A chain resolves one link at a time and cannot cycle, because an entry is only ever built from
+/// entries registered before it.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+pub fn record_value_shape(rust_ident: &str, shape: Option<&'static str>) {
+    ALIAS_INFO.with(|map| {
+        if let Some(info) = map.borrow_mut().get_mut(rust_ident) {
+            info.value_shape = shape;
+        }
     });
 }
 
@@ -656,6 +690,50 @@ fn ident_reexport_name(rust_ident: &str, export_name: &str) -> Option<String> {
     (referenced != export_name).then_some(referenced)
 }
 
+/// The names an item's own declaration binds as type parameters.
+///
+/// This is the whole of what separates a name the expansion cannot resolve *because it is a
+/// parameter* from one it cannot resolve because the type lives elsewhere: the first is in scope
+/// at the declaration and names no type any emitted output can reference, the second names a type
+/// that publishes its own schema module. Every surface that has to draw that line draws it here —
+/// see [`crate::field_type::FieldDef::erase_type_parameters`] for what each of them then does with
+/// it.
+///
+/// Lifetimes and const parameters name no type a field position can be written out of, so they are
+/// left out. That is also why an emitted `impl` block is spelled from `split_for_impl` instead of
+/// from this list: the block has to carry every parameter the declaration binds, lifetimes and
+/// consts included, while only these can reach a schema.
+pub fn type_parameters_in_scope(generics: &Generics) -> Vec<String> {
+    generics
+        .params
+        .iter()
+        .filter_map(|param| match param {
+            GenericParam::Type(type_param) => Some(type_param.ident.to_string()),
+            GenericParam::Const(_) | GenericParam::Lifetime(_) => None,
+        })
+        .collect()
+}
+
+/// The parameter list a generic item's `TypeScript` declaration is written under — `<IdType>`,
+/// `<IdType, DateType>` — or the empty string for an item that binds none.
+///
+/// Spelled once for the alias, the struct and every enum shape, so the three cannot come to write
+/// the same declaration differently. The names are written as declared, which is what a field
+/// typed with one already renders as: the declaration and the fields it binds have to spell a
+/// parameter the same way or the type does not close.
+///
+/// A lifetime and a const parameter never reach here — they name no type `TypeScript` has a
+/// declaration slot for — so `struct Label<'a>` publishes a plain `export type Label`.
+#[cfg(feature = "typescript")]
+pub fn ts_generic_params(generics: &Generics) -> String {
+    let parameters = type_parameters_in_scope(generics);
+    if parameters.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", parameters.join(", "))
+    }
+}
+
 /// The `TypeScript` line an item publishes under its own Rust ident, or nothing when it is already
 /// exported under it. The parameter list is repeated on both sides so a generic item stays generic
 /// through the re-export.
@@ -703,7 +781,9 @@ pub fn get_struct_docs(item_struct: &ItemStruct) -> Option<Vec<String>> {
     collect_doc_lines(&item_struct.attrs)
 }
 
-#[cfg(any(feature = "typescript", feature = "zod"))]
+/// An enum's doc lines. Reachable in every schema build, not just the two that publish prose: the
+/// `schema_example()` an item's ` ```rust example ` block earns is read off these too.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 pub fn get_enum_docs(item_enum: &ItemEnum) -> Option<Vec<String>> {
     collect_doc_lines(&item_enum.attrs)
 }
