@@ -221,19 +221,15 @@ fn merge_readers() -> proc_macro2::TokenStream {
         // joins — and owes each its own spelling, which is what says whether a payload two branches
         // admit is an error or the ordinary case.
         //
-        // A schema that is no union is the one-branch union of itself, and one branch is merged in
-        // place rather than wrapped, so the spelling carried for it is never the one written.
-        fn branches_of(schema: &serde_json::Value) -> (&'static str, Vec<&serde_json::Value>) {
+        // A schema that offers no choice answers with none, which is what tells the expansion it has
+        // reached something the base can merge rather than descend into.
+        fn union_branches(schema: &serde_json::Value) -> Option<(&'static str, &[serde_json::Value])> {
             for keyword in ["oneOf", "anyOf"] {
                 if let Some(union) = schema.get(keyword).and_then(serde_json::Value::as_array) {
-                    return (keyword, union.iter().collect());
+                    return Some((keyword, union.as_slice()));
                 }
             }
-            if schema.is_object() {
-                ("oneOf", vec![schema])
-            } else {
-                ("oneOf", Vec::new())
-            }
+            None
         }
     }
 }
@@ -248,43 +244,59 @@ fn merge_readers() -> proc_macro2::TokenStream {
 /// multiplies out are held under that source's own wrapper, and a second source multiplies each of
 /// them again from there: the wrappers nest rather than flatten into one, and each branch set keeps
 /// the rule its own union was written under.
+///
+/// A source is a tree rather than a list for the same reason: a branch that is itself a union was
+/// written under a spelling of its own, and grafting its leaves onto the source's wrapper would
+/// answer for them under a rule they were not written under.
 fn merged_tree() -> proc_macro2::TokenStream {
     quote::quote! {
+        enum Branches<'defs> {
+            Object(&'defs serde_json::Map<String, serde_json::Value>),
+            Union(&'static str, Vec<Branches<'defs>>),
+        }
+
         enum Merged {
             Object(serde_json::Map<String, serde_json::Value>),
             Union(&'static str, Vec<Merged>),
         }
 
+        impl Branches<'_> {
+            // What one base becomes once this source's choices are written into it: every leaf of
+            // the source contributes its members to a copy of the base, under the wrapper the level
+            // that offered it was written with.
+            fn merged_into(&self, base: &serde_json::Map<String, serde_json::Value>) -> Merged {
+                match *self {
+                    Self::Object(members) => Merged::Object(merge_object_schemas(base, members)),
+                    Self::Union(spelling, ref branches) => {
+                        let mut merged: Vec<Merged> = branches
+                            .iter()
+                            .map(|branch| branch.merged_into(base))
+                            .collect();
+                        // One key set is an object rather than a choice between objects, so a level
+                        // offering a single branch writes no wrapper and its spelling goes unread.
+                        if merged.len() == 1 {
+                            merged.swap_remove(0)
+                        } else {
+                            Merged::Union(spelling, merged)
+                        }
+                    }
+                }
+            }
+        }
+
         impl Merged {
-            // Every leaf gains the members of one branch of the source, so a source reaches the
+            // Every leaf gains the members of one leaf of the source, so a source reaches the
             // branches an earlier source left behind rather than only the object it started from.
-            fn multiplied(
-                self,
-                members: &[&serde_json::Map<String, serde_json::Value>],
-                spelling: &'static str,
-            ) -> Self {
+            fn multiplied(self, source: &Branches<'_>) -> Self {
                 match self {
                     Self::Union(keyword, branches) => Self::Union(
                         keyword,
                         branches
                             .into_iter()
-                            .map(|branch| branch.multiplied(members, spelling))
+                            .map(|branch| branch.multiplied(source))
                             .collect(),
                     ),
-                    Self::Object(base) => {
-                        let mut merged: Vec<serde_json::Map<String, serde_json::Value>> = members
-                            .iter()
-                            .map(|member| merge_object_schemas(&base, member))
-                            .collect();
-                        // One key set is an object rather than a choice between objects, so a
-                        // source with a single member writes no wrapper and its spelling goes
-                        // unread.
-                        if merged.len() == 1 {
-                            Self::Object(merged.swap_remove(0))
-                        } else {
-                            Self::Union(spelling, merged.into_iter().map(Self::Object).collect())
-                        }
-                    }
+                    Self::Object(base) => source.merged_into(&base),
                 }
             }
 
@@ -311,17 +323,14 @@ fn merged_tree() -> proc_macro2::TokenStream {
     }
 }
 
-/// The objects one merged schema contributes, as the tokens that bind them.
+/// How the expansion refuses a schema it cannot merge, as the tokens that declare the refusals.
 ///
-/// A union names no type of its own, so the branch is where the questions the whole merged body was
-/// asked are asked again — and serde cannot write a branch that is not an object into the object
-/// being written any more than it could write the whole value that way. A branch that is a deferred
-/// name carries none of the members it stands for, so it is read back out of the definitions first,
-/// the same way the whole merged body is.
-///
-/// Reads `fs_body` and `label` from the frame that merges, and binds `fs_objects` beside the
-/// spelling the source gave its union.
-fn branch_objects(diagnostic: &MergeDiagnostic<'_>) -> proc_macro2::TokenStream {
+/// The whole merged body and a branch any depth down are the same two failures, so one expansion
+/// answers for both and each refusal carries both wordings: an empty position is the body itself,
+/// and any other names the branch it was reached through. A branch's position is the trail of
+/// one-based choices taken to reach it, so a member of a nested union is named `1.2` rather than
+/// twice as `2`.
+fn expansion_refusals(diagnostic: &MergeDiagnostic<'_>) -> proc_macro2::TokenStream {
     let MergeDiagnostic {
         cycle_remedy,
         edge,
@@ -329,40 +338,131 @@ fn branch_objects(diagnostic: &MergeDiagnostic<'_>) -> proc_macro2::TokenStream 
         subject,
     } = *diagnostic;
     quote::quote! {
-        let (fs_spelling, fs_branches) = branches_of(fs_body);
-        let mut fs_objects: Vec<&serde_json::Map<String, serde_json::Value>> = Vec::new();
-        for (position, fb) in fs_branches.iter().enumerate() {
-            let branch = match deferred_name(fb) {
-                None => *fb,
-                Some(name) => match hoisted_defs.get(name) {
-                    Some(body) if body.is_object() => body,
-                    _ => panic!(
-                        "`{}`: {} `{}` closes a flatten cycle through a union member — its branch {} is `{}`, whose body does not exist to merge, and no finite value inhabits the type; {}",
-                        #subject,
-                        #edge,
-                        label,
-                        position + 1,
-                        name,
-                        #cycle_remedy,
-                    ),
-                },
+        fn branch_path(position: &[usize]) -> String {
+            position
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<String>>()
+                .join(".")
+        }
+
+        // An entry still only reserved is this merge coming back around to a name whose body is
+        // still being written: there is nothing to merge, and the type it would describe has no
+        // finite value to inhabit it.
+        fn refuse_missing_body(label: &str, position: &[usize], name: &str) -> ! {
+            if position.is_empty() {
+                panic!(
+                    "`{}`: {} `{}` closes a flatten cycle — the flattened body does not exist to merge, and no finite value inhabits the type; {}",
+                    #subject, #edge, name, #cycle_remedy,
+                );
+            }
+            panic!(
+                "`{}`: {} `{}` closes a flatten cycle through a union member — its branch {} is `{}`, whose body does not exist to merge, and no finite value inhabits the type; {}",
+                #subject, #edge, label, branch_path(position), name, #cycle_remedy,
+            );
+        }
+
+        // A name whose body does exist but stands on the path the expansion is already descending:
+        // the same cycle, closed through unions rather than through the value itself.
+        fn refuse_repeated_name(
+            label: &str,
+            position: &[usize],
+            name: &str,
+            expanding: &[&str],
+        ) -> ! {
+            let path = expanding
+                .iter()
+                .map(|resolved| format!("`{resolved}`"))
+                .collect::<Vec<String>>()
+                .join(" → ");
+            panic!(
+                "`{}`: {} `{}` closes a flatten cycle through nested unions — its branch {} names `{}`, already expanding on the path {}, and no finite value inhabits the type; {}",
+                #subject, #edge, label, branch_path(position), name, path, #cycle_remedy,
+            );
+        }
+
+        fn refuse_non_object(label: &str, position: &[usize], named: &str) -> ! {
+            if position.is_empty() {
+                panic!(
+                    "`{}`: {} `{}` is not written as an object — its schema describes a `{}`, which has no members to merge, and what serde writes for it does not join the object being written; {}",
+                    #subject, #edge, label, named, #non_object_remedy,
+                );
+            }
+            panic!(
+                "`{}`: {} `{}` writes a union member that is not an object — its branch {} describes a `{}`, which has no members to merge, and what serde writes for that member does not join the object being written; {}",
+                #subject, #edge, label, branch_path(position), named, #non_object_remedy,
+            );
+        }
+    }
+}
+
+/// The branch tree one merged schema contributes, as the tokens that declare how it is read.
+///
+/// A union names no type of its own, so the branch is where the questions the whole merged body was
+/// asked are asked again — and serde cannot write a branch that is not an object into the object
+/// being written any more than it could write the whole value that way. A branch that is a deferred
+/// name carries none of the members it stands for, so it is read back out of the definitions first,
+/// the same way the whole merged body is. A branch that is itself a union names no members either,
+/// so the questions are asked again below it, and again, until every leaf is an object the base can
+/// merge or a refusal.
+///
+/// Two things bound the descent. Plain nesting reaches a strictly smaller part of a finite document,
+/// so it ends on its own; a deferred name does not, because the body it resolves to may name it
+/// back. So the names resolved on the way down are carried, and a name reached twice on one path is
+/// a cycle by construction.
+fn branch_expansion() -> proc_macro2::TokenStream {
+    quote::quote! {
+        fn expanded_branches<'defs>(
+            schema: &'defs serde_json::Value,
+            hoisted_defs: &'defs serde_json::Map<String, serde_json::Value>,
+            expanding: &mut Vec<&'defs str>,
+            position: &mut Vec<usize>,
+            label: &str,
+        ) -> Option<Branches<'defs>> {
+            let mut resolved = None;
+            let body = match deferred_name(schema) {
+                None => schema,
+                Some(name) => {
+                    let Some(named_body) = hoisted_defs.get(name).filter(|body| body.is_object())
+                    else {
+                        refuse_missing_body(label, position, name);
+                    };
+                    // The path holds only names already descended through, so the first frame never
+                    // finds itself on it and this refusal always has a branch to name.
+                    if expanding.contains(&name) {
+                        refuse_repeated_name(label, position, name, expanding);
+                    }
+                    resolved = Some(name);
+                    named_body
+                }
             };
-            if let Some(named) = described_type(branch) {
+
+            if let Some(named) = described_type(body) {
                 if named != "object" {
-                    panic!(
-                        "`{}`: {} `{}` writes a union member that is not an object — its branch {} describes a `{}`, which has no members to merge, and what serde writes for that member does not join the object being written; {}",
-                        #subject,
-                        #edge,
-                        label,
-                        position + 1,
-                        named,
-                        #non_object_remedy,
-                    );
+                    refuse_non_object(label, position, named);
                 }
             }
-            if let Some(members) = branch.as_object() {
-                fs_objects.push(members);
+
+            let Some((spelling, branches)) = union_branches(body) else {
+                return body.as_object().map(Branches::Object);
+            };
+
+            // The name guards what is below it and nothing else, so it joins the path only for the
+            // descent and leaves it before the level that resolved it answers.
+            if let Some(name) = resolved {
+                expanding.push(name);
             }
+            let mut expanded: Vec<Branches<'defs>> = Vec::new();
+            for (index, branch) in branches.iter().enumerate() {
+                position.push(index + 1);
+                let below = expanded_branches(branch, hoisted_defs, expanding, position, label);
+                position.pop();
+                expanded.extend(below);
+            }
+            if resolved.is_some() {
+                expanding.pop();
+            }
+            (!expanded.is_empty()).then_some(Branches::Union(spelling, expanded))
         }
     }
 }
@@ -372,13 +472,8 @@ pub fn merged_object_value(
     merged: &[MergedSource],
     diagnostic: &MergeDiagnostic<'_>,
 ) -> proc_macro2::TokenStream {
-    let MergeDiagnostic {
-        cycle_remedy,
-        edge,
-        non_object_remedy,
-        subject,
-    } = *diagnostic;
-    let branch_reader = branch_objects(diagnostic);
+    let refusals = expansion_refusals(diagnostic);
+    let expansion = branch_expansion();
     let labels = merged.iter().map(|source| source.label.as_str());
     let values = merged.iter().map(|source| &source.value);
     let readers = merge_readers();
@@ -387,44 +482,20 @@ pub fn merged_object_value(
         {
             #tree
             #readers
+            #refusals
+            #expansion
 
             let flattened: Vec<(&'static str, serde_json::Value)> = vec![ #((#labels, #values)),* ];
 
             let mut described = Merged::Object(#base);
             for (label, fs) in &flattened {
-                // An entry still only reserved is this merge coming back around to a name whose
-                // body is still being written: there is nothing to merge, and the type it would
-                // describe has no finite value to inhabit it.
-                let fs_body = match deferred_name(fs) {
-                    None => fs,
-                    Some(name) => match hoisted_defs.get(name) {
-                        Some(body) if body.is_object() => body,
-                        _ => panic!(
-                            "`{}`: {} `{}` closes a flatten cycle — the flattened body does not exist to merge, and no finite value inhabits the type; {}",
-                            #subject,
-                            #edge,
-                            name,
-                            #cycle_remedy,
-                        ),
-                    },
-                };
-                if let Some(named) = described_type(fs_body) {
-                    if named != "object" {
-                        panic!(
-                            "`{}`: {} `{}` is not written as an object — its schema describes a `{}`, which has no members to merge, and what serde writes for it does not join the object being written; {}",
-                            #subject,
-                            #edge,
-                            label,
-                            named,
-                            #non_object_remedy,
-                        );
-                    }
+                let mut expanding: Vec<&str> = Vec::new();
+                let mut position: Vec<usize> = Vec::new();
+                if let Some(source) =
+                    expanded_branches(fs, hoisted_defs, &mut expanding, &mut position, label)
+                {
+                    described = described.multiplied(&source);
                 }
-                #branch_reader
-                if fs_objects.is_empty() {
-                    continue;
-                }
-                described = described.multiplied(&fs_objects, fs_spelling);
             }
 
             described.into_value()
