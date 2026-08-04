@@ -2216,6 +2216,93 @@ mod serde_tests {
     }
 }
 
+/// One value is one wire, and every spelling of that value publishes the one JSON type keyword the
+/// wire describes as.
+///
+/// `#[serde(transparent)]` puts the inner on the wire by itself, so a brand over a `u32` writes
+/// exactly what a field, a one-slot tuple struct and an alias of the same `u32` write. The four are
+/// pinned against each other because a keyword taken from the rendered TypeScript name instead of
+/// from the type spelled `integer` three times and `number` once — the same wire named twice, which
+/// the merge repeating the keyword cannot pick a side in.
+#[cfg(all(feature = "jsonschema", feature = "serde"))]
+mod branded_scalar_keyword_tests {
+    use super::*;
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct TickBrand(pub u32);
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct TickSlot(pub u32);
+
+    #[model_schema()]
+    pub type TickAlias = u32;
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct HoldsTick {
+        pub ticks: u32,
+    }
+
+    #[model_schema(no_display)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct RatioBrand(pub f64);
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct SwitchBrand(pub bool);
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct SlugBrand(pub String);
+
+    #[test]
+    fn every_spelling_of_one_integer_publishes_one_keyword() {
+        let integer = serde_json::json!({ "type": "integer" });
+        assert_eq!(TickBrand::json_schema(), integer);
+        assert_eq!(TickSlot::json_schema(), integer);
+        assert_eq!(tick_alias_schema::Schema::json_schema(), integer);
+        assert_eq!(HoldsTick::json_schema()["properties"]["ticks"], integer);
+
+        let aliased: TickAlias = 7;
+        assert_eq!(
+            serde_json::to_value(aliased).unwrap(),
+            serde_json::json!(7_u32)
+        );
+    }
+
+    /// And the brands whose inner is not an integer describe exactly what they described before:
+    /// a float is the `number` it always was, and a `bool` and a `String` are untouched.
+    #[test]
+    fn the_brands_over_every_other_scalar_are_byte_identical() {
+        assert_eq!(
+            RatioBrand::json_schema(),
+            serde_json::json!({ "type": "number" })
+        );
+        assert_eq!(
+            SwitchBrand::json_schema(),
+            serde_json::json!({ "type": "boolean" })
+        );
+        assert_eq!(
+            SlugBrand::json_schema(),
+            serde_json::json!({ "type": "string" })
+        );
+    }
+
+    /// The value the schema describes is the value serde writes: an integer keyword over a payload
+    /// serde renders with no fractional part.
+    #[test]
+    fn the_keyword_names_what_serde_writes() {
+        assert_eq!(serde_json::to_string(&TickBrand(7)).unwrap(), "7");
+        assert_eq!(serde_json::to_string(&RatioBrand(0.5)).unwrap(), "0.5");
+    }
+}
+
 #[cfg(any(
     feature = "serde",
     feature = "zod",
