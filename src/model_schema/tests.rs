@@ -4054,6 +4054,231 @@ fn a_parameter_with_no_default_is_accepted_where_no_json_document_is_built() {
     }
 }
 
+/// The bound checks `args` earns on `source`. Both are parsed from text so the emitted tokens carry
+/// file locations and the span each check hands the compiler can be read back as the source it was
+/// written as.
+fn filling_bound_checks(source: &str, args: &str) -> Vec<proc_macro2::TokenStream> {
+    let item: syn::Item = syn::parse_str(source).unwrap();
+    let parsed = super::parse_model_schema_args(syn::parse_str(args).unwrap());
+    assert_eq!(
+        parsed.arg_rejection.as_ref().map(ToString::to_string),
+        None,
+        "for {args}"
+    );
+    super::default_types_bound_checks(&item, &parsed)
+}
+
+/// The checks `args` earns on `source`, rendered.
+fn filling_bound_check_text(source: &str, args: &str) -> Vec<String> {
+    filling_bound_checks(source, args)
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// Whether any token of `tokens`, at any depth, was written as `written` in the source it was
+/// parsed from. A token the expansion synthesised was written nowhere and answers `None`.
+fn some_token_was_written_as(tokens: &proc_macro2::TokenStream, written: &str) -> bool {
+    tokens.clone().into_iter().any(|tree| match tree {
+        proc_macro2::TokenTree::Group(group) => some_token_was_written_as(&group.stream(), written),
+        leaf @ (proc_macro2::TokenTree::Ident(_)
+        | proc_macro2::TokenTree::Punct(_)
+        | proc_macro2::TokenTree::Literal(_)) => {
+            leaf.span().source_text().as_deref() == Some(written)
+        }
+    })
+}
+
+/// Whether a filling satisfies the bounds its parameter declares is a question about trait impls,
+/// which the macro cannot answer — so it hands the filling to a function carrying those bounds and
+/// lets the compiler answer. The parameter keeps the ident it was declared under, so a bound
+/// written in terms of it still reads.
+#[test]
+fn a_bounded_parameters_filling_is_handed_to_a_function_carrying_that_bound() {
+    let checks = filling_bound_check_text(
+        "pub struct Counted<CountType: Copy> { pub count: CountType }",
+        "default_types(CountType = String)",
+    );
+    assert_eq!(checks.len(), 1, "got: {checks:?}");
+    for needle in [
+        "fn default_type_filling < CountType : Copy > ()",
+        "default_type_filling :: < String > ()",
+    ] {
+        assert!(
+            checks[0].contains(needle),
+            "{needle} missing: {}",
+            checks[0]
+        );
+    }
+    assert!(
+        !checks[0].contains("compile_error"),
+        "the compiler answers this, not the macro: {}",
+        checks[0]
+    );
+}
+
+/// The bound and the filling keep the spans they were written at, so the compiler points at the
+/// entry that earned the refusal and at the declaration that required it — neither at anything the
+/// expansion synthesised.
+#[test]
+fn a_bound_check_carries_the_spans_the_entry_and_the_bound_were_written_at() {
+    let checks = filling_bound_checks(
+        "pub struct Counted<CountType: Copy> { pub count: CountType }",
+        "default_types(CountType = String)",
+    );
+    assert_eq!(checks.len(), 1, "got: {}", checks.len());
+    for written in ["String", "Copy", "CountType"] {
+        assert!(
+            some_token_was_written_as(&checks[0], written),
+            "{written} was not carried at the span it was written at: {}",
+            checks[0]
+        );
+    }
+}
+
+/// A parameter declares its bounds in either of two places, and a filling answers for both alike.
+#[test]
+fn a_bound_written_in_the_where_clause_is_read_like_one_written_beside_the_parameter() {
+    let beside = filling_bound_check_text(
+        "pub struct Counted<CountType: Copy> { pub count: CountType }",
+        "default_types(CountType = String)",
+    );
+    let clause = filling_bound_check_text(
+        "pub struct Counted<CountType> where CountType: Copy { pub count: CountType }",
+        "default_types(CountType = String)",
+    );
+    assert_eq!(clause.len(), 1, "got: {clause:?}");
+    assert_eq!(clause, beside);
+}
+
+/// A parameter bounded in both places is checked against every bound at once, so a filling has to
+/// answer for all of them.
+#[test]
+fn a_parameter_bounded_in_both_places_is_checked_against_every_bound() {
+    let checks = filling_bound_check_text(
+        "pub struct Counted<CountType: Copy> where CountType: Clone { pub count: CountType }",
+        "default_types(CountType = String)",
+    );
+    assert_eq!(checks.len(), 1, "got: {checks:?}");
+    assert!(
+        checks[0].contains("fn default_type_filling < CountType : Copy + Clone > ()"),
+        "got: {}",
+        checks[0]
+    );
+}
+
+/// A parameter declaring no bound admits every filling, so there is nothing to ask and the
+/// expansion is left exactly as it was — in every shape the attribute expands, and beside the
+/// lifetimes and consts that name no type.
+#[test]
+fn an_unbounded_parameter_earns_no_check() {
+    for (source, args) in [
+        (
+            "pub struct Both<IdType, DateType> { pub id: IdType, pub at: DateType }",
+            "default_types(IdType = String, DateType = f64)",
+        ),
+        (
+            "pub enum Tagged<IdType> { Named { id: IdType } }",
+            "default_types(IdType = String)",
+        ),
+        (
+            "pub type Boxed<ValueType> = Vec<ValueType>;",
+            "default_types(ValueType = String)",
+        ),
+        (
+            "pub struct Mixed<'label, IdType, const WIDTH: usize> { pub id: IdType }",
+            "default_types(IdType = String)",
+        ),
+        ("pub struct Plain { pub id: String }", ""),
+    ] {
+        let checks = filling_bound_check_text(source, args);
+        assert!(checks.is_empty(), "for {source}: {checks:?}");
+    }
+}
+
+/// A bound naming another parameter of the item holds only where that one is filled too, which is a
+/// joint statement this per-filling check does not make — and the neighbour's name reproduced
+/// beside a single filling would resolve to nothing. So the bound is left to the item's own use
+/// sites, whether it names a type parameter, a lifetime or a const.
+#[test]
+fn a_bound_naming_another_parameter_of_the_item_earns_no_check() {
+    for (source, args) in [
+        (
+            "pub struct Pair<AType: From<BType>, BType> { pub a: AType, pub b: BType }",
+            "default_types(AType = String, BType = char)",
+        ),
+        (
+            "pub struct Held<'label, ValueType: Into<&'label str>> { pub held: ValueType }",
+            "default_types(ValueType = String)",
+        ),
+        (
+            "pub struct Bounded<ValueType: Fits<WIDTH>, const WIDTH: usize> { pub held: ValueType }",
+            "default_types(ValueType = String)",
+        ),
+    ] {
+        let checks = filling_bound_check_text(source, args);
+        assert!(checks.is_empty(), "for {source}: {checks:?}");
+    }
+}
+
+/// A bound written in terms of the parameter it bounds names no neighbour, so it is checked like
+/// any other.
+#[test]
+fn a_bound_naming_only_the_parameter_it_bounds_is_still_checked() {
+    let checks = filling_bound_check_text(
+        "pub struct Held<ValueType: Iterator<Item = ValueType>> { pub held: ValueType }",
+        "default_types(ValueType = String)",
+    );
+    assert_eq!(checks.len(), 1, "got: {checks:?}");
+    assert!(
+        checks[0].contains("Iterator < Item = ValueType >"),
+        "got: {}",
+        checks[0]
+    );
+}
+
+/// One check per bounded filling, in the order the entries were written, and none for the unbounded
+/// parameters beside them.
+#[test]
+fn every_bounded_filling_earns_its_own_check() {
+    let checks = filling_bound_check_text(
+        "pub struct Trio<AType: Copy, BType, CType: Clone> { pub a: AType, pub b: BType, pub c: CType }",
+        "default_types(AType = u8, BType = String, CType = String)",
+    );
+    assert_eq!(checks.len(), 2, "got: {checks:?}");
+    assert!(
+        checks[0].contains("Copy") && checks[0].contains("u8"),
+        "got: {}",
+        checks[0]
+    );
+    assert!(
+        checks[1].contains("Clone") && checks[1].contains("String"),
+        "got: {}",
+        checks[1]
+    );
+}
+
+/// The three shapes the attribute expands answer alike: the check is read off the item's own
+/// parameters, which every one of them binds the same way.
+#[test]
+fn every_expanded_shape_checks_its_fillings_alike() {
+    let expected = filling_bound_check_text(
+        "pub struct Held<ValueType: Copy> { pub held: ValueType }",
+        "default_types(ValueType = String)",
+    );
+    assert_eq!(expected.len(), 1, "got: {expected:?}");
+    for source in [
+        "pub enum Held<ValueType: Copy> { Named { held: ValueType } }",
+        "pub type Held<ValueType: Copy> = Vec<ValueType>;",
+    ] {
+        assert_eq!(
+            filling_bound_check_text(source, "default_types(ValueType = String)"),
+            expected,
+            "for {source}"
+        );
+    }
+}
+
 /// The `compile_error!` tokens `source` earns for the example it carries against the parameters it
 /// declares. Parsed from text so the tokens carry file locations and each refusal's span can be
 /// read back as the source it points at.

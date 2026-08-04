@@ -1068,7 +1068,11 @@ pub fn exec_model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
     ) {
         return output;
     }
-    if let Item::Struct(item_struct) = item {
+    // Whether a filling satisfies the bounds its parameter declares is a question about trait
+    // impls, which a proc macro cannot answer — so it is asked here, of the compiler, and read off
+    // the item before the shapes take it.
+    let filling_bound_checks = default_types_bound_checks(&item, &parsed_args);
+    let expanded = if let Item::Struct(item_struct) = item {
         process_struct(item_struct, &parsed_args)
     } else if let Item::Enum(item_enum) = item {
         process_enum(item_enum, &parsed_args)
@@ -1078,7 +1082,8 @@ pub fn exec_model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
         syn::Error::new_spanned(item, "Unsupported target for model_schema")
             .to_compile_error()
             .into()
-    }
+    };
+    with_filling_bound_checks(expanded, &filling_bound_checks)
 }
 
 /// Classifies what an alias resolves to, for the registry.
@@ -2160,6 +2165,169 @@ fn missing_default_message(name: &syn::Ident, declared: &[&syn::Ident]) -> Strin
          each with the type its document should be generated from: \
          `#[model_schema(default_types({sample}))]`."
     )
+}
+
+/// The compile-time check every `default_types` filling earns against the bounds its parameter
+/// declares — one per bounded parameter, emitted beside the expansion rather than in place of it.
+///
+/// A filling is the author's statement of what the item holds; a parameter's bounds are the item's
+/// statement of what it can hold. The two can disagree, and nothing here can tell them apart: a
+/// proc macro reads tokens, not trait impls, so whether `String` is `Copy` is a question only the
+/// compiler answers. What is emitted is that question — the filling handed to a generic function
+/// carrying the parameter's own bounds — so the answer arrives as the compiler's own `E0277`,
+/// spanned on the filling as written, in every build. It is not a `compile_error!` and so does not
+/// take the expansion's place: the item and its schema surface still stand, and the one diagnostic
+/// the author reads is about the one entry that earned it.
+///
+/// Ungated, on the same footing as the refusal of an entry naming no parameter: a filling that no
+/// value of the parameter can take describes an item that is uninhabitable at it, which is as true
+/// in a build that generates no document as in one that does.
+///
+/// Two declarations earn nothing. A parameter with no bounds admits every filling, so the expansion
+/// is left exactly as it was. And a bound naming another parameter of the item holds only where
+/// that one is filled too — a joint statement this per-filling check does not make, and one whose
+/// name reproduced here would resolve to nothing — so it is left to the item's own use sites.
+fn default_types_bound_checks(
+    item: &Item,
+    args: &ModelSchemaArgs,
+) -> Vec<proc_macro2::TokenStream> {
+    let Some(generics) = item_generics(item) else {
+        return Vec::new();
+    };
+    args.default_types
+        .iter()
+        .filter_map(|(name, filling)| filling_bound_check(generics, name, filling))
+        .collect()
+}
+
+/// The check one filling earns, or `None` where its parameter declares nothing to check it against.
+///
+/// The parameter keeps the ident the author declared it under, so a bound written in terms of the
+/// parameter itself still reads, and the bounds keep the spans they were written at, so the
+/// compiler's `required by this bound` note points at the declaration rather than at anything
+/// emitted here.
+fn filling_bound_check(
+    generics: &syn::Generics,
+    name: &syn::Ident,
+    filling: &syn::Type,
+) -> Option<proc_macro2::TokenStream> {
+    let bounds = declared_bounds(generics, name);
+    if bounds.is_empty()
+        || bounds
+            .iter()
+            .any(|bound| mentions_another_parameter(bound, generics, name))
+    {
+        return None;
+    }
+    Some(quote! {
+        const _: fn() = || {
+            fn default_type_filling<#name: #(#bounds)+*>() {}
+            default_type_filling::<#filling>();
+        };
+    })
+}
+
+/// Everything a parameter is bounded by, in both places a declaration can put it: beside the
+/// parameter, and in the item's `where` clause.
+fn declared_bounds<'generics>(
+    generics: &'generics syn::Generics,
+    name: &syn::Ident,
+) -> Vec<&'generics syn::TypeParamBound> {
+    let beside_the_parameter = generics.params.iter().filter_map(|param| match param {
+        syn::GenericParam::Type(type_param) if type_param.ident == *name => {
+            Some(&type_param.bounds)
+        }
+        syn::GenericParam::Type(_)
+        | syn::GenericParam::Const(_)
+        | syn::GenericParam::Lifetime(_) => None,
+    });
+    let in_the_where_clause = generics
+        .where_clause
+        .iter()
+        .flat_map(|where_clause| &where_clause.predicates)
+        .filter_map(|predicate| {
+            let syn::WherePredicate::Type(predicate_type) = predicate else {
+                return None;
+            };
+            (named_parameter(&predicate_type.bounded_ty) == Some(name))
+                .then_some(&predicate_type.bounds)
+        });
+    beside_the_parameter
+        .chain(in_the_where_clause)
+        .flatten()
+        .collect()
+}
+
+/// The parameter a `where` predicate bounds, when it bounds a bare one; a predicate written about
+/// `Vec<T>` or `T::Item` bounds that type, not `T`.
+fn named_parameter(bounded_ty: &syn::Type) -> Option<&syn::Ident> {
+    let syn::Type::Path(type_path) = bounded_ty else {
+        return None;
+    };
+    if type_path.qself.is_some() {
+        return None;
+    }
+    type_path.path.get_ident()
+}
+
+/// Whether a bound reads any generic parameter of the item other than the one it bounds.
+///
+/// Asked of the tokens rather than the parsed bound because the answer only ever withholds a check:
+/// a path segment that happens to spell a parameter's name is read as the parameter, which costs
+/// the item nothing it had before.
+fn mentions_another_parameter(
+    bound: &syn::TypeParamBound,
+    generics: &syn::Generics,
+    name: &syn::Ident,
+) -> bool {
+    let own = name.to_string();
+    let neighbours: Vec<String> = generics
+        .params
+        .iter()
+        .map(|param| match param {
+            syn::GenericParam::Type(type_param) => type_param.ident.to_string(),
+            syn::GenericParam::Const(const_param) => const_param.ident.to_string(),
+            syn::GenericParam::Lifetime(lifetime_param) => {
+                lifetime_param.lifetime.ident.to_string()
+            }
+        })
+        .filter(|declared| *declared != own)
+        .collect();
+    reads_any_name(quote::ToTokens::to_token_stream(bound), &neighbours)
+}
+
+/// Whether a token stream spells any of the given names, at any nesting depth.
+fn reads_any_name(tokens: proc_macro2::TokenStream, names: &[String]) -> bool {
+    tokens.into_iter().any(|tree| match tree {
+        proc_macro2::TokenTree::Ident(ident) => names.contains(&ident.to_string()),
+        proc_macro2::TokenTree::Group(group) => reads_any_name(group.stream(), names),
+        proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => false,
+    })
+}
+
+/// Emits the expansion with the checks a `default_types` declaration earned beside it, or the
+/// expansion untouched where it earned none.
+///
+/// The checks accompany the expansion rather than replacing it: a filling failing a bound is a
+/// statement about the item, not a reason to withhold the item, and everything naming the item
+/// should still resolve so the bound's own diagnostic is the one the author reads.
+///
+/// They go ahead of it because a doc example is annotated at the same filling, and where the
+/// filling does not hold that annotation fails on the whole attribute. Both diagnostics are the one
+/// disagreement, and the author should meet the one that names the entry first.
+fn with_filling_bound_checks(
+    expanded: TokenStream,
+    checks: &[proc_macro2::TokenStream],
+) -> TokenStream {
+    if checks.is_empty() {
+        return expanded;
+    }
+    let item_and_surface: proc_macro2::TokenStream = expanded.into();
+    quote! {
+        #(#checks)*
+        #item_and_surface
+    }
+    .into()
 }
 
 /// The `compile_error!` tokens an item earns for carrying a ` ```rust example ` block while

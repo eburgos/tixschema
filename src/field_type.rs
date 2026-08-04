@@ -987,7 +987,7 @@ impl FieldDef {
     /// - For `StringLiteral`, generates quoted string literal
     /// - All Rust numbers map to 'number' in TS
     ///
-    /// See generation/typescript.rs for how this is used in full type defs.
+    /// See the emitters in `model_schema.rs` for how this is spliced into a full type definition.
     /// Examples in README.md show generated output.
     pub fn typescript_typename(&self) -> String {
         let pre_result = self.typescript_base();
