@@ -1220,11 +1220,13 @@ fn enum_schema_example_method(
     docs_vec: Option<&[String]>,
     name: &syn::Ident,
     generics: &syn::Generics,
+    args: &ModelSchemaArgs,
 ) -> Option<proc_macro2::TokenStream> {
     item_schema_example_method(
         docs_vec.and_then(extract_example_from_docs).as_ref(),
         name,
         generics,
+        args,
     )
 }
 
@@ -1236,19 +1238,26 @@ const fn enum_schema_example_method(
     _docs_vec: Option<&[String]>,
     _name: &syn::Ident,
     _generics: &syn::Generics,
+    _args: &ModelSchemaArgs,
 ) -> Option<proc_macro2::TokenStream> {
     None
 }
 
-/// The type a doc example's value is annotated with: the item's own name, with every parameter it
-/// declares instantiated at `String`.
+/// The type a doc example's value is annotated with: the item's own name, with every type parameter
+/// it declares instantiated at the type `default_types` declares for it, or at `String` where it
+/// declares none.
 ///
 /// The example is Rust the expansion has to compile, and a parameter names no type to compile it
-/// at — a bare ident is `E0107` before anything runs. Nothing in the attribute says which filling
-/// to pick and the example code itself names only one, so the convention is `String`: the one
-/// concrete type every example can be written against, whatever the item holds. The argument list
-/// is as long as the parameter list rather than one long, so an item declaring two parameters is
-/// annotated with two arguments.
+/// at — a bare ident is `E0107` before anything runs. `default_types` is the one argument that
+/// names a concrete type per parameter, so a parameter it fills is annotated at the author's own
+/// statement of what the item holds: an annotation picked over that filling would contradict it
+/// (`E0308`) and would fail any bound the filling satisfies and the picked type does not
+/// (`E0277`). Where the filling itself fails a bound, the item is refused on the declaration that
+/// named it rather than here. A parameter with no filling falls back to `String`, the one concrete
+/// type an example can be written against absent a statement of what the item holds; with
+/// `jsonschema` on the fillings are already required for every parameter, so the fallback is
+/// reached only in a build without it. The argument list is as long as the parameter list rather
+/// than one long, so an item declaring two parameters is annotated with two arguments.
 ///
 /// Lifetimes and consts are not here, [`type_parameters_in_scope`] leaving both out: a lifetime in
 /// a `let` annotation elides, and a const has no filling this convention could name.
@@ -1256,11 +1265,17 @@ const fn enum_schema_example_method(
 fn schema_example_value_type(
     name: &syn::Ident,
     generic_params: &[String],
+    default_types: &[(syn::Ident, syn::Type)],
 ) -> proc_macro2::TokenStream {
     if generic_params.is_empty() {
         return quote! { #name };
     }
-    let args = generic_params.iter().map(|_| quote! { String });
+    let args = generic_params.iter().map(|param| {
+        default_types
+            .iter()
+            .find(|(declared, _)| declared == param.as_str())
+            .map_or_else(|| quote! { String }, |(_, ty)| quote! { #ty })
+    });
     quote! { #name<#(#args),*> }
 }
 
@@ -1275,10 +1290,15 @@ fn item_schema_example_method(
     example_code: Option<&String>,
     name: &syn::Ident,
     generics: &syn::Generics,
+    args: &ModelSchemaArgs,
 ) -> Option<proc_macro2::TokenStream> {
     let code = example_code?;
     let code_tokens: proc_macro2::TokenStream = code.parse().unwrap();
-    let value_ty = schema_example_value_type(name, &type_parameters_in_scope(generics));
+    let value_ty = schema_example_value_type(
+        name,
+        &type_parameters_in_scope(generics),
+        &args.default_types,
+    );
     Some(quote! {
         pub fn schema_example() -> serde_json::Value {
             let value: #value_ty = {
@@ -1297,6 +1317,7 @@ const fn item_schema_example_method(
     _example_code: Option<&String>,
     _name: &syn::Ident,
     _generics: &syn::Generics,
+    _args: &ModelSchemaArgs,
 ) -> Option<proc_macro2::TokenStream> {
     None
 }
@@ -2048,12 +2069,13 @@ fn missing_default_message(name: &syn::Ident, declared: &[&syn::Ident]) -> Strin
 /// const.
 ///
 /// A doc example is Rust the expansion has to compile, so its value is annotated with the item's
-/// own name at one instantiation — every parameter filled in, `String` being the filling for a type
-/// parameter. A const takes no filling from that convention: `String` names a type, and a const is
-/// a value. Nor can one be read off the item, since no value is the one every const-parameterised
-/// example is written at, and picking one here would render the example at a length the author
-/// never wrote. So the example is refused where it was written, rather than expanded into an
-/// annotation that fails `E0107` before anything runs.
+/// own name at one instantiation — every parameter filled in, a type parameter taking the type
+/// `default_types` declares for it or `String` where it declares none. A const takes no filling
+/// from that convention: both spellings name a type, and a const is a value. Nor can one be read
+/// off the item, since `default_types` declares types and no value is the one every
+/// const-parameterised example is written at, so one picked here would render the example at a
+/// length the author never wrote. So the example is refused where it was written, rather than
+/// expanded into an annotation that fails `E0107` before anything runs.
 ///
 /// Answered at the one seam every expanded shape is dispatched from, so a struct and an enum cannot
 /// come to answer differently, and a branded newtype is answered before the struct path splits it
@@ -2116,13 +2138,13 @@ fn const_parameter_example_message(consts: &[&syn::Ident]) -> String {
         "`#[model_schema]` cannot build a `schema_example()` for an item that declares a const \
          parameter, and this item declares {names}. The example is Rust compiled at one \
          instantiation, so its value is annotated with this item's own name and every parameter \
-         filled in: a type parameter is filled at `String`, the one concrete type every example can \
-         be written against, and a const takes no filling from that convention — `String` names a \
-         type, a const is a value, and no value is the one every const-parameterised example is \
-         written at, so one chosen here would render the example at a length this item's author \
-         never wrote. This is refused because the `zod` feature is enabled, `zod` being the only \
-         surface that reads an example. Remove the ` ```rust example ` block, or the const \
-         parameter, whichever this item can do without."
+         filled in: a type parameter is filled at the type `default_types` declares for it, or at \
+         `String` where it declares none, and a const takes no filling from that convention — both \
+         spellings name a type, a const is a value, and no value is the one every \
+         const-parameterised example is written at, so one chosen here would render the example at \
+         a length this item's author never wrote. This is refused because the `zod` feature is \
+         enabled, `zod` being the only surface that reads an example. Remove the ` ```rust example \
+         ` block, or the const parameter, whichever this item can do without."
     )
 }
 
@@ -2934,8 +2956,12 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
     // schema_example must be directly on the type (not in the module) because the example code
     // uses type names that may not be accessible from the nested module.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    let schema_example_method =
-        item_schema_example_method(docs_and_example.1.as_ref(), &name, &item_struct.generics);
+    let schema_example_method = item_schema_example_method(
+        docs_and_example.1.as_ref(),
+        &name,
+        &item_struct.generics,
+        args,
+    );
 
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     let validate_method = struct_validate_method(&collected.3, &module_ident);
@@ -3284,8 +3310,12 @@ fn process_tuple_struct(
 
     // schema_example must be directly on the type (not in the module) because the example code
     // uses type names that may not be accessible from the nested module.
-    let schema_example_method =
-        item_schema_example_method(docs_and_example.1.as_ref(), &name, &item_struct.generics);
+    let schema_example_method = item_schema_example_method(
+        docs_and_example.1.as_ref(),
+        &name,
+        &item_struct.generics,
+        args,
+    );
 
     let delegate_impl_items = build_struct_delegate_items(
         &module_ident,
@@ -4180,12 +4210,13 @@ fn build_branded_schema_example(
     example_code: Option<&String>,
     name: &Ident,
     generic_params: &[String],
+    args: &ModelSchemaArgs,
 ) -> proc_macro2::TokenStream {
     let Some(code) = example_code else {
         return quote! {};
     };
     let code_tokens: proc_macro2::TokenStream = code.parse().unwrap();
-    let value_ty = schema_example_value_type(name, generic_params);
+    let value_ty = schema_example_value_type(name, generic_params, &args.default_types);
     quote! {
         pub fn schema_example() -> serde_json::Value {
             let value: #value_ty = {
@@ -4459,7 +4490,7 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
 
     #[cfg(feature = "zod")]
     let schema_example_tokens =
-        build_branded_schema_example(example_code.as_ref(), &name, &generic_params);
+        build_branded_schema_example(example_code.as_ref(), &name, &generic_params, args);
     #[cfg(not(feature = "zod"))]
     let schema_example_tokens = quote! {};
 
@@ -4560,11 +4591,11 @@ fn process_enum(item_enum: syn::ItemEnum, args: &ModelSchemaArgs) -> TokenStream
         #[cfg(not(feature = "serde"))]
         let rename_all = None;
 
-        process_plain_enum(item_enum, &name, rename_all, &item_name)
+        process_plain_enum(item_enum, &name, rename_all, &item_name, args)
     } else {
         #[cfg(feature = "serde")]
         if serde_type_meta.untagged {
-            return process_untagged_enum(item_enum, &name, &item_name);
+            return process_untagged_enum(item_enum, &name, &item_name, args);
         }
 
         // Neither tagging key named, so serde writes the externally tagged form and that is what
@@ -4577,6 +4608,7 @@ fn process_enum(item_enum: syn::ItemEnum, args: &ModelSchemaArgs) -> TokenStream
                 &name,
                 serde_type_meta.rename_all.as_deref(),
                 &item_name,
+                args,
             );
         }
 
@@ -4593,6 +4625,7 @@ fn process_enum(item_enum: syn::ItemEnum, args: &ModelSchemaArgs) -> TokenStream
                 tag,
                 serde_type_meta.rename_all.as_deref(),
                 &item_name,
+                args,
             );
         }
 
@@ -4620,6 +4653,7 @@ fn process_enum(item_enum: syn::ItemEnum, args: &ModelSchemaArgs) -> TokenStream
             &content_name,
             rename_all.as_deref(),
             &item_name,
+            args,
         )
     }
 }
@@ -4841,6 +4875,7 @@ fn process_plain_enum(
     name: &syn::Ident,
     rename_all: Option<&str>,
     item_name: &str,
+    args: &ModelSchemaArgs,
 ) -> TokenStream {
     // Compute the schema module name and register the enum so other types can find it.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -4906,9 +4941,12 @@ fn process_plain_enum(
 
     // schema_example must be directly on the type (not in the module) because the example code
     // uses type names that may not be accessible from the nested module.
+    #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+    let _: &_ = &args;
+
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     let schema_example_method =
-        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics);
+        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics, args);
 
     // Build schema module impl items (without schema_example)
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
@@ -5141,6 +5179,7 @@ fn process_discriminated_enum(
     content_name: &str,
     rename_all: Option<&str>,
     item_name: &str,
+    args: &ModelSchemaArgs,
 ) -> TokenStream {
     // Compute the schema module name and register the enum so other types can find it.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -5167,7 +5206,7 @@ fn process_discriminated_enum(
     }
     let rendered = render_discriminated_variants(tag_name, content_name, item_name, &variants.0);
     #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
-    let _: &_ = &(name, &rendered);
+    let _: &_ = &(name, &rendered, args);
 
     #[cfg(feature = "jsonschema")]
     let main_schema_code = discriminated_main_schema_code(&rendered.2);
@@ -5221,7 +5260,7 @@ fn process_discriminated_enum(
     // uses type names that may not be accessible from the nested module.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     let schema_example_method =
-        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics);
+        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics, args);
 
     // Build schema module impl items (without schema_example)
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
@@ -5561,6 +5600,7 @@ fn process_externally_tagged_enum(
     name: &syn::Ident,
     rename_all: Option<&str>,
     item_name: &str,
+    args: &ModelSchemaArgs,
 ) -> TokenStream {
     // Compute the schema module name and register the enum so other types can find it.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -5600,7 +5640,7 @@ fn process_externally_tagged_enum(
     #[cfg(not(feature = "zod"))]
     let _: &_ = &schema_code;
     #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
-    let _: &_ = &name;
+    let _: &_ = &(name, args);
 
     #[cfg(feature = "typescript")]
     let docs = build_jsdoc_body(docs_vec.as_deref(), item_name);
@@ -5631,7 +5671,7 @@ fn process_externally_tagged_enum(
 
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     let schema_example_method =
-        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics);
+        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics, args);
 
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![
@@ -5965,6 +6005,7 @@ fn process_internally_tagged_enum(
     tag_name: &str,
     rename_all: Option<&str>,
     item_name: &str,
+    args: &ModelSchemaArgs,
 ) -> TokenStream {
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     // Every other enum shape is written as a union of what its variants render as.
@@ -6007,7 +6048,7 @@ fn process_internally_tagged_enum(
     #[cfg(not(feature = "zod"))]
     let _: &_ = &schema_code;
     #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
-    let _: &_ = &name;
+    let _: &_ = &(name, args);
 
     #[cfg(feature = "typescript")]
     let docs = build_jsdoc_body(docs_vec.as_deref(), item_name);
@@ -6038,7 +6079,7 @@ fn process_internally_tagged_enum(
 
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     let schema_example_method =
-        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics);
+        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics, args);
 
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![
@@ -6911,6 +6952,7 @@ fn process_untagged_enum(
     mut item_enum: syn::ItemEnum,
     name: &syn::Ident,
     item_name: &str,
+    args: &ModelSchemaArgs,
 ) -> TokenStream {
     // Compute the schema module name and register the enum so other types can find it.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -6951,11 +6993,11 @@ fn process_untagged_enum(
     let _: &_ = &zod_merge_parts;
 
     #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
-    let _: &_ = &(name, item_name, &ts_parts, &zod_parts, &json_parts);
+    let _: &_ = &(name, item_name, &ts_parts, &zod_parts, &json_parts, args);
 
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     let schema_example_method =
-        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics);
+        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics, args);
 
     // Build schema module impl items (without schema_example)
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
