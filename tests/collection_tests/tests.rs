@@ -938,6 +938,33 @@ fn test_enum_keyed_sibling_array_member_matches_the_serialized_form() {
     );
 }
 
+/// What serde writes for a map whose key is wrapped in a sequence: nothing at all. A JSON object
+/// key is a string, a sequence has no string form, and `serde_json` refuses the whole value rather
+/// than falling back to an array of pairs — the refusal is the wrapper's, not the element's, so the
+/// fixed-size spelling earns it as squarely as the `Vec` one. The bare key beside them is the form
+/// that does write, and the one `#[model_schema()]` describes; a sequence-wrapped key describes no
+/// wire at all, which is why the expansion refuses the spelling instead of enumerating its element.
+#[test]
+fn test_a_sequence_wrapped_map_key_has_no_wire_form() {
+    let vec_keyed = HashMap::from([(vec![MetricSlot::Daily], 1_u32)]);
+    assert_eq!(
+        serde_json::to_value(&vec_keyed).unwrap_err().to_string(),
+        "key must be a string"
+    );
+
+    let array_keyed = HashMap::from([([MetricSlot::Daily; 1], 1_u32)]);
+    assert_eq!(
+        serde_json::to_value(&array_keyed).unwrap_err().to_string(),
+        "key must be a string"
+    );
+
+    let bare_keyed = HashMap::from([(MetricSlot::Daily, 1_u32)]);
+    assert_eq!(
+        serde_json::to_value(&bare_keyed).unwrap(),
+        serde_json::json!({ "Daily": 1_u32 })
+    );
+}
+
 #[test]
 fn test_nested_map_values_constructible_on_both_key_paths() {
     let enum_keyed = EnumKeyedNestedMapValues {

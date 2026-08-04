@@ -15,8 +15,7 @@ use super::{
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use super::{
-    AliasKind, alias_map_key_guard_error, branded_guard_errors, check_non_enum_map_key,
-    register_alias_info,
+    AliasKind, alias_map_key_guard_error, branded_guard_errors, check_map_key, register_alias_info,
 };
 
 #[cfg(feature = "typescript")]
@@ -751,7 +750,7 @@ fn field_map_key_error(field_type: &proc_macro2::TokenStream) -> String {
     };
     let field = item.fields.iter().next().unwrap();
     let field_def = get_field_def("counts", &field.ty, "");
-    check_non_enum_map_key(field, &field_def, &field_label("counts"))
+    check_map_key(field, &field_def, &field_label("counts"))
         .err()
         .map_or_else(String::new, |err| err.to_compile_error().to_string())
 }
@@ -792,8 +791,52 @@ fn a_map_key_proved_to_lack_enum_members_is_refused_wherever_it_is_written() {
     }
 }
 
+/// A sequence-wrapped key writes a JSON array, which serde refuses as an object key outright, so
+/// no surface has an object to describe and the field is refused instead — wherever the map is
+/// written, and whichever sequence spelling wrote it, the parser having collapsed them all onto the
+/// same array levels. The element the wrapper holds is named, that being the one part of the
+/// spelling the levels leave recoverable.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_sequence_wrapped_map_key_is_refused_wherever_it_is_written() {
+    register_alias_info("Slot", "Slot", "slot_schema", AliasKind::EnumMembers);
+    for (field_type, element) in [
+        (quote::quote! { HashMap<Vec<Slot>, u32> }, "Slot"),
+        (quote::quote! { HashMap<[Slot; 2], u32> }, "Slot"),
+        (quote::quote! { HashMap<HashSet<Slot>, u32> }, "Slot"),
+        (quote::quote! { HashMap<Vec<Vec<Slot>>, u32> }, "Slot"),
+        (quote::quote! { HashMap<Vec<String>, u32> }, "String"),
+        (quote::quote! { HashMap<Vec<u32>, u64> }, "u32"),
+        (
+            quote::quote! { HashMap<String, HashMap<Vec<Slot>, u32>> },
+            "Slot",
+        ),
+        (
+            quote::quote! { HashMap<Slot, HashMap<Vec<Slot>, u32>> },
+            "Slot",
+        ),
+        (quote::quote! { Vec<HashMap<Vec<Slot>, u32>> }, "Slot"),
+        (quote::quote! { Option<HashMap<Vec<Slot>, u32>> }, "Slot"),
+        (quote::quote! { (String, HashMap<Vec<Slot>, u32>) }, "Slot"),
+        (quote::quote! { Wrapper<HashMap<Vec<Slot>, u32>> }, "Slot"),
+    ] {
+        let error = field_map_key_error(&field_type);
+        assert!(error.contains("compile_error"), "for {field_type}: {error}");
+        assert!(
+            error.contains("field `counts`"),
+            "for {field_type}: {error}"
+        );
+        assert!(
+            error.contains("a map key must be a value serde writes as a string"),
+            "for {field_type}: {error}"
+        );
+        assert!(error.contains(element), "for {field_type}: {error}");
+    }
+}
+
 /// The guard is a filter, never a rewrite: a key the registry names as a plain enum, one it never
-/// saw registered, and one no position enumerates all keep the field they had.
+/// saw registered, and one no position enumerates all keep the field they had. A sequence in the
+/// *value* is no key at all, so the sequence refusal does not reach across the map to it.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn a_map_key_that_may_have_enum_members_is_left_alone() {
@@ -804,6 +847,9 @@ fn a_map_key_that_may_have_enum_members_is_left_alone() {
         quote::quote! { HashMap<Ghost, u32> },
         quote::quote! { HashMap<u32, u64> },
         quote::quote! { HashMap<String, HashMap<Slot, u32>> },
+        quote::quote! { HashMap<Slot, Vec<u32>> },
+        quote::quote! { HashMap<String, Vec<Slot>> },
+        quote::quote! { Vec<HashMap<Slot, u32>> },
     ] {
         let error = field_map_key_error(&field_type);
         assert!(error.is_empty(), "for {field_type}, got: {error}");
