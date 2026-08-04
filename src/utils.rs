@@ -362,12 +362,23 @@ pub fn compute_item_export_name(rust_ident: &str, override_name: Option<&str>) -
     override_name.map_or_else(|| safe_type_name(rust_ident), ToOwned::to_owned)
 }
 
+/// Builds the `JSDoc` comment body an alias's `export type` is emitted under, which is what
+/// `build_jsdoc_body` builds for a declared item and for the members inside it. Between them they
+/// are every `JSDoc` body the crate writes, so the rule below holds wherever one is written rather
+/// than at the call sites that reach for one.
+///
+/// An alias's ` ```rust example ` block is dropped before its lines reach the body, the way every
+/// item shape drops it: the block is Rust source, and nothing reads it as such once it is sitting in
+/// a `TypeScript` comment. An alias documented with nothing but an example is left naming itself,
+/// as an undocumented one is.
 #[cfg(feature = "typescript")]
 pub fn format_docs_for_ts(docs: &[String], fallback_name: &str) -> String {
-    if docs.is_empty() {
+    let described = strip_examples_from_docs(docs);
+    if described.is_empty() {
         format!(" * {fallback_name}\n * ")
     } else {
-        docs.iter()
+        described
+            .iter()
             .map(|line| format!(" * {line}"))
             .chain(iter::once(" * ".to_owned()))
             .collect::<Vec<_>>()
@@ -556,8 +567,9 @@ fn transform_example_code(code: &str) -> String {
 
 /// Strips example code blocks from documentation lines.
 ///
-/// This is used for descriptions to avoid including example code in the description field.
-#[cfg(any(feature = "typescript", feature = "zod"))]
+/// Every doc body the crate writes — an item's, an alias's, a field's, an enum variant's, and the
+/// descriptions spelled from the same lines — passes through here, so the block is dropped once
+/// rather than at each surface.
 pub fn strip_examples_from_docs(docs: &[String]) -> Vec<String> {
     let mut result = Vec::new();
     let mut in_example_block = false;
