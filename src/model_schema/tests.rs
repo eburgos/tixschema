@@ -39,6 +39,16 @@ use syn::spanned::Spanned as _;
 /// The variants of [`rendered_discriminated_union`]'s enum, in the order they are declared.
 const DECLARED_VARIANTS: [&str; 6] = ["Upload", "Generate", "Delete", "Rename", "Move", "Archive"];
 
+/// The doc attributes carrying a ` ```rust example ` block that the const-parameter probes are
+/// written under. Held apart from them so every probe writes the same block and only the
+/// declaration beneath it varies.
+#[cfg(feature = "zod")]
+const EXAMPLE_DOC_BLOCK: &str = "/// An item carrying an example block.\n\
+                                 ///\n\
+                                 /// ```rust example\n\
+                                 /// Probe::Held\n\
+                                 /// ```\n";
+
 /// Every pattern the `pattern` guards must decide, invalid ones first, then the valid shapes the
 /// shipped tests write.
 const PROBE_PATTERNS: [&str; 10] = [
@@ -2705,10 +2715,10 @@ fn an_alias_type_parameter_is_erased_at_every_depth() {
 }
 
 /// The same erasure at the same depths on the value surface, where the consequence of skipping it
-/// is louder: a Zod `const` cannot be parameterised, so a parameter left to render names a
-/// `$Schema` binding no emitted module declares and the pasted output throws before a payload is
-/// read. Asserted over the identical alias list the JSON test walks, so the two surfaces cannot
-/// erase at different depths.
+/// is louder: a parameter left to render names a `$Schema` binding no emitted module declares, and
+/// the pasted output throws before a payload is read. What it renders as instead is the argument
+/// the alias's own factory binds for it, at whatever depth it was written. Asserted over the
+/// identical alias list the JSON test walks, so the two surfaces cannot erase at different depths.
 #[cfg(feature = "zod")]
 #[test]
 fn an_alias_type_parameter_is_erased_at_every_depth_on_the_value_surface() {
@@ -2729,7 +2739,7 @@ fn an_alias_type_parameter_is_erased_at_every_depth_on_the_value_surface() {
             "for {alias_source}, got: {tokens}"
         );
         assert!(
-            tokens.contains("\"HolderType<unknown>\""),
+            tokens.contains("HolderType$SchemaFactory"),
             "for {alias_source}, got: {tokens}"
         );
     }
@@ -3590,6 +3600,73 @@ fn a_default_types_shape_the_parser_cannot_read_is_refused() {
     }
 }
 
+/// A parameter named twice is refused as written, and the refusal names the parameter and both
+/// fillings — a reader shown only that there is a duplicate still has to go and find the other
+/// entry to know what was dropped.
+#[test]
+fn a_parameter_declared_twice_is_refused() {
+    let rejection = args_rejection(quote::quote! {
+        default_types(IdType = String, IdType = f64)
+    })
+    .unwrap();
+    for needle in ["default_types", "IdType", "String", "f64"] {
+        assert!(rejection.contains(needle), "{needle} missing: {rejection}");
+    }
+}
+
+/// The duplicate is refused whatever surrounds it: the second of two identical entries says no
+/// more than the second of two different ones, and a repeat past the first pair is still a repeat.
+#[test]
+fn a_repeated_parameter_is_refused_wherever_it_is_written() {
+    let probes: [proc_macro2::TokenStream; 3] = [
+        quote::quote! { default_types(IdType = String, IdType = String) },
+        quote::quote! { default_types(IdType = String, DateType = f64, IdType = u8) },
+        quote::quote! { default_types(IdType = String, DateType = f64, DateType = f64) },
+    ];
+    for probe in probes {
+        let rendered = probe.to_string();
+        assert!(args_rejection(probe).is_some(), "for {rendered}");
+    }
+}
+
+/// The refusal points at the entry that earned it — the second spelling of the name, not the first,
+/// which on its own declares exactly what the author meant.
+#[test]
+fn a_duplicate_entry_refusal_is_spanned_on_the_second_spelling() {
+    let source = "default_types(IdType = String, DateType = f64, IdType = u8)";
+    let args: proc_macro2::TokenStream = syn::parse_str(source).unwrap();
+    let rejection = super::parse_model_schema_args(args).arg_rejection.unwrap();
+    let span = rejection.span();
+    assert_eq!(span.source_text().as_deref(), Some("IdType"));
+    assert_eq!(span.start().column, source.rfind("IdType").unwrap());
+    assert_ne!(span.start().column, source.find("IdType").unwrap());
+}
+
+/// A list that names each parameter once is read exactly as before, however many entries it
+/// carries and whatever the fillings are — the duplicate check costs a distinct declaration
+/// nothing.
+#[test]
+fn distinct_entries_are_read_unchanged() {
+    let args = super::parse_model_schema_args(quote::quote! {
+        default_types(AType = u32, BType = String, CType = u32, DType = Vec<Option<u8>>)
+    });
+    assert_eq!(args.arg_rejection.as_ref().map(ToString::to_string), None);
+    let read: Vec<(String, String)> = args
+        .default_types
+        .iter()
+        .map(|(name, ty)| (name.to_string(), quote::quote!(#ty).to_string()))
+        .collect();
+    assert_eq!(
+        read,
+        vec![
+            ("AType".to_owned(), "u32".to_owned()),
+            ("BType".to_owned(), "String".to_owned()),
+            ("CType".to_owned(), "u32".to_owned()),
+            ("DType".to_owned(), "Vec < Option < u8 > >".to_owned()),
+        ]
+    );
+}
+
 /// The argument shares the list with the string constraints and the name override, and reading it
 /// costs none of them. This is the only place the coexistence can be asked: a type-level string
 /// constraint is a brand's alone, and a brand over a type parameter is already refused at its
@@ -3765,6 +3842,107 @@ fn a_parameter_with_no_default_is_accepted_where_no_json_document_is_built() {
         );
         assert!(messages.is_empty(), "for {args:?}: {messages:?}");
     }
+}
+
+/// The `compile_error!` tokens `source` earns for the example it carries against the parameters it
+/// declares. Parsed from text so the tokens carry file locations and each refusal's span can be
+/// read back as the source it points at.
+#[cfg(feature = "zod")]
+fn const_example_refusals(source: &str) -> Vec<proc_macro2::TokenStream> {
+    super::const_parameter_example_errors(&syn::parse_str(source).unwrap())
+}
+
+/// The refusals `source` earns, rendered.
+#[cfg(feature = "zod")]
+fn const_example_messages(source: &str) -> Vec<String> {
+    const_example_refusals(source)
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// A doc example is Rust compiled at one instantiation, and no value is the one every
+/// const-parameterised example is written at, so an item that writes one while declaring a const
+/// is refused instead of expanded into a `schema_example()` that cannot compile. Both shapes that
+/// publish an example answer alike, the branded newtype among them.
+#[cfg(feature = "zod")]
+#[test]
+fn a_doc_example_on_a_const_declaring_item_is_refused() {
+    for (source, label) in [
+        (
+            format!("{EXAMPLE_DOC_BLOCK}pub enum Probe<const WIDTH: usize> {{ Held }}"),
+            "type `Probe`",
+        ),
+        (
+            format!("{EXAMPLE_DOC_BLOCK}pub struct Probe<const WIDTH: usize>(pub String);"),
+            "type `Probe`",
+        ),
+    ] {
+        let messages = const_example_messages(&source);
+        assert_eq!(messages.len(), 1, "for {source}: {messages:?}");
+        for needle in [
+            "compile_error",
+            "WIDTH",
+            "const parameter",
+            "```rust example",
+            "`zod` feature",
+            label,
+        ] {
+            assert!(
+                messages[0].contains(needle),
+                "{needle} missing for {source}: {}",
+                messages[0]
+            );
+        }
+    }
+}
+
+/// The refusal is the one the item earned, not one per parameter: an item writes a single example,
+/// so a second const adds a name to the message rather than a second diagnostic. It points at the
+/// first const declared, the example itself having no one token to sit on.
+#[cfg(feature = "zod")]
+#[test]
+fn a_doc_example_is_refused_once_and_names_every_const_declared() {
+    let source = format!(
+        "{EXAMPLE_DOC_BLOCK}pub struct Probe<'label, ValueType, const WIDTH: usize, const DEPTH: \
+         usize> {{ pub value: ValueType }}"
+    );
+    let refusals = const_example_refusals(&source);
+    assert_eq!(refusals.len(), 1, "got: {refusals:?}");
+    assert_eq!(refusals[0].span().source_text().as_deref(), Some("WIDTH"));
+    let rendered = refusals[0].to_string();
+    for needle in ["WIDTH", "DEPTH"] {
+        assert!(rendered.contains(needle), "{needle} missing: {rendered}");
+    }
+}
+
+/// What a const costs is the example, not the declaration: an item that writes none is expanded
+/// exactly as before, and so is one whose parameters are all kinds a filling exists for — a
+/// lifetime elides in the annotation and a type parameter takes `String`.
+#[cfg(feature = "zod")]
+#[test]
+fn an_item_the_example_convention_covers_earns_no_refusal() {
+    for source in [
+        "pub enum Probe<const WIDTH: usize> { Held }".to_owned(),
+        "pub struct Probe<const WIDTH: usize>(pub String);".to_owned(),
+        format!("{EXAMPLE_DOC_BLOCK}pub struct Probe<'label> {{ pub label: &'label str }}"),
+        format!("{EXAMPLE_DOC_BLOCK}pub struct Probe<ValueType> {{ pub value: ValueType }}"),
+        format!("{EXAMPLE_DOC_BLOCK}pub enum Probe {{ Held }}"),
+        format!("{EXAMPLE_DOC_BLOCK}pub struct Probe {{ pub value: String }}"),
+    ] {
+        let messages = const_example_messages(&source);
+        assert!(messages.is_empty(), "for {source}: {messages:?}");
+    }
+}
+
+/// An alias publishes no `schema_example()` — the expansion never reads its example — so a const
+/// on one costs nothing and is left alone. The refusal is owed exactly where the method is built.
+#[cfg(feature = "zod")]
+#[test]
+fn a_const_declaring_alias_is_left_alone() {
+    let source = format!("{EXAMPLE_DOC_BLOCK}pub type Probe<const WIDTH: usize> = [u8; WIDTH];");
+    let messages = const_example_messages(&source);
+    assert!(messages.is_empty(), "got: {messages:?}");
 }
 
 /// Builds the `Display` assertion for the sole field of `source`, parsed from text so its spans
@@ -5320,6 +5498,7 @@ fn wrapped_u32_value(wrapper: &str) -> super::FieldDef {
         model_schema_prop_meta: None,
         nullable_levels: Vec::new(),
         name: "items".to_owned(),
+        absent_from_wire: false,
         omits_value: false,
         type_span: proc_macro2::Span::call_site(),
     }

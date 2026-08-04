@@ -88,7 +88,13 @@ pub struct UserProfile {
 
 `Option<T>` fields validate as `z.union([type, z.undefined()]).prefault(undefined)` in Zod v4 and are left out of the JSON Schema's `required` list. The `.prefault(undefined)` makes the field default to `undefined` when omitted from the input.
 
-What TypeScript writes follows the wire. A field carrying `#[serde(skip_serializing_if = "Option::is_none")]` (or `skip` / `skip_serializing`) has no key at all in the payload serde writes for a `None`, so the member is written with an optional key — `field?: T`, which the absent-key payload satisfies. Every other `Option<T>` field keeps its key and carries `T | undefined`. The `serde` feature is what reads the attribute; without it no attribute is read and every `Option<T>` renders in the second form.
+What TypeScript writes follows the wire. A field carrying `#[serde(skip_serializing_if = "Option::is_none")]` or `#[serde(skip_serializing)]` has no key at all in the payload serde writes for a `None`, so the member is written with an optional key — `field?: T`, which the absent-key payload satisfies. Every other `Option<T>` field keeps its key and carries `T | undefined`.
+
+A bare `#[serde(skip)]` is not that. serde writes the key into no payload *and* throws it away out of every payload that supplies one, so there is nothing on the wire for any surface to describe: TypeScript writes no member, Zod no key, and the JSON Schema neither a `properties` entry nor a `required` one. `#[serde(skip_serializing, skip_deserializing)]` is the same wire spelled out and is answered the same way. Note what this costs on the way in — a `z.strictObject` and an `additionalProperties: false` both *reject* a payload carrying that key, while serde accepts such a payload and discards the value. The schemas describe the payload serde writes, and that key appears in none of them; a member under an optional key would instead claim the key is sometimes written, and would describe a value nothing ever reads.
+
+`#[serde(skip_deserializing)]` on its own drops neither surface's key: serde writes it in every payload, so the member keeps a required key, and the value a payload supplies under it is discarded on the way in.
+
+Which key a field writes is read off the attribute in every build, `serde` feature or not — one declaration describes one wire under every toggle. What the feature buys is the renaming, the tagging and the guards.
 
 ```rust
 #[model_schema()]
@@ -891,9 +897,9 @@ const createSchemaCache = <Cache extends object>(): Cache => new WeakMap() as un
 
 A cache maps an argument to the schema built from *that* argument, so its value type depends on its key type. TypeScript can declare that dependency -- each factory writes it out, one interface per parameter -- but cannot construct a map that satisfies it, since a `WeakMap` fixes both of its own parameters at construction. So the dependency is declared where it does the work and asserted exactly once, in the preamble: that line is the only assertion anywhere in the output. A module holding no generic type needs no preamble; one holding any needs it exactly once.
 
-#### The two items that still publish a `const`
+#### An alias is a factory too
 
-A generic alias and a generic branded newtype publish a plain `const`, so a parameter inside either has no argument to name and still renders as the opaque value -- `z.unknown()`, the same answer JSON Schema gives:
+Every generic item publishes a factory, an alias among them, so a parameter inside one is the argument that factory binds for it:
 
 ```rust
 #[model_schema(default_types(T = String))]
@@ -903,14 +909,15 @@ pub type Wrapper<T> = Vec<T>;
 ```typescript
 export type WrapperType<T> = Array<T>;
 
-const WrapperType$RawSchema = z.array(z.unknown());
-
-export const WrapperType$Schema: ZodType<WrapperType<unknown>> = WrapperType$RawSchema;
+const buildWrapperType$Schema = <T extends ZodType>(
+  t: T,
+) =>
+  z.array(t);
 ```
 
 Only the item's *own* parameters are read this way. A name the expansion cannot resolve because the type lives elsewhere keeps its `Name$Schema` reference, since that type publishes the binding.
 
-One consequence is worth stating outright: an opaque value carries no checks, so no `model_schema_prop` bound may be spelled against a type parameter. A branded newtype cannot apply `pattern`, `minLength`, or `maxLength` to one of its own — see [Branded Newtype Validation Constraints](#branded-newtype-validation-constraints) — and a *field* typed with one is refused for the same reason, at every depth the parameter is reached through:
+One consequence is worth stating outright: a parameter is a value only where a factory binds one for it, and the one JSON document an item publishes covers every filling it could be handed — so no `model_schema_prop` bound may be spelled against a type parameter. A branded newtype cannot apply `pattern`, `minLength`, or `maxLength` to one of its own — see [Branded Newtype Validation Constraints](#branded-newtype-validation-constraints) — and a *field* typed with one is refused for the same reason, at every depth the parameter is reached through:
 
 ```rust
 #[model_schema(default_types(IdType = String))]
@@ -920,7 +927,7 @@ pub struct Constrained<IdType> {
 }
 ```
 
-The value's type is whatever the instantiation supplies, so nothing here holds it to anything: Zod and the JSON schema describe the value as the opaque one, the generated validator emits no check for it, and serde reads the payload back untouched. Constrain the argument instead — declare the type the instantiation supplies as a branded newtype carrying the bound — or drop the key. The JSDoc says nothing about a bound the refusal turns away either, the sentence being written only where something holds the value to it.
+The value's type is whatever the instantiation supplies, so nothing here holds it to anything: Zod hands the check to a schema it has no bound on, the JSON schema describes the value as the permissive empty one, the generated validator emits no check for it, and serde reads the payload back untouched. Constrain the argument instead — declare the type the instantiation supplies as a branded newtype carrying the bound — or drop the key. The JSDoc says nothing about a bound the refusal turns away either, the sentence being written only where something holds the value to it.
 
 ### Branded Newtypes
 
@@ -947,11 +954,12 @@ Generated TypeScript (with `zod` feature):
 
 ```typescript
 export type UserId<ID_TYPE> = ID_TYPE & $brand<"UserId">;
-const UserId$RawSchema = ID_TYPE$Schema.brand<"UserId">().meta({
+const buildUserId$Schema = <ID_TYPE extends ZodType>(
+  iD_TYPE: ID_TYPE,
+) =>
+  iD_TYPE.meta({
   description: "UserId",
-});
-
-export const UserId$Schema: $ZodBranded<typeof ID_TYPE$Schema, "UserId"> = UserId$RawSchema;
+}).brand<"UserId">();
 
 export type CorrelationId = string & $brand<"CorrelationId">;
 const CorrelationId$RawSchema = z.string().brand<"CorrelationId">().meta({
@@ -975,7 +983,8 @@ Notes:
 
 - If the Rust type name ends with `Json`, the suffix is stripped in the generated TypeScript (e.g., `UserIdJson` becomes `UserId`). Otherwise, the Rust name is used as-is.
 - Generic parameter names (e.g., `ID_TYPE`) are preserved exactly in the TypeScript type.
-- A brand describes what its inner writes whether or not the inner names the brand's type parameters, so `TagList<T>(pub Vec<T>)` is an array on every surface — `Array<T>`, `z.array(z.unknown())`, `$ZodBranded<ZodArray, "TagList">`, `{"type": "array", "items": {}}` — and not the bare parameter. The parameter itself carries what an uninstantiated parameter carries anywhere else, under the rule in [Type Parameters](#type-parameters).
+- A generic brand publishes a factory, as every other generic item does, so the brand and its inner's shape land on the argument the caller supplied rather than on a value pinned at expansion. A parameter reaches it as the factory's own argument, under the rule in [Type Parameters](#type-parameters); a brand written over that parameter still describes what its inner writes, so `TagList<T>(pub Vec<T>)` is an array on every surface — `Array<T>`, `z.array(t)`, `{"type": "array", "items": {}}` — and not the bare parameter.
+- The description is written before the brand in a factory and after it in a `const`. Inside a factory the receiver is the parameter the caller filled, and Zod's `.meta()` returns `this` — which TypeScript resolves back to that bare parameter, dropping the marker `.brand<"Name">()` had just added. Both orders build the same schema.
 - Serde transparent serialization works normally -- the wrapper is invisible in JSON.
 - Use branded newtypes for opaque IDs and phantom types to prevent passing the wrong ID type across domain boundaries.
 
@@ -1203,12 +1212,13 @@ pub struct DocumentId<ID_TYPE>(pub ID_TYPE);
 Generated Zod:
 
 ```typescript
-const DocumentId$RawSchema = ID_TYPE$Schema.brand<"DocumentId">().meta({
+const buildDocumentId$Schema = <ID_TYPE extends ZodType>(
+  iD_TYPE: ID_TYPE,
+) =>
+  iD_TYPE.meta({
   description: "Generic document identifier.\n- `DocumentId<String>` for API/HTTP layer\n- `DocumentId<ObjectId>` for MongoDB layer",
   example: "64de3d95ff45b119e5b53a7e",
-});
-
-export const DocumentId$Schema: $ZodBranded<typeof ID_TYPE$Schema, "DocumentId"> = DocumentId$RawSchema;
+}).brand<"DocumentId">();
 ```
 
 ## Field Validation (`model_schema_prop`)
@@ -1510,18 +1520,17 @@ pub struct Event {
 
 ### Optional TypeScript Keys (`ts_optional`)
 
-An `Option<T>` field whose serde attributes drop the key for a `None` already renders as an optional key ([Optional Fields](#optional-fields)). The bare `ts_optional` flag asks for that same spelling (`field?: T` rather than `field: T | undefined`) on the author's word, for a field whose key nothing else says may be absent — an `Option<T>` written where no serde attribute is read at all.
+The bare `ts_optional` flag asks for the optional key (`field?: T` rather than `field: T | undefined`) on the author's word, for a field whose key nothing else says may be absent.
 
-This is a TypeScript-only knob -- the Zod schema and JSON Schema are unchanged (the field is already optional in both). The flag is only valid on `Option<T>` fields; applying it to a non-`Option` field is a compile error. It composes with `as = Type`, which names the type the field already renders.
+**Read the condition before reaching for it.** An `Option<T>` field whose serde attributes drop the key for a `None` already renders as an optional key, off the wire and in every build ([Optional Fields](#optional-fields)) — on such a field the flag changes nothing, because the attribute has already said it. What is left over is an `Option<T>` carrying no key-dropping attribute at all, and with the `serde` feature on that field does not compile: serde writes its `None` as a `null`, the generated schema admits only the absent key, and the guard refuses the declaration and names the attribute to add. So the flag decides the key in exactly one place — a build with the `serde` feature **off**, where no attribute is read and no such guard runs:
 
 ```rust
 #[model_schema()]
-#[derive(Serialize, Deserialize)]
 pub struct Profile {
     pub name: String,
     #[model_schema_prop(ts_optional)]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nickname: Option<String>,
+    pub nick_handle: Option<String>,
 }
 ```
 
@@ -1531,10 +1540,13 @@ Generated TypeScript:
 export type Profile = {
   name: string;
   nickname?: string;
+  nick_handle: string | undefined;
 };
 ```
 
-Without `ts_optional` and without an attribute that drops the key, `nickname` would render as `nickname: string | undefined`.
+`nick_handle` is the same field without the flag, so the flag is the whole of the difference between those two lines.
+
+This is a TypeScript-only knob -- the Zod schema and JSON Schema are unchanged (the field is already optional in both, flagged or not). The flag is only valid on `Option<T>` fields; applying it to a non-`Option` field is a compile error. It composes with `as = Type`, which names the type the field already renders. On a field the flag has no say over — one already carrying an omission attribute, or a positional slot, which has no key to make optional — writing it is accepted and inert.
 
 ## Compiler-Validated Examples
 
@@ -1615,6 +1627,7 @@ Key points:
 - If multiple examples are present, only the **first one** is used.
 - Examples respect Serde attributes (field renaming, etc.).
 - Being Rust source, the example block is dropped from the JSDoc comment above the generated `export type`, whatever the type is declared as. On a struct or an enum it reaches the Zod `example` field; on a type alias, which publishes no `example` field, it reaches no generated surface at all.
+- A generic struct or enum has its example built at one instantiation, with every type parameter filled at `String`. A lifetime elides there and needs no filling, but a **const parameter takes none** -- `String` names a type, a const is a value, and no value is the one every example would be written at. So a struct or an enum that declares a const parameter and writes an example is refused, naming the const; drop the example or the const parameter. Nothing is owed where no example is written, on a type alias, or with the `zod` feature off, `zod` being the only surface that reads one.
 - The example code is executed at compile time and serialized to JSON.
 - Wrong types produce compile errors, ensuring examples stay in sync with your types.
 
