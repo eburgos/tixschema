@@ -10,11 +10,11 @@ use regex_syntax::ast::{
 };
 use regex_syntax::hir;
 use std::collections::HashMap;
-use syn::{Attribute, Expr, Field, GenericParam, Generics, Lit, LitStr, Meta, Variant};
+use syn::{Attribute, Expr, Field, GenericParam, Generics, Lit, LitStr, Meta, Type, Variant};
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use syn::ItemEnum;
-#[cfg(any(feature = "typescript", feature = "zod"))]
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use syn::ItemStruct;
 
 /// The JavaScript engine generation the emitted Zod regex literals and JSON Schema `pattern`
@@ -165,6 +165,26 @@ impl ZodUnionMember {
     }
 }
 
+/// One leaf of the value surface a `#[model_schema()]` item published, in the vocabulary the
+/// flatten-member refusal names a wire by.
+///
+/// `branch` is the trail of one-based choices the leaf sits at behind the name, empty for a surface
+/// that offers no choice at all — so an item publishing `anyOf[value, null]` carries its null at
+/// `2`, and a member naming that item carries it at the member's own position followed by that `2`.
+/// `non_object` is the JSON type keyword the leaf describes as where the registration proves it is
+/// no object, and `None` where nothing there proves it — a map, an object, and a name nothing has
+/// classified alike.
+///
+/// Recorded and read under `serde` and `zod` together, which is the pair that reads
+/// `#[serde(untagged)]` and `#[serde(flatten)]` and multiplies one over the other: without both
+/// there is no merge to answer for and nothing asks.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[derive(Clone)]
+pub struct WireLeaf {
+    pub branch: Vec<usize>,
+    pub non_object: Option<&'static str>,
+}
+
 #[derive(Clone)]
 pub struct AliasInfo {
     pub export_name: String,
@@ -183,6 +203,16 @@ pub struct AliasInfo {
     /// registers.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     pub value_shape: Option<&'static str>,
+    /// What the value surface written under this name puts on the wire, one entry per leaf of it,
+    /// and empty when nothing has been recorded at all. Filled by [`record_wire_leaves`] as each
+    /// item registers.
+    ///
+    /// The shape above it answers the constrained-brand guard's question, which is what a check can
+    /// be appended to; this answers the merge's, which is whether an object can be joined to it —
+    /// two questions one word could not hold apart, an `integer` and a `number` being one shape and
+    /// two documents, and an array and a map one shape and opposite answers.
+    #[cfg(all(feature = "serde", feature = "zod"))]
+    pub wire: Vec<WireLeaf>,
     /// What an untagged enum's members are spelled as on the Zod surface, and empty for every other
     /// item. Filled by [`record_zod_union_members`] once the enum's own expansion has rendered
     /// them.
@@ -553,6 +583,8 @@ pub fn register_alias_info(
                 #[cfg(feature = "zod")]
                 publishes_zod_factory: false,
                 value_shape: None,
+                #[cfg(all(feature = "serde", feature = "zod"))]
+                wire: Vec::new(),
                 #[cfg(feature = "zod")]
                 zod_union_members: Vec::new(),
             },
@@ -581,6 +613,32 @@ pub fn record_value_shape(rust_ident: &str, shape: Option<&'static str>) {
     ALIAS_INFO.with(|map| {
         if let Some(info) = map.borrow_mut().get_mut(rust_ident) {
             info.value_shape = shape;
+        }
+    });
+}
+
+/// Records what the value surface written under a name puts on the wire, on the entry that name has
+/// just registered.
+///
+/// The question is the flatten merge's: what serde writes for a member, named by the JSON type
+/// keyword the other surface writes for the same member, so the two refuse the same declaration in
+/// the same words. A name is the one member spelling the expansion reading it cannot answer for —
+/// the document lives in the module the *named* item published — so each item answers for itself as
+/// it registers.
+///
+/// Recorded as leaves rather than as one word because a published surface may be a choice: an item
+/// whose own surface is nullable publishes its value and a bare `null`, and the merge descending it
+/// names that `null` a level below the member. One word at the member's own position could not say
+/// where it sits, and naming it at the member's position would put the two merges into
+/// disagreement — the very thing the branch trail exists to prevent.
+///
+/// A chain resolves one link at a time and cannot cycle, because an entry is only ever built from
+/// entries registered before it.
+#[cfg(all(feature = "serde", feature = "zod"))]
+pub fn record_wire_leaves(rust_ident: &str, leaves: &[WireLeaf]) {
+    ALIAS_INFO.with(|map| {
+        if let Some(info) = map.borrow_mut().get_mut(rust_ident) {
+            info.wire = leaves.to_vec();
         }
     });
 }
@@ -662,6 +720,29 @@ const fn negated_perl_class_written(kind: &ClassPerlKind) -> &'static str {
 
 pub fn lookup_alias_info(rust_ident: &str) -> Option<AliasInfo> {
     ALIAS_INFO.with(|map| map.borrow().get(rust_ident).cloned())
+}
+
+/// The type a spelling names, read through the invisible grouping a `macro_rules!` substitution
+/// arrives inside.
+///
+/// A type written through a `$t:ty` metavariable reaches the expansion wrapped in a
+/// `None`-delimited group — rustc's way of keeping the substituted type one unit whatever the
+/// expansion writes around it — which `syn` parses as [`Type::Group`]. The grouping is all it is:
+/// the type inside is the one the author wrote, at the spans they wrote it at, and it renders the
+/// same source text. What differs is the shape, and every reader below classifies by shape, so a
+/// substituted `String` handed over ungrouped is a type none of their arms answer for — it lands
+/// on the opaque value, silently, and the field comes to admit anything.
+///
+/// Substitutions nest — a metavariable passed on through a second `macro_rules!` arrives grouped
+/// twice — so the grouping is read all the way through rather than one layer off. A parenthesised
+/// type is left alone: `(String)` is a grouping the author wrote, and `syn` keeps it as
+/// [`Type::Paren`] precisely so it can be told from this one.
+pub fn written_type(ty: &Type) -> &Type {
+    let mut current = ty;
+    while let Type::Group(group) = current {
+        current = &group.elem;
+    }
+    current
 }
 
 pub fn safe_type_name(key: &str) -> String {
@@ -810,7 +891,7 @@ pub fn compute_item_export_name(rust_ident: &str, override_name: Option<&str>) -
     override_name.map_or_else(|| safe_type_name(rust_ident), ToOwned::to_owned)
 }
 
-#[cfg(any(feature = "typescript", feature = "zod"))]
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 /// Extracts and concatenates documentation comments from a `syn::ItemStruct`.
 ///
 /// # Arguments
