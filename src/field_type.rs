@@ -977,20 +977,22 @@ impl FieldDef {
                     // The element carries this field's own array levels, so it applies the wrap.
                     return self.collection_element_field(element).zod_array_base();
                 } else if let Some(info) = lookup_alias_info(name) {
-                    // Always reference the $Schema, regardless of generic params.
-                    // For branded wrappers like DocumentTypeId<String>, the Zod
-                    // schema is defined on the wrapper itself.
-                    format!("{}$Schema", info.export_name)
+                    // What the named type published is what this can name. A generic struct or
+                    // enum published a factory, so the arguments written here are the call's; an
+                    // alias and a branded newtype published the one `const` they have whatever
+                    // they were declared with, and that `const` is the whole of what a reference
+                    // to either can say.
+                    if info.publishes_zod_factory {
+                        zod_factory_call(&info.export_name, lst)
+                    } else {
+                        format!("{}$Schema", info.export_name)
+                    }
                 } else if lst.is_empty() {
                     format!("{name}$Schema")
                 } else {
-                    format!(
-                        "{name}<{}>",
-                        lst.iter()
-                            .map(Self::typescript_typename)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
+                    // A name the registry does not hold yet, written with arguments, is a generic
+                    // type expanded after this one: only a factory can take them.
+                    zod_factory_call(name, lst)
                 }
             }
             FieldDefType::Map(k, v) => {
@@ -1208,6 +1210,23 @@ impl FieldDef {
         };
         lookup_alias_info(name).map_or_else(Vec::new, |info| info.zod_union_members)
     }
+}
+
+/// A reference to a type that publishes a factory, as the call it has to be.
+///
+/// Each argument is rendered by the renderer that renders the reference itself, so an argument that
+/// is a forwarded parameter, a primitive, a date, or another generic reference all reach the call
+/// the same way — and one that is itself generic composes at whatever depth it was written at.
+#[cfg(feature = "zod")]
+fn zod_factory_call(name: &str, arguments: &[FieldDef]) -> String {
+    format!(
+        "{name}$SchemaFactory({})",
+        arguments
+            .iter()
+            .map(FieldDef::zod_type)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 /// The one list of std wrappers the crate renders as arrays, shared by every surface.
