@@ -82,11 +82,13 @@ use crate::features::model_schema_prop::{ModelSchemaPropMeta, parse_model_schema
 
 #[cfg(feature = "jsonschema")]
 use crate::features::jsonschema::{
-    MergedSource,
+    MergedSource, SchemaParameter,
     generate_plain_enum_json_schema_method as generate_plain_enum_json_schema_method_impl,
     generate_struct_json_schema_method as generate_struct_json_schema_method_impl,
     json_schema_methods,
 };
+#[cfg(feature = "jsonschema")]
+use crate::utils::json_argument_binding;
 
 #[cfg(all(feature = "serde", feature = "jsonschema"))]
 use crate::features::jsonschema::{MergeDiagnostic, merged_object_value};
@@ -1207,7 +1209,7 @@ fn process_type_alias(item_type: ItemType, args: &ModelSchemaArgs) -> TokenStrea
 
     let ts_method = generate_alias_ts_definition_method(&alias, &export_name, &alias_field_def);
     let json_schema_method =
-        generate_alias_json_schema_method(&alias, &export_name, &alias_field_def);
+        generate_alias_json_schema_method(&alias, &export_name, &alias_field_def, args);
     let zod_method =
         generate_alias_zod_method(&alias, &export_name, &rust_ident_str, &alias_field_def);
 
@@ -1825,14 +1827,15 @@ fn struct_schema_impl_items(
     item_name: &str,
     rust_ident: &str,
     generics: &syn::Generics,
+    args: &ModelSchemaArgs,
     docs: &str,
 ) -> Vec<proc_macro2::TokenStream> {
     #[cfg(not(feature = "typescript"))]
     let _: &str = docs;
     #[cfg(not(any(feature = "typescript", feature = "zod")))]
     let _: &str = rust_ident;
-    #[cfg(not(any(feature = "typescript", feature = "zod")))]
-    let _: &_ = &generics;
+    #[cfg(not(feature = "jsonschema"))]
+    let _: &_ = &args;
     #[cfg(feature = "typescript")]
     let ts_generics = ts_generic_params(generics);
     #[cfg(feature = "zod")]
@@ -1848,6 +1851,7 @@ fn struct_schema_impl_items(
             &bodies.2,
             &flatten_merged_sources(flattened_fields),
             item_name,
+            &schema_parameters(generics, args),
         ),
         #[cfg(feature = "typescript")]
         generate_ts_definition_method(
@@ -2860,7 +2864,8 @@ fn branded_pattern_error(name: &Ident, args: &ModelSchemaArgs) -> Option<proc_ma
 }
 
 /// The inner type as the two validating surfaces receive it: with the brand's own type parameters
-/// already erased to the opaque value, which is what those surfaces write for one.
+/// already classified as parameters, which is what leaves each surface writing the filling it
+/// reaches one through rather than a reference to a type of that name.
 ///
 /// The guard and the registration read the inner through this one call, so what a brand is refused
 /// for and what it records for the next brand to read cannot come apart.
@@ -3401,6 +3406,7 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
         &item_name,
         &rust_ident,
         &item_struct.generics,
+        args,
         &docs,
     );
 
@@ -3744,7 +3750,11 @@ fn process_tuple_struct(
 
     let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![
         #[cfg(feature = "jsonschema")]
-        json_schema_methods(&item_name, &tuple_struct_json_body(&item_name, &shape)),
+        json_schema_methods(
+            &item_name,
+            &tuple_struct_json_body(&item_name, &shape),
+            &schema_parameters(&item_struct.generics, args),
+        ),
         #[cfg(feature = "typescript")]
         build_tuple_struct_ts_definition_method(
             &build_jsdoc_body(docs_and_example.0.as_deref(), &item_name),
@@ -4088,6 +4098,7 @@ fn build_branded_json_schema_method(
     args: &ModelSchemaArgs,
     json_inner: &BrandedJsonInner,
     def_name: &str,
+    parameters: &[SchemaParameter],
 ) -> proc_macro2::TokenStream {
     let body = match json_inner {
         #[cfg(feature = "chrono")]
@@ -4099,7 +4110,7 @@ fn build_branded_json_schema_method(
         }
         BrandedJsonInner::Slot(inner) => branded_slot_json_schema(args, inner, def_name),
     };
-    json_schema_methods(def_name, &body)
+    json_schema_methods(def_name, &body, parameters)
 }
 
 /// The `FieldDef` every surface renders from: the written one with each name that is one of the
@@ -4107,10 +4118,11 @@ fn build_branded_json_schema_method(
 ///
 /// All three surfaces read this one def, which is why a parameter cannot come to mean two things
 /// about one declaration. What each of them then makes of it differs — the two validating surfaces
-/// describe it as the opaque value, TypeScript renders the name its own declaration binds — and
-/// that difference is [`FieldDef::erase_type_parameters`]'s to state rather than this seam's. A
-/// name left unclassified reads as a reference to a generated type of that name on every surface at
-/// once, which is what puts a parameter in a `Record<…>` key position TypeScript cannot bind.
+/// write the filling that reached the parameter, TypeScript renders the name its own declaration
+/// binds — and that difference is [`FieldDef::erase_type_parameters`]'s to state rather than this
+/// seam's. A name left unclassified reads as a reference to a generated type of that name on every
+/// surface at once, which is what puts a parameter in a `Record<…>` key position TypeScript cannot
+/// bind.
 ///
 /// A struct reaches the same def by erasing each field as it is collected; this is where the item
 /// shapes holding a single written target — an alias, a brand — reach it.
@@ -4156,8 +4168,9 @@ fn branded_ts_type_and_generics(
 /// Resolves the JSON schema shape for a branded newtype's inner field, read off the def
 /// [`surface_field_def`] has already erased the brand's own type parameters out of.
 ///
-/// So a parameter admits any value while the shape it sits in — an array, a map's keys, a tuple's
-/// arity — is still described, which is what `#[serde(transparent)]` puts on the wire.
+/// So a parameter is described by the filling that reached it while the shape it sits in — an
+/// array, a map's keys, a tuple's arity — is still described, which is what
+/// `#[serde(transparent)]` puts on the wire.
 ///
 /// An `ObjectId`, a composite and a named type are then read off that same `FieldDef`, because none
 /// of them writes a value one `"type"` keyword describes; a chrono type writes a string one keyword
@@ -4834,7 +4847,7 @@ fn branded_guard_failure_output(
 ///
 /// Generic parameters on the struct are preserved in the TypeScript output, whose declaration
 /// binds them. The two validating surfaces read the inner off the erased def instead, so a
-/// parameter reaching either of them describes as the opaque value — see
+/// parameter reaching either of them is written as the filling that reached it — see
 /// [`FieldDef::erase_type_parameters`].
 /// Registers a brand under its own name with both answers the registry holds about it: what serde
 /// writes for it where a map key is asked for, and what it publishes as a value where a brand
@@ -4931,7 +4944,12 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
 
     // --- Build schema module impl items ---
     #[cfg(feature = "jsonschema")]
-    let json_schema_method = build_branded_json_schema_method(args, &json_inner, &item_name);
+    let json_schema_method = build_branded_json_schema_method(
+        args,
+        &json_inner,
+        &item_name,
+        &schema_parameters(&item_struct.generics, args),
+    );
 
     let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![
         #[cfg(feature = "jsonschema")]
@@ -5375,7 +5393,9 @@ fn process_plain_enum(
 
     // Generate schema module methods
     #[cfg(feature = "jsonschema")]
-    let json_schema_method = generate_plain_enum_json_schema_method(&enumerated, item_name);
+    // No slot to fill: Rust refuses an all-unit enum that leaves a type parameter unused, so a
+    // plain enum reaches here declaring none — whatever consts and lifetimes it also binds.
+    let json_schema_method = generate_plain_enum_json_schema_method(&enumerated, item_name, &[]);
 
     #[cfg(feature = "typescript")]
     let ts_definition_method = generate_plain_enum_ts_definition_method(
@@ -5881,7 +5901,7 @@ fn process_discriminated_enum(
     // Generate schema module methods
     #[cfg(feature = "jsonschema")]
     let json_schema_method =
-        generate_discriminated_enum_json_schema_method(&main_schema_code, item_name);
+        enum_json_schema_methods(&main_schema_code, item_name, &item_enum.generics, args);
 
     #[cfg(feature = "typescript")]
     let ts_definition_method = generate_discriminated_enum_ts_definition_method(
@@ -6349,7 +6369,7 @@ fn process_externally_tagged_enum(
 
     #[cfg(feature = "jsonschema")]
     let json_schema_method =
-        generate_discriminated_enum_json_schema_method(&main_schema_code, item_name);
+        enum_json_schema_methods(&main_schema_code, item_name, &item_enum.generics, args);
 
     #[cfg(feature = "typescript")]
     let ts_definition_method = generate_discriminated_enum_ts_definition_method(
@@ -6763,7 +6783,7 @@ fn process_internally_tagged_enum(
 
     #[cfg(feature = "jsonschema")]
     let json_schema_method =
-        generate_discriminated_enum_json_schema_method(&main_schema_code, item_name);
+        enum_json_schema_methods(&main_schema_code, item_name, &item_enum.generics, args);
 
     #[cfg(feature = "typescript")]
     let ts_definition_method = generate_discriminated_enum_ts_definition_method(
@@ -7125,7 +7145,9 @@ fn field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
     }
 
     let inner = match &fld.field_type {
-        FieldDefType::SiblingType(name, _) => sibling_json_schema_value(name, fld.type_span),
+        FieldDefType::SiblingType(name, arguments) => {
+            sibling_json_schema_value(name, arguments, fld.type_span)
+        }
         FieldDefType::String => string_field_json_schema_value(fld),
         FieldDefType::StringLiteral(literal) => {
             quote! { serde_json::json!({ "type": "string", "const": #literal }) }
@@ -7166,9 +7188,9 @@ fn field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
             Ok(tuple_schema) => tuple_schema,
             Err(rejection) => return member_rejection_value(&fld.name, &rejection),
         },
-        // An opaque value carries no type name to narrow with, so the member admits any value: the
-        // permissive empty schema, as in field position.
-        FieldDefType::TypeParam(_) | FieldDefType::Unknown => quote! { serde_json::json!({}) },
+        // A parameter is the filling that reached it, and a value the expansion cannot name at all
+        // admits any value — the permissive empty schema, as in field position.
+        FieldDefType::TypeParam(_) | FieldDefType::Unknown => opaque_json_schema_value(fld),
     };
 
     arrayed_json_schema_value(fld, inner)
@@ -7667,16 +7689,18 @@ fn named_wire_leaves(written: &FieldDef) -> Option<Vec<WireLeaf>> {
     any(feature = "zod", feature = "typescript", feature = "jsonschema")
 ))]
 fn build_untagged_schema_impl_items(
-    name: &syn::Ident,
+    // The declaration itself rather than the pieces read off it: the name and the parameters are
+    // read by different surfaces, and the JSON one reads the parameters beside the attribute.
+    item_enum: &syn::ItemEnum,
     item_name: &str,
     docs_vec: Option<&[String]>,
-    generics: &syn::Generics,
+    args: &ModelSchemaArgs,
     ts_parts: &[String],
     zod_parts: &[String],
     json_parts: &[proc_macro2::TokenStream],
 ) -> Vec<proc_macro2::TokenStream> {
-    #[cfg(not(any(feature = "typescript", feature = "zod")))]
-    let _: &_ = &(name, generics);
+    #[cfg(not(feature = "jsonschema"))]
+    let _: &_ = &args;
     #[cfg(not(feature = "typescript"))]
     let _: &_ = &(ts_parts, docs_vec);
     #[cfg(not(feature = "zod"))]
@@ -7709,22 +7733,22 @@ fn build_untagged_schema_impl_items(
 
     #[cfg(feature = "jsonschema")]
     let json_schema_method =
-        generate_discriminated_enum_json_schema_method(&main_schema_code, item_name);
+        enum_json_schema_methods(&main_schema_code, item_name, &item_enum.generics, args);
 
     #[cfg(feature = "typescript")]
     let ts_definition_method = generate_discriminated_enum_ts_definition_method(
         &docs,
         item_name,
-        &name.to_string(),
-        &ts_generic_params(generics),
+        &item_enum.ident.to_string(),
+        &ts_generic_params(&item_enum.generics),
         &type_code,
     );
 
     #[cfg(feature = "zod")]
     let zod_schema_method = generate_discriminated_enum_zod_schema_method(
         item_name,
-        &name.to_string(),
-        &type_parameters_in_scope(generics),
+        &item_enum.ident.to_string(),
+        &type_parameters_in_scope(&item_enum.generics),
         &schema_code,
     );
 
@@ -7797,10 +7821,10 @@ fn process_untagged_enum(
     // Build schema module impl items (without schema_example)
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     let schema_impl_items = build_untagged_schema_impl_items(
-        name,
+        &item_enum,
         item_name,
         docs_vec.as_deref(),
-        &item_enum.generics,
+        args,
         &ts_parts,
         &zod_parts,
         &json_parts,
@@ -8473,14 +8497,137 @@ fn sibling_schema_module_ident(name: &str, span: proc_macro2::Span) -> Ident {
 /// come back around to a name still being written. So the names in flight and the definitions the
 /// root will carry travel into the call.
 ///
+/// A reference carrying arguments asks for the schema at those arguments instead. JSON Schema has
+/// no type parameters, so the named type's own document is written at one filling, and the filling
+/// the field carries is the reference site's — a stored-shape field embedding the wire-shape
+/// document would reject every payload it holds. Genericness is read off the reference rather than
+/// off the registry because Rust cannot name a generic type without arguments, so a reference
+/// carrying them names a type that declares them.
+///
 /// The whole call is spanned on where the sibling was named, so every failure it can raise — the
 /// unresolved module a function-local sibling produces, the missing method a type expanded without
 /// `#[model_schema()]` produces — is reported at the type rather than at the attribute. Only the
 /// spans change; the tokens are the ones a reference has always carried.
 #[cfg(feature = "jsonschema")]
-fn sibling_json_schema_value(name: &str, span: proc_macro2::Span) -> proc_macro2::TokenStream {
+fn sibling_json_schema_value(
+    name: &str,
+    arguments: &[FieldDef],
+    span: proc_macro2::Span,
+) -> proc_macro2::TokenStream {
     let module_ident = sibling_schema_module_ident(name, span);
-    quote_spanned! {span=> #module_ident::Schema::json_schema_within(in_flight, hoisted_defs) }
+    if arguments.is_empty() {
+        return quote_spanned! {span=> #module_ident::Schema::json_schema_within(in_flight, hoisted_defs) };
+    }
+    let documents = arguments
+        .iter()
+        .map(|argument| argument_json_schema_value(name, argument));
+    // Held in a local rather than written into the call: an argument that is itself a reference
+    // describes through this same call and borrows the run's own two values to do it, and a
+    // borrow taken for the outer call would still be live while the inner one asked for its own.
+    //
+    // Parenthesised because the block is written wherever the argumentless call was, and some of
+    // those positions are inside a `serde_json::json!` literal — where a bare block opens an
+    // object rather than an expression.
+    quote_spanned! {span=>
+        ({
+            let arguments = [#(#documents),*];
+            #module_ident::Schema::json_schema_within_with(in_flight, hoisted_defs, &arguments)
+        })
+    }
+}
+
+/// One reference-site argument as the document that fills the parameter it stands at.
+///
+/// Rendered through the dispatch a positional slot uses — the one total over the types the crate
+/// renders — so an argument describes as a field written with the same type describes, and one that
+/// is itself a reference composes at whatever depth it was written at.
+///
+/// The rejection is the field's own, reached only where the field-level key guard did not already
+/// refuse the reference: it names the type the argument was written into, that being what the
+/// author can act on.
+#[cfg(feature = "jsonschema")]
+fn argument_json_schema_value(name: &str, argument: &FieldDef) -> proc_macro2::TokenStream {
+    build_tuple_element_json_schema(argument).unwrap_or_else(|rejection| {
+        let message = map_member_rejection_message(&format!("`{name}`"), &rejection);
+        quote! { compile_error!(#message) }
+    })
+}
+
+/// The local the enclosing item's document reaches one of its own type parameters through, as the
+/// `serde_json::Value` expression a position holding that parameter is described by.
+///
+/// A parameter names no type at expansion, so what it describes as is whatever filled it: the
+/// argument the reference site supplied, or the item's own declared filling where the document was
+/// asked for standing alone. Cloned rather than borrowed because a parameter may be written at more
+/// than one position, and each of them owns the document it writes.
+#[cfg(feature = "jsonschema")]
+fn json_argument_value(parameter: &str) -> proc_macro2::TokenStream {
+    let binding = json_argument_ident(parameter);
+    quote! { #binding.clone() }
+}
+
+/// The local one type parameter's argument document is bound to, as the ident both ends spell it
+/// with — the binding the module writes and the reads the body makes of it.
+#[cfg(feature = "jsonschema")]
+fn json_argument_ident(parameter: &str) -> Ident {
+    Ident::new(
+        json_argument_binding(parameter).as_str(),
+        proc_macro2::Span::call_site(),
+    )
+}
+
+/// The document a value with no type of its own is described by: the filling of a type parameter,
+/// and the permissive empty schema for a value the expansion cannot name at all.
+#[cfg(feature = "jsonschema")]
+fn opaque_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
+    if let FieldDefType::TypeParam(parameter) = &fld.field_type {
+        return json_argument_value(parameter);
+    }
+    quote! { serde_json::json!({}) }
+}
+
+/// The argument slots an item's schema module publishes: one per type parameter it declares, in
+/// declaration order, each carrying the document the standalone form fills it with.
+///
+/// Declaration order rather than the order the fillings were written in, because that is the order
+/// a reference site supplies its arguments in — the two lists are read against each other
+/// positionally and nothing outside the generated code names either.
+///
+/// Empty for an item that declares no type parameter, which is what leaves its module publishing
+/// the one pair of methods it has always published.
+#[cfg(feature = "jsonschema")]
+fn schema_parameters(generics: &syn::Generics, args: &ModelSchemaArgs) -> Vec<SchemaParameter> {
+    type_parameters_in_scope(generics)
+        .iter()
+        .map(|parameter| SchemaParameter {
+            binding: json_argument_ident(parameter),
+            default: declared_filling_json_schema_value(parameter, &args.default_types),
+        })
+        .collect()
+}
+
+/// The document a parameter's declared filling describes as, rendered through the dispatch every
+/// other type position is rendered through — so the filling describes exactly as a field written
+/// with that type describes.
+///
+/// A parameter the declaration left out falls back to the permissive empty schema, which is what a
+/// parameter with nothing said about it always described as. An item reaching here with one has
+/// already been refused where it was written: a build generating JSON documents requires a filling
+/// for every parameter, so the fallback stands only for a build that reads none of this.
+#[cfg(feature = "jsonschema")]
+fn declared_filling_json_schema_value(
+    parameter: &str,
+    default_types: &[(syn::Ident, syn::Type)],
+) -> proc_macro2::TokenStream {
+    default_types
+        .iter()
+        .find(|(declared, _)| declared == parameter)
+        .map_or_else(
+            || quote! { serde_json::json!({}) },
+            |(_, filling)| {
+                argument_json_schema_value(parameter, &get_field_def(parameter, filling, ""))
+            },
+        )
 }
 
 /// Builds JSON schema for a tuple element (used for tuple fields and for tuple variants), or the
@@ -8967,18 +9114,22 @@ fn build_map_member_item(value: &FieldDef) -> Result<MapMemberItem, MapMemberRej
             log::trace!(
                 "Slot SiblingType => value_type_name: {value_type_name}, value_args: {value_args:?}"
             );
-            MapMemberItem::Value(sibling_json_schema_value(value_type_name, value.type_span))
+            MapMemberItem::Value(sibling_json_schema_value(
+                value_type_name,
+                value_args,
+                value.type_span,
+            ))
         }
         // The one `$oid` object every position spells, which a member carries as written.
         #[cfg(feature = "object_id")]
         FieldDefType::ObjectId => {
             MapMemberItem::Fragment(object_id_json_schema_item(&object_id_hex_json_schema()))
         }
-        // An opaque value carries no type name to narrow with, so a member admits any value: the
-        // permissive empty schema, as in field position.
-        FieldDefType::TypeParam(_) | FieldDefType::Unknown => {
-            MapMemberItem::Fragment(quote! { {} })
-        }
+        // A parameter is the filling that reached it, and a value the expansion cannot name at all
+        // admits any value — the permissive empty schema, as in field position. The filling is an
+        // expression rather than a literal, so it is already the value form.
+        FieldDefType::TypeParam(parameter) => MapMemberItem::Value(json_argument_value(parameter)),
+        FieldDefType::Unknown => MapMemberItem::Fragment(quote! { {} }),
         // The shared mapping renders every type named here except a tuple, which is the lone
         // `None`. Named exhaustively rather than caught by a wildcard: a new variant must be given
         // a member schema, not silently widened into an open object.
@@ -9297,7 +9448,7 @@ fn build_sibling_type_field_schema(
     generate_type_schema(
         fld,
         field_name_str,
-        &sibling_json_schema_value(name, fld.type_span),
+        &sibling_json_schema_value(name, lst, fld.type_span),
     )
 }
 
@@ -9392,15 +9543,19 @@ fn build_tuple_field_schema(
     }
 }
 
-/// Builds the JSON schema for an opaque field — a `serde_json::Value`, a function pointer, or any
-/// other type the parser could not classify. No type name is carried, so there is no schema module
-/// to reference: the field admits any value, which is the permissive empty schema. Matches the
-/// `unknown` TypeScript type and the `z.unknown()` Zod schema emitted for the same field.
+/// Builds the JSON schema for a field with no type of its own — one of the enclosing item's type
+/// parameters, or an opaque value: a `serde_json::Value`, a function pointer, or any other type the
+/// parser could not classify.
+///
+/// A parameter is described by the filling that reached it. An opaque value carries no type name at
+/// all, so there is no schema module to reference and no filling to read: the field admits any
+/// value, which is the permissive empty schema. That matches the `unknown` TypeScript type and the
+/// `z.unknown()` Zod schema emitted for the same field.
 #[cfg(feature = "jsonschema")]
 fn build_unknown_field_schema(fld: &FieldDef, field_name_str: &str) -> proc_macro2::TokenStream {
     log::trace!("Unknown => field_name: {field_name_str}, fld: {fld:?}");
 
-    let schema = arrayed_json_schema_value(fld, quote! { serde_json::json!({}) });
+    let schema = arrayed_json_schema_value(fld, opaque_json_schema_value(fld));
     quote! {
         properties.insert(#field_name_str.to_string(), #schema);
     }
@@ -10941,8 +11096,14 @@ fn generate_json_schema_method(
     json_schema_fields: &[proc_macro2::TokenStream],
     flatten_json_schemas: &[MergedSource],
     def_name: &str,
+    parameters: &[SchemaParameter],
 ) -> proc_macro2::TokenStream {
-    generate_struct_json_schema_method_impl(json_schema_fields, flatten_json_schemas, def_name)
+    generate_struct_json_schema_method_impl(
+        json_schema_fields,
+        flatten_json_schemas,
+        def_name,
+        parameters,
+    )
 }
 
 /// What a struct's `#[serde(flatten)]` fields contribute to the object it writes.
@@ -10960,11 +11121,11 @@ fn flatten_merged_sources(flattened_fields: &[FieldDef]) -> Vec<MergedSource> {
 /// and nothing below this point can still see the wrapper.
 #[cfg(feature = "jsonschema")]
 fn flatten_merged_source(fld: &FieldDef) -> MergedSource {
-    if let FieldDefType::SiblingType(name, _) = &fld.field_type {
+    if let FieldDefType::SiblingType(name, arguments) = &fld.field_type {
         MergedSource {
             label: name.clone(),
             optional: fld.is_optional(),
-            value: sibling_json_schema_value(name, fld.type_span),
+            value: sibling_json_schema_value(name, arguments, fld.type_span),
         }
     } else {
         MergedSource {
@@ -11556,10 +11717,11 @@ fn generate_enum_json_docs_part(docs: &str) -> proc_macro2::TokenStream {
 fn generate_plain_enum_json_schema_method(
     enumerated: &[proc_macro2::TokenStream],
     def_name: &str,
+    parameters: &[SchemaParameter],
 ) -> proc_macro2::TokenStream {
     #[cfg(feature = "jsonschema")]
     {
-        generate_plain_enum_json_schema_method_impl(enumerated, def_name)
+        generate_plain_enum_json_schema_method_impl(enumerated, def_name, parameters)
     }
 
     #[cfg(not(feature = "jsonschema"))]
@@ -11660,11 +11822,17 @@ fn generate_plain_enum_zod_schema_method(
 
 #[cfg(feature = "jsonschema")]
 /// Generates the JSON schema method for discriminated enums conditionally.
-fn generate_discriminated_enum_json_schema_method(
+fn enum_json_schema_methods(
     main_schema_code: &proc_macro2::TokenStream,
     def_name: &str,
+    generics: &syn::Generics,
+    args: &ModelSchemaArgs,
 ) -> proc_macro2::TokenStream {
-    json_schema_methods(def_name, &quote::quote! { { #main_schema_code } })
+    json_schema_methods(
+        def_name,
+        &quote::quote! { { #main_schema_code } },
+        &schema_parameters(generics, args),
+    )
 }
 
 #[cfg(feature = "typescript")]
@@ -11827,18 +11995,23 @@ fn generate_alias_json_schema_method(
     alias: &ItemType,
     export_name: &str,
     field_def: &FieldDef,
+    args: &ModelSchemaArgs,
 ) -> proc_macro2::TokenStream {
     #[cfg(feature = "jsonschema")]
     {
         let body = build_tuple_element_json_schema(&surface_field_def(&alias.generics, field_def))
             .unwrap_or_else(|rejection| alias_json_schema_rejection(export_name, &rejection));
-        json_schema_methods(export_name, &body)
+        json_schema_methods(
+            export_name,
+            &body,
+            &schema_parameters(&alias.generics, args),
+        )
     }
     #[cfg(not(feature = "jsonschema"))]
     {
         // Nothing in this build references an alias module's `json_schema()`; the sibling
         // reference that would (`flatten_field_json_schema_ref`) is itself jsonschema-gated.
-        let _: &_ = &(alias, export_name, field_def);
+        let _: &_ = &(alias, export_name, field_def, args);
         quote! {}
     }
 }

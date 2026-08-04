@@ -657,12 +657,15 @@ mod branded_in_struct_all_features_tests {
         );
     }
 
-    /// A brand whose inner is a bare parameter names no type to describe — one schema is written
-    /// for every instantiation — so it admits any value, as an uninstantiated parameter does
+    /// A brand whose inner is a bare parameter names no type of its own, so its document is
+    /// written at the type it declared for that parameter — as an uninstantiated parameter is
     /// wherever else it is written.
     #[test]
     fn test_generic_branded_newtype_own_json_schema() {
-        assert_eq!(TaskTypeId::<String>::json_schema(), serde_json::json!({}));
+        assert_eq!(
+            TaskTypeId::<String>::json_schema(),
+            serde_json::json!({ "type": "string" })
+        );
     }
 }
 
@@ -762,7 +765,10 @@ mod branded_in_struct_jsonschema_only_tests {
 
     #[test]
     fn test_generic_branded_own_json_schema_only() {
-        assert_eq!(TaskTypeIdJO::<String>::json_schema(), serde_json::json!({}));
+        assert_eq!(
+            TaskTypeIdJO::<String>::json_schema(),
+            serde_json::json!({ "type": "string" })
+        );
     }
 }
 
@@ -1334,7 +1340,7 @@ mod branded_generic_inner_tests {
         );
         assert_eq!(
             TagList::<String>::json_schema(),
-            serde_json::json!({ "type": "array", "items": {} })
+            serde_json::json!({ "type": "array", "items": { "type": "string" } })
         );
     }
 
@@ -1356,12 +1362,17 @@ mod branded_generic_inner_tests {
         );
         assert_eq!(
             WeightIndex::<u32>::json_schema(),
-            serde_json::json!({ "type": "object", "additionalProperties": {} })
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": { "type": "integer" }
+            })
         );
     }
 
     /// A parameter on its own carries no shape of its own, so each surface writes for it what it
-    /// writes for a bare generic field — which is the alias asserted beside it.
+    /// writes for a bare generic field — which is the alias asserted beside it. On the JSON surface
+    /// that is the type the brand declared for the parameter, a document being written at one
+    /// filling and the declaration naming it.
     #[test]
     fn a_bare_parameter_brand_matches_the_generic_field_convention() {
         assert_eq!(
@@ -1375,7 +1386,10 @@ mod branded_generic_inner_tests {
             zod.contains("export const BareTag$SchemaFactory = <T extends ZodType>("),
             "Got:\n{zod}"
         );
-        assert_eq!(BareTag::<String>::json_schema(), serde_json::json!({}));
+        assert_eq!(
+            BareTag::<String>::json_schema(),
+            serde_json::json!({ "type": "string" })
+        );
     }
 
     /// The rendering each surface gives the brand is the one it gives the same shape written
@@ -1807,7 +1821,9 @@ mod branded_sibling_inner_tests {
     fn a_constrained_brand_over_a_fixed_instantiation_carries_its_checks() {
         assert_eq!(
             FixedTag::json_schema(),
-            serde_json::json!({ "allOf": [{}, { "minLength": 3_u32 }] })
+            serde_json::json!({
+                "allOf": [{ "type": "string" }, { "minLength": 3_u32 }]
+            })
         );
         let zod = FixedTag::zod_schema();
         assert!(

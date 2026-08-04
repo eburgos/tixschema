@@ -978,6 +978,19 @@ pub fn zod_factory_argument(parameter: &str) -> String {
     })
 }
 
+/// The local a JSON document binds one type parameter's argument document to — `_arg_id_type` for
+/// `IdType`.
+///
+/// The counterpart of [`zod_factory_argument`] on the surface that writes Rust rather than
+/// JavaScript, and named off the parameter for the same reason: the argument reads as the parameter
+/// it fills while staying a name of its own beside it. Snake case because that is what a Rust local
+/// is spelled in, and underscore-led because a declared parameter need not reach the document at
+/// all — the item is not owed a warning for one the wire does not carry.
+#[cfg(feature = "jsonschema")]
+pub fn json_argument_binding(parameter: &str) -> String {
+    format!("_arg_{}", to_snake_case(parameter))
+}
+
 /// [`compute_alias_export_name`] for a declared item — a struct, an enum, a tuple struct, a branded
 /// newtype. Without an override the item keeps the name it is declared under, which is the one
 /// difference from an alias: an alias has no surface name of its own and is given the `Type` suffix.

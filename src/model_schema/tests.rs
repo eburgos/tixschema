@@ -2643,7 +2643,7 @@ fn a_string_filling_annotates_the_example_as_no_filling_does() {
 fn branded_json_schema_method_carries_no_cfg_attribute() {
     let args = super::ModelSchemaArgs::default();
     for inner in branded_json_inners() {
-        let tokens = super::build_branded_json_schema_method(&args, &inner, "DocumentId");
+        let tokens = super::build_branded_json_schema_method(&args, &inner, "DocumentId", &[]);
         assert_no_cfg_attribute(&tokens, "build_branded_json_schema_method");
     }
 }
@@ -2765,7 +2765,12 @@ fn alias_json_schema_method_carries_no_cfg_attribute() {
         pub type AliasIdent = String;
     );
     let field_def = super::get_field_def("AliasType", &alias.ty, "");
-    let tokens = super::generate_alias_json_schema_method(&alias, "AliasType", &field_def);
+    let tokens = super::generate_alias_json_schema_method(
+        &alias,
+        "AliasType",
+        &field_def,
+        &super::ModelSchemaArgs::default(),
+    );
     assert_no_cfg_attribute(&tokens, "generate_alias_json_schema_method");
 }
 
@@ -2782,8 +2787,13 @@ fn an_alias_of_an_unrenderable_target_emits_only_the_compile_error() {
     ] {
         let alias: syn::ItemType = syn::parse_str(alias_source).unwrap();
         let field_def = super::get_field_def("RowsType", &alias.ty, "");
-        let tokens =
-            super::generate_alias_json_schema_method(&alias, "RowsType", &field_def).to_string();
+        let tokens = super::generate_alias_json_schema_method(
+            &alias,
+            "RowsType",
+            &field_def,
+            &super::ModelSchemaArgs::default(),
+        )
+        .to_string();
         assert!(
             tokens.contains("compile_error !"),
             "for {alias_source}, got: {tokens}"
@@ -2824,8 +2834,13 @@ fn an_alias_type_parameter_is_erased_at_every_depth() {
     ] {
         let alias: syn::ItemType = syn::parse_str(alias_source).unwrap();
         let field_def = super::get_field_def("HolderType", &alias.ty, "");
-        let tokens =
-            super::generate_alias_json_schema_method(&alias, "HolderType", &field_def).to_string();
+        let tokens = super::generate_alias_json_schema_method(
+            &alias,
+            "HolderType",
+            &field_def,
+            &super::ModelSchemaArgs::default(),
+        )
+        .to_string();
         assert!(
             !tokens.contains("_schema :: Schema ::"),
             "for {alias_source}, got: {tokens}"
@@ -4930,14 +4945,17 @@ fn a_nested_enum_keyed_map_value_renders_its_inner_members() {
     }
 }
 
-/// A generic sibling is a map value the `String`-key path renders through its schema module, so the
-/// enum-key path renders it there too.
+/// A generic sibling is a map value the `String`-key path renders through its schema module at the
+/// arguments the reference carries, so the enum-key path renders it there and at those too.
 #[cfg(feature = "jsonschema")]
 #[test]
 fn a_generic_sibling_enum_keyed_map_value_emits_the_sibling_schema() {
     let tokens = map_field_schema("HashMap<Slot, Wrapper<String>>").to_string();
     assert!(
-        tokens.contains("let value_schema = wrapper_schema :: Schema :: json_schema_within (in_flight , hoisted_defs) ;"),
+        tokens.contains(
+            "let arguments = [serde_json :: json ! ({ \"type\" : \"string\" })] ; wrapper_schema \
+             :: Schema :: json_schema_within_with (in_flight , hoisted_defs , & arguments)"
+        ),
         "got: {tokens}"
     );
 }
@@ -5972,17 +5990,18 @@ fn a_sibling_string_keyed_map_value_emits_the_sibling_schema() {
     }
 }
 
-/// A sibling's type arguments do not reach its schema, which lives on the wrapper itself, so a
-/// generic value is the same schema-module reference a bare one is. Pinned on this key path as it
-/// is on the enum-key one: the two share a dispatcher, and a narrowing that reintroduces the
-/// divergence has to fail on the key path it is written for.
+/// A sibling's type arguments reach its schema, JSON Schema having no parameters for the wrapper to
+/// carry: the document is written at one filling, and the reference site names it. Pinned on this
+/// key path as it is on the enum-key one: the two share a dispatcher, and a narrowing that drops
+/// the arguments on one of them has to fail on the key path it is written for.
 #[cfg(feature = "jsonschema")]
 #[test]
 fn a_generic_sibling_string_keyed_map_value_emits_the_sibling_schema() {
     let tokens = map_field_schema("HashMap<String, Wrapper<String>>").to_string();
     assert!(
         tokens.contains(
-            r#""additionalProperties" : wrapper_schema :: Schema :: json_schema_within (in_flight , hoisted_defs)"#
+            "let arguments = [serde_json :: json ! ({ \"type\" : \"string\" })] ; wrapper_schema \
+             :: Schema :: json_schema_within_with (in_flight , hoisted_defs , & arguments)"
         ),
         "got: {tokens}"
     );
@@ -6243,6 +6262,7 @@ fn brand_json_schema_over(inner_ty: &syn::Type) -> String {
         &super::ModelSchemaArgs::default(),
         &super::branded_json_inner(&super::get_field_def("_inner", inner_ty, "")),
         "Wrapped",
+        &[],
     )
     .to_string()
 }
