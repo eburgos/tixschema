@@ -204,7 +204,7 @@ fn without_ident_reexport(surface: &str, ident: &str, exported: &str) -> String 
 fn jsdoc_body_lines(ts: &str) -> Vec<String> {
     let (block, _) = ts
         .strip_prefix("/**\n")
-        .and_then(|rest| rest.split_once("**/"))
+        .and_then(|rest| rest.split_once(" */"))
         .unwrap();
     block
         .lines()

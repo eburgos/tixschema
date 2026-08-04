@@ -646,15 +646,11 @@ struct DocumentedSequenceFields {
 /// The member spelling an `Option` field written with a `skip_serializing_if` renders as.
 ///
 /// serde drops the key for a `None`, so the payload has no such key and the member is written with
-/// an optional one. Only a build that reads the attribute knows that: without the `serde` feature
-/// none is read, and the key stays written with an `undefined` value.
+/// an optional one. The attribute is on the field under every toggle, so this is one spelling and
+/// not two.
 #[cfg(feature = "typescript")]
 fn omitted_member(name: &str, ts_type: &str) -> String {
-    if cfg!(feature = "serde") {
-        format!("{name}?: {ts_type};")
-    } else {
-        format!("{name}: {ts_type} | undefined;")
-    }
+    format!("{name}?: {ts_type};")
 }
 
 fn one<T, C>(item: T) -> C
@@ -3405,19 +3401,19 @@ fn test_an_alias_of_a_nested_sequence_publishes_its_depth() {
 fn test_a_doc_comment_reaches_ts_from_a_collapsed_wrapper_field() {
     let ts = DocumentedSequenceFields::ts_definition();
     let documented_nested = format!(
-        " * Documented nested field.\n * \n**/\n  {}",
+        "   * Documented nested field.\n   * \n   */\n  {}",
         omitted_member("documented_nested", "Array<number>")
     );
     let documented_optional = format!(
-        " * Documented optional field.\n * \n**/\n  {}",
+        "   * Documented optional field.\n   * \n   */\n  {}",
         omitted_member("documented_optional", "string")
     );
     for spelling in [
         documented_nested.as_str(),
         documented_optional.as_str(),
-        " * Documented set field.\n * \n**/\n  documented_set: Array<string>;",
-        " * Documented vec field.\n * \n**/\n  documented_vec: Array<string>;",
-        " * undocumented_vec\n * \n**/\n  undocumented_vec: Array<string>;",
+        "   * Documented set field.\n   * \n   */\n  documented_set: Array<string>;",
+        "   * Documented vec field.\n   * \n   */\n  documented_vec: Array<string>;",
+        "   * undocumented_vec\n   * \n   */\n  undocumented_vec: Array<string>;",
     ] {
         assert!(ts.contains(spelling), "Got: {ts}");
     }

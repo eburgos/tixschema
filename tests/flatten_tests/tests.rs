@@ -295,6 +295,147 @@ enum LaterScalarEither {
     Text(String),
 }
 
+/// The same shape with one member reached through an `Option`. Standing on its own it is an
+/// ordinary union — a member may be written as its value or as a bare `null`, and every surface
+/// describes the choice.
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum FlatNullableEither {
+    Base(FlatFirst),
+    Maybe(Option<FlatSecond>),
+}
+
+/// Flattening it is what neither direction of serde agrees with the other on, so the Zod surface
+/// refuses the declaration and the struct exists only where nothing records the members — which is
+/// where the JSON-schema merge answers for the same declaration at run time instead.
+#[cfg(all(feature = "jsonschema", not(feature = "zod")))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatOverNullableUntagged {
+    #[serde(flatten)]
+    either: FlatNullableEither,
+    own: String,
+}
+
+/// The same union declared *below* the object that flattens it, which every table holds: the
+/// recording carries nothing for it, so the Zod merge names it as the one operand it is while the
+/// JSON-schema merge refuses it wherever it was declared.
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatOverLaterNullableUntagged {
+    #[serde(flatten)]
+    either: LaterNullableEither,
+    own: String,
+}
+
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum LaterNullableEither {
+    Base(FlatFirst),
+    Maybe(Option<FlatSecond>),
+}
+
+/// Three members that name another item rather than spelling a type out: a brand over a string, a
+/// brand over a `bool`, and a plain unit enum. What serde writes each as lives on the named item,
+/// so the merge asks the registry rather than the spelling.
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(transparent)]
+struct MemberSlug(String);
+
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(transparent)]
+struct MemberSwitch(bool);
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+enum MemberHue {
+    Blue,
+    Red,
+}
+
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum MemberSlugEither {
+    Base(FlatFirst),
+    Slug(MemberSlug),
+}
+
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum MemberSwitchEither {
+    Base(FlatFirst),
+    Switch(MemberSwitch),
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum MemberHueEither {
+    Base(FlatFirst),
+    Hue(MemberHue),
+}
+
+#[cfg(all(feature = "jsonschema", not(feature = "zod")))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatOverMemberSlugUntagged {
+    #[serde(flatten)]
+    either: MemberSlugEither,
+    own: String,
+}
+
+#[cfg(all(feature = "jsonschema", not(feature = "zod")))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatOverMemberSwitchUntagged {
+    #[serde(flatten)]
+    either: MemberSwitchEither,
+    own: String,
+}
+
+#[cfg(not(feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatOverMemberHueUntagged {
+    #[serde(flatten)]
+    either: MemberHueEither,
+    own: String,
+}
+
+/// And the same brand member in a union declared below the object, which keeps the fallback: a
+/// name the recording holds nothing for is named as the one operand it is, whatever the registry
+/// could have said about the members.
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatOverLaterMemberSlugUntagged {
+    #[serde(flatten)]
+    either: LaterMemberSlugEither,
+    own: String,
+}
+
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum LaterMemberSlugEither {
+    Base(FlatFirst),
+    Slug(MemberSlug),
+}
+
 /// A union member that names itself, and the struct that flattens the union. The member describes
 /// as a reference into the definitions, and the body it points at is written by the time the merge
 /// asks for it.
@@ -1118,6 +1259,142 @@ fn test_a_string_member_of_a_later_flattened_untagged_enum_is_refused_by_the_mer
     assert!(FlatOverLaterScalarUntagged::json_schema().is_object());
 }
 
+/// A member reached through an `Option` is the one shape where serde's two directions describe
+/// different payload sets. It writes the flattened `None` as the object's own keys alone, with no
+/// error, and then refuses to read those same keys back — the untagged enum matches no member for
+/// them. So there is no branch a multiplication could write: spelling the absence accepts a
+/// document `from_value` rejects, and omitting it rejects one `to_value` writes.
+#[test]
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+fn test_an_optional_flattened_union_member_is_written_and_then_not_read_back() {
+    let written = serde_json::to_value(FlatOverLaterNullableUntagged {
+        own: "o".to_owned(),
+        either: LaterNullableEither::Maybe(None),
+    })
+    .unwrap();
+    assert_eq!(written, serde_json::json!({ "own": "o" }));
+    let refusal = serde_json::from_value::<FlatOverLaterNullableUntagged>(written)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refusal.contains("did not match any variant"),
+        "Got: {refusal}"
+    );
+
+    let present = serde_json::to_value(FlatOverLaterNullableUntagged {
+        own: "o".to_owned(),
+        either: LaterNullableEither::Maybe(Some(FlatSecond { b: true })),
+    })
+    .unwrap();
+    assert_eq!(present, serde_json::json!({ "own": "o", "b": true }));
+    serde_json::from_value::<FlatOverLaterNullableUntagged>(present).unwrap();
+}
+
+/// So the merge refuses the whole union, naming the null the absence is described as and the leaf
+/// it sits at: an `Option` is a choice of its own below the member, so the absence is `2.2` rather
+/// than `2`.
+#[test]
+#[cfg(all(feature = "jsonschema", not(feature = "zod")))]
+#[should_panic(
+    expected = "`FlatOverNullableUntagged`: `#[serde(flatten)]` of `FlatNullableEither` writes a union member that is not an object — its branch 2.2 describes a `null`"
+)]
+fn test_an_optional_member_of_a_flattened_untagged_enum_is_refused_by_the_merge() {
+    assert!(FlatOverNullableUntagged::json_schema().is_object());
+}
+
+/// And in those same words wherever the union was declared, which is the one reading of the
+/// declaration that survives the Zod surface refusing it at expansion.
+#[test]
+#[cfg(feature = "jsonschema")]
+#[should_panic(
+    expected = "`FlatOverLaterNullableUntagged`: `#[serde(flatten)]` of `LaterNullableEither` writes a union member that is not an object — its branch 2.2 describes a `null`"
+)]
+fn test_an_optional_member_of_a_later_flattened_untagged_enum_is_refused_by_the_merge() {
+    assert!(FlatOverLaterNullableUntagged::json_schema().is_object());
+}
+
+/// A member that names a brand over a string is one serde refuses to flatten for the reason it
+/// refuses a directly flattened brand: what it writes is the bare string the brand's inner writes.
+#[test]
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+fn test_flattening_an_untagged_enum_over_a_named_string_member_is_unserializable() {
+    let refusal = serde_json::to_value(FlatOverLaterMemberSlugUntagged {
+        own: "o".to_owned(),
+        either: LaterMemberSlugEither::Slug(MemberSlug("s".to_owned())),
+    })
+    .unwrap_err()
+    .to_string();
+    assert!(
+        refusal.contains("can only flatten structs and maps"),
+        "Got: {refusal}"
+    );
+}
+
+/// So the merge refuses it, naming the branch and the string the brand publishes as — the answer
+/// the registry holds for the name, which the spelling of the member does not carry.
+#[test]
+#[cfg(feature = "jsonschema")]
+#[should_panic(
+    expected = "`FlatOverLaterMemberSlugUntagged`: `#[serde(flatten)]` of `LaterMemberSlugEither` writes a union member that is not an object — its branch 2 describes a `string`"
+)]
+fn test_a_named_string_member_of_a_flattened_untagged_enum_is_refused_by_the_merge() {
+    assert!(FlatOverLaterMemberSlugUntagged::json_schema().is_object());
+}
+
+/// In the same words wherever the union was declared, which is the reading that survives the Zod
+/// surface refusing the declared-above one at expansion.
+#[test]
+#[cfg(all(feature = "jsonschema", not(feature = "zod")))]
+#[should_panic(
+    expected = "`FlatOverMemberSlugUntagged`: `#[serde(flatten)]` of `MemberSlugEither` writes a union member that is not an object — its branch 2 describes a `string`"
+)]
+fn test_a_named_string_member_of_an_earlier_untagged_enum_is_refused_by_the_merge() {
+    assert!(FlatOverMemberSlugUntagged::json_schema().is_object());
+}
+
+/// The same for a brand serde stringifies and for a plain unit enum, each named by the keyword its
+/// own published document carries.
+#[test]
+#[cfg(all(feature = "jsonschema", not(feature = "zod")))]
+#[should_panic(
+    expected = "`FlatOverMemberSwitchUntagged`: `#[serde(flatten)]` of `MemberSwitchEither` writes a union member that is not an object — its branch 2 describes a `boolean`"
+)]
+fn test_a_named_boolean_member_of_a_flattened_untagged_enum_is_refused_by_the_merge() {
+    assert!(FlatOverMemberSwitchUntagged::json_schema().is_object());
+}
+
+#[test]
+#[cfg(all(feature = "jsonschema", not(feature = "zod")))]
+#[should_panic(
+    expected = "`FlatOverMemberHueUntagged`: `#[serde(flatten)]` of `MemberHueEither` writes a union member that is not an object — its branch 2 describes a `string`"
+)]
+fn test_a_named_enumerated_member_of_a_flattened_untagged_enum_is_refused_by_the_merge() {
+    assert!(FlatOverMemberHueUntagged::json_schema().is_object());
+}
+
+/// A plain enum is the one of the three serde does not refuse outright — the flatten serializer
+/// writes the variant name as a key of its own and reads it back. What refuses it is that both
+/// schema surfaces describe it as the string its member name is, and a string joins no object.
+#[test]
+#[cfg(not(feature = "zod"))]
+fn test_a_flattened_plain_enum_member_is_written_as_a_key_no_schema_describes() {
+    let holder = FlatOverMemberHueUntagged {
+        own: "o".to_owned(),
+        either: MemberHueEither::Hue(MemberHue::Red),
+    };
+    let written = serde_json::to_value(&holder).unwrap();
+    assert_eq!(written, serde_json::json!({ "own": "o", "Red": null }));
+    assert_eq!(
+        serde_json::from_value::<FlatOverMemberHueUntagged>(written).unwrap(),
+        holder
+    );
+    #[cfg(feature = "jsonschema")]
+    assert_eq!(
+        MemberHue::json_schema(),
+        serde_json::json!({ "type": "string", "enum": ["Blue", "Red"] })
+    );
+}
+
 /// The remedy that refusal names is the same one every flattened non-object gets.
 #[test]
 #[cfg(feature = "jsonschema")]
@@ -1634,7 +1911,7 @@ fn test_the_optional_flatten_schema_admits_no_partial_base() {
 fn test_the_optional_flatten_schema_binds_the_objects_own_keys_once() {
     let zod = OptHolder::zod_schema();
     assert!(
-        zod.contains("const OptHolder$OwnSchema = z.strictObject({\n  own: z.string(),\n\n});"),
+        zod.contains("const OptHolder$OwnSchema = z.strictObject({\n  own: z.string(),\n});"),
         "expected the object's own keys bound once, got: {zod}"
     );
     assert_eq!(
@@ -1654,7 +1931,7 @@ fn test_a_non_optional_flatten_type_is_byte_identical() {
     let declared = &ts[ts.find("export type").unwrap()..];
     assert_eq!(
         declared,
-        "export type MultiFlatten = {\n  /**\n * id\n * \n**/\n  id: string;\n\n} & BasePart & ExtraPart;"
+        "export type MultiFlatten = {\n  /**\n   * id\n   * \n   */\n  id: string;\n} & BasePart & ExtraPart;"
     );
 }
 
@@ -1662,9 +1939,9 @@ fn test_a_non_optional_flatten_type_is_byte_identical() {
 #[cfg(feature = "zod")]
 fn test_a_non_optional_flatten_schema_is_byte_identical() {
     #[cfg(feature = "typescript")]
-    const EXPECTED: &str = "const MultiFlatten$RawSchema = z.strictObject({\n  id: z.string(),\n\n}).and(z.lazy(() => BasePart$Schema)).and(z.lazy(() => ExtraPart$Schema));\n\nexport const MultiFlatten$Schema: ZodType<MultiFlatten> = MultiFlatten$RawSchema;";
+    const EXPECTED: &str = "const MultiFlatten$RawSchema = z.strictObject({\n  id: z.string(),\n}).and(z.lazy(() => BasePart$Schema)).and(z.lazy(() => ExtraPart$Schema));\n\nexport const MultiFlatten$Schema: ZodType<MultiFlatten> = MultiFlatten$RawSchema;";
     #[cfg(not(feature = "typescript"))]
-    const EXPECTED: &str = "export const MultiFlatten$Schema = z.strictObject({\n  id: z.string(),\n\n}).and(z.lazy(() => BasePart$Schema)).and(z.lazy(() => ExtraPart$Schema));";
+    const EXPECTED: &str = "export const MultiFlatten$Schema = z.strictObject({\n  id: z.string(),\n}).and(z.lazy(() => BasePart$Schema)).and(z.lazy(() => ExtraPart$Schema));";
 
     assert_eq!(MultiFlatten::zod_schema(), EXPECTED);
 }
@@ -1684,9 +1961,9 @@ fn test_a_non_optional_flatten_schema_is_byte_identical() {
 #[cfg(feature = "zod")]
 fn test_the_untagged_flatten_schema_multiplies_the_object_over_the_unions_members() {
     #[cfg(feature = "typescript")]
-    const EXPECTED: &str = "const FlatOverUntagged$OwnSchema = z.strictObject({\n  own: z.string(),\n\n});\n\nconst FlatOverUntagged$RawSchema = z.union([\n  FlatOverUntagged$OwnSchema.and(z.lazy(() => FlatFirst$Schema)),\n  FlatOverUntagged$OwnSchema.and(z.lazy(() => FlatSecond$Schema)),\n]);\n\nexport const FlatOverUntagged$Schema: ZodType<FlatOverUntagged> = FlatOverUntagged$RawSchema;";
+    const EXPECTED: &str = "const FlatOverUntagged$OwnSchema = z.strictObject({\n  own: z.string(),\n});\n\nconst FlatOverUntagged$RawSchema = z.union([\n  FlatOverUntagged$OwnSchema.and(z.lazy(() => FlatFirst$Schema)),\n  FlatOverUntagged$OwnSchema.and(z.lazy(() => FlatSecond$Schema)),\n]);\n\nexport const FlatOverUntagged$Schema: ZodType<FlatOverUntagged> = FlatOverUntagged$RawSchema;";
     #[cfg(not(feature = "typescript"))]
-    const EXPECTED: &str = "const FlatOverUntagged$OwnSchema = z.strictObject({\n  own: z.string(),\n\n});\n\nexport const FlatOverUntagged$Schema = z.union([\n  FlatOverUntagged$OwnSchema.and(z.lazy(() => FlatFirst$Schema)),\n  FlatOverUntagged$OwnSchema.and(z.lazy(() => FlatSecond$Schema)),\n]);";
+    const EXPECTED: &str = "const FlatOverUntagged$OwnSchema = z.strictObject({\n  own: z.string(),\n});\n\nexport const FlatOverUntagged$Schema = z.union([\n  FlatOverUntagged$OwnSchema.and(z.lazy(() => FlatFirst$Schema)),\n  FlatOverUntagged$OwnSchema.and(z.lazy(() => FlatSecond$Schema)),\n]);";
 
     assert_eq!(FlatOverUntagged::zod_schema(), EXPECTED);
 }
@@ -1833,9 +2110,9 @@ fn test_a_union_declared_below_the_object_is_named_as_one_operand() {
 #[cfg(feature = "zod")]
 fn test_an_internally_tagged_flatten_schema_is_byte_identical() {
     #[cfg(feature = "typescript")]
-    const EXPECTED: &str = "const DataElementSampleValueEntry$RawSchema = z.strictObject({\n  dataElementId: z.string(),\n\n}).and(z.lazy(() => DataElementSampleValueVariant$Schema));\n\nexport const DataElementSampleValueEntry$Schema: ZodType<DataElementSampleValueEntry> = DataElementSampleValueEntry$RawSchema;";
+    const EXPECTED: &str = "const DataElementSampleValueEntry$RawSchema = z.strictObject({\n  dataElementId: z.string(),\n}).and(z.lazy(() => DataElementSampleValueVariant$Schema));\n\nexport const DataElementSampleValueEntry$Schema: ZodType<DataElementSampleValueEntry> = DataElementSampleValueEntry$RawSchema;";
     #[cfg(not(feature = "typescript"))]
-    const EXPECTED: &str = "export const DataElementSampleValueEntry$Schema = z.strictObject({\n  dataElementId: z.string(),\n\n}).and(z.lazy(() => DataElementSampleValueVariant$Schema));";
+    const EXPECTED: &str = "export const DataElementSampleValueEntry$Schema = z.strictObject({\n  dataElementId: z.string(),\n}).and(z.lazy(() => DataElementSampleValueVariant$Schema));";
 
     assert_eq!(DataElementSampleValueEntry::zod_schema(), EXPECTED);
 }
@@ -1853,6 +2130,65 @@ fn test_a_standalone_union_with_a_scalar_member_is_byte_identical() {
         "export const FlatScalarEither$Schema = z.union([FlatFirst$Schema, z.string()]);";
 
     assert_eq!(FlatScalarEither::zod_schema(), EXPECTED);
+}
+
+/// A union holding a member reached through an `Option`, and ones holding members that name a
+/// brand or a plain enum, are unions like any other while nothing flattens them: the member is a
+/// branch of the choice, and each is spelled byte for byte as it was before the merge could tell
+/// the shapes apart.
+#[test]
+#[cfg(feature = "zod")]
+fn test_standalone_unions_the_merge_now_refuses_are_byte_identical() {
+    #[cfg(feature = "typescript")]
+    const EXPECTED: [&str; 4] = [
+        "const FlatNullableEither$RawSchema = z.union([FlatFirst$Schema, z.nullable(FlatSecond$Schema)]);\n\nexport const FlatNullableEither$Schema: ZodType<FlatNullableEither> = FlatNullableEither$RawSchema;",
+        "const MemberSlugEither$RawSchema = z.union([FlatFirst$Schema, MemberSlug$Schema]);\n\nexport const MemberSlugEither$Schema: ZodType<MemberSlugEither> = MemberSlugEither$RawSchema;",
+        "const MemberSwitchEither$RawSchema = z.union([FlatFirst$Schema, MemberSwitch$Schema]);\n\nexport const MemberSwitchEither$Schema: ZodType<MemberSwitchEither> = MemberSwitchEither$RawSchema;",
+        "const MemberHueEither$RawSchema = z.union([FlatFirst$Schema, MemberHue$Schema]);\n\nexport const MemberHueEither$Schema: ZodType<MemberHueEither> = MemberHueEither$RawSchema;",
+    ];
+    #[cfg(not(feature = "typescript"))]
+    const EXPECTED: [&str; 4] = [
+        "export const FlatNullableEither$Schema = z.union([FlatFirst$Schema, z.nullable(FlatSecond$Schema)]);",
+        "export const MemberSlugEither$Schema = z.union([FlatFirst$Schema, MemberSlug$Schema]);",
+        "export const MemberSwitchEither$Schema = z.union([FlatFirst$Schema, MemberSwitch$Schema]);",
+        "export const MemberHueEither$Schema = z.union([FlatFirst$Schema, MemberHue$Schema]);",
+    ];
+
+    assert_eq!(
+        [
+            FlatNullableEither::zod_schema(),
+            MemberSlugEither::zod_schema(),
+            MemberSwitchEither::zod_schema(),
+            MemberHueEither::zod_schema(),
+        ],
+        EXPECTED.map(str::to_owned)
+    );
+}
+
+/// And the reach of both refusals is the recording's, exactly as the scalar one's is: a union
+/// declared below the object records nothing for the merge to read, so it is still named as the one
+/// operand it is and the fallback is unchanged.
+#[test]
+#[cfg(feature = "zod")]
+fn test_the_unions_declared_below_the_object_are_still_named_as_one_operand() {
+    let nullable = FlatOverLaterNullableUntagged::zod_schema();
+    assert!(
+        nullable.contains("}).and(z.lazy(() => LaterNullableEither$Schema));"),
+        "expected the union named as one operand, got: {nullable}"
+    );
+    assert!(
+        !nullable.contains("z.nullable("),
+        "the absence reached the intersection in: {nullable}"
+    );
+    let slug = FlatOverLaterMemberSlugUntagged::zod_schema();
+    assert!(
+        slug.contains("}).and(z.lazy(() => LaterMemberSlugEither$Schema));"),
+        "expected the union named as one operand, got: {slug}"
+    );
+    assert!(
+        !slug.contains(".and(z.lazy(() => MemberSlug$Schema))"),
+        "the brand member reached the intersection in: {slug}"
+    );
 }
 
 /// And flattening one is refused at expansion rather than emitted — the branch that used to be

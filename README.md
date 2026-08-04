@@ -133,6 +133,7 @@ pub struct UserWithCollections {
     pub tags: Vec<String>,
     pub scores: Vec<u32>,
     pub metadata: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<HashMap<String, String>>,
 }
 ```
@@ -217,6 +218,8 @@ The remaining refusals are all one rule: a JSON object key is a string, and `ser
 All of them are covered under [Compilation Errors](#compilation-errors), with the exact diagnostic each produces.
 
 Every other key is neither open nor enumerable, and none of them is refused: serde stringifies each one into a key for you. The JSON schema describes such a map as an object and says nothing about its members — `{"type": "object", "additionalProperties": true}` — while TypeScript and Zod keep the key's own type, so a `HashMap<u32, String>` is `Partial<Record<number, string>>` and `z.record(z.number().int(), z.string())`. serde writes the object with the key's string form for its keys: `7` becomes `"7"`, `true` becomes `"true"`, a chrono `NaiveDate` its ISO rendering. A brand over one of those writes the same object and describes as the same one, under the brand's name. Only the narrowing is missing, not the object. The rule the refusals apply is refuse-what-serde-refuses, never refuse-what-is-not-a-`String`.
+
+A key written as one of the enclosing item's own type parameters is the open case, read off that same rule. The expansion cannot see which type the instantiation will supply, but serde has already settled what any of them may write: an instantiation whose key writes as a string keys the map, and one whose key does not fails the whole map at serialization with `key must be a string` — so string keys hold for every instantiation that serializes at all. The two validating surfaces say exactly that and nothing more, `{"type": "object", "additionalProperties": V}` and `z.record(z.string(), V)`, the pair a `String` key earns; the value side stays described, being no parameter's business. TypeScript keeps the parameter in the key position the way it keeps a parameter anywhere — see [Type Parameters](#type-parameters).
 
 ### Pointers and Borrowed Values
 
@@ -804,7 +807,6 @@ const buildWrapper$Schema = <IdType extends ZodType>(
   children: z.array(idType),
   id: idType,
   name: z.string(),
-
 });
 
 type Wrapper$SchemaOf<IdType extends ZodType> = ReturnType<
@@ -878,7 +880,17 @@ export const WrapperType$Schema: ZodType<WrapperType<unknown>> = WrapperType$Raw
 
 Only the item's *own* parameters are read this way. A name the expansion cannot resolve because the type lives elsewhere keeps its `Name$Schema` reference, since that type publishes the binding.
 
-One consequence is worth stating outright: an opaque value carries no string checks, so a branded newtype cannot apply `pattern`, `minLength`, or `maxLength` to one of its own type parameters. See [Branded Newtype Validation Constraints](#branded-newtype-validation-constraints).
+One consequence is worth stating outright: an opaque value carries no checks, so no `model_schema_prop` bound may be spelled against a type parameter. A branded newtype cannot apply `pattern`, `minLength`, or `maxLength` to one of its own — see [Branded Newtype Validation Constraints](#branded-newtype-validation-constraints) — and a *field* typed with one is refused for the same reason, at every depth the parameter is reached through:
+
+```rust
+#[model_schema()]
+pub struct Constrained<IdType> {
+    #[model_schema_prop(minLength = 3)] // refused, and so is it on `Option<IdType>` or `Vec<IdType>`
+    pub id: IdType,
+}
+```
+
+The value's type is whatever the instantiation supplies, so nothing here holds it to anything: Zod and the JSON schema describe the value as the opaque one, the generated validator emits no check for it, and serde reads the payload back untouched. Constrain the argument instead — declare the type the instantiation supplies as a branded newtype carrying the bound — or drop the key. The JSDoc says nothing about a bound the refusal turns away either, the sentence being written only where something holds the value to it.
 
 ### Branded Newtypes
 
@@ -1478,6 +1490,7 @@ This is a TypeScript-only knob -- the Zod schema and JSON Schema are unchanged (
 pub struct Profile {
     pub name: String,
     #[model_schema_prop(ts_optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nickname: Option<String>,
 }
 ```
@@ -1592,6 +1605,7 @@ pub struct Document {
     pub author_id: ObjectId,
     pub tags: Vec<ObjectId>,
     pub metadata: HashMap<String, ObjectId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<ObjectId>,
     pub related_docs: HashMap<String, Vec<ObjectId>>,
 }
@@ -1606,7 +1620,7 @@ export type Document = {
   author_id: ObjectId;
   tags: Array<ObjectId>;
   metadata: Partial<Record<string, ObjectId>>;
-  parent_id: ObjectId | undefined;
+  parent_id?: ObjectId;
   related_docs: Partial<Record<string, Array<ObjectId>>>;
 };
 
@@ -1681,6 +1695,7 @@ pub struct Event {
     pub created_at: DateTime<Utc>,
     #[model_schema_prop(as_number)]
     pub epoch_ms: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<DateTime<Utc>>,
 }
 ```
@@ -1695,7 +1710,7 @@ export type Event = {
   local_datetime: string;
   created_at: Date;
   epoch_ms: number;
-  updated_at: Date | undefined;
+  updated_at?: Date;
 };
 ```
 

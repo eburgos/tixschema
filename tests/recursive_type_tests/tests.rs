@@ -313,13 +313,9 @@ mod describes {
         );
 
         let boxed_self = produced("boxed_self_ts");
-        // serde drops the key for a `None`, so the member carries an optional one where the
-        // attribute is read at all.
-        let next = if cfg!(feature = "serde") {
-            "next?: ChainNode;"
-        } else {
-            "next: ChainNode | undefined;"
-        };
+        // serde drops the key for a `None`, which every build reads off the attribute on the
+        // field.
+        let next = "next?: ChainNode;";
         assert!(
             boxed_self.contains(next),
             "an optional box of self is the type's own name: {boxed_self}"
