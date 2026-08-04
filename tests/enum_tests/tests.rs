@@ -21,6 +21,37 @@ use serde_json::Value;
 ))]
 use tixschema::model_schema;
 
+// A tagged enum whose tag is written after a serde key this crate has no use for. Reaching the tag
+// at all means consuming that key's value: left on the parse stream it ends the attribute walk on
+// the comma that follows, and the surfaces then describe a wire serde is not writing.
+#[cfg(all(
+    test,
+    feature = "serde",
+    any(feature = "typescript", feature = "jsonschema", feature = "zod")
+))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(expecting = "an action", tag = "kind", rename_all = "camelCase")]
+enum ActionTaggedAfterIgnoredKey {
+    Generate { value: String },
+    Upload { value: String },
+}
+
+// The same declaration with nothing for the walk to step over, so the two renderings can be held
+// against each other: an attribute the walk ignores may not change a byte of what is generated.
+#[cfg(all(
+    test,
+    feature = "serde",
+    any(feature = "typescript", feature = "jsonschema", feature = "zod")
+))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum ActionTaggedWithNothingIgnored {
+    Generate { value: String },
+    Upload { value: String },
+}
+
 // Test single-value enum used as a field in a discriminated union.
 #[cfg(all(test, any(feature = "typescript", feature = "zod", feature = "serde")))]
 #[model_schema()]
@@ -329,6 +360,65 @@ fn test_discriminated_union_ts_definition() {
     // Check Zod discriminated union - now in separate method
     let zod_schema = PaymentMethod::zod_schema();
     assert!(zod_schema.contains("z.discriminatedUnion(\"type\""));
+}
+
+/// The tag is written after a key this crate ignores, so it is reached only if that key's value is
+/// consumed. Each surface has to describe the discriminated wire serde writes, and has to describe
+/// it exactly as it does for the same declaration with nothing to ignore.
+#[test]
+#[cfg(all(feature = "typescript", feature = "serde"))]
+fn test_tag_written_after_an_ignored_key_reaches_the_ts_definition() {
+    let ts = ActionTaggedAfterIgnoredKey::ts_definition();
+    assert!(
+        ts.contains("kind: \"generate\"") && ts.contains("kind: \"upload\""),
+        "TS definition should carry the discriminant. Got:\n{ts}"
+    );
+    assert_eq!(
+        ts.replace("ActionTaggedAfterIgnoredKey", "Action"),
+        ActionTaggedWithNothingIgnored::ts_definition()
+            .replace("ActionTaggedWithNothingIgnored", "Action"),
+        "the ignored key may not change a byte of the TypeScript"
+    );
+}
+
+#[test]
+#[cfg(all(feature = "serde", feature = "zod"))]
+fn test_tag_written_after_an_ignored_key_reaches_the_zod_schema() {
+    let zod = ActionTaggedAfterIgnoredKey::zod_schema();
+    assert!(
+        zod.contains("z.discriminatedUnion(\"kind\""),
+        "Zod schema should be a discriminated union. Got:\n{zod}"
+    );
+    assert_eq!(
+        zod.replace("ActionTaggedAfterIgnoredKey", "Action"),
+        ActionTaggedWithNothingIgnored::zod_schema()
+            .replace("ActionTaggedWithNothingIgnored", "Action"),
+        "the ignored key may not change a byte of the Zod schema"
+    );
+}
+
+#[test]
+#[cfg(all(feature = "jsonschema", feature = "serde"))]
+fn test_tag_written_after_an_ignored_key_reaches_the_json_schema() {
+    let schema = ActionTaggedAfterIgnoredKey::json_schema();
+    for variant in schema["oneOf"].as_array().unwrap() {
+        assert!(
+            variant["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("kind"),
+            "every variant should carry the discriminant. Got:\n{schema}"
+        );
+    }
+    assert_eq!(
+        schema
+            .to_string()
+            .replace("ActionTaggedAfterIgnoredKey", "Action"),
+        ActionTaggedWithNothingIgnored::json_schema()
+            .to_string()
+            .replace("ActionTaggedWithNothingIgnored", "Action"),
+        "the ignored key may not change a byte of the JSON schema"
+    );
 }
 
 #[test]

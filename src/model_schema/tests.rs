@@ -407,7 +407,7 @@ fn positional_option_field_is_exempt() {
 /// Collects the untagged-path guard failures as rendered `compile_error!` token streams.
 #[cfg(feature = "serde")]
 fn untagged_guard_error_tokens(item: &mut syn::ItemEnum) -> Vec<proc_macro2::TokenStream> {
-    collect_untagged_members(item, UNTAGGED_MODULE).4
+    collect_untagged_members(item, UNTAGGED_MODULE).5
 }
 
 /// Collects the untagged-path guard failures as rendered `compile_error!` token strings.
@@ -587,7 +587,8 @@ fn untagged_member_carries_its_constraint_to_the_surfaces() {
             },
         }
     };
-    let (_, zod_parts, _, _, errors, _, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
+    let (_, _, zod_parts, _, _, errors, _, _) =
+        collect_untagged_members(&mut item, UNTAGGED_MODULE);
     assert!(errors.is_empty(), "got: {errors:?}");
     assert!(
         zod_parts[0].contains("z.string().min(2).check(z.regex(/^[a-z]+$/))"),
@@ -609,7 +610,7 @@ fn untagged_member_constraint_generates_the_validator_and_hangs_it_on_the_member
             },
         }
     };
-    let (_, _, _, _, errors, validation_fns, _) =
+    let (_, _, _, _, _, errors, validation_fns, _) =
         collect_untagged_members(&mut item, UNTAGGED_MODULE);
     assert!(errors.is_empty(), "got: {errors:?}");
     assert_eq!(validation_fns.len(), 1, "got: {validation_fns:?}");
@@ -644,7 +645,7 @@ fn untagged_member_constraint_generates_nothing_without_a_schema_module() {
             },
         }
     };
-    let (_, _, _, _, errors, validation_fns, _) = collect_untagged_members(&mut item, None);
+    let (_, _, _, _, _, errors, validation_fns, _) = collect_untagged_members(&mut item, None);
     assert!(errors.is_empty(), "got: {errors:?}");
     assert!(validation_fns.is_empty(), "got: {validation_fns:?}");
     let attrs = &item.variants[0].fields.iter().next().unwrap().attrs;
@@ -811,7 +812,7 @@ fn untagged_member_reaching_an_unwritable_map_key_is_refused() {
 #[cfg(all(feature = "serde", feature = "jsonschema"))]
 fn untagged_member_values(mut item: syn::ItemEnum) -> Vec<String> {
     collect_untagged_members(&mut item, UNTAGGED_MODULE)
-        .3
+        .4
         .iter()
         .map(ToString::to_string)
         .collect()
@@ -1742,7 +1743,7 @@ fn a_refused_map_key_leaves_no_hook_naming_the_dropped_module() {
             },
         }
     };
-    let errors = collect_untagged_members(&mut item, UNTAGGED_MODULE).4;
+    let errors = collect_untagged_members(&mut item, UNTAGGED_MODULE).5;
     assert_eq!(errors.len(), 1, "got: {errors:?}");
     assert!(
         errors[0].to_string().contains("a map key must be a plain"),
@@ -7971,7 +7972,8 @@ fn a_scalar_union_member_is_recorded_as_the_type_serde_writes_it_as() {
             Many(Vec<Holder>),
         }
     };
-    let (_, _, merge_parts, _, errors, _, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
+    let (_, _, _, merge_parts, _, errors, _, _) =
+        collect_untagged_members(&mut item, UNTAGGED_MODULE);
     assert!(errors.is_empty(), "got: {errors:?}");
     let recorded: Vec<(String, Option<&str>)> = merge_parts
         .iter()
@@ -8086,7 +8088,8 @@ fn recorded_union_flatten_error(
     mut item: syn::ItemEnum,
     field: &syn::Field,
 ) -> Option<String> {
-    let (_, _, merge_parts, _, errors, _, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
+    let (_, _, _, merge_parts, _, errors, _, _) =
+        collect_untagged_members(&mut item, UNTAGGED_MODULE);
     assert!(errors.is_empty(), "got: {errors:?}");
     register_alias_info(
         rust_ident,
@@ -8102,7 +8105,8 @@ fn recorded_union_flatten_error(
 /// write, in declaration order.
 #[cfg(all(feature = "serde", feature = "zod"))]
 fn recorded_member_trails(mut item: syn::ItemEnum) -> Vec<(String, Option<&'static str>)> {
-    let (_, _, merge_parts, _, errors, _, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
+    let (_, _, _, merge_parts, _, errors, _, _) =
+        collect_untagged_members(&mut item, UNTAGGED_MODULE);
     assert!(errors.is_empty(), "got: {errors:?}");
     merge_parts
         .iter()
@@ -8919,5 +8923,43 @@ fn a_word_boundary_pattern_keeps_its_regex() {
          static RE : LazyLock < regex :: Regex > = LazyLock :: new (|| { regex :: Regex :: new (\"\\\\b\") . unwrap () }) ; \
          if ! RE . is_match (value) { \
          return Err (format ! (\"'{}' does not match pattern '{}'\" , \"field\" , \"\\\\b\")) ; } } Ok (()) } "
+    );
+}
+
+/// A flattened source that is one of the item's own parameters contributes the document its
+/// filling describes as, read through the one binding every other position holding that parameter
+/// reads it through — not the placeholder that stands for a value the expansion cannot name, which
+/// carries no member and multiplies nothing into the object being written.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_flattened_type_parameter_is_merged_at_the_document_its_filling_binds() {
+    let ty: syn::Type = syn::parse_str("HeldType").unwrap();
+    let mut held = super::get_field_def("held", &ty, "");
+    held.erase_type_parameters(&["HeldType".to_owned()]);
+
+    let source = super::flatten_merged_source(&held);
+
+    assert_eq!(source.label, "held");
+    assert_eq!(
+        source.value.to_string(),
+        "_arg_held_type . clone ()",
+        "the placeholder still stands where the filling belongs"
+    );
+}
+
+/// A flatten source the expansion can name neither as a sibling nor as a parameter has no document
+/// to reach for, and keeps the placeholder it has always contributed.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_flatten_source_with_no_name_of_its_own_keeps_the_placeholder() {
+    let ty: syn::Type = syn::parse_str("serde_json::Value").unwrap();
+    let held = super::get_field_def("held", &ty, "");
+
+    let source = super::flatten_merged_source(&held);
+
+    assert_eq!(source.label, "held");
+    assert_eq!(
+        source.value.to_string(),
+        "serde_json :: json ! ({ \"type\" : \"object\" })"
     );
 }

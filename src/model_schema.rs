@@ -84,7 +84,7 @@ use crate::features::model_schema_prop::{ModelSchemaPropMeta, parse_model_schema
 use crate::features::jsonschema::{
     MergedSource, SchemaParameter,
     generate_plain_enum_json_schema_method as generate_plain_enum_json_schema_method_impl,
-    generate_struct_json_schema_method as generate_struct_json_schema_method_impl,
+    generate_struct_json_schema_method as generate_struct_json_schema_method_impl, in_flight_type,
     json_schema_methods,
 };
 #[cfg(feature = "jsonschema")]
@@ -119,6 +119,9 @@ use crate::utils::ZodUnionMember;
 
 #[cfg(all(feature = "serde", any(feature = "zod", feature = "typescript")))]
 use crate::utils::{FlattenVariant, WireLeaf, record_flatten_variants, record_wire_leaves};
+
+#[cfg(all(feature = "serde", feature = "typescript"))]
+use crate::utils::record_ts_union_members;
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::register_alias_info;
@@ -221,12 +224,14 @@ type ZodMergeParts = Vec<ZodUnionMember>;
 #[cfg(all(feature = "serde", not(feature = "zod")))]
 type ZodMergeParts = Vec<String>;
 
-/// Per-member data collected from an untagged enum: the TypeScript member types, the Zod member
-/// schemas, what those Zod members contribute to an object that merges the enum, the JSON-schema
-/// value tokens, the `compile_error!` tokens for any field-level guard violations, the per-member
-/// serde validation functions, and the `validate()` match arms those functions are run from.
+/// Per-member data collected from an untagged enum: the TypeScript member types, what those members
+/// are spelled as where an object merges the enum, the Zod member schemas, what those Zod members
+/// contribute to an object that merges the enum, the JSON-schema value tokens, the `compile_error!`
+/// tokens for any field-level guard violations, the per-member serde validation functions, and the
+/// `validate()` match arms those functions are run from.
 #[cfg(feature = "serde")]
 type UntaggedMemberData = (
+    Vec<String>,
     Vec<String>,
     Vec<String>,
     ZodMergeParts,
@@ -1779,34 +1784,42 @@ fn flattened_zod_branches(fld: &FieldDef) -> Vec<String> {
 }
 
 /// What one flattened source is written as where the TypeScript merge names it: the parenthesised
-/// union of the per-variant key sets an externally tagged enum recorded, and the name itself
+/// union of the key sets the choice it names recorded for this position, and the name itself
 /// everywhere else.
 ///
 /// TypeScript distributes an intersection over a union on its own, so a name standing for a choice
-/// every branch of which is an object already describes what the multiplication would write and is
-/// left as the one operand it is. What it cannot distribute over is a branch that is no object: the
-/// bare string a unit variant publishes standing alone intersects the object to `never`, and the
-/// payload serde actually writes for that variant — the variant's name holding `null` — belongs to
-/// no branch of the result. Where the enum's recorded leaves prove such a branch, the operand is
-/// spelled as the key sets serde writes instead of as the union the enum publishes.
+/// of objects reaches every branch the multiplication would write. Two things it does not reach are
+/// what the recorded operands carry. One is a branch that is no object: the bare string a unit
+/// variant publishes standing alone intersects the object to `never`, and the payload serde actually
+/// writes for that variant — the variant's name holding `null` — belongs to no branch of the result.
+/// The other is what each branch says about its siblings: the excess-property check reads the union
+/// of every branch's keys, so a branch that names one of them is still satisfied by a payload
+/// carrying the rest, and the type describes payloads serde writes for no value. The recorded
+/// operands close each branch against the keys the others name, which is a thing only two branches
+/// or more have to say.
 ///
 /// A name the registry proves nothing about, and a source declared below the object, keep the
 /// spelling they always had.
 #[cfg(all(feature = "serde", feature = "typescript"))]
 fn flattened_ts_spelling(fld: &FieldDef) -> String {
     let named = fld.typescript_merged_typename();
-    if named_wire_leaves(fld).is_none() {
-        return named;
-    }
     let variants: Vec<String> = fld
         .flatten_variants()
         .into_iter()
         .map(|variant| variant.typescript)
         .collect();
-    if variants.is_empty() {
+    if !variants.is_empty() {
+        return if variants.len() > 1 || named_wire_leaves(fld).is_some() {
+            format!("({})", variants.join(" | "))
+        } else {
+            named
+        };
+    }
+    let members = fld.ts_union_members();
+    if members.is_empty() {
         named
     } else {
-        format!("({})", variants.join(" | "))
+        format!("({})", members.join(" | "))
     }
 }
 
@@ -1926,16 +1939,19 @@ fn refused_item_schema_module(ident: &syn::Ident) -> proc_macro2::TokenStream {
     let refusal = format!("`{ident}`: refused by `#[model_schema()]`, so it describes nothing");
 
     #[cfg(feature = "jsonschema")]
-    let json_schema_methods = quote! {
-        pub fn json_schema() -> serde_json::Value {
-            panic!(#refusal)
-        }
+    let json_schema_methods = {
+        let in_flight_type = in_flight_type();
+        quote! {
+            pub fn json_schema() -> serde_json::Value {
+                panic!(#refusal)
+            }
 
-        pub fn json_schema_within(
-            _in_flight: &mut Vec<&'static str>,
-            _hoisted_defs: &mut serde_json::Map<String, serde_json::Value>,
-        ) -> serde_json::Value {
-            panic!(#refusal)
+            pub fn json_schema_within(
+                _in_flight: &mut #in_flight_type,
+                _hoisted_defs: &mut serde_json::Map<String, serde_json::Value>,
+            ) -> serde_json::Value {
+                panic!(#refusal)
+            }
         }
     };
     #[cfg(not(feature = "jsonschema"))]
@@ -6444,27 +6460,47 @@ fn render_external_variant(
 /// of taken from the member, in the shape the same variant would have rendered as had it carried
 /// data. That is what puts the two spellings of one variant at one indent and under one `JSDoc`
 /// block.
+///
+/// The TypeScript operand carries one thing beyond that shape: each variant says outright that it
+/// does not tag the keys its siblings tag. Nothing in the key set alone says it — a payload carrying
+/// two variants' keys at once satisfies either of them structurally, and an object joined to the
+/// choice makes both of those keys known — so what serde writes one variant at a time would be
+/// described two at a time. The Zod operand needs no such thing: a `z.strictObject` recognizes
+/// exactly the keys it names and refuses the second variant's on that alone.
 #[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod")))]
 fn record_external_flatten_operands(
     rust_ident: &str,
     variants: &[DiscriminatedVariant],
     members: &[(String, String, proc_macro2::TokenStream)],
 ) {
+    #[cfg(feature = "typescript")]
+    let exclusions = sibling_key_exclusions(
+        &variants
+            .iter()
+            .map(|variant| Some(vec![variant.discriminator_value.clone()]))
+            .collect::<Vec<_>>(),
+    );
     let operands: Vec<FlattenVariant> = variants
         .iter()
         .zip(members)
-        .map(|(variant, member)| {
+        .enumerate()
+        .map(|(index, (variant, member))| {
             let unit = matches!(variant.kind, VariantKind::Unit);
             let key = &variant.discriminator_value;
             #[cfg(feature = "typescript")]
-            let typescript = if unit {
-                format!(
-                    "{{\n{}\n  \"{key}\": null;\n}}",
-                    member_jsdoc_block(&variant.docs)
-                )
-            } else {
-                member.0.clone()
+            let typescript = {
+                let tagged = if unit {
+                    format!(
+                        "{{\n{}\n  \"{key}\": null;\n}}",
+                        member_jsdoc_block(&variant.docs)
+                    )
+                } else {
+                    member.0.clone()
+                };
+                close_tagged_flatten_member(&tagged, &exclusions[index])
             };
+            #[cfg(not(feature = "typescript"))]
+            let _: usize = index;
             #[cfg(feature = "zod")]
             let zod = if unit {
                 format!("z.strictObject({{\n  \"{key}\": z.null(),\n}})")
@@ -6480,6 +6516,57 @@ fn record_external_flatten_operands(
         })
         .collect();
     record_flatten_variants(rust_ident, &operands);
+}
+
+/// Which of a flattened choice's keys each member has to say it does not carry, one list per member
+/// and in the order the union writes them.
+///
+/// A member is closed against every key its siblings name and it does not. Its own are left off
+/// because it carries them, and the excluded keys are the payloads a merge would otherwise describe
+/// and serde never writes: one branch's keys beside another's.
+///
+/// `None` is a member whose keys nothing here proves — a name the registry classified no further, a
+/// map, a scalar. Such a member is left unclosed, and names no key for its siblings to exclude
+/// either: a key it was told to leave out could be one it carries, and an exclusion is only worth
+/// writing where the declaration proves it.
+#[cfg(all(feature = "serde", feature = "typescript"))]
+fn sibling_key_exclusions(member_keys: &[Option<Vec<String>>]) -> Vec<Vec<String>> {
+    member_keys
+        .iter()
+        .map(|member| {
+            let Some(own) = member.as_ref() else {
+                return Vec::new();
+            };
+            let mut excluded: Vec<String> = Vec::new();
+            for key in member_keys.iter().flatten().flatten() {
+                if !own.contains(key) && !excluded.contains(key) {
+                    excluded.push(key.clone());
+                }
+            }
+            excluded
+        })
+        .collect()
+}
+
+/// One externally tagged variant's flatten operand with its siblings' tags marked absent, written in
+/// the key-per-line shape [`render_external_variant`] already wrote the variant in.
+///
+/// A member that is no object literal keeps its spelling: there is no key list to add a line to, and
+/// the exclusion is best-effort in exactly the way the excess-property posture around it is.
+#[cfg(all(feature = "serde", feature = "typescript"))]
+fn close_tagged_flatten_member(member: &str, excluded: &[String]) -> String {
+    if excluded.is_empty() {
+        return member.to_owned();
+    }
+    let Some(keys) = member.strip_suffix("\n}") else {
+        return member.to_owned();
+    };
+    let mut closed = keys.to_owned();
+    for key in excluded {
+        let _ = write!(closed, "\n  \"{key}\"?: never;");
+    }
+    closed.push_str("\n}");
+    closed
 }
 
 /// Joins an externally tagged enum's rendered members into its three union surfaces: the
@@ -7259,6 +7346,43 @@ fn render_untagged_named(
     (ts, zod, json_val)
 }
 
+/// The keys one untagged member names, and `None` where nothing here proves them.
+///
+/// A `Named` variant writes its own fields and is the whole of what it writes, so its keys are the
+/// ones the member already spells. Every other member is written as the type it names — the merge
+/// reads what that name published for the questions it can ask a registry, and its key list is not
+/// one of them.
+#[cfg(all(feature = "serde", feature = "typescript"))]
+fn untagged_member_keys(kind: &VariantKind, field_defs: &[FieldDef]) -> Option<Vec<String>> {
+    matches!(kind, VariantKind::Named)
+        .then(|| field_defs.iter().map(|fld| fld.name.clone()).collect())
+}
+
+/// One untagged member's flatten operand with its siblings' keys marked absent, written in the
+/// one-line shape [`render_untagged_named`] already wrote the member in.
+///
+/// A member that is no object literal keeps its spelling, which is the same answer
+/// [`untagged_member_keys`] gives it: a name is what it is written as, and nothing here proves what
+/// it would have to be told to leave out.
+#[cfg(all(feature = "serde", feature = "typescript"))]
+fn close_untagged_flatten_member(member: &str, excluded: &[String]) -> String {
+    if excluded.is_empty() {
+        return member.to_owned();
+    }
+    let Some(keys) = member.strip_suffix(" }") else {
+        return member.to_owned();
+    };
+    let mut closed = keys.trim_end().to_owned();
+    for key in excluded {
+        if !closed.ends_with('{') {
+            closed.push(';');
+        }
+        let _ = write!(closed, " {key}?: never");
+    }
+    closed.push_str(" }");
+    closed
+}
+
 /// Builds the `{ type: object, properties, required, additionalProperties: false }` JSON-schema
 /// value token for a `Named` untagged variant.
 #[cfg(all(feature = "serde", feature = "jsonschema"))]
@@ -7635,6 +7759,8 @@ fn collect_untagged_members(
     let enum_type_name = item_enum.ident.to_string();
     let type_parameters = type_parameters_in_scope(&item_enum.generics);
     let mut ts_parts: Vec<String> = Vec::new();
+    #[cfg(feature = "typescript")]
+    let mut ts_member_keys: Vec<Option<Vec<String>>> = Vec::new();
     let mut zod_parts: Vec<String> = Vec::new();
     #[cfg(feature = "zod")]
     let mut zod_merge_parts: ZodMergeParts = Vec::new();
@@ -7676,6 +7802,8 @@ fn collect_untagged_members(
                     &zod,
                     ts_parts.len() + 1,
                 ));
+                #[cfg(feature = "typescript")]
+                ts_member_keys.push(untagged_member_keys(&kind, &field_defs));
                 ts_parts.push(ts);
                 zod_parts.push(zod);
                 json_parts.push(json_val);
@@ -7694,8 +7822,14 @@ fn collect_untagged_members(
         );
     }
 
+    #[cfg(feature = "typescript")]
+    let ts_merge_parts = ts_flatten_operands(&ts_parts, &ts_member_keys);
+    #[cfg(not(feature = "typescript"))]
+    let ts_merge_parts: Vec<String> = Vec::new();
+
     (
         ts_parts,
+        ts_merge_parts,
         zod_parts,
         zod_merge_parts,
         json_parts,
@@ -7703,6 +7837,32 @@ fn collect_untagged_members(
         validation_fns,
         build_member_check_arms(per_variant_checks),
     )
+}
+
+/// What an object flattening an untagged enum spells in the enum's name's place, one operand per
+/// member — and nothing where the name already spells the same payload set.
+///
+/// Standing alone the union describes one member at a time and needs no exclusions. Intersected with
+/// an open object it stops doing so: the excess-property check reads the union of every member's
+/// keys, and each member is satisfied structurally by a payload carrying more keys than it names, so
+/// the type admits a payload carrying two members' keys at once and serde, Zod and the JSON-schema
+/// document all refuse. Closing each member against its siblings' keys is what puts the four
+/// surfaces back on one payload set.
+///
+/// A union no member of which proves a key — one written over names alone — has nothing to close,
+/// and the merge keeps naming the enum rather than writing out what the name already says.
+#[cfg(all(feature = "serde", feature = "typescript"))]
+fn ts_flatten_operands(members: &[String], member_keys: &[Option<Vec<String>>]) -> Vec<String> {
+    let operands: Vec<String> = sibling_key_exclusions(member_keys)
+        .iter()
+        .zip(members)
+        .map(|(excluded, member)| close_untagged_flatten_member(member, excluded))
+        .collect();
+    if operands == members {
+        Vec::new()
+    } else {
+        operands
+    }
 }
 
 /// What one rendered member contributes to an object that merges the enum: the members of the union
@@ -8024,6 +8184,7 @@ fn process_untagged_enum(
     // Render each variant into its union member (TS / Zod / JSON parts).
     let (
         ts_parts,
+        ts_merge_parts,
         zod_parts,
         zod_merge_parts,
         json_parts,
@@ -8043,6 +8204,10 @@ fn process_untagged_enum(
     record_zod_union_members(&name.to_string(), &zod_merge_parts);
     #[cfg(not(feature = "zod"))]
     let _: &_ = &zod_merge_parts;
+    #[cfg(feature = "typescript")]
+    record_ts_union_members(&name.to_string(), &ts_merge_parts);
+    #[cfg(not(feature = "typescript"))]
+    let _: &_ = &ts_merge_parts;
 
     #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
     let _: &_ = &(name, item_name, &ts_parts, &zod_parts, &json_parts, args);
@@ -11352,20 +11517,31 @@ fn flatten_merged_sources(flattened_fields: &[FieldDef]) -> Vec<MergedSource> {
 /// An `Option` around it travels too. What it wraps says which members the value contributes, and
 /// the `Option` says whether it contributes them at all — the merge owes the object both answers,
 /// and nothing below this point can still see the wrapper.
+///
+/// A parameter contributes the document its filling describes as, read through the one binding
+/// every other position holding that parameter reads it through — the merge expands whatever it is
+/// handed, so an object filling's members join the base exactly as a named source's do. Whether a
+/// filling is an object at all is the merge's to answer and not the declaration's: which type fills
+/// a parameter is the reference site's to name, so the declaration cannot know it, and the merge is
+/// where it finally is known.
 #[cfg(feature = "jsonschema")]
 fn flatten_merged_source(fld: &FieldDef) -> MergedSource {
     if let FieldDefType::SiblingType(name, arguments) = &fld.field_type {
-        MergedSource {
+        return MergedSource {
             label: name.clone(),
             optional: fld.is_optional(),
             value: sibling_json_schema_value(name, arguments, fld.type_span),
-        }
+        };
+    }
+    let value = if let FieldDefType::TypeParam(parameter) = &fld.field_type {
+        json_argument_value(parameter)
     } else {
-        MergedSource {
-            label: fld.name.clone(),
-            optional: fld.is_optional(),
-            value: quote! { serde_json::json!({ "type": "object" }) },
-        }
+        quote! { serde_json::json!({ "type": "object" }) }
+    };
+    MergedSource {
+        label: fld.name.clone(),
+        optional: fld.is_optional(),
+        value,
     }
 }
 
