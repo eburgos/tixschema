@@ -18,7 +18,8 @@ use super::{
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use super::{
     AliasKind, PublishedShape, alias_map_key_guard_error, branded_guard_errors, check_map_key,
-    ident_schema_module_name, record_value_shape, register_alias_info,
+    deferred_shape_question, deferred_shape_refusals, ident_schema_module_name,
+    record_shape_question, record_value_shape, register_alias_info,
 };
 
 #[cfg(all(feature = "serde", feature = "zod"))]
@@ -406,7 +407,7 @@ fn positional_option_field_is_exempt() {
 /// Collects the untagged-path guard failures as rendered `compile_error!` token streams.
 #[cfg(feature = "serde")]
 fn untagged_guard_error_tokens(item: &mut syn::ItemEnum) -> Vec<proc_macro2::TokenStream> {
-    collect_untagged_members(item, UNTAGGED_MODULE).4
+    collect_untagged_members(item, UNTAGGED_MODULE).5
 }
 
 /// Collects the untagged-path guard failures as rendered `compile_error!` token strings.
@@ -586,7 +587,8 @@ fn untagged_member_carries_its_constraint_to_the_surfaces() {
             },
         }
     };
-    let (_, zod_parts, _, _, errors, _, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
+    let (_, _, zod_parts, _, _, errors, _, _) =
+        collect_untagged_members(&mut item, UNTAGGED_MODULE);
     assert!(errors.is_empty(), "got: {errors:?}");
     assert!(
         zod_parts[0].contains("z.string().min(2).check(z.regex(/^[a-z]+$/))"),
@@ -608,7 +610,7 @@ fn untagged_member_constraint_generates_the_validator_and_hangs_it_on_the_member
             },
         }
     };
-    let (_, _, _, _, errors, validation_fns, _) =
+    let (_, _, _, _, _, errors, validation_fns, _) =
         collect_untagged_members(&mut item, UNTAGGED_MODULE);
     assert!(errors.is_empty(), "got: {errors:?}");
     assert_eq!(validation_fns.len(), 1, "got: {validation_fns:?}");
@@ -643,7 +645,7 @@ fn untagged_member_constraint_generates_nothing_without_a_schema_module() {
             },
         }
     };
-    let (_, _, _, _, errors, validation_fns, _) = collect_untagged_members(&mut item, None);
+    let (_, _, _, _, _, errors, validation_fns, _) = collect_untagged_members(&mut item, None);
     assert!(errors.is_empty(), "got: {errors:?}");
     assert!(validation_fns.is_empty(), "got: {validation_fns:?}");
     let attrs = &item.variants[0].fields.iter().next().unwrap().attrs;
@@ -810,7 +812,7 @@ fn untagged_member_reaching_an_unwritable_map_key_is_refused() {
 #[cfg(all(feature = "serde", feature = "jsonschema"))]
 fn untagged_member_values(mut item: syn::ItemEnum) -> Vec<String> {
     collect_untagged_members(&mut item, UNTAGGED_MODULE)
-        .3
+        .4
         .iter()
         .map(ToString::to_string)
         .collect()
@@ -1741,7 +1743,7 @@ fn a_refused_map_key_leaves_no_hook_naming_the_dropped_module() {
             },
         }
     };
-    let errors = collect_untagged_members(&mut item, UNTAGGED_MODULE).4;
+    let errors = collect_untagged_members(&mut item, UNTAGGED_MODULE).5;
     assert_eq!(errors.len(), 1, "got: {errors:?}");
     assert!(
         errors[0].to_string().contains("a map key must be a plain"),
@@ -3279,14 +3281,18 @@ fn string_constraints_over_a_named_inner_the_registry_calls_a_string_pass() {
     assert!(errors.is_empty(), "got: {errors:?}");
 }
 
-/// A name the registry has no answer for keeps the emission it has always had.
+/// A name the registry has no answer for keeps the emission it has always had, at the consult
+/// itself.
 ///
-/// The two names that reach this are the same absence: one written above the item that registers
-/// it, and one this crate never expands at all — an unresolved user type whose schema the author
-/// supplies. Refusing on absence would refuse the second for the sake of the first, and would make
-/// a diagnostic out of declaration order: moving a declaration would turn a compiling program into
-/// a refused one without changing what it means. The `Display` assertion still bounds the Rust
-/// surface either way.
+/// The two names that reach this are the same absence here: one written above the item that
+/// registers it, and one this crate never expands at all — an unresolved user type whose schema the
+/// author supplies. Refusing on absence would refuse the second for the sake of the first, and the
+/// argument alone tells them apart no better, a publisher being free to write a string whatever its
+/// parameter is handed. The `Display` assertion still bounds the Rust surface either way.
+///
+/// What the guard does *not* do is forget the question: the first of the two is answered by the
+/// registration that follows, which is what takes the verdict off declaration order without
+/// touching this admission. See the deferred tests below.
 ///
 /// Both of them name a type the declaration has already fixed, which is what the admission rests
 /// on; a name written over one of the brand's own parameters has not, and is refused below.
@@ -3504,6 +3510,169 @@ fn a_recorded_position_is_read_off_the_arguments_the_reference_writes() {
 
     let unwritten = brand_over_named_inner_errors("PublishesItsSecond<String>");
     assert!(unwritten.is_empty(), "got: {unwritten:?}");
+}
+
+/// The question a constrained brand leaves where the registry has no record, spelled as the brand's
+/// own expansion would leave it.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn ask_about(brand: &syn::ItemStruct) -> bool {
+    deferred_shape_question(brand, &pattern_args()).is_some_and(|question| {
+        record_shape_question(question);
+        true
+    })
+}
+
+/// A brand written over the given inner, under a name that is the same in both declaration orders
+/// so the two refusals can be read against each other.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn brand_over(inner: &str) -> syn::ItemStruct {
+    let ty: syn::Type = syn::parse_str(inner).unwrap();
+    syn::parse_quote! {
+        #[serde(transparent)]
+        struct Branded(pub #ty);
+    }
+}
+
+/// What the expansion registering a name emits for the questions asked about it, as rendered
+/// `compile_error!` token strings.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn deferred_refusals_for(rust_ident: &str) -> Vec<String> {
+    let name = syn::Ident::new(rust_ident, proc_macro2::Span::call_site());
+    deferred_shape_refusals(Some(&name))
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// A consult the registry could not answer is kept, and the expansion that finally registers the
+/// name answers it — filling the position that registration published with the argument shape the
+/// brand resolved when it asked.
+///
+/// The brand is admitted at its own expansion whatever the argument, because a name declared below
+/// it and a name this crate never expands are one absence there. What closes the half is that the
+/// absence is temporary: the registry is a compile-local recording the later expansion also writes
+/// to, so the answer arrives one declaration later rather than never.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_question_left_where_the_registry_was_silent_is_answered_by_the_later_registration() {
+    let brand = brand_over("AnsweredLater<u32>");
+    assert!(
+        branded_errors_with(&brand, &pattern_args()).is_empty(),
+        "the brand's own expansion has nothing to refuse it on"
+    );
+    assert!(ask_about(&brand));
+    assert!(
+        deferred_refusals_for("AnsweredLater").is_empty(),
+        "nothing has registered under the name yet"
+    );
+
+    seed_published_shape("AnsweredLater", PublishedShape::Parameter(0));
+    let errors = deferred_refusals_for("AnsweredLater");
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(errors[0].contains("compile_error"), "got: {}", errors[0]);
+    assert!(errors[0].contains("`Branded`"), "got: {}", errors[0]);
+    assert!(errors[0].contains("`AnsweredLater`"), "got: {}", errors[0]);
+    assert!(errors[0].contains("numeric"), "got: {}", errors[0]);
+}
+
+/// Both orders of the one pair refuse in one wording, so an author moving either declaration past
+/// the other reads the same sentence — only the span moves, to the tokens the answering expansion
+/// holds.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn both_orders_of_the_same_pair_refuse_in_one_wording() {
+    assert!(ask_about(&brand_over("WordingBelow<u32>")));
+    seed_published_shape("WordingBelow", PublishedShape::Parameter(0));
+    let below = deferred_refusals_for("WordingBelow");
+    assert_eq!(below.len(), 1, "got: {below:?}");
+
+    seed_published_shape("WordingAbove", PublishedShape::Parameter(0));
+    let above = brand_over_named_inner_errors("WordingAbove<u32>");
+    assert_eq!(above.len(), 1, "got: {above:?}");
+
+    assert_eq!(
+        below[0].replace("WordingBelow", "Inner"),
+        above[0].replace("WordingAbove", "Inner")
+    );
+}
+
+/// A registration proving the argument is a string settles its question silently, so the pair that
+/// works keeps working — and keeps working in the order the registry could not answer.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_question_a_string_argument_answers_settles_silently() {
+    assert!(ask_about(&brand_over("SettlesSilently<String>")));
+    seed_published_shape("SettlesSilently", PublishedShape::Parameter(0));
+    let errors = deferred_refusals_for("SettlesSilently");
+    assert!(errors.is_empty(), "got: {errors:?}");
+}
+
+/// A name nothing ever registers leaves its question unanswered, which is the foreign-type
+/// admission the guard makes on purpose — an unresolved user type whose schema the author supplies.
+///
+/// Read off the registry rather than off the question, so the absence that never ends is told from
+/// the one that does by the registration itself rather than by anything the brand could have known.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_question_no_registration_reaches_stays_unanswered() {
+    assert!(ask_about(&brand_over("NeverRegisters<u32>")));
+    let errors = deferred_refusals_for("NeverRegisters");
+    assert!(errors.is_empty(), "got: {errors:?}");
+}
+
+/// A brand the registry could answer leaves no question, so the pair the other order already
+/// refuses is refused once rather than twice.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_brand_the_registry_answers_leaves_no_question() {
+    seed_published_shape("AlreadyAnswering", PublishedShape::Parameter(0));
+    for inner in ["AlreadyAnswering<u32>", "AlreadyAnswering<String>"] {
+        assert!(
+            deferred_shape_question(&brand_over(inner), &pattern_args()).is_none(),
+            "for {inner}"
+        );
+    }
+}
+
+/// Nothing is asked where nothing would be appended: a brand carrying no string checks, and an
+/// inner whose own spelling fixes a shape the registry is never consulted about.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_brand_with_nothing_to_append_asks_nothing() {
+    assert!(
+        deferred_shape_question(
+            &brand_over("Unasked<u32>"),
+            &super::ModelSchemaArgs::default()
+        )
+        .is_none()
+    );
+    for inner in ["Vec<Unasked>", "BTreeSet<Unasked>", "String", "u32"] {
+        assert!(
+            deferred_shape_question(&brand_over(inner), &pattern_args()).is_none(),
+            "for {inner}"
+        );
+    }
+}
+
+/// A registration publishing a flat shape answers whatever the reference wrote, and one publishing
+/// a position the reference left unwritten answers nothing — the same two readings the consult
+/// itself makes of one record.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_deferred_answer_reads_the_record_the_consult_would_have_read() {
+    assert!(ask_about(&brand_over("FlatlyNumeric")));
+    seed_value_shape("FlatlyNumeric", Some("numeric"));
+    let flat = deferred_refusals_for("FlatlyNumeric");
+    assert_eq!(flat.len(), 1, "got: {flat:?}");
+    assert!(flat[0].contains("numeric"), "got: {}", flat[0]);
+
+    assert!(ask_about(&brand_over("FlatlyString")));
+    seed_value_shape("FlatlyString", None);
+    assert!(deferred_refusals_for("FlatlyString").is_empty());
+
+    assert!(ask_about(&brand_over("PublishesUnwritten<String>")));
+    seed_published_shape("PublishesUnwritten", PublishedShape::Parameter(1));
+    assert!(deferred_refusals_for("PublishesUnwritten").is_empty());
 }
 
 /// What a tuple struct records: serde writes one slot as that slot's value alone, so the schema is
@@ -4328,28 +4497,204 @@ fn an_unbounded_parameter_earns_no_check() {
 }
 
 /// A bound naming another parameter of the item holds only where that one is filled too, which is a
-/// joint statement this per-filling check does not make — and the neighbour's name reproduced
-/// beside a single filling would resolve to nothing. So the bound is left to the item's own use
-/// sites, whether it names a type parameter, a lifetime or a const.
+/// joint statement no per-filling check makes — and the neighbour's name reproduced beside a single
+/// filling would resolve to nothing. So it earns no check of its own, and is carried instead by the
+/// one check that declares the whole parameter list.
 #[test]
-fn a_bound_naming_another_parameter_of_the_item_earns_no_check() {
+fn a_bound_naming_another_parameter_of_the_item_earns_no_check_of_its_own() {
+    let checks = filling_bound_check_text(
+        "pub struct Pair<AType: From<BType>, BType> { pub a: AType, pub b: BType }",
+        "default_types(AType = String, BType = char)",
+    );
+    assert_eq!(checks.len(), 1, "got: {checks:?}");
+    assert!(
+        !checks[0].contains("fn default_type_filling <"),
+        "the bound reads a neighbour, so no per-filling check carries it: {}",
+        checks[0]
+    );
+}
+
+/// The joint check declares every type parameter the item declares, carries the bounds that read a
+/// neighbour, and is called at every declared filling in the order they were declared — so each
+/// name such a bound reads stands at the filling the author declared for it.
+#[test]
+fn a_bound_naming_another_parameter_is_checked_at_the_whole_parameter_list_at_once() {
+    let checks = filling_bound_check_text(
+        "pub struct Pair<AType: From<BType>, BType> { pub a: AType, pub b: BType }",
+        "default_types(AType = String, BType = char)",
+    );
+    assert_eq!(checks.len(), 1, "got: {checks:?}");
+    for needle in [
+        "fn default_type_fillings < AType , BType > ()",
+        "where AType : From < BType >",
+        "default_type_fillings :: < String , char > ()",
+    ] {
+        assert!(
+            checks[0].contains(needle),
+            "{needle} missing: {}",
+            checks[0]
+        );
+    }
+}
+
+/// The joint call follows the parameter list, not the order the entries were written in: the
+/// arguments stand at positions, and an entry written out of order still fills its own.
+#[test]
+fn the_joint_check_is_called_in_the_order_the_parameters_were_declared() {
+    let checks = filling_bound_check_text(
+        "pub struct Pair<AType: From<BType>, BType> { pub a: AType, pub b: BType }",
+        "default_types(BType = char, AType = String)",
+    );
+    assert_eq!(checks.len(), 1, "got: {checks:?}");
+    assert!(
+        checks[0].contains("default_type_fillings :: < String , char > ()"),
+        "got: {}",
+        checks[0]
+    );
+}
+
+/// A parameter no bound reads is still declared and still filled, so the argument list lines up
+/// with the parameter list however few of them a bound actually joins.
+#[test]
+fn the_joint_check_declares_and_fills_the_parameters_no_bound_reads() {
+    let checks = filling_bound_check_text(
+        "pub struct Trio<AType: From<BType>, BType, CType> { pub a: AType, pub b: BType, pub c: CType }",
+        "default_types(AType = String, BType = char, CType = u8)",
+    );
+    assert_eq!(checks.len(), 1, "got: {checks:?}");
+    assert!(
+        checks[0].contains("fn default_type_fillings < AType , BType , CType > ()")
+            && checks[0].contains("default_type_fillings :: < String , char , u8 > ()"),
+        "got: {}",
+        checks[0]
+    );
+}
+
+/// A lifetime a bound reads is declared as it was written and left out of the call, where it
+/// elides — so a bound joining a parameter to a lifetime is reached like any other.
+#[test]
+fn a_lifetime_a_bound_reads_is_declared_as_written_and_left_out_of_the_call() {
+    let checks = filling_bound_check_text(
+        "pub struct Held<'label, ValueType: Into<&'label str>> { pub held: ValueType }",
+        "default_types(ValueType = String)",
+    );
+    assert_eq!(checks.len(), 1, "got: {checks:?}");
+    for needle in [
+        "fn default_type_fillings < 'label , ValueType > ()",
+        "where ValueType : Into < & 'label str >",
+        "default_type_fillings :: < String > ()",
+    ] {
+        assert!(
+            checks[0].contains(needle),
+            "{needle} missing: {}",
+            checks[0]
+        );
+    }
+}
+
+/// A const takes no filling from a convention that names types, so a joint function declaring one
+/// could not be called at all. A bound reading a const is left to the item's own use sites, as
+/// every bound reading a neighbour was before.
+#[test]
+fn a_bound_reading_a_const_parameter_earns_no_check() {
+    let checks = filling_bound_check_text(
+        "pub struct Bounded<ValueType: Fits<WIDTH>, const WIDTH: usize> { pub held: ValueType }",
+        "default_types(ValueType = String)",
+    );
+    assert!(checks.is_empty(), "got: {checks:?}");
+}
+
+/// A const beside a bound that does not read it costs the joint check nothing: it is declared
+/// nowhere and the call still lines up with the type parameters.
+#[test]
+fn a_const_no_bound_reads_leaves_the_joint_check_standing() {
+    let checks = filling_bound_check_text(
+        "pub struct Sized<AType: From<BType>, BType, const WIDTH: usize> { pub a: AType, pub b: BType }",
+        "default_types(AType = String, BType = char)",
+    );
+    assert_eq!(checks.len(), 1, "got: {checks:?}");
+    assert!(
+        checks[0].contains("fn default_type_fillings < AType , BType > ()")
+            && !checks[0].contains("WIDTH"),
+        "got: {}",
+        checks[0]
+    );
+}
+
+/// A parameter left without a filling — which only a build generating no JSON document allows —
+/// leaves nothing for the joint call to stand at, and a filling nobody declared would ask the
+/// compiler a question nobody asked. So the whole check is withheld.
+#[test]
+fn a_parameter_left_without_a_filling_withholds_the_joint_check() {
+    let checks = filling_bound_check_text(
+        "pub struct Pair<AType: From<BType>, BType> { pub a: AType, pub b: BType }",
+        "default_types(AType = String)",
+    );
+    assert!(checks.is_empty(), "got: {checks:?}");
+}
+
+/// The two kinds of bound partition a parameter's own: the half that reads no neighbour is checked
+/// at the filling alone, the half that does is checked jointly, and neither is checked twice.
+#[test]
+fn a_parameter_bounded_both_ways_is_checked_once_against_each_half() {
+    let checks = filling_bound_check_text(
+        "pub struct Pair<AType: Copy + From<BType>, BType> { pub a: AType, pub b: BType }",
+        "default_types(AType = u8, BType = char)",
+    );
+    assert_eq!(checks.len(), 2, "got: {checks:?}");
+    assert!(
+        checks[0].contains("fn default_type_filling < AType : Copy > ()")
+            && !checks[0].contains("From"),
+        "the per-filling check keeps only the neighbour-free half: {}",
+        checks[0]
+    );
+    assert!(
+        checks[1].contains("where AType : From < BType >") && !checks[1].contains("Copy"),
+        "the joint check holds exactly the complement: {}",
+        checks[1]
+    );
+}
+
+/// A declaration no bound joins earns no joint check, so an item that had none before is left
+/// exactly as it was.
+#[test]
+fn a_declaration_with_no_cross_parameter_bound_earns_no_joint_check() {
     for (source, args) in [
         (
-            "pub struct Pair<AType: From<BType>, BType> { pub a: AType, pub b: BType }",
-            "default_types(AType = String, BType = char)",
+            "pub struct Counted<CountType: Copy> { pub count: CountType }",
+            "default_types(CountType = String)",
         ),
         (
-            "pub struct Held<'label, ValueType: Into<&'label str>> { pub held: ValueType }",
-            "default_types(ValueType = String)",
-        ),
-        (
-            "pub struct Bounded<ValueType: Fits<WIDTH>, const WIDTH: usize> { pub held: ValueType }",
-            "default_types(ValueType = String)",
+            "pub struct Both<IdType, DateType> { pub id: IdType, pub at: DateType }",
+            "default_types(IdType = String, DateType = f64)",
         ),
     ] {
         let checks = filling_bound_check_text(source, args);
-        assert!(checks.is_empty(), "for {source}: {checks:?}");
+        assert!(
+            checks.iter().all(|check| !check.contains("fillings")),
+            "for {source}: {checks:?}"
+        );
     }
+}
+
+/// Rust does not enforce a bound written on a type alias's parameter, so a filling that fails one
+/// still names a type every use site of the alias accepts. Refusing it would refuse a program the
+/// language admits, so the alias earns no check of either kind.
+#[test]
+fn an_alias_earns_no_check_for_a_bound_rust_leaves_unenforced() {
+    for args in [
+        "default_types(ValueType = String)",
+        "default_types(ValueType = u32)",
+    ] {
+        let checks =
+            filling_bound_check_text("pub type Boxed<ValueType: Copy> = Vec<ValueType>;", args);
+        assert!(checks.is_empty(), "for {args}: {checks:?}");
+    }
+    let joint = filling_bound_check_text(
+        "pub type Paired<AType: From<BType>, BType> = (AType, BType);",
+        "default_types(AType = String, BType = char)",
+    );
+    assert!(joint.is_empty(), "got: {joint:?}");
 }
 
 /// A bound written in terms of the parameter it bounds names no neighbour, so it is checked like
@@ -4389,25 +4734,23 @@ fn every_bounded_filling_earns_its_own_check() {
     );
 }
 
-/// The three shapes the attribute expands answer alike: the check is read off the item's own
-/// parameters, which every one of them binds the same way.
+/// The two shapes whose parameters Rust binds answer alike: the check is read off the item's own
+/// parameters, which a struct and an enum bind the same way. The third — an alias, whose parameters
+/// bind nothing Rust checks — is left out entirely.
 #[test]
-fn every_expanded_shape_checks_its_fillings_alike() {
+fn every_expanded_shape_whose_bounds_rust_enforces_checks_its_fillings_alike() {
     let expected = filling_bound_check_text(
         "pub struct Held<ValueType: Copy> { pub held: ValueType }",
         "default_types(ValueType = String)",
     );
     assert_eq!(expected.len(), 1, "got: {expected:?}");
-    for source in [
-        "pub enum Held<ValueType: Copy> { Named { held: ValueType } }",
-        "pub type Held<ValueType: Copy> = Vec<ValueType>;",
-    ] {
-        assert_eq!(
-            filling_bound_check_text(source, "default_types(ValueType = String)"),
-            expected,
-            "for {source}"
-        );
-    }
+    assert_eq!(
+        filling_bound_check_text(
+            "pub enum Held<ValueType: Copy> { Named { held: ValueType } }",
+            "default_types(ValueType = String)",
+        ),
+        expected
+    );
 }
 
 /// The `compile_error!` tokens `source` earns for the example it carries against the parameters it
@@ -7629,7 +7972,8 @@ fn a_scalar_union_member_is_recorded_as_the_type_serde_writes_it_as() {
             Many(Vec<Holder>),
         }
     };
-    let (_, _, merge_parts, _, errors, _, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
+    let (_, _, _, merge_parts, _, errors, _, _) =
+        collect_untagged_members(&mut item, UNTAGGED_MODULE);
     assert!(errors.is_empty(), "got: {errors:?}");
     let recorded: Vec<(String, Option<&str>)> = merge_parts
         .iter()
@@ -7744,7 +8088,8 @@ fn recorded_union_flatten_error(
     mut item: syn::ItemEnum,
     field: &syn::Field,
 ) -> Option<String> {
-    let (_, _, merge_parts, _, errors, _, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
+    let (_, _, _, merge_parts, _, errors, _, _) =
+        collect_untagged_members(&mut item, UNTAGGED_MODULE);
     assert!(errors.is_empty(), "got: {errors:?}");
     register_alias_info(
         rust_ident,
@@ -7760,7 +8105,8 @@ fn recorded_union_flatten_error(
 /// write, in declaration order.
 #[cfg(all(feature = "serde", feature = "zod"))]
 fn recorded_member_trails(mut item: syn::ItemEnum) -> Vec<(String, Option<&'static str>)> {
-    let (_, _, merge_parts, _, errors, _, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
+    let (_, _, _, merge_parts, _, errors, _, _) =
+        collect_untagged_members(&mut item, UNTAGGED_MODULE);
     assert!(errors.is_empty(), "got: {errors:?}");
     merge_parts
         .iter()
