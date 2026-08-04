@@ -52,14 +52,49 @@ fn test_the_merge_wraps_branches_in_the_spelling_its_source_used() {
     .to_string();
 
     assert!(
-        merge.contains("let (fs_spelling , fs_branches) = branches_of (fs_body)"),
+        merge.contains("let Some ((spelling , branches)) = union_branches (body)"),
         "{merge}"
     );
     assert!(
-        merge.contains("multiplied (& fs_objects , fs_spelling)"),
+        merge.contains("Branches :: Union (spelling , expanded)"),
+        "{merge}"
+    );
+    assert!(
+        merge.contains("Merged :: Union (spelling , merged)"),
         "{merge}"
     );
     assert!(merge.contains("\"anyOf\""), "{merge}");
+}
+
+/// A branch that is itself a union carries no members either, so the questions the whole merged body
+/// was asked are asked of it too rather than once. The descent is bounded by the names it resolved
+/// on the way down: a name reached twice on one path names a type no finite value inhabits.
+#[test]
+fn test_the_merge_expands_branches_to_a_fixed_point_under_a_path_terminator() {
+    let merge = generate_struct_json_schema_method(
+        &[],
+        &[MergedSource {
+            label: "Base".to_owned(),
+            value: quote::quote! { serde_json::json!({ "type": "object" }) },
+        }],
+        "Node",
+    )
+    .to_string();
+
+    assert!(
+        merge.contains(
+            "let below = expanded_branches (branch , hoisted_defs , expanding , position , label)"
+        ),
+        "{merge}"
+    );
+    assert!(
+        merge.contains("if expanding . contains (& name)"),
+        "{merge}"
+    );
+    assert!(
+        merge.contains("closes a flatten cycle through nested unions"),
+        "{merge}"
+    );
 }
 
 /// The two methods are one mechanism: the guarded one is what siblings call, and the entry point
