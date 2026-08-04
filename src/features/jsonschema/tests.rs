@@ -120,7 +120,7 @@ fn test_the_merge_expands_branches_to_a_fixed_point_under_a_path_terminator() {
 
     assert!(
         merge.contains(
-            "let below = expanded_branches (branch , hoisted_defs , expanding , position , label)"
+            "None => expanded_branches (branch , hoisted_defs , expanding , position , label)"
         ),
         "{merge}"
     );
@@ -130,6 +130,36 @@ fn test_the_merge_expands_branches_to_a_fixed_point_under_a_path_terminator() {
     );
     assert!(
         merge.contains("closes a flatten cycle through nested unions"),
+        "{merge}"
+    );
+}
+
+/// One branch of the choice the edge itself offers is read before the descent rather than by it: a
+/// unit variant of an exclusive union is the one key set the description does not spell out, serde
+/// writing the variant's name as a key where the document pins it as a bare string.
+#[test]
+fn test_the_merge_reads_a_tagged_unit_variant_at_the_edges_own_depth() {
+    let merge = generate_struct_json_schema_method(
+        &[],
+        &[MergedSource {
+            label: "Base".to_owned(),
+            optional: false,
+            value: quote::quote! { serde_json::json!({ "type": "object" }) },
+        }],
+        "Node",
+    )
+    .to_string();
+
+    assert!(
+        merge.contains("(position . len () == 1 && spelling == \"oneOf\")"),
+        "{merge}"
+    );
+    assert!(
+        merge.contains("Some (name) => Some (Branches :: Tagged (name))"),
+        "{merge}"
+    );
+    assert!(
+        merge.contains("schema . get (\"const\") ? . as_str ()"),
         "{merge}"
     );
 }
