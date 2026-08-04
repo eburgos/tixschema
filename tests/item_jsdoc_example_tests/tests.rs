@@ -153,6 +153,101 @@ pub enum DocumentedSlotVariant {
     Secondary,
 }
 
+/// ```rust example
+/// let item = ExampleOnlyStruct {
+///     label: "alpha".to_string(),
+/// };
+/// println!("Item: {:?}", item);
+/// ```
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ExampleOnlyStruct {
+    /// ```rust example
+    /// let label = "alpha".to_string();
+    /// println!("Label: {}", label);
+    /// ```
+    pub label: String,
+}
+
+// An internally tagged enum whose one documented member says nothing but an example. Commented with
+// `//`, so the item itself is held against its twin as the undocumented one it is.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(tag = "kind")]
+pub enum ExampleOnlyVariantHolder {
+    /// ```rust example
+    /// let item = ExampleOnlyVariantHolder::Unit;
+    /// println!("Item: {:?}", item);
+    /// ```
+    Named {
+        side: u8,
+    },
+    Unit,
+}
+
+/// ```rust example
+/// let item: ExampleOnlyAlias = 3;
+/// println!("Item: {:?}", item);
+/// ```
+#[model_schema()]
+pub type ExampleOnlyAlias = u32;
+
+/// ```rust example
+/// let item = ExampleOnlySlot::Primary;
+/// println!("Item: {:?}", item);
+/// ```
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+pub enum ExampleOnlySlot {
+    Primary,
+    Secondary,
+}
+
+/// ```rust example
+/// let item = ExampleOnlyBrand("alpha".to_string());
+/// println!("Item: {:?}", item);
+/// ```
+// A brand publishes a description and no `JSDoc` header of its own, so it is read on the Zod
+// surface alone and is gated on the feature that surface is.
+#[cfg(feature = "zod")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(transparent)]
+pub struct ExampleOnlyBrand(pub String);
+
+// The undocumented twins of the shapes above. Dropping an example is the whole of what the strip
+// does, so a shape documented with nothing else is left exactly where a shape documented with
+// nothing at all already stands — which is what the twins below are held against.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug)]
+pub struct UndocumentedStruct {
+    pub label: String,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(tag = "kind")]
+pub enum UndocumentedVariantHolder {
+    Named { side: u8 },
+    Unit,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+pub enum UndocumentedSlot {
+    Primary,
+    Secondary,
+}
+
+#[cfg(feature = "zod")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(transparent)]
+pub struct UndocumentedBrand(pub String);
+
+#[model_schema()]
+pub type UndocumentedAlias = u32;
+
 /// Every documented shape above, paired with the description its `JSDoc` is left with once the
 /// example is dropped. The plain enum rides along as the shape that already dropped it.
 fn documented_shapes() -> Vec<(String, &'static str)> {
@@ -244,6 +339,101 @@ fn a_documented_alias_publishes_the_same_zod_schema_it_always_did() {
     let zod = documented_alias_schema::Schema::zod_schema();
     for leaked in ["```", "let item", "println!", "example"] {
         assert!(!zod.contains(leaked), "{leaked} reached: {zod}");
+    }
+}
+
+/// Every shape documented with nothing but an example, paired with the undocumented twin it is
+/// held against: the `TypeScript` one writes is the other's with the fixture's own name in it.
+fn example_only_twins() -> Vec<(String, String, &'static str, &'static str)> {
+    vec![
+        (
+            ExampleOnlyStruct::ts_definition(),
+            UndocumentedStruct::ts_definition(),
+            "ExampleOnlyStruct",
+            "UndocumentedStruct",
+        ),
+        (
+            ExampleOnlyVariantHolder::ts_definition(),
+            UndocumentedVariantHolder::ts_definition(),
+            "ExampleOnlyVariantHolder",
+            "UndocumentedVariantHolder",
+        ),
+        (
+            ExampleOnlySlot::ts_definition(),
+            UndocumentedSlot::ts_definition(),
+            "ExampleOnlySlot",
+            "UndocumentedSlot",
+        ),
+        (
+            example_only_alias_schema::Schema::ts_definition(),
+            undocumented_alias_schema::Schema::ts_definition(),
+            "ExampleOnlyAlias",
+            "UndocumentedAlias",
+        ),
+    ]
+}
+
+/// The reported failure: an item and a member documented with nothing but an example emitted an
+/// empty `JSDoc` body, where an undocumented one names what it is documenting. The strip is what
+/// decides whether anything was said, so what it leaves empty is what falls back to the name — and
+/// the shape is then the undocumented one, byte for byte.
+#[test]
+fn an_example_only_shape_writes_what_its_undocumented_twin_writes() {
+    // The aliases publish `ts_definition` from their own modules rather than from the alias, so
+    // naming the types here is what keeps the fixtures from being pruned as unused.
+    let aliased: ExampleOnlyAlias = 3;
+    let aliased_twin: UndocumentedAlias = 3;
+    assert_eq!(aliased, aliased_twin);
+
+    for (example_only, twin, named, twin_named) in example_only_twins() {
+        assert_eq!(example_only.replace(named, twin_named), twin, "for {named}");
+    }
+}
+
+/// What the fallback writes, read off the emitted `TypeScript` rather than off the twin: the item
+/// names itself as it is exported, and each member names itself as it is serialized.
+#[test]
+fn an_example_only_item_and_member_name_themselves() {
+    let ts = ExampleOnlyStruct::ts_definition();
+    assert!(
+        ts.starts_with("/**\n * ExampleOnlyStruct\n * \n"),
+        "item did not name itself: {ts}"
+    );
+    assert!(ts.contains("/**\n * label\n * \n"), "field unnamed: {ts}");
+
+    let variants = ExampleOnlyVariantHolder::ts_definition();
+    assert!(
+        variants.contains("/**\n * Named\n * \n"),
+        "variant unnamed: {variants}"
+    );
+
+    let alias = example_only_alias_schema::Schema::ts_definition();
+    assert!(
+        alias.starts_with("/**\n * ExampleOnlyAliasType\n * \n"),
+        "alias did not name itself: {alias}"
+    );
+}
+
+/// The `description` a shape publishes is spelled from the lines its `JSDoc` body is spelled from,
+/// so the fallback fires on the same reading at both. The two shapes that publish one are covered:
+/// a plain enum writes it beside a header of its own, and a brand writes it instead of one.
+///
+/// Only the description is held against the twin's. The Zod surface is where an example is *kept* —
+/// it is published as the schema's own `example`, which is the one thing an example-only shape has
+/// that an undocumented one does not.
+#[cfg(feature = "zod")]
+#[test]
+fn an_example_only_shape_describes_itself_as_its_undocumented_twin_does() {
+    for (zod, exported) in [
+        (ExampleOnlySlot::zod_schema(), "ExampleOnlySlot"),
+        (UndocumentedSlot::zod_schema(), "UndocumentedSlot"),
+        (ExampleOnlyBrand::zod_schema(), "ExampleOnlyBrand"),
+        (UndocumentedBrand::zod_schema(), "UndocumentedBrand"),
+    ] {
+        assert!(
+            zod.contains(&format!("description: \"{exported}\"")),
+            "{exported} did not describe itself: {zod}"
+        );
     }
 }
 

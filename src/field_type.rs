@@ -865,6 +865,29 @@ pub fn is_sequence_wrapper(name: &str) -> bool {
     )
 }
 
+/// The number of leading type arguments a std container's wire form is written from, or `None` for
+/// a name that is not one of them.
+///
+/// std's hashed maps and sets carry a hasher past the types they write, and each of these
+/// containers takes an allocator beside it. Neither reaches the wire — serde writes the same bytes
+/// whichever is named — so neither is part of what the container describes as, and an argument past
+/// this count is dropped rather than read as a type of its own.
+///
+/// The count is what the container is claimed on, not what it is written with: a spelling carrying
+/// fewer arguments than this is not the container at all, and is left to fall through as the
+/// sibling it was written as, where the schema module it names is reported unresolvable against the
+/// author's own type. The one-argument list is the surfaces' shared answer for what writes a JSON
+/// array, so a wrapper cannot be read here as a container and there as a name of its own.
+fn container_wire_arity(name: &str) -> Option<usize> {
+    if name == "HashMap" || name == "BTreeMap" {
+        Some(2)
+    } else if is_sequence_wrapper(name) {
+        Some(1)
+    } else {
+        None
+    }
+}
+
 /// The one list of std wrappers the crate reads straight through to what they hold.
 ///
 /// Membership is decided on the wire and nothing else: serde writes each of these as its inner
@@ -996,7 +1019,7 @@ fn get_field_def_from_generic_type(
 ) -> FieldDef {
     let ident_name = type_ident.to_string();
     let ident = ident_name.as_str();
-    let arg_types: Vec<FieldDef> = args
+    let mut arg_types: Vec<FieldDef> = args
         .args
         .iter()
         .filter_map(|arg| {
@@ -1007,6 +1030,13 @@ fn get_field_def_from_generic_type(
             }
         })
         .collect();
+    // A container is claimed by its own name, so what it is written with past its wire form is
+    // dropped before the arms below count arguments.
+    if let Some(arity) = container_wire_arity(ident)
+        && arg_types.len() > arity
+    {
+        arg_types.truncate(arity);
+    }
     if arg_types.is_empty() {
         FieldDef {
             name: safe_name,

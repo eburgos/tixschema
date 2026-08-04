@@ -894,6 +894,62 @@ fn an_alias_targeting_a_map_key_with_no_members_is_refused() {
     assert!(error.contains("Doc"), "got: {error}");
 }
 
+/// The type the parser reads a field's written spelling as, rendered the way every surface receives
+/// it: one `FieldDef`, so a spelling that parses alike describes alike wherever it is dispatched.
+fn parsed_field_type(field_type: &proc_macro2::TokenStream) -> String {
+    let item: syn::ItemStruct = syn::parse_quote! {
+        struct Report {
+            counts: #field_type,
+        }
+    };
+    let field = item.fields.iter().next().unwrap();
+    format!("{:?}", get_field_def("counts", &field.ty, "").field_type)
+}
+
+/// The reported failure: std's `HashMap<K, V, S>` and `HashSet<T, S>` carry a hasher past the types
+/// they write, and the arity-keyed arms read that argument as a type of its own — demoting the
+/// container to a sibling naming a schema module the expansion never writes. serde writes the same
+/// bytes whichever hasher is named, so a container is read by its own name and the arguments past
+/// its wire form are dropped before any arm is consulted.
+#[test]
+fn a_container_written_with_a_hasher_parses_as_the_container_without_one() {
+    for (written, implied) in [
+        (
+            quote::quote! { HashMap<String, u32, FxBuildHasher> },
+            quote::quote! { HashMap<String, u32> },
+        ),
+        (
+            quote::quote! { HashSet<String, FxBuildHasher> },
+            quote::quote! { HashSet<String> },
+        ),
+        (
+            quote::quote! { HashMap<String, HashSet<u32, FxBuildHasher>> },
+            quote::quote! { HashMap<String, HashSet<u32>> },
+        ),
+        (
+            quote::quote! { Option<HashSet<u32, FxBuildHasher>> },
+            quote::quote! { Option<HashSet<u32>> },
+        ),
+    ] {
+        assert_eq!(
+            parsed_field_type(&written),
+            parsed_field_type(&implied),
+            "for {written}"
+        );
+    }
+}
+
+/// A container named with fewer arguments than its wire form is written from is not that container,
+/// and is left to fall through as the sibling it was written as — where the schema module it names
+/// is reported unresolvable against the type the author wrote, rather than quietly read as a map.
+#[test]
+fn a_container_short_of_its_wire_arity_still_falls_through_as_a_sibling() {
+    assert_eq!(
+        parsed_field_type(&quote::quote! { HashMap<String> }),
+        parsed_field_type(&quote::quote! { Wrapper<String> }).replace("Wrapper", "HashMap"),
+    );
+}
+
 /// Runs the field walk the way [`super::process_field`] does and renders the guard failures its
 /// `model_schema_prop` attributes earn, so a refused key and an unparseable `pattern` are read off
 /// the same channel that carries them to the emitted item.

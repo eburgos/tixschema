@@ -82,7 +82,7 @@ use crate::utils::{compute_alias_export_name, ident_schema_module_name};
 use crate::utils::compute_item_export_name;
 
 #[cfg(feature = "typescript")]
-use crate::utils::{format_docs_for_ts, get_item_docs};
+use crate::utils::get_item_docs;
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::register_alias_info;
@@ -2969,9 +2969,14 @@ fn item_plain_doc_lines(doc_lines: &[String]) -> Vec<String> {
 }
 
 /// An item's doc lines, flattened the way the calling surface reads them, or the one line it falls
-/// back to when it carries no docs: the name it is exported under, not the one it is declared
-/// under, so a `JSDoc` header never contradicts the `export type` one line beneath it and a
-/// description never names an item something no surface exports.
+/// back to when it says nothing: the name it is exported under, not the one it is declared under,
+/// so a `JSDoc` header never contradicts the `export type` one line beneath it and a description
+/// never names an item something no surface exports.
+///
+/// Whether anything was said is read off the flattened lines rather than off the attribute, because
+/// the flattening is what decides: a ` ```rust example ` block is Rust source and is dropped, so an
+/// item documented with nothing else has an attribute and still says nothing, and is left naming
+/// itself the way an undocumented one is.
 ///
 /// Every item shape and member reaches that fallback through here, so no path can drift from the
 /// rest by spelling it separately. What a caller brings of its own is `flatten` — how its docs
@@ -2982,7 +2987,28 @@ fn item_lines_or_name(
     item_name: &str,
     flatten: impl FnOnce(&[String]) -> Vec<String>,
 ) -> Vec<String> {
-    docs_vec.map_or_else(|| vec![item_name.to_owned()], flatten)
+    let lines = docs_vec.map(flatten).unwrap_or_default();
+    if lines.is_empty() {
+        vec![item_name.to_owned()]
+    } else {
+        lines
+    }
+}
+
+/// The `JSDoc` body an alias's `export type` is emitted under.
+///
+/// An alias has no surface name of its own and is given the `Type` suffix, which is the name it
+/// falls back to. Everything else is the body every declared item is written from — the same
+/// fallback, over the same lines, closed the same way — so an alias with nothing to say opens
+/// exactly as a struct with nothing to say does. What it keeps of its own is the flattening: an
+/// alias publishes its doc lines as they were written, blank ones included.
+#[cfg(feature = "typescript")]
+fn alias_jsdoc_body(docs_vec: Option<&[String]>, export_name: &str) -> String {
+    item_jsdoc_body(&item_lines_or_name(
+        docs_vec,
+        export_name,
+        strip_examples_from_docs,
+    ))
 }
 
 /// The `JSDoc` body a set of lines is written as: each prefixed with ` * `, the block closed by a
@@ -7600,9 +7626,7 @@ fn generate_alias_ts_definition_method(
 ) -> proc_macro2::TokenStream {
     #[cfg(feature = "typescript")]
     {
-        let docs_vec = get_item_docs(&alias.attrs)
-            .unwrap_or_else(|| vec![export_name.to_owned(), String::new()]);
-        let docs_formatted = format_docs_for_ts(&docs_vec, export_name);
+        let docs_formatted = alias_jsdoc_body(get_item_docs(&alias.attrs).as_deref(), export_name);
 
         let generics: Vec<String> = alias
             .generics
