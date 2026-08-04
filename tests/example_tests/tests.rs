@@ -561,3 +561,49 @@ fn a_plain_const_still_carries_its_example_on_the_exported_binding() {
         "Got: {zod}"
     );
 }
+
+/// A lifetime takes no filling and needs none: it elides in the value's annotation, so an item
+/// binding one is annotated exactly as an item binding nothing and its example is built as
+/// written.
+#[cfg(feature = "zod")]
+#[test]
+fn a_lifetime_item_renders_its_example_with_the_lifetime_elided() {
+    /// A borrowing type carrying an example block.
+    ///
+    /// ```rust example
+    /// Labelled { label: "x" }
+    /// ```
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub struct Labelled<'label> {
+        pub label: &'label str,
+    }
+
+    assert_eq!(
+        Labelled::schema_example(),
+        serde_json::json!({ "label": "x" })
+    );
+}
+
+/// An example on a const-declaring item is only unwritable where an example is written out at all,
+/// and `zod` is the only surface that writes one. Without it the block sits unread exactly as it
+/// does on every other item here, so the item expands and its own contract is untouched.
+#[cfg(not(feature = "zod"))]
+#[test]
+fn a_const_declaring_item_keeps_its_example_where_no_example_is_read() {
+    /// A const-bearing type carrying an example block.
+    ///
+    /// ```rust example
+    /// Slotted { label: "x".to_owned() }
+    /// ```
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub struct Slotted<const WIDTH: usize> {
+        pub label: String,
+    }
+
+    let slotted = Slotted::<3> {
+        label: "x".to_owned(),
+    };
+    assert_eq!(slotted.label, "x");
+}

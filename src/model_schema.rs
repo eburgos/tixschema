@@ -97,8 +97,10 @@ use crate::utils::{compute_alias_export_name, ident_schema_module_name};
 
 use crate::utils::compute_item_export_name;
 
+#[cfg(any(feature = "typescript", feature = "zod"))]
+use crate::utils::get_item_docs;
 #[cfg(feature = "typescript")]
-use crate::utils::{get_item_docs, ident_reexport_ts};
+use crate::utils::ident_reexport_ts;
 
 #[cfg(feature = "zod")]
 use crate::utils::ident_reexport_zod;
@@ -945,6 +947,16 @@ pub fn exec_model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
         &item,
         item_schema_ident(&item),
         &default_types_guard_errors(&item, &parsed_args),
+    ) {
+        return output;
+    }
+    // A doc example is compiled at one instantiation, and a const parameter takes no filling from
+    // the convention that names one, so an item writing both is refused here — ahead of every
+    // shape, and of the branded split inside the struct path.
+    if let Some(output) = guard_failure_output(
+        &item,
+        item_schema_ident(&item),
+        &const_parameter_example_errors(&item),
     ) {
         return output;
     }
@@ -1949,6 +1961,89 @@ fn missing_default_message(name: &syn::Ident, declared: &[&syn::Ident]) -> Strin
          because the `jsonschema` feature is enabled. Declare one for every parameter of this item, \
          each with the type its document should be generated from: \
          `#[model_schema(default_types({sample}))]`."
+    )
+}
+
+/// The `compile_error!` tokens an item earns for carrying a ` ```rust example ` block while
+/// declaring a const parameter, or none where it carries no example and none where it declares no
+/// const.
+///
+/// A doc example is Rust the expansion has to compile, so its value is annotated with the item's
+/// own name at one instantiation — every parameter filled in, `String` being the filling for a type
+/// parameter. A const takes no filling from that convention: `String` names a type, and a const is
+/// a value. Nor can one be read off the item, since no value is the one every const-parameterised
+/// example is written at, and picking one here would render the example at a length the author
+/// never wrote. So the example is refused where it was written, rather than expanded into an
+/// annotation that fails `E0107` before anything runs.
+///
+/// Answered at the one seam every expanded shape is dispatched from, so a struct and an enum cannot
+/// come to answer differently, and a branded newtype is answered before the struct path splits it
+/// off. An alias reaches here too and is deliberately left out: it publishes no `schema_example()`
+/// at all, so its example is already unread and a const on it costs nothing.
+///
+/// Only a build that reads an example owes the refusal, which is why this is `zod`-gated: without
+/// it no `schema_example()` is emitted and an example on a const-declaring item is exactly as
+/// unread as an example on any other item.
+#[cfg(feature = "zod")]
+fn const_parameter_example_errors(item: &Item) -> Vec<proc_macro2::TokenStream> {
+    let (generics, attrs) = if let Item::Struct(item_struct) = item {
+        (&item_struct.generics, &item_struct.attrs)
+    } else if let Item::Enum(item_enum) = item {
+        (&item_enum.generics, &item_enum.attrs)
+    } else {
+        return Vec::new();
+    };
+    let consts: Vec<&syn::Ident> = generics
+        .params
+        .iter()
+        .filter_map(|param| match param {
+            syn::GenericParam::Const(const_param) => Some(&const_param.ident),
+            syn::GenericParam::Type(_) | syn::GenericParam::Lifetime(_) => None,
+        })
+        .collect();
+    let Some(first) = consts.first() else {
+        return Vec::new();
+    };
+    if get_item_docs(attrs)
+        .and_then(|docs| extract_example_from_docs(&docs))
+        .is_none()
+    {
+        return Vec::new();
+    }
+    vec![attr_guard_error(
+        &syn::Error::new_spanned(first, const_parameter_example_message(&consts)),
+        &item_label(item),
+    )]
+}
+
+/// Nothing, in a build that reads no example: the method the refusal is owed for is never built,
+/// so the block sits unread the way it does on every other item here.
+#[cfg(not(feature = "zod"))]
+const fn const_parameter_example_errors(_item: &Item) -> Vec<proc_macro2::TokenStream> {
+    Vec::new()
+}
+
+/// Why a doc example on a const-declaring item is refused: what the example has to be, why the
+/// convention that fills a type parameter reaches no const, what the feature has to do with it, and
+/// the two ways out.
+#[cfg(feature = "zod")]
+fn const_parameter_example_message(consts: &[&syn::Ident]) -> String {
+    let names = consts
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "`#[model_schema]` cannot build a `schema_example()` for an item that declares a const \
+         parameter, and this item declares {names}. The example is Rust compiled at one \
+         instantiation, so its value is annotated with this item's own name and every parameter \
+         filled in: a type parameter is filled at `String`, the one concrete type every example can \
+         be written against, and a const takes no filling from that convention — `String` names a \
+         type, a const is a value, and no value is the one every const-parameterised example is \
+         written at, so one chosen here would render the example at a length this item's author \
+         never wrote. This is refused because the `zod` feature is enabled, `zod` being the only \
+         surface that reads an example. Remove the ` ```rust example ` block, or the const \
+         parameter, whichever this item can do without."
     )
 }
 

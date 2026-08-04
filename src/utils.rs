@@ -922,7 +922,10 @@ pub fn get_field_docs(field: &Field) -> Option<Vec<String>> {
     collect_doc_lines(&field.attrs)
 }
 
-#[cfg(feature = "typescript")]
+/// The doc lines of anything carrying attributes. Read by the `TypeScript` surface for the prose it
+/// publishes, and by the guard that answers for a ` ```rust example ` block written on an item no
+/// annotation can be spelled for.
+#[cfg(any(feature = "typescript", feature = "zod"))]
 pub fn get_item_docs(attrs: &[Attribute]) -> Option<Vec<String>> {
     collect_doc_lines(attrs)
 }
