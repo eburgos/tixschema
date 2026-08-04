@@ -2239,16 +2239,15 @@ fn a_chrono_enum_keyed_map_value_keeps_its_format() {
     }
 }
 
-/// An `ObjectId` is the one value the two key paths spell differently: a `String`-keyed member
-/// carries a closed, unpatterned `$oid` object where an enum-keyed member carries the field-position
-/// form. Pinned so the divergence stays a decision rather than a drift.
+/// An enum-keyed member binds the one `$oid` object every position spells — the same one a
+/// `String`-keyed member carries. Pinned so neither key path can grow a spelling of its own.
 #[cfg(all(feature = "object_id", feature = "jsonschema"))]
 #[test]
-fn an_object_id_enum_keyed_map_value_keeps_the_field_position_oid_object() {
+fn an_object_id_enum_keyed_map_value_binds_the_one_oid_object() {
     let tokens = enum_key_map_value_binding(FieldDefType::ObjectId);
     assert!(
         tokens.contains(
-            r#"let value_schema = serde_json :: json ! ({ "type" : "object" , "properties" : { "$oid" : { "type" : "string" , "pattern" : "^[a-f\\d]{24}$" } } , "required" : ["$oid"] }) ;"#
+            r#"let value_schema = serde_json :: json ! ({ "type" : "object" , "properties" : { "$oid" : (serde_json :: json ! ({ "type" : "string" , "pattern" : "^[a-f\\d]{24}$" })) } , "required" : ["$oid"] , "additionalProperties" : false }) ;"#
         ),
         "got: {tokens}"
     );
@@ -2648,11 +2647,11 @@ fn a_nested_string_literal_map_value_keeps_its_const() {
     );
 }
 
-/// A nested `ObjectId` member carries the closed `$oid` object the outer member carries.
+/// A nested `ObjectId` member carries the `$oid` object the outer member carries.
 #[cfg(all(feature = "object_id", feature = "jsonschema"))]
 #[test]
 fn a_nested_object_id_map_value_keeps_its_oid_object() {
-    let inner_member = r#"{ "type" : "object" , "additionalProperties" : { "type" : "object" , "properties" : { "$oid" : { "type" : "string" } } , "required" : ["$oid"] , "additionalProperties" : false } }"#;
+    let inner_member = r#"{ "type" : "object" , "additionalProperties" : { "type" : "object" , "properties" : { "$oid" : (serde_json :: json ! ({ "type" : "string" , "pattern" : "^[a-f\\d]{24}$" })) } , "required" : ["$oid"] , "additionalProperties" : false } }"#;
     let bare = nested_string_key_map_value_schema(FieldDefType::ObjectId, 0);
     assert!(
         bare.contains(&format!(r#""additionalProperties" : {inner_member}"#)),
@@ -3320,18 +3319,17 @@ fn an_unwrapped_map_field_keeps_the_object_it_has_always_described_as() {
     );
 }
 
-/// The `ObjectId` divergence is frozen by position, so routing the tuple element through the map
-/// path's dispatch must not migrate it onto the `String`-keyed member's closed, unpatterned `$oid`
-/// object: the element keeps the patterned, open field-position form it has always carried.
+/// A tuple element is a slot, and a slot spells the `$oid` object the way every other position
+/// spells it. Pinned so the element cannot be handed a rendering of its own again.
 #[cfg(all(feature = "object_id", feature = "jsonschema"))]
 #[test]
-fn an_object_id_tuple_element_keeps_the_field_position_oid_object() {
+fn an_object_id_tuple_element_spells_the_one_oid_object() {
     let parsed = super::get_field_def("id", &syn::parse_quote!(ObjectId), "");
     assert_eq!(
         super::build_tuple_element_json_schema(&parsed)
             .unwrap()
             .to_string(),
-        r#"serde_json :: json ! ({ "type" : "object" , "properties" : { "$oid" : { "type" : "string" , "pattern" : "^[a-f\\d]{24}$" } } , "required" : ["$oid"] })"#
+        r#"serde_json :: json ! ({ "type" : "object" , "properties" : { "$oid" : (serde_json :: json ! ({ "type" : "string" , "pattern" : "^[a-f\\d]{24}$" })) } , "required" : ["$oid"] , "additionalProperties" : false })"#
     );
 }
 

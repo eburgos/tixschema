@@ -108,6 +108,11 @@ const KNOWN_ARGS: &[&str] = &["name", "pattern", "minLength", "maxLength", "no_d
 const FLATTENED_PLAIN_ENUM_SCOPE: &str = "Only a type the registry has already classified reaches this guard; one it has not keeps its \
      TypeScript and Zod intersection, and is refused by the JSON surface when the merge runs.";
 
+/// The 24-character hex an `ObjectId`'s `$oid` member holds, as a JSON-schema `pattern`. Written
+/// once so no position can describe the same string a different way.
+#[cfg(all(feature = "jsonschema", feature = "object_id"))]
+const OBJECT_ID_HEX_PATTERN: &str = r"^[a-f\d]{24}$";
+
 /// One variant of a discriminated enum, carrying everything its union member is rendered from.
 struct DiscriminatedVariant {
     discriminator_value: String,
@@ -1995,12 +2000,14 @@ fn branded_checked_value(
     }
 }
 
-/// Builds the string schema a branded newtype's constraints are written into: `type_name` as the
-/// `"type"`, then one insert per constraint the brand declares.
+/// Builds the schema a branded newtype's constraints are written into: `base_inserts` first — what
+/// the inner type describes as before the brand narrows it — then one insert per constraint the
+/// brand declares. A keyword the base already states is written over rather than beside it, one
+/// string carrying one `pattern`.
 #[cfg(feature = "jsonschema")]
-fn branded_constrained_schema_obj(
+fn branded_schema_obj_over(
     args: &ModelSchemaArgs,
-    type_name: &str,
+    base_inserts: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
     let mut constraint_inserts: Vec<proc_macro2::TokenStream> = Vec::new();
 
@@ -2023,11 +2030,40 @@ fn branded_constrained_schema_obj(
     quote! {
         {
             let mut schema_obj = serde_json::Map::new();
-            schema_obj.insert("type".to_string(), serde_json::Value::String(#type_name.to_string()));
+            #base_inserts
             #(#constraint_inserts)*
             serde_json::Value::Object(schema_obj)
         }
     }
+}
+
+/// Builds the string schema a branded newtype's constraints are written into: `type_name` as the
+/// `"type"`, then one insert per constraint the brand declares.
+#[cfg(feature = "jsonschema")]
+fn branded_constrained_schema_obj(
+    args: &ModelSchemaArgs,
+    type_name: &str,
+) -> proc_macro2::TokenStream {
+    branded_schema_obj_over(
+        args,
+        &quote! {
+            schema_obj.insert("type".to_string(), serde_json::Value::String(#type_name.to_string()));
+        },
+    )
+}
+
+/// The `$oid` member an `ObjectId` brand carries: the hex string the type always holds, narrowed by
+/// the brand's own constraints, so a brand that declares none still describes the hex the type it
+/// wraps describes wherever else it is written.
+#[cfg(all(feature = "jsonschema", feature = "object_id"))]
+fn branded_object_id_hex_schema(args: &ModelSchemaArgs) -> proc_macro2::TokenStream {
+    branded_schema_obj_over(
+        args,
+        &quote! {
+            schema_obj.insert("type".to_string(), serde_json::Value::String("string".to_string()));
+            schema_obj.insert("pattern".to_string(), serde_json::Value::String(#OBJECT_ID_HEX_PATTERN.to_string()));
+        },
+    )
 }
 
 /// The description a brand carries for an inner no `"type"` keyword names: the one the slot
@@ -2062,7 +2098,7 @@ fn build_branded_json_schema_method(
         BrandedJsonInner::Scalar(type_name) => branded_constrained_schema_obj(args, type_name),
         #[cfg(feature = "object_id")]
         BrandedJsonInner::ObjectId => {
-            object_id_json_schema_value(&branded_constrained_schema_obj(args, "string"))
+            object_id_json_schema_value(&branded_object_id_hex_schema(args))
         }
         BrandedJsonInner::Slot(inner) => branded_slot_json_schema(inner, def_name),
     };
@@ -4465,15 +4501,7 @@ fn field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
         }
         FieldDefType::Boolean => quote! { serde_json::json!({ "type": "boolean" }) },
         #[cfg(feature = "object_id")]
-        FieldDefType::ObjectId => quote! {
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "$oid": { "type": "string", "pattern": "^[a-f\\d]{24}$" }
-                },
-                "required": ["$oid"]
-            })
-        },
+        FieldDefType::ObjectId => object_id_json_schema_value(&object_id_hex_json_schema()),
         #[cfg(feature = "chrono")]
         FieldDefType::NaiveDate => {
             quote! { serde_json::json!({ "type": "string", "format": "date" }) }
@@ -5158,13 +5186,7 @@ fn scalar_field_json_schema_item(fld: &FieldDef) -> Option<proc_macro2::TokenStr
             quote! { { "type": "string", "format": "date-time" } }
         }
         #[cfg(feature = "object_id")]
-        FieldDefType::ObjectId => quote! { {
-            "type": "object",
-            "properties": {
-                "$oid": { "type": "string", "pattern": "^[a-f\\d]{24}$" }
-            },
-            "required": ["$oid"]
-        } },
+        FieldDefType::ObjectId => object_id_json_schema_item(&object_id_hex_json_schema()),
         FieldDefType::Unknown
         | FieldDefType::SiblingType(..)
         | FieldDefType::Map(..)
@@ -5173,23 +5195,15 @@ fn scalar_field_json_schema_item(fld: &FieldDef) -> Option<proc_macro2::TokenStr
     Some(item_schema)
 }
 
-/// [`build_map_member_item`] for a tuple element, which differs for exactly two value types.
-///
-/// An `ObjectId` here carries the field-position `$oid` object — patterned, and open — where a
-/// `String`-keyed map member carries the closed, unpatterned one; which of the two a slot should
-/// carry is unsettled, so this position keeps the rendering it has. A tuple renders as the
-/// fixed-arity array its own field position renders, which is the one value the map path has no
-/// renderer for: an element is dispatched by the tuple builder itself, so the nesting costs
-/// nothing but the recursion.
+/// [`build_map_member_item`] for a tuple element, which differs for exactly one value type: a tuple
+/// renders as the fixed-arity array its own field position renders, which is the one value the map
+/// path has no renderer for. An element is dispatched by the tuple builder itself, so the nesting
+/// costs nothing but the recursion.
 ///
 /// Every other value is the member the map path renders, at every depth, so a type describes the
 /// same in either slot.
 #[cfg(feature = "jsonschema")]
 fn build_tuple_element_item(value: &FieldDef) -> Result<MapMemberItem, MapMemberRejection> {
-    #[cfg(feature = "object_id")]
-    if matches!(value.field_type, FieldDefType::ObjectId) {
-        return Ok(MapMemberItem::Fragment(scalar_slot_item(value)?));
-    }
     if let FieldDefType::Tuple(elements) = &value.field_type {
         return Ok(MapMemberItem::Value(tuple_json_schema_value(elements)?));
     }
@@ -5682,15 +5696,11 @@ fn build_map_member_item(value: &FieldDef) -> Result<MapMemberItem, MapMemberRej
             );
             MapMemberItem::Value(sibling_json_schema_value(value_type_name, value.type_span))
         }
-        // A map member's `$oid` object is closed and unpatterned, where the shared mapping's
-        // field-position rendering carries the hex pattern and leaves the object open.
+        // The one `$oid` object every position spells, which a member carries as written.
         #[cfg(feature = "object_id")]
-        FieldDefType::ObjectId => MapMemberItem::Fragment(quote! { {
-            "type": "object",
-            "properties": { "$oid": { "type": "string" } },
-            "required": ["$oid"],
-            "additionalProperties": false
-        } }),
+        FieldDefType::ObjectId => {
+            MapMemberItem::Fragment(object_id_json_schema_item(&object_id_hex_json_schema()))
+        }
         // An opaque value carries no type name to narrow with, so a member admits any value: the
         // permissive empty schema, as in field position.
         FieldDefType::Unknown => MapMemberItem::Fragment(quote! { {} }),
@@ -5790,19 +5800,6 @@ fn string_key_map_json_schema_value(
     })
 }
 
-/// [`build_map_member_item`] for a member of an enum-keyed map, which differs for exactly one value
-/// type: an `ObjectId` member here carries the field-position `$oid` object — patterned, and open —
-/// where a `String`-keyed member carries the closed, unpatterned one. Which of the two a map member
-/// should carry is unsettled, so each key path keeps the rendering it has.
-#[cfg(feature = "jsonschema")]
-fn build_enum_key_map_member_item(value: &FieldDef) -> Result<MapMemberItem, MapMemberRejection> {
-    #[cfg(feature = "object_id")]
-    if matches!(value.field_type, FieldDefType::ObjectId) {
-        return Ok(MapMemberItem::Fragment(scalar_slot_item(value)?));
-    }
-    build_map_member_item(value)
-}
-
 /// The object an enum-keyed map describes as, as a standalone `serde_json::Value` expression: one
 /// property per member the key enumerates, each carrying the value type's own rendering, and closed
 /// to every other key. `Err` when the value has no rendering here, or when the registry proves the
@@ -5837,7 +5834,7 @@ fn enum_key_map_json_schema_value(
     }
 
     let normalized = normalized_slot_value(value);
-    let member_value = build_enum_key_map_member_item(&normalized)?.into_member_value(&normalized);
+    let member_value = build_map_member_item(&normalized)?.into_member_value(&normalized);
     let key_type_name_ident = Ident::new(key_type_name, key_span);
     let key_members = quote_spanned! {key_span=> #key_type_name_ident::enum_members() };
     Ok(quote! {
@@ -6021,23 +6018,41 @@ fn build_sibling_type_field_schema(
     }
 }
 
-/// The JSON schema an `ObjectId` describes — the closed `$oid` object serde writes — with
+/// The `json!` literal an `ObjectId` describes as — the closed `$oid` object serde writes — with
 /// `hex_schema` as the schema of the hex string it holds.
 ///
-/// Field position and the branded path read this one spelling, so the transparent brand and the
-/// inner it wraps cannot drift apart. The map-member positions still carry their own renderings.
+/// Every position reads this one spelling: a field, a slot (a tuple element, a tuple struct, a
+/// brand over a container), a member of a map on either key path, and an untagged member. So the
+/// same `ObjectId` cannot describe two ways depending on where it is written, and a brand cannot
+/// drift from the inner it wraps.
+///
+/// The object is closed because serde writes that one member and every other object this crate
+/// emits is closed, and the hex member is patterned because that is what the string always holds —
+/// both are true of every payload serde writes, so neither turns one away.
+#[cfg(all(feature = "jsonschema", feature = "object_id"))]
+fn object_id_json_schema_item(hex_schema: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    quote! { {
+        "type": "object",
+        "properties": {
+            "$oid": (#hex_schema)
+        },
+        "required": ["$oid"],
+        "additionalProperties": false
+    } }
+}
+
+/// [`object_id_json_schema_item`] as a standalone `serde_json::Value` expression, for the positions
+/// that hold the `$oid` object as a value rather than writing it into a literal.
 #[cfg(all(feature = "jsonschema", feature = "object_id"))]
 fn object_id_json_schema_value(hex_schema: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
-    quote! {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "$oid": (#hex_schema)
-            },
-            "required": ["$oid"],
-            "additionalProperties": false
-        })
-    }
+    let item = object_id_json_schema_item(hex_schema);
+    quote! { serde_json::json!(#item) }
+}
+
+/// The hex string an `ObjectId`'s `$oid` member holds, where no brand narrows it further.
+#[cfg(all(feature = "jsonschema", feature = "object_id"))]
+fn object_id_hex_json_schema() -> proc_macro2::TokenStream {
+    quote! { serde_json::json!({ "type": "string", "pattern": #OBJECT_ID_HEX_PATTERN }) }
 }
 
 /// Builds the JSON schema for a `MongoDB` `ObjectId` field (`{ "$oid": string }`).
@@ -6045,7 +6060,7 @@ fn object_id_json_schema_value(hex_schema: &proc_macro2::TokenStream) -> proc_ma
 fn build_object_id_field_schema(fld: &FieldDef, field_name_str: &str) -> proc_macro2::TokenStream {
     let schema = arrayed_json_schema_value(
         fld,
-        object_id_json_schema_value(&quote! { serde_json::json!({ "type": "string" }) }),
+        object_id_json_schema_value(&object_id_hex_json_schema()),
     );
     quote! {
         properties.insert(#field_name_str.to_string(), { #schema });
