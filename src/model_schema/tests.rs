@@ -1651,6 +1651,40 @@ fn a_name_an_identifier_can_be_spelled_from_is_read() {
     }
 }
 
+/// An item with no docs falls back to the name it is exported under on both surfaces, and the
+/// description surface escapes a double quote where the `JSDoc` one leaves it alone — so the two
+/// fallbacks can only be spelled from one body while no exported name can carry that character.
+/// The name has exactly two sources and neither can produce one: an override is refused unless it
+/// spells an identifier, and an unrenamed item takes the Rust ident, which the grammar refuses to
+/// tokenize with a quote in it — raw spelling included, which reaches the name as `r#`.
+#[test]
+fn an_exported_name_can_carry_no_double_quote() {
+    for value in ["Weird\"Name", "\"", "\"Quoted\""] {
+        assert!(
+            args_rejection(quote::quote! { name = #value }).is_some(),
+            "accepted `name = {value:?}`"
+        );
+        assert!(
+            syn::parse_str::<syn::Ident>(value).is_err(),
+            "tokenized {value:?} as an ident"
+        );
+    }
+    assert_eq!(
+        syn::Ident::new_raw("type", proc_macro2::Span::call_site()).to_string(),
+        "r#type"
+    );
+    // The unrenamed path takes the ident whole but for a `Json` suffix, which drops characters and
+    // adds none; the renamed path takes the refused-unless-identifier override verbatim.
+    assert_eq!(
+        super::compute_item_export_name("PayloadJson", None),
+        "Payload"
+    );
+    assert_eq!(
+        super::compute_item_export_name("Payload", Some("Renamed")),
+        "Renamed"
+    );
+}
+
 /// The refusal offers every argument the parser reads, and the probes below prove each offered
 /// name is one it actually reads — the list and the arms cannot drift apart while both hold.
 #[test]

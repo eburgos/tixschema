@@ -762,32 +762,19 @@ fn has_serde_transparent(attrs: &[syn::Attribute]) -> bool {
 /// tuple structs, and the tagged and untagged enums; the shapes that publish both surfaces spell
 /// them from the same lines in `build_item_docs_and_description`.
 ///
-/// The no-docs fallback names the item as it is exported, not as it is declared in Rust, so a
-/// `JSDoc` header never contradicts the `export type` one line under it.
-///
 /// An item's ` ```rust example ` block is dropped before its lines reach the body, the way
 /// `item_plain_doc_lines` drops it: the block is Rust source, and nothing reads it as such once it
-/// is sitting in a `TypeScript` comment. A consumer after the example reads the Rust docs.
+/// is sitting in a `TypeScript` comment. A consumer after the example reads the Rust docs. What is
+/// left reaches the body as written — this is the one surface that publishes an item's docs
+/// unflattened.
 #[cfg(feature = "typescript")]
 fn build_item_jsdoc(docs_vec: Option<&[String]>, item_name: &str) -> String {
-    docs_vec.map_or_else(
-        || {
-            [item_name.to_owned(), String::new()]
-                .into_iter()
-                .map(|l| format!(" * {l}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        },
-        |doc_lines| {
-            strip_examples_from_docs(doc_lines)
-                .iter()
-                .flat_map(|v| v.lines().map(ToOwned::to_owned).collect::<Vec<_>>())
-                .chain(vec![String::new()])
-                .map(|l| format!(" * {l}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        },
-    )
+    item_jsdoc_body(&item_lines_or_name(docs_vec, item_name, |doc_lines| {
+        strip_examples_from_docs(doc_lines)
+            .iter()
+            .flat_map(|v| v.lines().map(ToOwned::to_owned).collect::<Vec<_>>())
+            .collect()
+    }))
 }
 
 /// Builds the type-level `schema_example()` method from extracted example code, if present.
@@ -2944,48 +2931,75 @@ fn item_plain_doc_lines(doc_lines: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// The escaped one-line description an item publishes, falling back to the exported name when it
-/// carries no docs. Every item shape reaches its description through this one body, so the
-/// fallback cannot drift between shapes.
+/// An item's doc lines, flattened the way the calling surface reads them, or the one line it falls
+/// back to when it carries no docs: the name it is exported under, not the one it is declared
+/// under, so a `JSDoc` header never contradicts the `export type` one line beneath it and a
+/// description never names an item something no surface exports.
+///
+/// Every item shape reaches that fallback through here, so no shape can drift from the rest by
+/// spelling it separately. What a shape brings of its own is `flatten` — how its docs reach the
+/// surface, not what it says when it has none.
 #[cfg(any(feature = "typescript", feature = "zod"))]
+fn item_lines_or_name(
+    docs_vec: Option<&[String]>,
+    item_name: &str,
+    flatten: impl FnOnce(&[String]) -> Vec<String>,
+) -> Vec<String> {
+    docs_vec.map_or_else(|| vec![item_name.to_owned()], flatten)
+}
+
+/// The `JSDoc` body a set of lines is written as: each prefixed with ` * `, the block closed by a
+/// bare ` * ` so it ends on an empty line.
+#[cfg(any(feature = "typescript", feature = "zod"))]
+fn item_jsdoc_body(lines: &[String]) -> String {
+    lines
+        .iter()
+        .map(|l| format!(" * {l}"))
+        .chain([" * ".to_owned()])
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The one-line description a set of lines is published as, escaped for the `description: "…"` it
+/// is spliced into.
+///
+/// The escape reaches the exported name an undocumented item falls back to and does nothing there:
+/// a `name = "…"` override is refused unless it spells an identifier, and a Rust ident cannot be
+/// written with a quote in it, so no exported name carries one.
+#[cfg(any(feature = "typescript", feature = "zod"))]
+fn describe_item_lines(lines: &[String]) -> String {
+    lines.join("\\n").replace('"', "\\\"")
+}
+
+/// The escaped one-line description an item publishes, falling back to the exported name when it
+/// carries no docs — spelled from the same two bodies as the description of a shape that publishes
+/// a `JSDoc` header alongside it, so the two cannot drift apart.
+///
+/// Gated on the feature of its one caller: a brand is the only shape that publishes a description
+/// and no `JSDoc` header of its own, and a description is a zod surface.
+#[cfg(feature = "zod")]
 fn item_description(docs_vec: Option<&[String]>, item_name: &str) -> String {
-    docs_vec.map_or_else(
-        || item_name.to_owned(),
-        |doc_lines| {
-            item_plain_doc_lines(doc_lines)
-                .join("\\n")
-                .replace('"', "\\\"")
-        },
-    )
+    describe_item_lines(&item_lines_or_name(
+        docs_vec,
+        item_name,
+        item_plain_doc_lines,
+    ))
 }
 
 /// Flattens an item's doc comments into a `JSDoc` body and an escaped one-line description, both
-/// derived from the same lines (with ` ```rust example ` blocks stripped). Falls back to the
-/// exported name when there are no docs, matching every other item path.
+/// written from one pass over the same lines (with ` ```rust example ` blocks stripped). Falls
+/// back to the exported name when there are no docs, matching every other item path.
 #[cfg(any(feature = "typescript", feature = "zod"))]
 fn build_item_docs_and_description(
     docs_vec: Option<&[String]>,
     item_name: &str,
 ) -> (String, String) {
-    let docs_formatted = docs_vec.map_or_else(
-        || {
-            [item_name.to_owned(), String::new()]
-                .into_iter()
-                .map(|l| format!(" * {l}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        },
-        |doc_lines| {
-            item_plain_doc_lines(doc_lines)
-                .iter()
-                .map(|l| format!(" * {l}"))
-                .chain(vec![" * ".to_owned()])
-                .collect::<Vec<_>>()
-                .join("\n")
-        },
-    );
+    let plain_lines = item_lines_or_name(docs_vec, item_name, item_plain_doc_lines);
 
-    (docs_formatted, item_description(docs_vec, item_name))
+    (
+        item_jsdoc_body(&plain_lines),
+        describe_item_lines(&plain_lines),
+    )
 }
 
 /// Collects a plain enum's serialized variant names (respecting serde renames) and per-variant
