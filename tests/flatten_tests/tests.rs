@@ -373,6 +373,37 @@ enum NestCycleInner {
     Back(Box<NestCycleOuter>),
 }
 
+/// A base reached through an `Option`, and the object that flattens it. serde writes the base's
+/// members beside the object's own when the field is `Some` and writes the object alone when it is
+/// `None` — the declaration guard forces `skip_serializing_if` on the field, so the absent form is
+/// the only `None` the crate admits.
+///
+/// Two required members, so a payload carrying one of them is a base serde never writes.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct OptBase {
+    left: String,
+    right: bool,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct OptHolder {
+    #[serde(flatten, skip_serializing_if = "Option::is_none", default)]
+    maybe: Option<OptBase>,
+    own: String,
+}
+
+/// The same absence over a source that is itself a union: serde writes the matched member's keys or
+/// no keys at all, so the choice the `Option` adds sits outside the choice the enum already offered.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct OptUnionHolder {
+    #[serde(flatten, skip_serializing_if = "Option::is_none", default)]
+    maybe: Option<NestTagged>,
+    own: String,
+}
+
 /// Whether `payload` is accepted by a document every leaf of which is an object closed by
 /// `additionalProperties: false`: a leaf accepts when it names every key the payload carries and
 /// requires no key it does not.
@@ -1179,4 +1210,132 @@ fn test_a_cycle_through_nested_unions_names_the_path_it_closes() {
 )]
 fn test_the_nested_union_cycle_refusal_names_the_remedy() {
     assert!(NestCycleHolder::json_schema().is_object());
+}
+
+/// What serde writes for a base reached through an `Option`: the base's members beside the object's
+/// own when the field is `Some`, and the object's own alone when it is `None`. Both read back as the
+/// value that wrote them, so both are payloads of the type rather than one form and one accident.
+#[test]
+fn test_an_optional_flattened_base_writes_its_members_or_nothing() {
+    let forms: [(Option<OptBase>, serde_json::Value); 2] = [
+        (
+            Some(OptBase {
+                left: "l".to_owned(),
+                right: true,
+            }),
+            serde_json::json!({ "left": "l", "right": true, "own": "o" }),
+        ),
+        (None, serde_json::json!({ "own": "o" })),
+    ];
+    for (maybe, expected) in forms {
+        let holder = OptHolder {
+            maybe,
+            own: "o".to_owned(),
+        };
+        let written = serde_json::to_value(&holder).unwrap();
+        assert_eq!(written, expected);
+        let back: OptHolder = serde_json::from_value(written).unwrap();
+        assert_eq!(back, holder);
+    }
+}
+
+/// And when the optional base is a union, the same two forms with the matched member's keys in the
+/// present one: the `Option` and the enum are two choices, and only the innermost writes keys.
+#[test]
+fn test_an_optional_flattened_union_writes_the_matched_members_keys_or_nothing() {
+    let forms: [(Option<NestTagged>, serde_json::Value); 3] = [
+        (
+            Some(NestTagged::Left {
+                left: "l".to_owned(),
+            }),
+            serde_json::json!({ "kind": "Left", "left": "l", "own": "o" }),
+        ),
+        (
+            Some(NestTagged::Right { right: true }),
+            serde_json::json!({ "kind": "Right", "right": true, "own": "o" }),
+        ),
+        (None, serde_json::json!({ "own": "o" })),
+    ];
+    for (maybe, expected) in forms {
+        let holder = OptUnionHolder {
+            maybe,
+            own: "o".to_owned(),
+        };
+        let written = serde_json::to_value(&holder).unwrap();
+        assert_eq!(written, expected);
+        let back: OptUnionHolder = serde_json::from_value(written).unwrap();
+        assert_eq!(back, holder);
+    }
+}
+
+/// So the merged document accepts both: the base's members are what an object writes beside its own
+/// or does not write at all, and folding them into one key set required the object to write keys the
+/// `None` payload never carries.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_the_optional_flatten_schema_accepts_every_payload_serde_writes() {
+    let schema = OptHolder::json_schema();
+    for payload in [
+        serde_json::json!({ "left": "l", "right": true, "own": "o" }),
+        serde_json::json!({ "own": "o" }),
+    ] {
+        assert!(
+            closed_document_accepts(&schema, &payload),
+            "{payload} is rejected by {schema}"
+        );
+    }
+}
+
+/// And rejects a base written in part. serde writes the base whole or not at all, so a payload
+/// carrying some of its required members is one no value of the type produces — which is what the
+/// two branches say and dropping the members from `required` would not.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_the_optional_flatten_schema_rejects_a_partial_base() {
+    let schema = OptHolder::json_schema();
+    for payload in [
+        serde_json::json!({ "left": "l", "own": "o" }),
+        serde_json::json!({ "right": true, "own": "o" }),
+    ] {
+        assert!(
+            !closed_document_accepts(&schema, &payload),
+            "{payload} is accepted by {schema}"
+        );
+    }
+}
+
+/// The document that says both: the base's members joined to the object's under one branch, and the
+/// object's own alone under another. `anyOf` is what the choice is written with — the branches
+/// overlap wherever the base can write no members of its own, which is the same payload the absent
+/// branch stands for.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_the_optional_flatten_document_offers_the_base_and_its_absence() {
+    assert_eq!(
+        serde_json::to_string(&OptHolder::json_schema()).unwrap(),
+        r#"{"type":"object","anyOf":[{"type":"object","properties":{"own":{"type":"string"},"left":{"type":"string"},"right":{"type":"boolean"}},"required":["own","left","right"],"additionalProperties":false},{"type":"object","properties":{"own":{"type":"string"}},"required":["own"],"additionalProperties":false}]}"#
+    );
+}
+
+/// And when the optional source is a union, the absence joins its branches from outside: each member
+/// keeps the spelling its own enum was written under, and the absent branch is a choice about the
+/// whole union rather than a member of it.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_an_optional_flattened_union_offers_every_member_and_their_absence() {
+    let schema = OptUnionHolder::json_schema();
+    for payload in [
+        serde_json::json!({ "kind": "Left", "left": "l", "own": "o" }),
+        serde_json::json!({ "kind": "Right", "right": true, "own": "o" }),
+        serde_json::json!({ "own": "o" }),
+    ] {
+        assert!(
+            closed_document_accepts(&schema, &payload),
+            "{payload} is rejected by {schema}"
+        );
+    }
+    assert_eq!(
+        serde_json::to_string(&schema).unwrap(),
+        r#"{"type":"object","anyOf":[{"type":"object","oneOf":[{"type":"object","properties":{"own":{"type":"string"},"kind":{"type":"string","const":"Left"},"left":{"type":"string"}},"required":["own","kind","left"],"additionalProperties":false},{"type":"object","properties":{"own":{"type":"string"},"kind":{"type":"string","const":"Right"},"right":{"type":"boolean"}},"required":["own","kind","right"],"additionalProperties":false}]},{"type":"object","properties":{"own":{"type":"string"}},"required":["own"],"additionalProperties":false}]}"#
+    );
 }
