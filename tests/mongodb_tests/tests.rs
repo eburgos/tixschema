@@ -238,11 +238,7 @@ fn test_basic_object_id_types() {
     // TypeScript should use ObjectId type
     assert!(ts_definition.contains("id: ObjectId;"));
     assert!(ts_definition.contains("name: string;"));
-    assert!(ts_definition.contains(if cfg!(feature = "serde") {
-        "email?: string;"
-    } else {
-        "email: string | undefined;"
-    }));
+    assert!(ts_definition.contains("email?: string;"));
 
     // Zod schema should use the MongoDB ObjectId structure with regex validation - now in separate method
     let zod_schema = User::zod_schema();
@@ -263,11 +259,7 @@ fn test_complex_nested_object_id_structures() {
     assert!(ts_definition.contains("author_id: ObjectId;"));
     assert!(ts_definition.contains("references: Array<ObjectId>;"));
     assert!(ts_definition.contains("metadata: Partial<Record<string, ObjectId>>;"));
-    assert!(ts_definition.contains(if cfg!(feature = "serde") {
-        "parent_id?: ObjectId;"
-    } else {
-        "parent_id: ObjectId | undefined;"
-    }));
+    assert!(ts_definition.contains("parent_id?: ObjectId;"));
     assert!(ts_definition.contains("nested_refs: Partial<Record<string, Array<ObjectId>>>;"));
 
     // Zod schema should handle all ObjectId variations with regex validation - now in separate method
@@ -485,11 +477,7 @@ fn test_optional_object_id() {
     let ts_definition = UserWithOptionalId::ts_definition();
 
     // TypeScript should use ObjectId type
-    assert!(ts_definition.contains(if cfg!(feature = "serde") {
-        "id?: ObjectId;"
-    } else {
-        "id: ObjectId | undefined;"
-    }));
+    assert!(ts_definition.contains("id?: ObjectId;"));
     assert!(ts_definition.contains("name: string;"));
     assert!(ts_definition.contains("email: string;"));
 
