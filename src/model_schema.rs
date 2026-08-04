@@ -685,11 +685,16 @@ fn has_serde_transparent(attrs: &[syn::Attribute]) -> bool {
     false
 }
 
-/// Processes a struct item and generates TypeScript and Zod schema definitions for it.
-/// Builds the `JSDoc` comment body (lines prefixed with ` * `) for a struct or enum type.
+/// Builds the `JSDoc` comment body (lines prefixed with ` * `) that precedes an item's
+/// `export type`. Serves the shapes that publish no zod `description` of their own — structs,
+/// tuple structs, and the tagged and untagged enums; the shapes that publish both surfaces spell
+/// them from the same lines in `build_item_docs_and_description`.
 ///
-/// The fallback names the item as it is exported, not as it is declared in Rust, so a `JSDoc`
-/// header never contradicts the `export type` one line under it.
+/// The no-docs fallback names the item as it is exported, not as it is declared in Rust, so a
+/// `JSDoc` header never contradicts the `export type` one line under it.
+///
+/// Doc lines reach the body as written: unlike the `item_plain_doc_lines` path, this one strips no
+/// ` ```rust example ` block.
 #[cfg(feature = "typescript")]
 fn build_item_jsdoc(docs_vec: Option<&[String]>, item_name: &str) -> String {
     docs_vec.map_or_else(
