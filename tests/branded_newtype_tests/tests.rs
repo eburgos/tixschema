@@ -1504,7 +1504,8 @@ mod branded_chrono_inner_tests {
     }
 
     /// The wire is a string, so the brand's own constraints stay legal — and sit beside `type` and
-    /// `format` the way they sit beside `type` alone.
+    /// `format` the way they sit beside `type` alone. The `\d` the brand was declared with reaches
+    /// the schema as the members it stands for, per the pattern guard's cross-engine translation.
     #[test]
     fn a_constrained_chrono_brand_carries_its_constraints_beside_the_format() {
         assert_eq!(
@@ -1514,7 +1515,7 @@ mod branded_chrono_inner_tests {
                 "format": "date",
                 "minLength": 10_u32,
                 "maxLength": 10_u32,
-                "pattern": r"^\d{4}-\d{2}-\d{2}$"
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
             })
         );
     }
