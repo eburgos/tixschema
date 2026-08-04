@@ -632,6 +632,33 @@ impl Surface {
         Self::named(Some("enumerated"), Some("string"))
     }
 
+    /// The union an externally tagged enum writes, as the leaves a merge descending it reaches.
+    ///
+    /// serde writes a data-carrying variant as the single-key object the variant's name tags, and
+    /// writes a unit variant as that name alone — a bare string, which carries no members and which
+    /// no object can be merged with. The JSON-schema merge descends the `oneOf` this publishes and
+    /// names such a variant by its position in it, so the leaves are recorded at those same
+    /// positions: what a flattened member naming the enum is refused at on one surface is what it
+    /// is refused at on the other, in one set of words.
+    ///
+    /// The tagged shapes that write an object for every variant keep [`Self::union`]: their leaves
+    /// would be unmarked to the last one, which is what the single unmarked leaf already says.
+    #[cfg(all(feature = "serde", feature = "zod"))]
+    fn externally_tagged(variants: &Punctuated<syn::Variant, Token![,]>) -> Self {
+        Self {
+            shape: Self::union().shape,
+            wire: RecordedWire::Leaves(external_variant_wire_leaves(variants)),
+        }
+    }
+
+    /// The same union where no merge reads its leaves. `serde` and `zod` together are the pair that
+    /// flattens one over the other; without both, nothing asks what the variants write and the
+    /// union is the union every other enum shape registers.
+    #[cfg(all(feature = "serde", not(feature = "zod")))]
+    const fn externally_tagged(_variants: &Punctuated<syn::Variant, Token![,]>) -> Self {
+        Self::union()
+    }
+
     /// A surface neither answer is read off a written type for.
     const fn named(shape: Option<&'static str>, wire: Option<&'static str>) -> Self {
         #[cfg(not(all(feature = "serde", feature = "zod")))]
@@ -1554,7 +1581,7 @@ fn compute_flatten_outputs(
         .iter()
         .map(|fld| MergedOperand {
             members: fld.zod_union_members(),
-            optional: fld.is_optional(),
+            optional: fld.is_optional() || flattened_name_offers_absence(fld),
             spelling: fld.zod_merged_schema(),
         })
         .collect();
@@ -1562,6 +1589,37 @@ fn compute_flatten_outputs(
     let zod_schemas = Vec::new();
 
     (ts_types, zod_schemas)
+}
+
+/// Whether the registration a flattened source names offers its own absence, which is the second
+/// key set the merge owes it.
+///
+/// The two spellings of reaching a nullable source are one declaration to serde: it writes the
+/// value's own keys or writes nothing, and reads the payload carrying none of them back as the
+/// absent value either way. A source written `Option<T>` says so in the type and is read through
+/// [`FieldDef::is_optional`]; one naming an item whose published surface is nullable says so a name
+/// away, and this is where that is read — off the leaves the name recorded, so the two spellings
+/// reach the multiplication by one answer.
+///
+/// The name has to be the whole of what the source writes. An array level is the array around
+/// whatever the name publishes, and the choice behind the name is one its items offer rather than
+/// one the source does.
+#[cfg(all(feature = "serde", feature = "zod"))]
+fn flattened_name_offers_absence(fld: &FieldDef) -> bool {
+    if fld.is_array() {
+        return false;
+    }
+    let FieldDefType::SiblingType(name, _) = &fld.field_type else {
+        return false;
+    };
+    lookup_alias_info(name).is_some_and(|info| info.wire.iter().any(WireLeaf::is_published_absence))
+}
+
+/// No source offers one where nothing reads `#[serde(flatten)]`: without `serde` no field reaches
+/// the merge to begin with, and the registry records no wire for a name to publish an absence in.
+#[cfg(all(feature = "zod", not(feature = "serde")))]
+const fn flattened_name_offers_absence(_fld: &FieldDef) -> bool {
+    false
 }
 
 /// The schema methods a struct's module publishes — the JSON-schema document, the TypeScript
@@ -5398,8 +5456,12 @@ fn process_externally_tagged_enum(
     // Compute the schema module name and register the enum so other types can find it.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     // Every other enum shape is written as a union of what its variants render as.
-    let (module_name, module_ident) =
-        enum_module_idents(name, item_name, AliasKind::NoEnumMembers, Surface::union());
+    let (module_name, module_ident) = enum_module_idents(
+        name,
+        item_name,
+        AliasKind::NoEnumMembers,
+        Surface::externally_tagged(&item_enum.variants),
+    );
 
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     let docs_vec = get_enum_docs(&item_enum);
@@ -6599,14 +6661,36 @@ fn published_wire_leaves(written: &FieldDef) -> Vec<WireLeaf> {
     })
 }
 
-/// The leaves the item a field names published, where the field's whole wire *is* that name's and
-/// the name stands for more than one leaf — and `None` everywhere the one-leaf dispatch already
-/// answers.
+/// The leaves an externally tagged enum's variants write, one per variant and in the order the
+/// `oneOf` it publishes writes them.
 ///
-/// Only a choice is spliced. A name publishing one leaf keeps flowing through the same single
-/// answer it always did, so nothing about a member naming an object, a scalar or a map moves; a
-/// name publishing a choice is the one thing that answer could not carry, its levels sitting below
-/// the member's own position rather than at it.
+/// The classification is [`classify_variant`]'s, which is the one
+/// [`render_external_variant`] writes each variant from — so what is recorded and what is emitted
+/// read the declaration the same way, and a variant that renders as a bare string is a leaf that
+/// says so.
+#[cfg(all(feature = "serde", feature = "zod"))]
+fn external_variant_wire_leaves(variants: &Punctuated<syn::Variant, Token![,]>) -> Vec<WireLeaf> {
+    variants
+        .iter()
+        .enumerate()
+        .map(|(index, variant)| WireLeaf {
+            branch: vec![index + 1],
+            non_object: matches!(classify_variant(variant), VariantKind::Unit).then_some("string"),
+        })
+        .collect()
+}
+
+/// The leaves the item a field names published, where the field's whole wire *is* that name's and
+/// one of those leaves proves serde writes no object at its position — and `None` everywhere the
+/// one-leaf dispatch already answers.
+///
+/// Only a refusable choice is spliced. A name publishing one leaf keeps flowing through the same
+/// single answer it always did, so nothing about a member naming an object, a scalar or a map
+/// moves; and a choice whose every leaf is an object is that same answer written once per branch —
+/// the operand a merge joins is the name whichever branch matched, so splicing it would put one
+/// member where one stood and say nothing the single leaf did not. What only the leaves can carry
+/// is a branch serde writes as something no object joins, sitting below the member's own position
+/// rather than at it.
 ///
 /// An array level is not one of those: what the field writes is the array around whatever the name
 /// publishes, and the leaves behind the name describe an item of it rather than the field.
@@ -6619,7 +6703,10 @@ fn named_wire_leaves(written: &FieldDef) -> Option<Vec<WireLeaf>> {
         return None;
     };
     let leaves = lookup_alias_info(name)?.wire;
-    (leaves.len() > 1).then_some(leaves)
+    leaves
+        .iter()
+        .any(|leaf| leaf.non_object.is_some())
+        .then_some(leaves)
 }
 
 /// Builds the schema module's impl items for an untagged enum: its JSON schema, its `TypeScript`

@@ -7307,6 +7307,125 @@ fn flattening_a_union_with_a_named_nullable_member_is_refused_naming_the_trail()
     );
 }
 
+/// A member naming an externally tagged enum carries one leaf per variant, at the positions the
+/// JSON-schema merge names the same variants by. serde writes a data-carrying variant as the
+/// single-key object its name tags and writes a unit variant as that name alone — a bare string —
+/// so the choice behind the member holds a leaf no object can be merged with, one level in from
+/// where the member stands.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_union_member_naming_a_tagged_enum_carries_one_leaf_per_variant() {
+    seed_external_registration(&syn::parse_quote! {
+        enum WireExtBare {
+            Bare,
+            Wrapped(Holder),
+        }
+    });
+    assert_eq!(
+        recorded_member_trails(syn::parse_quote! {
+            enum WireExtBareChoice {
+                Obj(Holder),
+                Ext(WireExtBare),
+            }
+        }),
+        vec![
+            ("1".to_owned(), None),
+            ("2.1".to_owned(), Some("string")),
+            ("2.2".to_owned(), None),
+        ]
+    );
+}
+
+/// And a tagged enum whose every variant carries data keeps the one unmarked leaf it always had.
+/// Every branch of that choice is an object the merge joins, and the operand it would join is the
+/// name whichever branch matched — so writing one member per branch would put three where one stood
+/// and say nothing the single leaf did not.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_union_member_naming_an_all_object_tagged_enum_keeps_its_one_leaf() {
+    seed_external_registration(&syn::parse_quote! {
+        enum WireExtObjects {
+            One(Holder),
+            Two(Other),
+        }
+    });
+    assert_eq!(
+        recorded_member_trails(syn::parse_quote! {
+            enum WireExtObjChoice {
+                Obj(Holder),
+                Ext(WireExtObjects),
+            }
+        }),
+        vec![("1".to_owned(), None), ("2".to_owned(), None)]
+    );
+}
+
+/// So flattening a union whose member names one is refused at the leaf the bare string sits at —
+/// `2.1`, a position below the member, which is where the enum's own choice puts it and not where
+/// the member stands — and in the words the JSON-schema merge refuses the same declaration in.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn flattening_a_union_with_a_tagged_enum_member_is_refused_naming_the_trail() {
+    seed_external_registration(&syn::parse_quote! {
+        enum FlatWireExtBare {
+            Bare,
+            Wrapped(Holder),
+        }
+    });
+    let refusal = recorded_union_flatten_error(
+        "WireExtFlatChoice",
+        syn::parse_quote! {
+            enum WireExtFlatChoice {
+                Obj(Holder),
+                Ext(FlatWireExtBare),
+            }
+        },
+        &syn::parse_quote! { #[serde(flatten)] either: WireExtFlatChoice },
+    )
+    .unwrap();
+    assert!(
+        refusal
+            .contains("`#[serde(flatten)]` of `WireExtFlatChoice` writes a union member that is"),
+        "got: {refusal}"
+    );
+    assert!(
+        refusal.contains("its branch 2.1 describes a `string`, which has no members to merge"),
+        "got: {refusal}"
+    );
+    seed_external_registration(&syn::parse_quote! {
+        enum FlatWireExtObjects {
+            One(Holder),
+            Two(Other),
+        }
+    });
+    assert!(
+        recorded_union_flatten_error(
+            "WireExtObjFlatChoice",
+            syn::parse_quote! {
+                enum WireExtObjFlatChoice {
+                    Obj(Holder),
+                    Ext(FlatWireExtObjects),
+                }
+            },
+            &syn::parse_quote! { #[serde(flatten)] either: WireExtObjFlatChoice },
+        )
+        .is_none()
+    );
+}
+
+/// Runs the registration an externally tagged enum's own expansion runs, so the leaves the registry
+/// answers with for the name are ones a declaration put there rather than words written by hand.
+#[cfg(all(feature = "serde", feature = "zod"))]
+fn seed_external_registration(item: &syn::ItemEnum) {
+    let rust_ident = item.ident.to_string();
+    let _: (String, syn::Ident) = super::enum_module_idents(
+        &item.ident,
+        &rust_ident,
+        AliasKind::NoEnumMembers,
+        super::Surface::externally_tagged(&item.variants),
+    );
+}
+
 /// `^$` is the empty-string check, not a degenerate pattern: it pins both ends of the value to one
 /// position. It keeps the `is_empty()` call it has been emitted as, byte for byte, now that the
 /// shapes written out of the same two anchors are refused.
