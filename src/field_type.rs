@@ -239,6 +239,52 @@ impl FieldDef {
         arrayed
     }
 
+    /// The shape this field renders when the values a bound could be spelled against are its
+    /// members rather than the field itself.
+    ///
+    /// A map writes its keys and its values, a tuple writes each of its elements, and every surface
+    /// builds those from the inner field defs — which carry no meta, the field's own sitting on the
+    /// outer def none of them reads. A length, a pattern or a range names one value, and
+    /// `model_schema_prop` has no way to say which member it meant, so a bound written here reaches
+    /// nothing on any surface; the caller turns that into a guard error naming the field.
+    pub const fn composite_shape_name(&self) -> Option<&'static str> {
+        match &self.field_type {
+            FieldDefType::Map(_, _) => Some("a map"),
+            FieldDefType::Tuple(_) => Some("a tuple"),
+            #[cfg(feature = "object_id")]
+            FieldDefType::ObjectId => None,
+            #[cfg(feature = "chrono")]
+            FieldDefType::NaiveDate
+            | FieldDefType::NaiveTime
+            | FieldDefType::NaiveDateTime
+            | FieldDefType::DateTime => None,
+            FieldDefType::SiblingType(_, _)
+            | FieldDefType::Unknown
+            | FieldDefType::StringLiteral(_)
+            | FieldDefType::Boolean
+            | FieldDefType::String
+            | FieldDefType::U8
+            | FieldDefType::U16
+            | FieldDefType::U32
+            | FieldDefType::U64
+            | FieldDefType::I8
+            | FieldDefType::I16
+            | FieldDefType::I32
+            | FieldDefType::I64
+            | FieldDefType::Usize
+            | FieldDefType::Isize
+            | FieldDefType::F32
+            | FieldDefType::F64 => None,
+        }
+    }
+
+    /// Whether a length, a pattern or a range written on this field reaches no surface at all —
+    /// the one question both the refusal and the docs are written from, so neither can come to
+    /// answer it differently from the other.
+    pub const fn constraints_reach_nothing(&self) -> bool {
+        self.fixed_shape_name().is_some() || self.composite_shape_name().is_some()
+    }
+
     #[cfg(feature = "zod")]
     /// Checks if this field contains a reference to the given type name.
     ///
@@ -376,7 +422,8 @@ impl FieldDef {
     /// caller turns that into a guard error naming the field instead of dropping it.
     ///
     /// Only the field's own rendering is asked about. A map or a tuple holding one of these
-    /// describes its members separately, and a bound on the field around them was never theirs.
+    /// describes its members separately, and a bound on the field around them is
+    /// [`Self::composite_shape_name`]'s to answer for.
     pub const fn fixed_shape_name(&self) -> Option<&'static str> {
         match &self.field_type {
             #[cfg(feature = "object_id")]
@@ -666,6 +713,19 @@ impl FieldDef {
         })
     }
 
+    /// What this field contributes to an object that writes its members beside its own, on the
+    /// TypeScript surface: the value itself, with no answer for the outermost `Option`.
+    ///
+    /// A merged source has no key of its own, so that `Option` is not the question
+    /// [`Self::typescript_typename`] answers. There, a `None` is a key the object leaves out; here
+    /// it is every one of the source's keys left out at once — the object writes its own members
+    /// merged with the source's or writes its own alone, and a choice between two key sets belongs
+    /// where the merge is assembled rather than on the operand it is assembled from.
+    #[cfg(feature = "typescript")]
+    pub fn typescript_merged_typename(&self) -> String {
+        self.typescript_base()
+    }
+
     /// The TypeScript type for a value in a slot that cannot be dropped — a tuple element, a map
     /// entry, or the content key of a single-element tuple variant, which serde always writes. An
     /// `Option` there is null-flavored (`{base} | null`) rather than undefined-flavored: none of
@@ -841,6 +901,14 @@ impl FieldDef {
         } else {
             array_result
         }
+    }
+
+    /// The same value on the Zod surface, for the same reason: what a merged source validates, with
+    /// the outermost `Option` left to whatever assembles the merge. See
+    /// [`Self::typescript_merged_typename`].
+    #[cfg(feature = "zod")]
+    pub fn zod_merged_schema(&self) -> String {
+        self.zod_base()
     }
 
     /// Builds the Zod schema string for a numeric field, applying any min/max constraints.
