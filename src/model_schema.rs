@@ -5068,6 +5068,81 @@ fn collect_untagged_members(
     )
 }
 
+/// Builds the schema module's impl items for an untagged enum: its JSON schema, its `TypeScript`
+/// definition, and its Zod schema, in the order the module publishes them.
+///
+/// An untagged member is matched on its own shape rather than on a shared tag, so the three
+/// surfaces join the rendered members as plain alternatives — an `anyOf` with no `type` pinned over
+/// it, a `|` union, a `z.union`. The joins live next to the method that reads them because each is
+/// read exactly once and every one is feature-gated; keeping the pair together is what lets a
+/// disabled surface take its join with it.
+#[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
+fn build_untagged_schema_impl_items(
+    name: &syn::Ident,
+    item_name: &str,
+    docs_vec: Option<&[String]>,
+    ts_parts: &[String],
+    zod_parts: &[String],
+    json_parts: &[proc_macro2::TokenStream],
+) -> Vec<proc_macro2::TokenStream> {
+    #[cfg(not(any(feature = "typescript", feature = "zod")))]
+    let _: &_ = &name;
+    #[cfg(not(feature = "typescript"))]
+    let _: &_ = &(ts_parts, docs_vec);
+    #[cfg(not(feature = "zod"))]
+    let _: &_ = &zod_parts;
+    #[cfg(not(feature = "jsonschema"))]
+    let _: &_ = &json_parts;
+
+    #[cfg(feature = "jsonschema")]
+    let main_schema_code = quote! {
+        let mut schema_obj = serde_json::Map::new();
+        schema_obj.insert("anyOf".to_string(), {
+            let result: Vec<serde_json::Value> = vec![
+                #(#json_parts), *
+            ];
+
+            serde_json::Value::Array(result)
+        });
+
+        serde_json::Value::Object(schema_obj)
+    };
+
+    #[cfg(feature = "typescript")]
+    let type_code = ts_parts.join(" | ");
+
+    #[cfg(feature = "zod")]
+    let schema_code = format!("z.union([{}])", zod_parts.join(", "));
+
+    #[cfg(feature = "typescript")]
+    let docs = build_jsdoc_body(docs_vec, item_name);
+
+    #[cfg(feature = "jsonschema")]
+    let json_schema_method =
+        generate_discriminated_enum_json_schema_method(&main_schema_code, item_name);
+
+    #[cfg(feature = "typescript")]
+    let ts_definition_method = generate_discriminated_enum_ts_definition_method(
+        &docs,
+        item_name,
+        &name.to_string(),
+        &type_code,
+    );
+
+    #[cfg(feature = "zod")]
+    let zod_schema_method =
+        generate_discriminated_enum_zod_schema_method(item_name, &name.to_string(), &schema_code);
+
+    vec![
+        #[cfg(feature = "jsonschema")]
+        json_schema_method,
+        #[cfg(feature = "typescript")]
+        ts_definition_method,
+        #[cfg(feature = "zod")]
+        zod_schema_method,
+    ]
+}
+
 /// Processes an untagged enum (`#[serde(untagged)]`) and generates its definitions.
 ///
 /// Emits a TypeScript union (`A | B`), a Zod `z.union([...])`, and a JSON-schema `anyOf`.
@@ -5085,6 +5160,14 @@ fn process_untagged_enum(
     // Extract docs early for example extraction
     #[cfg(any(feature = "typescript", feature = "zod"))]
     let docs_vec = get_enum_docs(&item_enum);
+    // The schema module is built under a wider gate than the one that reads docs, so the binding
+    // it takes has to exist on that gate's own terms.
+    #[cfg(all(
+        not(feature = "typescript"),
+        not(feature = "zod"),
+        feature = "jsonschema"
+    ))]
+    let docs_vec: Option<Vec<String>> = None;
 
     #[cfg(feature = "zod")]
     let example_code = docs_vec
@@ -5107,56 +5190,7 @@ fn process_untagged_enum(
     }
 
     #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
-    let _: &_ = &name;
-    #[cfg(not(feature = "zod"))]
-    let _: &_ = &&zod_parts;
-    #[cfg(not(feature = "jsonschema"))]
-    let _: &_ = &&json_parts;
-
-    #[cfg(feature = "jsonschema")]
-    let main_schema_code = quote! {
-        let mut schema_obj = serde_json::Map::new();
-        schema_obj.insert("anyOf".to_string(), {
-            let result: Vec<serde_json::Value> = vec![
-                #(#json_parts), *
-            ];
-
-            serde_json::Value::Array(result)
-        });
-
-        serde_json::Value::Object(schema_obj)
-    };
-
-    #[cfg(feature = "typescript")]
-    let type_code = ts_parts.join(" | ");
-    #[cfg(not(feature = "typescript"))]
-    let _: &_ = &&ts_parts;
-
-    #[cfg(feature = "zod")]
-    let schema_code = format!("z.union([{}])", zod_parts.join(", "));
-
-    #[cfg(feature = "typescript")]
-    let docs = build_jsdoc_body(docs_vec.as_deref(), item_name);
-
-    // Generate schema module methods
-    #[cfg(feature = "jsonschema")]
-    let json_schema_method =
-        generate_discriminated_enum_json_schema_method(&main_schema_code, item_name);
-
-    #[cfg(feature = "typescript")]
-    let ts_definition_method = generate_discriminated_enum_ts_definition_method(
-        &docs,
-        item_name,
-        &name.to_string(),
-        &type_code,
-    );
-
-    #[cfg(feature = "zod")]
-    let zod_schema_method =
-        generate_discriminated_enum_zod_schema_method(item_name, &name.to_string(), &schema_code);
-
-    #[cfg(not(any(feature = "typescript", feature = "zod")))]
-    let _: &_ = &item_name;
+    let _: &_ = &(name, item_name, &ts_parts, &zod_parts, &json_parts);
 
     #[cfg(feature = "zod")]
     let schema_example_method = build_struct_schema_example(example_code.as_ref(), name);
@@ -5168,14 +5202,14 @@ fn process_untagged_enum(
 
     // Build schema module impl items (without schema_example)
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
-    let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![
-        #[cfg(feature = "jsonschema")]
-        json_schema_method,
-        #[cfg(feature = "typescript")]
-        ts_definition_method,
-        #[cfg(feature = "zod")]
-        zod_schema_method,
-    ];
+    let schema_impl_items = build_untagged_schema_impl_items(
+        name,
+        item_name,
+        docs_vec.as_deref(),
+        &ts_parts,
+        &zod_parts,
+        &json_parts,
+    );
 
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     let delegate_impl_items = build_struct_delegate_items(
