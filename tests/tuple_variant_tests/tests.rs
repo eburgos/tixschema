@@ -226,7 +226,9 @@ pub enum ExternalKeptOnly {
 }
 
 /// The same drops under a content key, where the array is written under `value` rather than under
-/// the variant's own name.
+/// the variant's own name. `Lone` is declared as the unit it would have been written as: under this
+/// tagging alone the collapse has no payload to be described by and is refused, and this is the
+/// remedy that refusal names.
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "type", content = "value")]
@@ -234,7 +236,7 @@ pub enum AdjacentDroppedSlots {
     Every(#[serde(skip)] String, #[serde(skip)] u32),
     Kept(u8, bool),
     Lead(#[serde(skip)] String, u32),
-    Lone(#[serde(skip)] String),
+    Lone,
 }
 
 /// The kept variant on its own, for the same reading in the adjacent form.
@@ -243,6 +245,21 @@ pub enum AdjacentDroppedSlots {
 #[serde(tag = "type", content = "value")]
 pub enum AdjacentKeptOnly {
     Kept(u8, bool),
+}
+
+/// The adjacent lone-slot collapse, declared without a schema because the surfaces refuse it — the
+/// wire captured below is what they refuse it for.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "type", content = "value")]
+pub enum AdjacentLoneSlotWire {
+    Lone(#[serde(skip)] String),
+}
+
+/// The same variant declared as the unit it is written as, which is the remedy the refusal names.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "type", content = "value")]
+pub enum AdjacentUnitWire {
+    Lone,
 }
 
 /// A value serde writes as an object, which is the only content a bare tag can carry beside it.
@@ -2022,21 +2039,66 @@ fn test_serde_writes_a_variant_whose_lone_slot_is_dropped_as_its_name_alone() {
     );
 }
 
-/// The same three readings under a content key: the array shrinks under `value`, and the variant
-/// whose lone slot is gone writes the tag with no content key at all.
+/// The same readings under a content key, and the scope the lone slot's refusal stops at: the array
+/// shrinks under `value` at every other declared arity and reads straight back, so each of them has
+/// one payload the surfaces can describe.
 #[test]
 fn test_serde_writes_a_dropped_variant_slot_the_same_way_under_a_content_key() {
+    for (held, written) in [
+        (
+            AdjacentDroppedSlots::Lead("s".to_owned(), 7_u32),
+            serde_json::json!({ "type": "Lead", "value": [7_u32] }),
+        ),
+        (
+            AdjacentDroppedSlots::Every("s".to_owned(), 1_u32),
+            serde_json::json!({ "type": "Every", "value": [] }),
+        ),
+    ] {
+        assert_eq!(serde_json::to_value(held).unwrap(), written);
+        assert!(
+            serde_json::from_value::<AdjacentDroppedSlots>(written.clone()).is_ok(),
+            "must read back: {written}"
+        );
+    }
+}
+
+/// The wire the adjacent form's lone-slot collapse is refused for: serde writes `{"type":"Lone"}`
+/// and then refuses to read that same payload back, asking for the content key it never wrote. Only
+/// the `value: null` spelling reads, so the write set and the read set have no common member.
+#[test]
+fn test_serde_refuses_the_adjacent_payload_it_writes_for_a_dropped_lone_slot() {
     assert_eq!(
-        serde_json::to_value(AdjacentDroppedSlots::Lead("s".to_owned(), 7_u32)).unwrap(),
-        serde_json::json!({ "type": "Lead", "value": [7_u32] })
-    );
-    assert_eq!(
-        serde_json::to_value(AdjacentDroppedSlots::Every("s".to_owned(), 1_u32)).unwrap(),
-        serde_json::json!({ "type": "Every", "value": [] })
-    );
-    assert_eq!(
-        serde_json::to_value(AdjacentDroppedSlots::Lone("s".to_owned())).unwrap(),
+        serde_json::to_value(AdjacentLoneSlotWire::Lone("s".to_owned())).unwrap(),
         serde_json::json!({ "type": "Lone" })
+    );
+    let refused = serde_json::from_str::<AdjacentLoneSlotWire>(r#"{"type":"Lone"}"#).unwrap_err();
+    assert!(
+        refused.to_string().contains("missing field `value`"),
+        "Got: {refused}"
+    );
+    assert_eq!(
+        serde_json::from_str::<AdjacentLoneSlotWire>(r#"{"type":"Lone","value":null}"#).unwrap(),
+        AdjacentLoneSlotWire::Lone(String::new())
+    );
+    assert!(
+        serde_json::from_str::<AdjacentLoneSlotWire>(r#"{"type":"Lone","value":"s"}"#).is_err(),
+        "the slot's own value must not read back"
+    );
+}
+
+/// The control the refusal's remedy names: the variant declared as a unit writes the identical
+/// payload, reads it back, and still accepts the `value: null` spelling the collapse reads.
+#[test]
+fn test_serde_reads_back_the_adjacent_payload_a_declared_unit_variant_writes() {
+    let written = serde_json::to_value(AdjacentUnitWire::Lone).unwrap();
+    assert_eq!(written, serde_json::json!({ "type": "Lone" }));
+    assert_eq!(
+        serde_json::from_value::<AdjacentUnitWire>(written).unwrap(),
+        AdjacentUnitWire::Lone
+    );
+    assert_eq!(
+        serde_json::from_str::<AdjacentUnitWire>(r#"{"type":"Lone","value":null}"#).unwrap(),
+        AdjacentUnitWire::Lone
     );
 }
 
@@ -2134,30 +2196,46 @@ fn test_a_variant_whose_lone_slot_is_dropped_describes_as_a_string_in_json_schem
 }
 
 /// The adjacent form describes the same shrink under its content key, and drops the key entirely
-/// for the variant whose lone slot is gone — which is the object serde writes for it.
+/// for the variant declared as a unit — the member the refused collapse would have been given, now
+/// reached through the declaration the refusal sends its author to.
 #[cfg(feature = "jsonschema")]
 #[test]
 fn test_a_dropped_variant_slot_shrinks_the_content_key_in_json_schema() {
     let schema = AdjacentDroppedSlots::json_schema();
     let members = schema["oneOf"].as_array().unwrap();
-    let lead = members
-        .iter()
-        .find(|member| member["properties"]["type"]["const"] == "Lead")
-        .unwrap();
+    let member = |name: &str| {
+        let found = members
+            .iter()
+            .find(|member| member["properties"]["type"]["const"] == name)
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        assert!(!found.is_null(), "No member `{name}`. Got: {schema}");
+        found
+    };
     assert_eq!(
-        lead["properties"]["value"]["maxItems"], 1_u32,
+        member("Lead")["properties"]["value"]["maxItems"],
+        1_u32,
         "Got: {schema}"
     );
-    let lone = members
-        .iter()
-        .find(|member| member["properties"]["type"]["const"] == "Lone")
-        .unwrap();
+    let lone = member("Lone");
     assert_eq!(
         lone["required"],
         serde_json::json!(["type"]),
         "Got: {schema}"
     );
     assert!(lone["properties"]["value"].is_null(), "Got: {schema}");
+}
+
+/// The remedy is equivalent on the wire, which is what makes it the one the refusal names: the
+/// variant declared as a unit writes the very payload the refused collapse wrote, and reads it back.
+#[test]
+fn test_the_declared_unit_remedy_writes_the_payload_the_refused_collapse_wrote() {
+    let written = serde_json::to_value(AdjacentDroppedSlots::Lone).unwrap();
+    assert_eq!(written, serde_json::json!({ "type": "Lone" }));
+    assert_eq!(
+        serde_json::from_value::<AdjacentDroppedSlots>(written).unwrap(),
+        AdjacentDroppedSlots::Lone
+    );
 }
 
 /// The bare tag carries nothing beside it for a variant whose lone slot is gone, so the value the

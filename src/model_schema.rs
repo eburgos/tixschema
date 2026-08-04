@@ -5499,20 +5499,28 @@ fn process_plain_enum(
 /// slot off the wire writes `{"One":[7]}` and with both off writes `{"One":[]}` — a shorter array
 /// and then an empty one, never a bare value and never the bare name.
 fn variant_wire_kind(variant: &syn::Variant) -> VariantKind {
-    let kind = classify_variant(variant);
+    if lone_slot_off_wire(variant) {
+        VariantKind::Unit
+    } else {
+        classify_variant(variant)
+    }
+}
+
+/// Whether the variant declares exactly one slot and takes that slot off the wire in both
+/// directions — the collapse [`variant_wire_kind`] publishes a unit for.
+///
+/// Held apart from the kind it produces because two seams need the declaration back: what the
+/// collapse is written as is a unit, and what it was *declared* as is what the refusals reading this
+/// have to name. A declared unit and a collapsed one share every wire and part only here.
+fn lone_slot_off_wire(variant: &syn::Variant) -> bool {
     // `classify_variant` names `TupleSingle` for a variant of exactly one unnamed field, so the
     // first field is the lone slot whose omission decides this.
-    let publishes_no_slot = matches!(kind, VariantKind::TupleSingle)
+    matches!(classify_variant(variant), VariantKind::TupleSingle)
         && variant
             .fields
             .iter()
             .next()
-            .is_some_and(|field| parse_serde_key_omission(&field.attrs).absent_from_wire());
-    if publishes_no_slot {
-        VariantKind::Unit
-    } else {
-        kind
-    }
+            .is_some_and(|field| parse_serde_key_omission(&field.attrs).absent_from_wire())
 }
 
 /// Rejects a tuple-variant slot whose serde attributes drop it out of one of serde's two directions
@@ -5742,6 +5750,74 @@ fn discriminated_main_schema_code(
     }
 }
 
+/// Refuses every variant of an adjacently tagged enum whose declared lone slot is off the wire in
+/// both directions, one error per offender so the expansion names them all.
+///
+/// This is the one tagging where the collapse has no payload to be described by. Captured on
+/// `#[serde(tag = "type", content = "value")] enum E { One(#[serde(skip)] String) }` holding `"s"`:
+/// serde writes `{"type":"One"}` and then refuses to read that very payload back — `missing field
+/// value` — while only `{"type":"One","value":null}` reads. The write set and the read set are
+/// disjoint, so there is no payload a schema could hold for the pair, exactly the property that
+/// already refuses a slot dropped from one direction only. The remedy is the control: the same
+/// variant declared as a unit writes the identical `{"type":"One"}` and reads it back.
+///
+/// The other three taggings are untouched, their captured collapses round-tripping — externally
+/// `"One"`, under a bare tag `{"type":"One"}`, untagged `null` — and every other declared arity
+/// keeps the shrink, a two-slot variant with one slot off the wire writing and reading
+/// `{"type":"One","value":[7]}`.
+///
+/// Read against the tag and content keys the declaration named, so the payloads the author is shown
+/// are their own. Gated on the `serde` feature because the tagging flavor is: without it no
+/// declaration can be told apart and the adjacent form stands for all of them, which is the same
+/// reason the untagged refusals are gated.
+#[cfg(feature = "serde")]
+fn adjacent_collapsed_slot_guard_errors(
+    item_enum: &syn::ItemEnum,
+    tag_name: &str,
+    content_name: &str,
+) -> Vec<proc_macro2::TokenStream> {
+    let type_name = &item_enum.ident;
+    item_enum
+        .variants
+        .iter()
+        .filter(|variant| lone_slot_off_wire(variant))
+        .map(|variant| {
+            let variant_name = &variant.ident;
+            syn::Error::new_spanned(
+                variant,
+                format!(
+                    "model_schema: variant `{variant_name}` of enum `{type_name}` declares one \
+                     slot and takes it off the wire in both directions, so serde writes it as \
+                     `{{\"{tag_name}\":\"{variant_name}\"}}` — the payload a unit variant writes — \
+                     and then refuses to read that same payload back, asking for the \
+                     `{content_name}` key it never wrote. Only \
+                     `{{\"{tag_name}\":\"{variant_name}\",\"{content_name}\":null}}` reads, so what \
+                     serde writes for the variant and what serde reads for it have no payload in \
+                     common and no schema can be written for the pair. Declare `{variant_name}` as \
+                     a unit variant: it writes the identical \
+                     `{{\"{tag_name}\":\"{variant_name}\"}}` and reads it back. Or drop the \
+                     attribute so the slot is written and read in its place."
+                ),
+            )
+            .to_compile_error()
+        })
+        .collect()
+}
+
+/// Builds the Zod `z.discriminatedUnion` expression for a discriminated enum from its per-variant
+/// member schemas, beside [`discriminated_main_schema_code`] which answers the same for JSON.
+#[cfg(feature = "zod")]
+fn discriminated_zod_schema_code(tag_name: &str, members: &[(String, Vec<String>)]) -> String {
+    format!(
+        "z.discriminatedUnion(\"{tag_name}\", [{}])",
+        members
+            .iter()
+            .map(|(member, _opts)| format!("z.strictObject({member})"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
 /// Processes a discriminated enum (tagged union in TypeScript) and generates its definitions.
 fn process_discriminated_enum(
     mut item_enum: syn::ItemEnum,
@@ -5768,6 +5844,17 @@ fn process_discriminated_enum(
     #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
     let enum_module_name_opt = None;
 
+    // Read before the walk, which rewrites the very attributes the collapse is read off, and
+    // returned before it so no held-back attribute is written onto an item the guard refuses.
+    #[cfg(feature = "serde")]
+    if let Some(output) = guard_failure_output(
+        &item_enum,
+        Some(&item_enum.ident),
+        &adjacent_collapsed_slot_guard_errors(&item_enum, tag_name, content_name),
+    ) {
+        return output;
+    }
+
     // Bind both result tuples whole so feature-gated field access marks them used (no per-element
     // guards): `variants` = (variants, validation_fns, guard_errors);
     // `rendered` = (ts, zod, json).
@@ -5785,17 +5872,8 @@ fn process_discriminated_enum(
     #[cfg(feature = "typescript")]
     let type_code = rendered.0.join(" | ");
 
-    // Generate Zod schema conditionally
     #[cfg(feature = "zod")]
-    let schema_code = format!(
-        "z.discriminatedUnion(\"{tag_name}\", [{}])",
-        rendered
-            .1
-            .iter()
-            .map(|(v, _opts)| format!("z.strictObject({}){}", v, ""))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
+    let schema_code = discriminated_zod_schema_code(tag_name, &rendered.1);
 
     #[cfg(feature = "typescript")]
     let docs = build_jsdoc_body(docs_vec.as_deref(), item_name);
@@ -6784,6 +6862,9 @@ fn render_untagged_variant(
     match (kind, field_defs) {
         (VariantKind::TupleSingle, [fld]) => Ok(render_untagged_tuple_single(fld, self_type_name)),
         (VariantKind::Named, _) => Ok(render_untagged_named(field_defs, self_type_name)),
+        (VariantKind::Unit, _) if lone_slot_off_wire(variant) => {
+            Err(collapsed_untagged_variant_error(variant))
+        }
         (VariantKind::Unit, _) => Err(unsupported_untagged_variant_error(
             variant,
             "a unit variant",
@@ -6795,6 +6876,37 @@ fn render_untagged_variant(
             ))
         }
     }
+}
+
+/// Refuses an untagged variant that reached the unit wire by taking its lone slot off it, spanned on
+/// the variant.
+///
+/// The treatment is the one a declared unit variant takes and the wire is the same: captured,
+/// `#[serde(untagged)] enum E { One(#[serde(skip)] String) }` writes `null` and reads `null` back,
+/// which is what `enum E { One }` writes and reads in the same place. Only the words part. The
+/// standing refusal offers inner types and named fields as the shapes the union supports, and this
+/// declaration has an inner type on its face — an author reading that is told their code is
+/// something it is not. So the collapse is named instead: the slot is off the wire in both
+/// directions, which is how a declaration holding a type comes to be written as the null a unit
+/// writes.
+///
+/// Whether an untagged union should gain a null member — which would admit both spellings, the two
+/// sharing one wire — is a separate decision this refusal does not take.
+#[cfg(feature = "serde")]
+fn collapsed_untagged_variant_error(variant: &syn::Variant) -> syn::Error {
+    let variant_name = &variant.ident;
+    syn::Error::new_spanned(
+        variant,
+        format!(
+            "model_schema: variant `{variant_name}`: the lone slot of `{variant_name}` is off the \
+             wire in both directions, so serde writes and reads the variant as the bare `null` a \
+             unit variant is written as, whatever the slot holds — and an untagged union has no \
+             member spelling for `null`: a member is written as its inner type or as an object of \
+             named fields, and the slot this one would have been written as never reaches the wire. \
+             Keep the slot on the wire so the member has a value to be written as, or remove \
+             `{variant_name}` from the union."
+        ),
+    )
 }
 
 /// Refuses a variant shape the untagged union has no member spelling for, spanned on the variant.
