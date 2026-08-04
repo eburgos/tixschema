@@ -2449,7 +2449,7 @@ fn test_a_named_non_nullable_flatten_type_is_byte_identical() {
 #[cfg(feature = "zod")]
 fn test_a_named_non_nullable_flatten_schema_is_byte_identical() {
     #[cfg(feature = "typescript")]
-    const EXPECTED: &str = "const NamedPlainHolder$RawSchema = z.strictObject({\n  own: z.string(),\n}).and(z.lazy(() => PlainOptBase$Schema));\n\nexport const NamedPlainHolder$Schema: ZodType<NamedPlainHolder> = NamedPlainHolder$RawSchema;";
+    const EXPECTED: &str = "const NamedPlainHolder$RawSchema = z.strictObject({\n  own: z.string(),\n}).and(z.lazy(() => PlainOptBase$Schema));\n\nexport const NamedPlainHolder$Schema: z.ZodType<NamedPlainHolder> = NamedPlainHolder$RawSchema;";
     #[cfg(not(feature = "typescript"))]
     const EXPECTED: &str = "export const NamedPlainHolder$Schema = z.strictObject({\n  own: z.string(),\n}).and(z.lazy(() => PlainOptBase$Schema));";
 
@@ -2548,7 +2548,7 @@ fn test_a_non_optional_flatten_type_is_byte_identical() {
 #[cfg(feature = "zod")]
 fn test_a_non_optional_flatten_schema_is_byte_identical() {
     #[cfg(feature = "typescript")]
-    const EXPECTED: &str = "const MultiFlatten$RawSchema = z.strictObject({\n  id: z.string(),\n}).and(z.lazy(() => BasePart$Schema)).and(z.lazy(() => ExtraPart$Schema));\n\nexport const MultiFlatten$Schema: ZodType<MultiFlatten> = MultiFlatten$RawSchema;";
+    const EXPECTED: &str = "const MultiFlatten$RawSchema = z.strictObject({\n  id: z.string(),\n}).and(z.lazy(() => BasePart$Schema)).and(z.lazy(() => ExtraPart$Schema));\n\nexport const MultiFlatten$Schema: z.ZodType<MultiFlatten> = MultiFlatten$RawSchema;";
     #[cfg(not(feature = "typescript"))]
     const EXPECTED: &str = "export const MultiFlatten$Schema = z.strictObject({\n  id: z.string(),\n}).and(z.lazy(() => BasePart$Schema)).and(z.lazy(() => ExtraPart$Schema));";
 
@@ -2570,7 +2570,7 @@ fn test_a_non_optional_flatten_schema_is_byte_identical() {
 #[cfg(feature = "zod")]
 fn test_the_untagged_flatten_schema_multiplies_the_object_over_the_unions_members() {
     #[cfg(feature = "typescript")]
-    const EXPECTED: &str = "const FlatOverUntagged$OwnSchema = z.strictObject({\n  own: z.string(),\n});\n\nconst FlatOverUntagged$RawSchema = z.union([\n  FlatOverUntagged$OwnSchema.and(z.lazy(() => FlatFirst$Schema)),\n  FlatOverUntagged$OwnSchema.and(z.lazy(() => FlatSecond$Schema)),\n]);\n\nexport const FlatOverUntagged$Schema: ZodType<FlatOverUntagged> = FlatOverUntagged$RawSchema;";
+    const EXPECTED: &str = "const FlatOverUntagged$OwnSchema = z.strictObject({\n  own: z.string(),\n});\n\nconst FlatOverUntagged$RawSchema = z.union([\n  FlatOverUntagged$OwnSchema.and(z.lazy(() => FlatFirst$Schema)),\n  FlatOverUntagged$OwnSchema.and(z.lazy(() => FlatSecond$Schema)),\n]);\n\nexport const FlatOverUntagged$Schema: z.ZodType<FlatOverUntagged> = FlatOverUntagged$RawSchema;";
     #[cfg(not(feature = "typescript"))]
     const EXPECTED: &str = "const FlatOverUntagged$OwnSchema = z.strictObject({\n  own: z.string(),\n});\n\nexport const FlatOverUntagged$Schema = z.union([\n  FlatOverUntagged$OwnSchema.and(z.lazy(() => FlatFirst$Schema)),\n  FlatOverUntagged$OwnSchema.and(z.lazy(() => FlatSecond$Schema)),\n]);";
 
@@ -2719,7 +2719,7 @@ fn test_a_union_declared_below_the_object_is_named_as_one_operand() {
 #[cfg(feature = "zod")]
 fn test_an_internally_tagged_flatten_schema_is_byte_identical() {
     #[cfg(feature = "typescript")]
-    const EXPECTED: &str = "const DataElementSampleValueEntry$RawSchema = z.strictObject({\n  dataElementId: z.string(),\n}).and(z.lazy(() => DataElementSampleValueVariant$Schema));\n\nexport const DataElementSampleValueEntry$Schema: ZodType<DataElementSampleValueEntry> = DataElementSampleValueEntry$RawSchema;";
+    const EXPECTED: &str = "const DataElementSampleValueEntry$RawSchema = z.strictObject({\n  dataElementId: z.string(),\n}).and(z.lazy(() => DataElementSampleValueVariant$Schema));\n\nexport const DataElementSampleValueEntry$Schema: z.ZodType<DataElementSampleValueEntry> = DataElementSampleValueEntry$RawSchema;";
     #[cfg(not(feature = "typescript"))]
     const EXPECTED: &str = "export const DataElementSampleValueEntry$Schema = z.strictObject({\n  dataElementId: z.string(),\n}).and(z.lazy(() => DataElementSampleValueVariant$Schema));";
 
@@ -2733,7 +2733,7 @@ fn test_an_internally_tagged_flatten_schema_is_byte_identical() {
 #[cfg(feature = "zod")]
 fn test_a_standalone_union_with_a_scalar_member_is_byte_identical() {
     #[cfg(feature = "typescript")]
-    const EXPECTED: &str = "const FlatScalarEither$RawSchema = z.union([FlatFirst$Schema, z.string()]);\n\nexport const FlatScalarEither$Schema: ZodType<FlatScalarEither> = FlatScalarEither$RawSchema;";
+    const EXPECTED: &str = "const FlatScalarEither$RawSchema = z.union([FlatFirst$Schema, z.string()]);\n\nexport const FlatScalarEither$Schema: z.ZodType<FlatScalarEither> = FlatScalarEither$RawSchema;";
     #[cfg(not(feature = "typescript"))]
     const EXPECTED: &str =
         "export const FlatScalarEither$Schema = z.union([FlatFirst$Schema, z.string()]);";
@@ -2750,10 +2750,10 @@ fn test_a_standalone_union_with_a_scalar_member_is_byte_identical() {
 fn test_standalone_unions_the_merge_now_refuses_are_byte_identical() {
     #[cfg(feature = "typescript")]
     const EXPECTED: [&str; 4] = [
-        "const FlatNullableEither$RawSchema = z.union([FlatFirst$Schema, z.nullable(FlatSecond$Schema)]);\n\nexport const FlatNullableEither$Schema: ZodType<FlatNullableEither> = FlatNullableEither$RawSchema;",
-        "const MemberSlugEither$RawSchema = z.union([FlatFirst$Schema, MemberSlug$Schema]);\n\nexport const MemberSlugEither$Schema: ZodType<MemberSlugEither> = MemberSlugEither$RawSchema;",
-        "const MemberSwitchEither$RawSchema = z.union([FlatFirst$Schema, MemberSwitch$Schema]);\n\nexport const MemberSwitchEither$Schema: ZodType<MemberSwitchEither> = MemberSwitchEither$RawSchema;",
-        "const MemberHueEither$RawSchema = z.union([FlatFirst$Schema, MemberHue$Schema]);\n\nexport const MemberHueEither$Schema: ZodType<MemberHueEither> = MemberHueEither$RawSchema;",
+        "const FlatNullableEither$RawSchema = z.union([FlatFirst$Schema, z.nullable(FlatSecond$Schema)]);\n\nexport const FlatNullableEither$Schema: z.ZodType<FlatNullableEither> = FlatNullableEither$RawSchema;",
+        "const MemberSlugEither$RawSchema = z.union([FlatFirst$Schema, MemberSlug$Schema]);\n\nexport const MemberSlugEither$Schema: z.ZodType<MemberSlugEither> = MemberSlugEither$RawSchema;",
+        "const MemberSwitchEither$RawSchema = z.union([FlatFirst$Schema, MemberSwitch$Schema]);\n\nexport const MemberSwitchEither$Schema: z.ZodType<MemberSwitchEither> = MemberSwitchEither$RawSchema;",
+        "const MemberHueEither$RawSchema = z.union([FlatFirst$Schema, MemberHue$Schema]);\n\nexport const MemberHueEither$Schema: z.ZodType<MemberHueEither> = MemberHueEither$RawSchema;",
     ];
     #[cfg(not(feature = "typescript"))]
     const EXPECTED: [&str; 4] = [
@@ -2957,9 +2957,9 @@ fn test_a_named_map_member_keeps_its_merged_document() {
 fn test_the_named_wire_unions_are_byte_identical_standing_alone() {
     #[cfg(feature = "typescript")]
     const EXPECTED: [&str; 3] = [
-        "const MemberBagEither$RawSchema = z.union([FlatFirst$Schema, MemberBag$Schema]);\n\nexport const MemberBagEither$Schema: ZodType<MemberBagEither> = MemberBagEither$RawSchema;",
-        "const MemberBucketEither$RawSchema = z.union([FlatFirst$Schema, MemberBucket$Schema]);\n\nexport const MemberBucketEither$Schema: ZodType<MemberBucketEither> = MemberBucketEither$RawSchema;",
-        "const MemberMaybeEither$RawSchema = z.union([FlatFirst$Schema, MemberMaybeSecond$Schema]);\n\nexport const MemberMaybeEither$Schema: ZodType<MemberMaybeEither> = MemberMaybeEither$RawSchema;",
+        "const MemberBagEither$RawSchema = z.union([FlatFirst$Schema, MemberBag$Schema]);\n\nexport const MemberBagEither$Schema: z.ZodType<MemberBagEither> = MemberBagEither$RawSchema;",
+        "const MemberBucketEither$RawSchema = z.union([FlatFirst$Schema, MemberBucket$Schema]);\n\nexport const MemberBucketEither$Schema: z.ZodType<MemberBucketEither> = MemberBucketEither$RawSchema;",
+        "const MemberMaybeEither$RawSchema = z.union([FlatFirst$Schema, MemberMaybeSecond$Schema]);\n\nexport const MemberMaybeEither$Schema: z.ZodType<MemberMaybeEither> = MemberMaybeEither$RawSchema;",
     ];
     #[cfg(not(feature = "typescript"))]
     const EXPECTED: [&str; 3] = [
@@ -3073,8 +3073,8 @@ fn test_an_all_object_tagged_enum_member_keeps_its_merged_document() {
 fn test_the_tagged_enums_are_byte_identical_standing_alone() {
     #[cfg(feature = "typescript")]
     const EXPECTED: [&str; 2] = [
-        "const MemberExtBare$RawSchema = z.union([z.literal(\"Bare\"), z.strictObject({\n  \"Wrapped\": FlatSecond$Schema,\n})]);\n\nexport const MemberExtBare$Schema: ZodType<MemberExtBare> = MemberExtBare$RawSchema;",
-        "const MemberExtObjects$RawSchema = z.union([z.strictObject({\n  \"One\": FlatFirst$Schema,\n}), z.strictObject({\n  \"Two\": FlatSecond$Schema,\n})]);\n\nexport const MemberExtObjects$Schema: ZodType<MemberExtObjects> = MemberExtObjects$RawSchema;",
+        "const MemberExtBare$RawSchema = z.union([z.literal(\"Bare\"), z.strictObject({\n  \"Wrapped\": FlatSecond$Schema,\n})]);\n\nexport const MemberExtBare$Schema: z.ZodType<MemberExtBare> = MemberExtBare$RawSchema;",
+        "const MemberExtObjects$RawSchema = z.union([z.strictObject({\n  \"One\": FlatFirst$Schema,\n}), z.strictObject({\n  \"Two\": FlatSecond$Schema,\n})]);\n\nexport const MemberExtObjects$Schema: z.ZodType<MemberExtObjects> = MemberExtObjects$RawSchema;",
     ];
     #[cfg(not(feature = "typescript"))]
     const EXPECTED: [&str; 2] = [

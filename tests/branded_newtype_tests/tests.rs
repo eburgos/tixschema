@@ -55,7 +55,7 @@ mod zod_ts_tests {
     /// type beside it keeps `IdType`, its own declaration binding it for real.
     ///
     /// The builder itself carries no `$ZodBranded` — its own bound is the plain `IdType extends
-    /// ZodType`, unlike the non-generic const's own base schema, which names it directly. Only
+    /// z.ZodType`, unlike the non-generic const's own base schema, which names it directly. Only
     /// `$SchemaDefault`, called at the declared default, has a concrete filling to annotate with
     /// one (txsch-bpnj) — the shape `an_unconstrained_generic_brands_default_is_still_branded`
     /// below pins.
@@ -63,7 +63,7 @@ mod zod_ts_tests {
     fn test_branded_newtype_zod_schema() {
         let zod = RoleId::<String>::zod_schema();
         assert!(
-            zod.contains("export const RoleId$SchemaFactory = <IdType extends ZodType>("),
+            zod.contains("export const RoleId$SchemaFactory = <IdType extends z.ZodType>("),
             "Got: {zod}"
         );
         assert!(zod.contains("idType.meta({"), "Got: {zod}");
@@ -75,7 +75,7 @@ mod zod_ts_tests {
 
     /// Shape (b) from txsch-bpnj's capture: an *unconstrained* generic brand — no
     /// `minLength`/`maxLength`/`pattern` at all — still has its `$SchemaDefault` annotated
-    /// `z.core.$ZodBranded<z.ZodString, "RoleId">` rather than `ZodType<RoleId<string>>`: the
+    /// `z.core.$ZodBranded<z.ZodString, "RoleId">` rather than `z.ZodType<RoleId<string>>`: the
     /// factory's chain ends in `.brand()` whether or not there is a check to route, so the same
     /// `_output` mismatch applies with or without one. Every class name is spelled off the `z`
     /// namespace, since none resolves as a bare name under the documented `import { z } from
@@ -977,8 +977,8 @@ mod constrained_generic_branded_tests {
     /// composed onto that argument — exactly the shape the design settled on.
     ///
     /// Annotated `z.core.$ZodBranded<z.ZodString, "StrictDocumentId">` rather than
-    /// `ZodType<StrictDocumentId<string>>`: the factory's own chain always ends in `.brand()`, and
-    /// strict tsc rejects the plain `ZodType<...>` spelling there — the classic interface's
+    /// `z.ZodType<StrictDocumentId<string>>`: the factory's own chain always ends in `.brand()`, and
+    /// strict tsc rejects the plain `z.ZodType<...>` spelling there — the classic interface's
     /// deprecated `_output` field is computed at the pre-brand type and a brand intersection does
     /// not refresh it (txsch-bpnj). `z.core.$ZodBranded` matches the spelling the non-generic const
     /// already carries for the identical reason, and every class name is spelled off the `z`
@@ -1034,7 +1034,7 @@ mod constrained_generic_branded_tests {
     /// has neither.
     ///
     /// Annotated `z.core.$ZodBranded<z.ZodLazy<typeof StrictDocumentId$SchemaDefault>, "OuterId">`
-    /// rather than `ZodType<OuterId<StrictDocumentId<string>>>` — the same `.brand()`-vs-`ZodType`
+    /// rather than `z.ZodType<OuterId<StrictDocumentId<string>>>` — the same `.brand()`-vs-`z.ZodType`
     /// mismatch `the_default_composes_the_factory_with_the_constrained_argument` documents, with
     /// the deferred target's own type spelled through `typeof` (txsch-bpnj), and every class name
     /// spelled off the `z` namespace (txsch-9rcw).
@@ -1101,7 +1101,7 @@ mod constrained_default_names_a_sibling_tests {
     /// thunk, over `InnerString$Schema`'s own base `.check(...)` surface.
     ///
     /// Annotated `z.core.$ZodBranded<z.ZodLazy<typeof InnerString$Schema>, "OuterBrand">` rather
-    /// than `ZodType<OuterBrand<InnerString>>` — the same `.brand()`-vs-`ZodType` mismatch
+    /// than `z.ZodType<OuterBrand<InnerString>>` — the same `.brand()`-vs-`z.ZodType` mismatch
     /// `constrained_generic_branded_tests` documents for the primitive-default case, with the
     /// deferred target's own type spelled through `typeof` (txsch-bpnj), and every class name
     /// spelled off the `z` namespace (txsch-9rcw).
@@ -1628,7 +1628,7 @@ mod branded_generic_inner_tests {
         assert!(zod.contains("  z.array(t).meta({"), "Got:\n{zod}");
         assert!(zod.contains(r#"}).brand<"TagList">();"#), "Got:\n{zod}");
         assert!(
-            zod.contains("export const TagList$SchemaFactory = <T extends ZodType>("),
+            zod.contains("export const TagList$SchemaFactory = <T extends z.ZodType>("),
             "Got:\n{zod}"
         );
         assert_eq!(
@@ -1650,7 +1650,7 @@ mod branded_generic_inner_tests {
         );
         assert!(zod.contains(r#"}).brand<"WeightIndex">();"#), "Got:\n{zod}");
         assert!(
-            zod.contains("export const WeightIndex$SchemaFactory = <T extends ZodType>("),
+            zod.contains("export const WeightIndex$SchemaFactory = <T extends z.ZodType>("),
             "Got:\n{zod}"
         );
         assert_eq!(
@@ -1676,7 +1676,7 @@ mod branded_generic_inner_tests {
         assert!(zod.contains("  t.meta({"), "Got:\n{zod}");
         assert!(zod.contains(r#"}).brand<"BareTag">();"#), "Got:\n{zod}");
         assert!(
-            zod.contains("export const BareTag$SchemaFactory = <T extends ZodType>("),
+            zod.contains("export const BareTag$SchemaFactory = <T extends z.ZodType>("),
             "Got:\n{zod}"
         );
         assert_eq!(
@@ -1763,22 +1763,22 @@ mod branded_generic_inner_tests {
 
     /// A generic alias publishes a factory exactly as the brand beside it does, so neither has an
     /// annotation left to erase an argument out of — the `const` each used to publish claimed
-    /// `ZodType<Name<unknown>>` while the declaration beside it kept the argument, which is a type
+    /// `z.ZodType<Name<unknown>>` while the declaration beside it kept the argument, which is a type
     /// error at any field naming either.
     #[test]
     fn a_generic_alias_publishes_the_factory_the_brand_beside_it_publishes() {
         for (zod, factory) in [
             (
                 tag_seq_schema::Schema::zod_schema(),
-                "export const TagSeqType$SchemaFactory = <T extends ZodType>(",
+                "export const TagSeqType$SchemaFactory = <T extends z.ZodType>(",
             ),
             (
                 weight_seq_schema::Schema::zod_schema(),
-                "export const WeightSeqType$SchemaFactory = <T extends ZodType>(",
+                "export const WeightSeqType$SchemaFactory = <T extends z.ZodType>(",
             ),
             (
                 bare_seq_schema::Schema::zod_schema(),
-                "export const BareSeqType$SchemaFactory = <T extends ZodType>(",
+                "export const BareSeqType$SchemaFactory = <T extends z.ZodType>(",
             ),
         ] {
             assert!(zod.contains(factory), "Got:\n{zod}");
@@ -1859,7 +1859,7 @@ mod branded_javascript_flavour_tests {
     #[test]
     fn a_brand_binding_carries_no_annotation() {
         for zod in [PlainMark::zod_schema(), HeldMark::<String>::zod_schema()] {
-            assert!(!zod.contains("ZodType"), "Got:\n{zod}");
+            assert!(!zod.contains("z.ZodType"), "Got:\n{zod}");
             assert!(!zod.contains("$ZodBranded"), "Got:\n{zod}");
             assert!(!zod.contains("$Schema:"), "Got:\n{zod}");
         }
@@ -2182,7 +2182,7 @@ mod branded_sibling_inner_tests {
         );
         let zod = OpenTag::<String>::zod_schema();
         assert!(
-            zod.contains("const buildOpenTag$Schema = <TagType extends ZodType>("),
+            zod.contains("const buildOpenTag$Schema = <TagType extends z.ZodType>("),
             "Got:\n{zod}"
         );
         assert!(
@@ -2190,7 +2190,7 @@ mod branded_sibling_inner_tests {
             "Got:\n{zod}"
         );
         assert!(
-            zod.contains("export const OpenTag$SchemaFactory = <TagType extends ZodType>("),
+            zod.contains("export const OpenTag$SchemaFactory = <TagType extends z.ZodType>("),
             "Got:\n{zod}"
         );
     }

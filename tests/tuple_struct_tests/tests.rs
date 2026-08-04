@@ -149,13 +149,13 @@ fn test_a_wider_tuple_struct_describes_a_fixed_tuple_in_zod() {
     assert!(!zod.contains("strictObject"), "Got: {zod}");
 }
 
-/// The `ZodType<...> = ...$RawSchema` framing only appears when typescript is also enabled.
+/// The `z.ZodType<...> = ...$RawSchema` framing only appears when typescript is also enabled.
 #[cfg(all(feature = "zod", feature = "typescript"))]
 #[test]
 fn test_a_tuple_struct_zod_schema_is_annotated_with_its_typescript_type() {
     let zod = Pair::zod_schema();
     assert!(
-        zod.contains("export const Pair$Schema: ZodType<Pair> = Pair$RawSchema;"),
+        zod.contains("export const Pair$Schema: z.ZodType<Pair> = Pair$RawSchema;"),
         "Got: {zod}"
     );
 }
