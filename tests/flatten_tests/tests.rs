@@ -73,6 +73,26 @@ enum CycleUnionEither {
     Only(Box<CycleUnionNode>),
 }
 
+/// A cycle spanning both places an intersection operand is written: a struct's `#[serde(flatten)]`
+/// base on one side, an internally tagged newtype variant's content on the other. Each names the
+/// other's `const`, so neither declaration order puts both above the other.
+#[cfg(feature = "zod")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct CycleVariantContent {
+    #[serde(flatten)]
+    back: CycleVariantHost,
+    own: String,
+}
+
+#[cfg(feature = "zod")]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "type")]
+enum CycleVariantHost {
+    Wrapped(Box<CycleVariantContent>),
+}
+
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct ExtraPart {
@@ -599,6 +619,34 @@ fn test_a_flatten_cycle_defers_both_sides_of_the_pair() {
     assert!(
         !second.contains(".and(CycleFirst$Schema)"),
         "`CycleFirst$Schema` is read eagerly in: {second}"
+    );
+}
+
+/// An intersection operand is written in two places — a struct's flattened base and an internally
+/// tagged newtype variant's content — and a cycle can run through both. Deferring one side alone
+/// leaves the other reading a name that a module declared below has not bound yet, so both sides
+/// carry the same deferral and the pair loads whichever order the modules are assembled in.
+#[test]
+#[cfg(feature = "zod")]
+fn test_a_flatten_cycle_through_a_variants_content_defers_both_sides() {
+    let content = CycleVariantContent::zod_schema();
+    let host = CycleVariantHost::zod_schema();
+
+    assert!(
+        content.contains("}).and(z.lazy(() => CycleVariantHost$Schema));"),
+        "expected a deferred base, got: {content}"
+    );
+    assert!(
+        host.contains("}).and(z.lazy(() => CycleVariantContent$Schema))"),
+        "expected a deferred content, got: {host}"
+    );
+    assert!(
+        !content.contains(".and(CycleVariantHost$Schema)"),
+        "`CycleVariantHost$Schema` is read eagerly in: {content}"
+    );
+    assert!(
+        !host.contains(".and(CycleVariantContent$Schema)"),
+        "`CycleVariantContent$Schema` is read eagerly in: {host}"
     );
 }
 

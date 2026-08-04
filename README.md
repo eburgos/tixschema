@@ -393,9 +393,11 @@ Generated Zod -- a flattened member is an intersection, which has no shape of it
 export const Internal$Schema: ZodType<Internal> = z.union([
   z.strictObject({ type: z.literal("Bare") }),
   z.strictObject({ type: z.literal("Fields"), a: z.string(), b: z.boolean() }),
-  z.strictObject({ type: z.literal("Wrapped") }).and(TagPayload$Schema),
+  z.strictObject({ type: z.literal("Wrapped") }).and(z.lazy(() => TagPayload$Schema)),
 ]);
 ```
+
+The content joins the member under `z.lazy` for the reason a flattened base does: the inner type is a `const` of its own and nothing orders one type's schema against another's, so reading the name while the union's `const` initializes would fail for any inner type declared below -- and a cycle running through a variant's content and a `#[serde(flatten)]` base has no order that puts each above the other. Deferred, every module loads whatever order it is assembled in.
 
 Only a value Serde writes as an object has members to put beside the tag. A newtype variant wrapping a string, a number, a boolean, a sequence, an `Option` or a tuple is one Serde refuses to serialize at run time (`cannot serialize tagged newtype variant ... containing a string`), and a multi-element tuple variant is one Serde's own derive refuses outright. `#[model_schema()]` rejects all of those at expansion rather than describing a value that cannot reach the wire; name a `content` key so the value gets an object of its own, or wrap it in a struct whose fields can sit beside the tag.
 
