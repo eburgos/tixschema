@@ -59,9 +59,8 @@ use crate::utils::{TrivialPattern, trivial_pattern};
 #[cfg(feature = "serde")]
 use crate::features::serde::{SerdeFieldMeta, SerdeTypeMeta};
 use crate::features::serde::{has_serde_default, parse_serde_key_omission};
-// The type is named only where a slot's own omission is read, which is where a surface describes
-// the tuple that slot sits in.
-#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+// The type is named where a positional slot's own omission is read: the tuple-struct walk, which
+// only a describing build performs, and the variant walk, which every build performs.
 use crate::features::serde::SerdeKeyOmission;
 
 #[cfg(feature = "serde")]
@@ -631,6 +630,19 @@ enum TupleStructShape {
     Array(Vec<FieldDef>),
     /// The bare value serde writes for a struct declaring exactly one slot.
     BareValue(Box<FieldDef>),
+}
+
+/// What one untagged variant's member walk produces: the members its surfaces are rendered from,
+/// the bindings its constrained members are checked under, and the three enum-wide lists the walk
+/// adds to, which the caller joins onto its own in declaration order.
+#[cfg(feature = "serde")]
+struct UntaggedVariantMembers {
+    bound: Vec<(proc_macro2::Ident, proc_macro2::Ident)>,
+    checks: Vec<proc_macro2::TokenStream>,
+    deferred_attrs: Vec<Vec<syn::Attribute>>,
+    field_defs: Vec<FieldDef>,
+    guard_errors: Vec<proc_macro2::TokenStream>,
+    validation_fns: Vec<proc_macro2::TokenStream>,
 }
 
 /// What the item around a field says about it: everything [`process_field`] needs that is not the
@@ -5168,6 +5180,92 @@ fn process_plain_enum(
     TokenStream::from(output)
 }
 
+/// The kind a variant publishes, which is not always the kind it declares.
+///
+/// A variant declaring exactly one slot and taking that slot off the wire is written as a unit
+/// variant, whatever tagging the enum carries. Captured on `V(#[serde(skip)] String)` holding
+/// `"s"`: externally tagged it writes `"One"` and reads `"One"` and `{"One":null}` back; under
+/// `#[serde(tag = "type")]` it writes and reads `{"type":"One"}`; untagged it writes and reads
+/// `null`. Those are the three payloads a declared unit variant writes in the same three places.
+///
+/// This is where the variant seam parts from the tuple-struct one. A one-slot *struct* was captured
+/// ignoring the attribute outright — it writes and reads its slot's value whatever `skip` says — so
+/// there the lone slot's spellings go unread. A one-slot *variant* has the variant name to fall
+/// back on, and serde uses it.
+///
+/// Every other declared arity keeps the kind it declared: captured, a two-slot variant with one
+/// slot off the wire writes `{"One":[7]}` and with both off writes `{"One":[]}` — a shorter array
+/// and then an empty one, never a bare value and never the bare name.
+fn variant_wire_kind(variant: &syn::Variant) -> VariantKind {
+    let kind = classify_variant(variant);
+    // `classify_variant` names `TupleSingle` for a variant of exactly one unnamed field, so the
+    // first field is the lone slot whose omission decides this.
+    let publishes_no_slot = matches!(kind, VariantKind::TupleSingle)
+        && variant
+            .fields
+            .iter()
+            .next()
+            .is_some_and(|field| parse_serde_key_omission(&field.attrs).absent_from_wire());
+    if publishes_no_slot {
+        VariantKind::Unit
+    } else {
+        kind
+    }
+}
+
+/// Rejects a tuple-variant slot whose serde attributes drop it out of one of serde's two directions
+/// and not the other.
+///
+/// Captured from serde on `enum E { One(#[serde(...)] String, u32) }` holding `("s", 7)`, and the
+/// same three attributes tell the same story under every tagging:
+/// - `skip_serializing` alone writes `{"One":[7]}` and reads only `{"One":["s",7]}`;
+/// - `skip_deserializing` alone writes `{"One":["s",7]}` and reads only `{"One":[7]}`;
+/// - `skip_serializing_if` writes `{"One":[7]}` or `{"One":["s",7]}` as its predicate decides, and
+///   reads only `{"One":["s",7]}`.
+///
+/// A lone slot splits the same way, into payloads further apart still: `One(#[serde(skip_
+/// serializing)] String)` writes the bare name `"One"` and reads only `{"One":"s"}`, and
+/// `skip_deserializing` writes `{"One":"s"}` and reads only `{"One":null}`. So unlike the
+/// tuple-struct seam, where serde ignores a lone slot's spellings, every declared arity of a
+/// variant is asked.
+///
+/// In each of them what serde writes is not what serde reads. A named field in the same position is
+/// describable — the key is simply absent from one payload and present in the other, which an
+/// optional key covers — but a slot is written by its place, so the two payloads have no common
+/// spelling. The declaration is refused rather than described, the way the named field whose
+/// omitted key serde cannot read back already is.
+///
+/// A named field of a struct variant is left alone here, its key being the spelling that describes
+/// both payloads; the subject is read off the field itself for that reason, the way the omission a
+/// key carries already is.
+///
+/// Not gated on the `serde` feature, and neither is the drop this stands beside: both read only the
+/// omission walk, which every build performs, and a toggle that changed the answer would leave one
+/// declaration refused in one build and described in another.
+fn check_variant_slot_wire_is_readable(
+    field: &Field,
+    index: usize,
+    variant_name: &str,
+    type_name: &str,
+    omission: SerdeKeyOmission,
+) -> Result<(), syn::Error> {
+    if field.ident.is_some() || !omission.drops_one_direction_only() {
+        return Ok(());
+    }
+    Err(syn::Error::new_spanned(
+        field,
+        format!(
+            "model_schema: slot {index} of variant `{variant_name}` of enum `{type_name}` carries \
+             a serde attribute that drops it from only one of serde's two directions, so what \
+             serde writes for the variant is not what serde reads for it — one of them carries the \
+             slot and the other does not. A slot is written by its place rather than under a key, \
+             so there is no optional spelling to describe both and no schema can be written for \
+             the pair. Use #[serde(skip)] to take the slot off the wire in both directions, or \
+             drop the attribute so the slot is written and read in its place."
+        ),
+    ))
+}
+
 /// Processes each variant of a discriminated enum, returning per-variant field defs, doc strings,
 /// and variant kinds in declaration order, plus the collected serde validation functions and the
 /// `validate()` arms those functions are run from.
@@ -5175,6 +5273,14 @@ fn process_plain_enum(
 /// A member's check is generated here whatever the enum's tagging, so the accessor built from these
 /// arms exists on all three tagged flavors alike — the tag decides how the value is written, not
 /// which of its members carry a bound.
+///
+/// A slot serde carries in neither direction leaves the walk, the way a named field whose key
+/// reaches no payload already does. Captured: `One(#[serde(skip)] String, u32)` holding `("s", 7)`
+/// writes `{"One":[7]}` and reads `{"One":[7]}` back, refusing `{"One":["s",7]}` — the slot is
+/// absent from the array in both directions and the slots after it move up, so the described tuple
+/// is the slots that remain, which shrinks its arity, its `prefixItems` and its element types
+/// together. The def is still built before that decision, so a slot leaves the wire without taking
+/// the guards it violates with it.
 fn collect_discriminated_variants(
     item_enum: &mut syn::ItemEnum,
     rename_all: Option<&str>,
@@ -5198,7 +5304,10 @@ fn collect_discriminated_variants(
         let variant_ident = item.ident.to_string();
         let final_name =
             get_final_variant_name(&variant_ident, field_rename.as_deref(), rename_all);
-        let variant_kind = classify_variant(item);
+        // The Rust shape the `validate()` arm is matched by, beside the wire shape the surfaces
+        // describe: a variant that publishes no slot is still declared holding one.
+        let declared_kind = classify_variant(item);
+        let wire_kind = variant_wire_kind(item);
         // A struct variant is where serde accepts a container-level `default`, so it is the
         // container its own fields' omissions are read against.
         let variant_defaulted = has_serde_default(&item.attrs);
@@ -5207,7 +5316,18 @@ fn collect_discriminated_variants(
         let mut bound: Vec<(proc_macro2::Ident, proc_macro2::Ident)> = Vec::new();
         let mut checks: Vec<proc_macro2::TokenStream> = Vec::new();
         let total_fields = item.fields.len();
-        for field in &mut item.fields {
+        for (index, field) in item.fields.iter_mut().enumerate() {
+            let omission = parse_serde_key_omission(&field.attrs);
+            let positional = field.ident.is_none();
+            if let Err(rejection) = check_variant_slot_wire_is_readable(
+                field,
+                index,
+                &variant_ident,
+                &enum_type_name,
+                omission,
+            ) {
+                guard_errors.push(rejection.to_compile_error());
+            }
             let (f_def, validation_fn, validate_body, field_guard_errors) = process_field(
                 &FieldContext {
                     container_defaulted: variant_defaulted,
@@ -5231,10 +5351,13 @@ fn collect_discriminated_variants(
                 checks.push(body);
             }
             guard_errors.extend(field_guard_errors);
+            if positional && omission.absent_from_wire() {
+                continue;
+            }
             push_described_field(&mut field_defs, f_def);
         }
         per_variant_checks.push((
-            variant_check_pattern(&item.ident, &variant_kind, total_fields, &bound),
+            variant_check_pattern(&item.ident, &declared_kind, total_fields, &bound),
             checks,
         ));
 
@@ -5243,7 +5366,7 @@ fn collect_discriminated_variants(
             discriminator_value: final_name,
             docs: discriminator_docs,
             field_defs,
-            kind: variant_kind,
+            kind: wire_kind,
         });
     }
 
@@ -5983,8 +6106,14 @@ fn internally_tagged_guard_errors(
                 );
             }
             // An empty tuple variant carries nothing: serde writes it as the tag alone, which is
-            // what the unit arm already describes.
+            // what the unit arm already describes. So does a variant whose lone slot is off the
+            // wire — captured, `One(#[serde(skip)] String)` writes and reads `{"type":"One"}`
+            // whatever the slot holds, so what the inner type would have written beside the tag is
+            // never asked.
             let field = unnamed.unnamed.first()?;
+            if parse_serde_key_omission(&field.attrs).absent_from_wire() {
+                return None;
+            }
             let inner = get_field_def("_inner", &field.ty, "");
             let message = match tagged_content(&inner) {
                 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -6318,9 +6447,14 @@ fn process_internally_tagged_enum(
 /// every other shape is refused as an error spanned on the variant, which the caller collects so
 /// one expansion reports every offender rather than stopping at the first.
 ///
-/// The single-member pattern is what rules out a `TupleSingle` carrying no field. That shape is
-/// unreachable — [`classify_variant`] sends an empty `Foo()` to `Unit` — and a slice pattern says
-/// so structurally, where a length assertion would have to be written and then never fire.
+/// The single-member pattern is what rules out a `TupleSingle` carrying no member. That shape is
+/// unreachable — [`variant_wire_kind`] sends both an empty `Foo()` and a lone slot taken off the
+/// wire to `Unit` — and a slice pattern says so structurally, where a length assertion would have
+/// to be written and then never fire.
+///
+/// The arity a refused tuple variant is named by is the one the author declared, not the one that
+/// reached the wire: a slot dropped from the description is still a slot the union has no member
+/// spelling for.
 #[cfg(feature = "serde")]
 fn render_untagged_variant(
     kind: &VariantKind,
@@ -6335,10 +6469,10 @@ fn render_untagged_variant(
             variant,
             "a unit variant",
         )),
-        (VariantKind::TupleSingle | VariantKind::TupleMultiple, fields) => {
+        (VariantKind::TupleSingle | VariantKind::TupleMultiple, _) => {
             Err(unsupported_untagged_variant_error(
                 variant,
-                &format!("a tuple variant with {} fields", fields.len()),
+                &format!("a tuple variant with {} fields", variant.fields.len()),
             ))
         }
     }
@@ -6723,6 +6857,90 @@ fn untagged_member_field_def(
 /// sentence. That is what the member's schema already means on the other two surfaces, where the
 /// same declaration is one branch of an `anyOf` and one member of a `z.union`; leaving the hook out
 /// is what would have made the Rust side the odd one, reading back values both schemas reject.
+/// Walks one untagged variant's members, stamping each with its validation and collecting the
+/// guards it earns.
+///
+/// A slot serde carries in neither direction leaves the walk, the way it does on every other
+/// positional seam, and a slot dropped from one direction only is refused there. Untagged, a
+/// multi-element tuple variant has no member spelling at all — the caller refuses it whole — so
+/// what the drop reaches here is the lone slot, which takes the variant to the unit it is written
+/// as.
+#[cfg(feature = "serde")]
+fn collect_untagged_variant_members(
+    variant: &mut syn::Variant,
+    enum_type_name: &str,
+    schema_module_name: Option<&str>,
+    type_parameters: &[String],
+) -> UntaggedVariantMembers {
+    let variant_name = variant.ident.to_string();
+    let variant_defaulted = has_serde_default(&variant.attrs);
+    let mut walked = UntaggedVariantMembers {
+        bound: Vec::new(),
+        checks: Vec::new(),
+        deferred_attrs: Vec::new(),
+        field_defs: Vec::new(),
+        guard_errors: Vec::new(),
+        validation_fns: Vec::new(),
+    };
+
+    for (index, field) in variant.fields.iter_mut().enumerate() {
+        let omission = parse_serde_key_omission(&field.attrs);
+        let positional = field.ident.is_none();
+        if let Err(rejection) = check_variant_slot_wire_is_readable(
+            field,
+            index,
+            &variant_name,
+            enum_type_name,
+            omission,
+        ) {
+            walked.guard_errors.push(rejection.to_compile_error());
+        }
+        let field_name = field_ident_string(field);
+        let prop_meta = parse_model_schema_prop_attributes(&field.attrs);
+        let serde_field_meta = parse_serde_field_attributes(&field.attrs);
+
+        let new_attrs = declaration_attrs(field);
+        let mut injected_attrs: Vec<syn::Attribute> = Vec::new();
+        let (validation_fn, validate_body, positional_constraint_error) = generate_field_validation(
+            field,
+            schema_module_name,
+            &field_name,
+            Some(&variant_name),
+            &prop_meta,
+            &mut injected_attrs,
+        );
+        field.attrs = new_attrs;
+        walked.deferred_attrs.push(injected_attrs);
+        walked.validation_fns.extend(validation_fn);
+        if let (Some(body), Some(ident)) = (validate_body, field.ident.as_ref()) {
+            walked.bound.push((ident.clone(), member_binding(ident)));
+            walked.checks.push(body);
+        }
+
+        let member_ctx = untagged_variant_context(
+            variant_defaulted,
+            schema_module_name,
+            enum_type_name,
+            type_parameters,
+            &variant_name,
+        );
+        let (member_def, member_guard_errors) = untagged_member_field_def(
+            &member_ctx,
+            field,
+            &field_name,
+            prop_meta,
+            &serde_field_meta,
+            positional_constraint_error,
+        );
+        walked.guard_errors.extend(member_guard_errors);
+        if positional && omission.absent_from_wire() {
+            continue;
+        }
+        push_described_field(&mut walked.field_defs, member_def);
+    }
+    walked
+}
+
 #[cfg(feature = "serde")]
 fn collect_untagged_members(
     item_enum: &mut syn::ItemEnum,
@@ -6744,60 +6962,23 @@ fn collect_untagged_members(
     let mut deferred_attrs: Vec<Vec<syn::Attribute>> = Vec::new();
 
     for variant in &mut item_enum.variants {
-        let kind = classify_variant(variant);
-        let variant_name = variant.ident.to_string();
-        let variant_defaulted = has_serde_default(&variant.attrs);
-
-        let mut field_defs: Vec<FieldDef> = Vec::new();
-        let mut bound: Vec<(proc_macro2::Ident, proc_macro2::Ident)> = Vec::new();
-        let mut checks: Vec<proc_macro2::TokenStream> = Vec::new();
+        let declared_kind = classify_variant(variant);
+        let kind = variant_wire_kind(variant);
         let total_fields = variant.fields.len();
-        for field in &mut variant.fields {
-            let field_name = field_ident_string(field);
-            let prop_meta = parse_model_schema_prop_attributes(&field.attrs);
-            let serde_field_meta = parse_serde_field_attributes(&field.attrs);
-
-            let new_attrs = declaration_attrs(field);
-            let mut injected_attrs: Vec<syn::Attribute> = Vec::new();
-            let (validation_fn, validate_body, positional_constraint_error) =
-                generate_field_validation(
-                    field,
-                    schema_module_name,
-                    &field_name,
-                    Some(&variant_name),
-                    &prop_meta,
-                    &mut injected_attrs,
-                );
-            field.attrs = new_attrs;
-            deferred_attrs.push(injected_attrs);
-            validation_fns.extend(validation_fn);
-            if let (Some(body), Some(ident)) = (validate_body, field.ident.as_ref()) {
-                bound.push((ident.clone(), member_binding(ident)));
-                checks.push(body);
-            }
-
-            let member_ctx = untagged_variant_context(
-                variant_defaulted,
-                schema_module_name,
-                &enum_type_name,
-                &type_parameters,
-                &variant_name,
-            );
-            let (member_def, member_guard_errors) = untagged_member_field_def(
-                &member_ctx,
-                field,
-                &field_name,
-                prop_meta,
-                &serde_field_meta,
-                positional_constraint_error,
-            );
-            guard_errors.extend(member_guard_errors);
-            push_described_field(&mut field_defs, member_def);
-        }
+        let mut walked = collect_untagged_variant_members(
+            variant,
+            &enum_type_name,
+            schema_module_name,
+            &type_parameters,
+        );
+        guard_errors.append(&mut walked.guard_errors);
+        validation_fns.append(&mut walked.validation_fns);
+        deferred_attrs.append(&mut walked.deferred_attrs);
+        let field_defs = walked.field_defs;
 
         per_variant_checks.push((
-            variant_check_pattern(&variant.ident, &kind, total_fields, &bound),
-            checks,
+            variant_check_pattern(&variant.ident, &declared_kind, total_fields, &walked.bound),
+            walked.checks,
         ));
 
         match render_untagged_variant(&kind, variant, &field_defs, &enum_type_name) {
@@ -6997,10 +7178,10 @@ fn published_wire_leaves(written: &FieldDef) -> Vec<WireLeaf> {
 /// The leaves an externally tagged enum's variants write, one per variant and in the order the
 /// `oneOf` it publishes writes them.
 ///
-/// The classification is [`classify_variant`]'s, which is the one
+/// The classification is [`variant_wire_kind`]'s, which is the one
 /// [`render_external_variant`] writes each variant from — so what is recorded and what is emitted
 /// read the declaration the same way, and a variant that renders as a bare string is a leaf that
-/// says so.
+/// says so. A variant whose lone slot is off the wire is one of those: serde writes its name alone.
 #[cfg(all(feature = "serde", any(feature = "zod", feature = "typescript")))]
 fn external_variant_wire_leaves(variants: &Punctuated<syn::Variant, Token![,]>) -> Vec<WireLeaf> {
     variants
@@ -7008,7 +7189,7 @@ fn external_variant_wire_leaves(variants: &Punctuated<syn::Variant, Token![,]>) 
         .enumerate()
         .map(|(index, variant)| WireLeaf {
             branch: vec![index + 1],
-            non_object: matches!(classify_variant(variant), VariantKind::Unit).then_some("string"),
+            non_object: matches!(variant_wire_kind(variant), VariantKind::Unit).then_some("string"),
         })
         .collect()
 }

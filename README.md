@@ -100,6 +100,8 @@ A slot dropped from only one of the two directions has no such description and i
 
 A struct declaring a single slot keeps it whatever these attributes say: serde writes and reads a newtype struct's only slot regardless, so nothing there is dropped.
 
+A tuple *variant*'s slots read the same way, with one difference at the lone-slot arity. `enum E { One(#[serde(skip)] String, u32) }` holding `("s", 7)` writes `{"One":[7]}`, reads that back, and refuses `{"One":["s",7]}`, so the described tuple shrinks exactly as a struct's does — under the content key when one is named, and to `{"One":[]}` when every slot is dropped. Where a variant differs is that it has its own name to fall back on: a variant declaring one slot and dropping it is written as a unit variant, `"One"` externally, `{"type":"One"}` under a tag and `null` untagged, and each surface describes it as the unit it has become. Because serde does read a variant slot's attributes at every arity, the one-directional halves are refused there at every arity too — `One(#[serde(skip_serializing)] String)` writes `"One"` and reads only `{"One":"s"}`.
+
 Which key a field writes is read off the attribute in every build, `serde` feature or not — one declaration describes one wire under every toggle. What the feature buys is the renaming, the tagging and the guards.
 
 ```rust
@@ -1983,7 +1985,7 @@ Supported Serde attributes:
 - `#[serde(flatten)]` -- flatten a field into the parent as an intersection type (`A & B`) / Zod `.and(...)`
 - `#[serde(transparent)]` -- transparent wrappers (used for branded newtypes)
 - `#[serde(skip_serializing_if = "...")]` -- the key is left out of the payload when the predicate fires, so the member is described under an optional key: `roles?: Array<string>;` in TypeScript, `roles: z.array(z.string()).optional(),` in Zod, and no `required` entry in the JSON Schema
-- `#[serde(skip)]` -- the key is written into no payload and read out of none, so no surface describes the member at all: no TypeScript member, no Zod key, and neither a `properties` nor a `required` entry. On a tuple-struct slot it takes the slot out of the described tuple, which shortens the arity
+- `#[serde(skip)]` -- the key is written into no payload and read out of none, so no surface describes the member at all: no TypeScript member, no Zod key, and neither a `properties` nor a `required` entry. On a tuple-struct or tuple-variant slot it takes the slot out of the described tuple, which shortens the arity -- and a variant declaring one slot becomes a unit variant, which is what serde writes for it
 - `#[serde(skip_serializing)]` -- the write half of `skip`: the key is left out of every payload while a supplied one is still read, so the member is described under an optional key, as `skip_serializing_if` is
 - `#[serde(skip_deserializing)]` -- the read half: the key is written into every payload while a supplied one is discarded, so the member keeps a required key
 
