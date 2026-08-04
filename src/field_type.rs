@@ -841,6 +841,28 @@ impl FieldDef {
         }
     }
 
+    /// The members of the untagged union this field names as an object flattening it spells them,
+    /// as the registry recorded them — and nothing for a field that names no such union, and for one
+    /// whose members carry no exclusion the union's own name does not already describe.
+    ///
+    /// Answered under the same bound [`Self::zod_union_members`] is answered under, and for the same
+    /// reason: what is spliced in the name's place has to be the whole of what the operand
+    /// describes.
+    #[cfg(all(feature = "serde", feature = "typescript"))]
+    pub fn ts_union_members(&self) -> Vec<String> {
+        let wrapped = self
+            .model_schema_prop_meta
+            .as_ref()
+            .is_some_and(|meta| !meta.preprocess.is_empty());
+        if self.array_depth > 0 || wrapped {
+            return Vec::new();
+        }
+        let FieldDefType::SiblingType(name, _) = &self.field_type else {
+            return Vec::new();
+        };
+        lookup_alias_info(name).map_or_else(Vec::new, |info| info.ts_union_members)
+    }
+
     /// Builds the TypeScript type before the outermost optional wrap: the type match plus one
     /// `Array<…>` per array level, each carrying the `| null` of the level it wraps. The outermost
     /// level's wrap lives in `typescript_typename` and `typescript_slot_typename`, which is where

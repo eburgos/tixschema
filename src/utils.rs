@@ -267,6 +267,12 @@ pub struct AliasInfo {
     /// [`record_zod_factory`] as the item decides which of the two it publishes.
     #[cfg(feature = "zod")]
     pub publishes_zod_factory: bool,
+    /// What an untagged enum's members are spelled as where an object flattens the enum itself, one
+    /// per member in the order the union writes them — and empty both for every other item and
+    /// wherever spelling the members says nothing the enum's own name does not already say. Filled
+    /// by [`record_ts_union_members`] once that enum's own expansion has rendered them.
+    #[cfg(all(feature = "serde", feature = "typescript"))]
+    pub ts_union_members: Vec<String>,
     /// What the value surface written under this name is, in the vocabulary a constrained brand's
     /// refusal names shapes by — and [`PublishedShape::Flat(None)`] both when that surface is one
     /// string checks land on and when nothing has been recorded at all. Filled by
@@ -654,6 +660,8 @@ pub fn register_alias_info(
                 module_name: module_name.to_owned(),
                 #[cfg(feature = "zod")]
                 publishes_zod_factory: false,
+                #[cfg(all(feature = "serde", feature = "typescript"))]
+                ts_union_members: Vec::new(),
                 value_shape: PublishedShape::Flat(None),
                 #[cfg(all(feature = "serde", any(feature = "zod", feature = "typescript")))]
                 wire: Vec::new(),
@@ -746,6 +754,26 @@ pub fn record_zod_union_members(rust_ident: &str, members: &[ZodUnionMember]) {
     });
 }
 
+/// Records what an untagged enum's members are spelled as where an object flattens the enum itself,
+/// on the entry that enum has already registered.
+///
+/// The two spellings of one union part where an object is joined to it. Standing alone the union
+/// describes one member at a time, and the enum's own name is the whole of what it publishes;
+/// intersected with an open object each member is left satisfied by a payload carrying the other
+/// members' keys as well, which serde writes for no value. The members recorded here carry the
+/// exclusions that close them against one another, so the merge can spell them in the name's place.
+///
+/// Nothing is recorded where those exclusions come to nothing — a union of names proves no key an
+/// object could be told to leave out — and the merge then names the union as it always did.
+#[cfg(all(feature = "serde", feature = "typescript"))]
+pub fn record_ts_union_members(rust_ident: &str, members: &[String]) {
+    ALIAS_INFO.with(|map| {
+        if let Some(info) = map.borrow_mut().get_mut(rust_ident) {
+            info.ts_union_members = members.to_vec();
+        }
+    });
+}
+
 /// Records what an externally tagged enum's variants are spelled as where an object flattens the
 /// enum itself, on the entry that enum has already registered.
 ///
@@ -756,10 +784,11 @@ pub fn record_zod_union_members(rust_ident: &str, members: &[ZodUnionMember]) {
 /// where the union publishes a bare string no object joins. So the flatten-edge spelling is recorded
 /// beside the union's rather than read back off it.
 ///
-/// Recorded for every externally tagged enum, and read by each surface under the bound that
-/// surface's own merge has: Zod joins one operand per variant wherever the enum is flattened
-/// directly, TypeScript only where a variant is proved to be no object, an intersection distributing
-/// over a union of objects on its own.
+/// Recorded for every externally tagged enum, and read by each surface wherever the enum is
+/// flattened directly. A Zod intersection recognizes exactly the keys its operands name, so it takes
+/// one operand per variant; TypeScript distributes over a union of objects on its own and takes the
+/// variants for what the union alone cannot say — the key set serde writes for a unit variant, and
+/// each variant's silence about the keys its siblings tag.
 #[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod")))]
 pub fn record_flatten_variants(rust_ident: &str, variants: &[FlattenVariant]) {
     ALIAS_INFO.with(|map| {
