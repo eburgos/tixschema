@@ -4448,6 +4448,23 @@ fn every_sequence_wrapper_describes_as_the_vec_of_its_element_in_a_slot() {
     }
 }
 
+/// And in an untagged variant's member, the third position that dispatches a value. It reads the
+/// wrappers through the seam the other positions read them through, so a member describes a covered
+/// wrapper as the `Vec` of its element too — and none of them can name a schema module after a
+/// wrapper, which is a module the expansion never declares and rustc reports at the member's type.
+#[cfg(all(feature = "jsonschema", feature = "serde"))]
+#[test]
+fn every_sequence_wrapper_describes_as_the_vec_of_its_element_in_an_untagged_member() {
+    let expected = super::field_json_schema_value(&parsed_u32_vec_value()).to_string();
+    for wrapper in SEQUENCE_WRAPPERS {
+        assert_eq!(
+            super::field_json_schema_value(&wrapped_u32_value(wrapper)).to_string(),
+            expected,
+            "for: {wrapper}"
+        );
+    }
+}
+
 /// A sibling is carried by reference in every position that holds one, so the two slot positions
 /// name one schema module and wrap it the same way — a tuple element that fell back to the open
 /// object would admit values the same type in a map member rejects.

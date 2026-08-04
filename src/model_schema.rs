@@ -5107,6 +5107,14 @@ fn string_field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
 /// position leaves it open too.
 #[cfg(all(feature = "serde", feature = "jsonschema"))]
 fn field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
+    // A covered sequence wrapper writes the JSON array of its element, so the member is dispatched
+    // as the arrayed element it stands for — through the seam field position reads it through, and
+    // the array levels it carries are the whole field's, which is why it replaces this call rather
+    // than being wrapped again.
+    if let Some(element_field) = sequence_wrapper_field(fld) {
+        return field_json_schema_value(&element_field);
+    }
+
     let inner = match &fld.field_type {
         FieldDefType::SiblingType(name, _) => sibling_json_schema_value(name, fld.type_span),
         FieldDefType::String => string_field_json_schema_value(fld),
@@ -6166,6 +6174,19 @@ fn sequence_wrapper_element(fld: &FieldDef) -> Option<&FieldDef> {
     is_sequence_wrapper(wrapper_name).then_some(element)
 }
 
+/// The field a sequence-spelled type stands for: its element, carrying the array level the wrapper
+/// writes — and `None` for everything else.
+///
+/// Every position that renders a wrapper renders it through here, so the detection and the unwrap
+/// live in one place: a field, a slot, and an untagged variant's member cannot answer differently
+/// for the same name, and none of them can name a schema module after a wrapper the expansion never
+/// declares. The result stands for the whole field, so a caller re-dispatches it in place of the
+/// field rather than wrapping it again.
+#[cfg(feature = "jsonschema")]
+fn sequence_wrapper_field(fld: &FieldDef) -> Option<FieldDef> {
+    sequence_wrapper_element(fld).map(|element| fld.collection_element_field(element))
+}
+
 /// The classification every position reads a map key through.
 ///
 /// The rule it applies is serde's own: a JSON object key is a string, so a key serde writes as a
@@ -6538,11 +6559,8 @@ fn map_member_slot_value(
 #[cfg(feature = "jsonschema")]
 fn normalized_slot_value(value: &FieldDef) -> FieldDef {
     let mut normalized = value.clone();
-    while let FieldDefType::SiblingType(wrapper_name, wrapper_args) = &normalized.field_type
-        && is_sequence_wrapper(wrapper_name)
-        && let [element] = wrapper_args.as_slice()
-    {
-        normalized = normalized.collection_element_field(element);
+    while let Some(element_field) = sequence_wrapper_field(&normalized) {
+        normalized = element_field;
     }
     normalized
 }
@@ -6885,25 +6903,22 @@ fn build_sibling_type_field_schema(
     // exactly as the `Vec` of the same element does — element by element, at every type. Which
     // wrappers those are is the surfaces' one shared answer, so no name reaches one surface as an
     // array and another as a schema module of its own.
-    if let [element] = lst
-        && is_sequence_wrapper(name)
-    {
-        build_field_type_schema(&fld.collection_element_field(element), field_name_str)
-    } else {
-        // Every remaining shape is carried by the named type's own schema module: the non-generic
-        // sibling (lst.is_empty()), and the generic branded wrapper like DocumentTypeId<String>,
-        // whose schema is defined on the wrapper and whose type params do not affect it. A map is
-        // not among them — the parser claims both 2-argument map idents before the sibling fallback
-        // is reached, so a map arrives as a `Map` and is rendered once, there. A name this arm
-        // cannot resolve is the compile error the reference raises at the type, which is what keeps
-        // a second rendering — free to widen or to drop the array the one rendering carries — from
-        // growing back here.
-        generate_type_schema(
-            fld,
-            field_name_str,
-            &sibling_json_schema_value(name, fld.type_span),
-        )
+    if let Some(element_field) = sequence_wrapper_field(fld) {
+        return build_field_type_schema(&element_field, field_name_str);
     }
+
+    // Every remaining shape is carried by the named type's own schema module: the non-generic
+    // sibling (lst.is_empty()), and the generic branded wrapper like DocumentTypeId<String>, whose
+    // schema is defined on the wrapper and whose type params do not affect it. A map is not among
+    // them — the parser claims both 2-argument map idents before the sibling fallback is reached,
+    // so a map arrives as a `Map` and is rendered once, there. A name this arm cannot resolve is
+    // the compile error the reference raises at the type, which is what keeps a second rendering —
+    // free to widen or to drop the array the one rendering carries — from growing back here.
+    generate_type_schema(
+        fld,
+        field_name_str,
+        &sibling_json_schema_value(name, fld.type_span),
+    )
 }
 
 /// The `json!` literal an `ObjectId` describes as — the closed `$oid` object serde writes — with
