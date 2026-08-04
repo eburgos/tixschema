@@ -863,6 +863,36 @@ EcmDocument$SchemaFactory(z.string(), z.number()) === wireDocument;  // false --
 
 A generic type that also flattens keeps the deferred read of its base, so declaration order stays irrelevant: `.and(z.lazy(() => Envelope$Schema))` composes inside the factory unchanged.
 
+#### A generic type may reach itself
+
+A generic type that holds itself -- directly, or through a second type that holds it back -- is described on every surface. JSON Schema hoists it into `$defs` once and points a `$ref` back at that one definition, which stands because every reference around the cycle carries the same filling. TypeScript writes the name inside itself, arguments and all. Zod calls the factory again with the argument the outer call was handed, and the memo cache is what makes that terminate: the schema is in the cache before the recursive call is made, so it comes back rather than being rebuilt.
+
+```rust
+#[model_schema(default_types(IdType = String))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Node<IdType> {
+    pub children: Vec<Self>,
+    pub id: IdType,
+}
+```
+
+```typescript
+export type Node<IdType> = {
+  children: Array<Node<IdType>>;
+  id: IdType;
+};
+
+const buildNode$Schema = <IdType extends ZodType>(
+  idType: IdType,
+) =>
+  z.strictObject({
+  get children() { return z.array(Node$SchemaFactory(idType)); },
+  id: idType,
+});
+```
+
+The member is written as a getter so that the call is made after the factory has reached its cache rather than while its object is still being built. Where a cycle spans two types, the reference the getter is written on is the one pointing *forward* -- at a type declared below -- because that is the reference no cycle can be built without: if every reference in a cycle named something already declared, declaration positions would have to decrease all the way round. Deferring those leaves nothing that can cycle, and every reference pointing back at a type already declared is written as it stands.
+
 #### Declaring the default type
 
 JSON Schema has no type parameters. A generic type's document has to be built from one concrete filling, and nothing in the declaration says which — so `default_types` says it, one `Parameter = Type` pair per type parameter:
@@ -878,6 +908,8 @@ pub struct EcmDocument<IdType, DateType> {
 ```
 
 The pairs may be written in any order, and the argument sits beside every other item-level argument -- `name`, `pattern`, `minLength`, `maxLength`, `no_display` -- changing none of them. A lifetime and a const parameter name no type, so neither takes an entry.
+
+A lifetime is dropped from every emitted surface, neither TypeScript nor JSON Schema having one and a borrowed value writing exactly what its owned form writes. A const renders in one position only -- an array length, which [describes as an unbounded array](#collections-and-maps) -- so a const handed to a written type as an *argument* is refused, spanned on the argument: an argument list is read as a list of types, and the const standing in one would have the JSON document call into a module named after it and the TypeScript declaration write a name it binds nothing for. A const no written type carries is untouched.
 
 The declared filling is what `json_schema()` writes the document at. Beside it, a generic type's schema module publishes `json_schema_with`, which takes one document per parameter, positionally, in the order the item declares them:
 
@@ -900,6 +932,7 @@ The declaration is read in both directions, and each refusal points at what earn
 | An entry naming something the item does not declare | Refused in **every** feature configuration, spanned on the entry. A misspelled parameter fills nothing, and the parameter it was meant for would be left with no default at all. |
 | A type parameter with no entry | Refused only where `jsonschema` is on, spanned on the parameter. Nothing else reads the default, so the same item compiles untouched without that feature. |
 | `default_types` on an item declaring no type parameter | Refused, there being nothing for a filling to fill. |
+| An entry filled at a type the macro cannot describe -- `char`, `i128`, `u128`, `f16`, `f128` | Refused only where `jsonschema` is on, spanned on the filling. A name the type dispatch has no arm for is read as another `#[model_schema]` item, which is right for a sibling declared below and gibberish for a primitive: the emission would name a `char_schema` module nothing publishes. Only the primitive names the language reserves are refused, so a forward-referenced sibling keeps compiling. |
 
 There is deliberately no fallback. Guessing a filling produces a document that silently rejects valid payloads, which is the failure the declaration exists to prevent.
 

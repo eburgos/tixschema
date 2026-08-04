@@ -12,7 +12,9 @@ use crate::features::model_schema_prop::ModelSchemaPropMeta;
 use crate::utils::{lookup_alias_info, safe_type_name, written_type};
 
 #[cfg(feature = "zod")]
-use crate::utils::{ZodUnionMember, escape_js_regex_literal, zod_factory_argument};
+use crate::utils::{
+    ZodUnionMember, escape_js_regex_literal, publishes_zod_factory, zod_factory_argument,
+};
 
 #[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod")))]
 use crate::utils::FlattenVariant;
@@ -785,33 +787,113 @@ impl FieldDef {
         }
     }
 
-    /// Rewrites any `Self` type reference to the concrete enclosing type name.
+    /// Whether this field reaches a generic type the registry does not hold yet — a
+    /// `#[model_schema]` item declared below the one being expanded.
     ///
-    /// A recursive type may refer to itself with the `Self` keyword
-    /// (e.g. `Array(Vec<Self>)`). The macro detects recursion and renders
-    /// references by comparing type names, so `Self` must be resolved to the
-    /// actual type name before that logic runs; afterwards `Vec<Self>` is
-    /// treated exactly like `Vec<EnclosingType>`.
+    /// Such a reference is written as a call to the factory that item goes on to publish, which is
+    /// the only binding that can take the arguments written here. Spliced in as it stands, the call
+    /// runs while the containing builder's own body is being evaluated — and where the item below
+    /// points back at this one, that call re-enters this factory before it has reached its cache,
+    /// and the pair recurses until the stack ends.
     ///
-    /// Recurses through `SiblingType` generics, `Map` keys/values, and `Tuple`
-    /// elements.
-    pub fn resolve_self_references(&mut self, type_name: &str) {
+    /// Deferring exactly these references is enough to end that, and it needs no cycle to be found.
+    /// Every cycle contains at least one of them: if every reference in a cycle named something
+    /// already registered, declaration positions would strictly decrease all the way round, which
+    /// no cycle can do. What is left once they are deferred is a graph whose every remaining
+    /// reference names something declared earlier, so it cannot cycle and every chain of eager
+    /// calls ends.
+    ///
+    /// The same partial-answer regime the export name and the map-key registry already run under:
+    /// a name the registry does not hold is a name expanded later, and one it does hold was
+    /// expanded before.
+    #[cfg(feature = "zod")]
+    pub fn reaches_a_type_declared_later(&self) -> bool {
+        match &self.field_type {
+            FieldDefType::SiblingType(name, generics) => {
+                (!generics.is_empty()
+                    && !is_sequence_wrapper(name)
+                    && lookup_alias_info(name).is_none())
+                    || generics.iter().any(Self::reaches_a_type_declared_later)
+            }
+            FieldDefType::Map(key, value) => {
+                key.reaches_a_type_declared_later() || value.reaches_a_type_declared_later()
+            }
+            FieldDefType::Tuple(elements) => {
+                elements.iter().any(Self::reaches_a_type_declared_later)
+            }
+            FieldDefType::TypeParam(_)
+            | FieldDefType::Unknown
+            | FieldDefType::StringLiteral(_)
+            | FieldDefType::Boolean
+            | FieldDefType::String
+            | FieldDefType::U8
+            | FieldDefType::U16
+            | FieldDefType::U32
+            | FieldDefType::U64
+            | FieldDefType::I8
+            | FieldDefType::I16
+            | FieldDefType::I32
+            | FieldDefType::I64
+            | FieldDefType::Usize
+            | FieldDefType::Isize
+            | FieldDefType::F32
+            | FieldDefType::F64 => false,
+            #[cfg(feature = "object_id")]
+            FieldDefType::ObjectId => false,
+            #[cfg(feature = "chrono")]
+            FieldDefType::NaiveDate
+            | FieldDefType::NaiveTime
+            | FieldDefType::NaiveDateTime
+            | FieldDefType::DateTime => false,
+        }
+    }
+
+    /// Rewrites any `Self` type reference to the concrete enclosing type name, at the parameters
+    /// the enclosing item declares.
+    ///
+    /// A recursive type may refer to itself with the `Self` keyword (e.g. `Array(Vec<Self>)`). The
+    /// macro detects recursion and renders references by comparing type names, so `Self` must be
+    /// resolved to the actual type name before that logic runs; afterwards `Vec<Self>` is treated
+    /// exactly like `Vec<EnclosingType>`.
+    ///
+    /// `Self` on a *generic* item names that item at its own parameters — it is the one spelling
+    /// whose arguments are implied rather than written — so the parameters are restored here, where
+    /// the name is. Left off, the reference reads as a name with no arguments at all: the Zod
+    /// surface calls the item's factory with none of the arguments it requires, and the TypeScript
+    /// one writes a bare name beside a declaration that binds parameters. `Self` cannot be written
+    /// with arguments of its own, so there is nothing here to overwrite.
+    ///
+    /// Recurses through `SiblingType` generics, `Map` keys/values, and `Tuple` elements.
+    pub fn resolve_self_references(&mut self, type_name: &str, parameters: &[String]) {
         match &mut self.field_type {
             FieldDefType::SiblingType(name, generics) => {
                 if name == "Self" {
                     type_name.clone_into(name);
+                    generics.extend(parameters.iter().map(|parameter| Self {
+                        name: parameter.clone(),
+                        field_type: FieldDefType::TypeParam(parameter.clone()),
+                        array_depth: 0,
+                        array_lengths: Vec::new(),
+                        docs: String::new(),
+                        model_schema_prop_meta: None,
+                        nullable_levels: Vec::new(),
+                        absent_from_wire: false,
+                        omits_value: false,
+                        #[cfg(feature = "jsonschema")]
+                        type_span: Span::call_site(),
+                    }));
                 }
                 for generic in generics.iter_mut() {
-                    generic.resolve_self_references(type_name);
+                    generic.resolve_self_references(type_name, parameters);
                 }
             }
             FieldDefType::Map(key, value) => {
-                key.resolve_self_references(type_name);
-                value.resolve_self_references(type_name);
+                key.resolve_self_references(type_name, parameters);
+                value.resolve_self_references(type_name, parameters);
             }
             FieldDefType::Tuple(elements) => {
                 for element in elements.iter_mut() {
-                    element.resolve_self_references(type_name);
+                    element.resolve_self_references(type_name, parameters);
                 }
             }
             // Leaf types cannot contain nested references.
@@ -1104,7 +1186,7 @@ impl FieldDef {
                     // type declares parameters, and the one schema it has where it declares none.
                     // Read off the registry rather than off the arguments written here, because a
                     // name carrying arguments says nothing about which of the two it published.
-                    if info.publishes_zod_factory {
+                    if publishes_zod_factory(name) {
                         zod_factory_call(&info.export_name, lst)
                     } else {
                         format!("{}$Schema", info.export_name)
@@ -1800,6 +1882,27 @@ fn get_field_def_type_or_sibling(t_name: &str) -> FieldDefType {
         }
         type_name => FieldDefType::SiblingType(type_name.to_owned(), vec![]),
     }
+}
+
+/// Whether a name is one the language reserves for a primitive type that
+/// [`get_field_def_type_or_sibling`] has no arm for.
+///
+/// The dispatch above is total by construction: a name it does not recognise is taken for a sibling
+/// — another `model_schema` item, named before or after this one — and rendered as a reference to
+/// the module that item publishes. That is the right reading of `Foo`, which may well be declared
+/// below, and it is gibberish for `char`: no module named `char_schema` will ever exist, so the
+/// reference resolves to nothing and the author reads an `E0433` about a module they never wrote.
+///
+/// The two cannot be told apart by tokens, so only what is *provably* not a sibling is named here:
+/// the primitive names the language reserves, minus the ones the dispatch does answer for. A
+/// caller refusing on this answer refuses exactly the spellings that cannot become siblings later.
+///
+/// `f16` and `f128` are listed with `char`, `i128` and `u128` although the language does not yet
+/// stabilise them: they are reserved primitive names either way, and a build that gains them
+/// should reach a refusal naming the limitation rather than the phantom module.
+#[cfg(feature = "jsonschema")]
+pub fn is_undescribable_primitive(name: &str) -> bool {
+    matches!(name, "char" | "i128" | "u128" | "f16" | "f128")
 }
 
 /// Parses serde attributes from struct/enum attributes (requires "serde" feature).

@@ -228,6 +228,7 @@ pub struct BadConfig {
 - `NaiveTime` → `string` (Zod `z.iso.time()` wrapped in an inline preprocessor that also accepts millis-since-start-of-day)
 - `#[serde(flatten)]` field → TypeScript intersection (`A & B`), Zod `.and(...)`
 - `#[serde(untagged)]` enum → TypeScript union (`A | B`), Zod `z.union([...])`, JSON Schema `anyOf`
+- Type parameter → TypeScript parameter (`X<IdType>`), Zod `X$SchemaFactory(idType)` (memoized, one cache level per parameter), JSON Schema the document of whatever fills it — `default_types(...)` where the type stands alone, the reference site's arguments where a field embeds it. A lifetime is dropped on every surface, a borrowed value writing what its owned form writes; a const renders as an array length only, and is refused where it is handed to a written type as an argument
 
 ### 5. Zod v4 Requirements
 
@@ -389,6 +390,22 @@ every generated module carries once above its per-type definitions. It holds the
 anywhere in the output: a cache's value type depends on its key type, which TypeScript can declare
 but cannot construct.
 
+A generic type may reach itself, directly or through a second type reaching back. JSON Schema
+hoists it into `$defs` once and points a `$ref` at that definition; TypeScript writes the name
+inside itself with its arguments; Zod calls the factory again with the argument the outer call was
+handed, the memo cache being what ends the recursion — the schema is cached before the recursive
+call is made. Which of the item's two bindings a self-reference names is read off the store
+`record_zod_factory` writes, and that is written at `exec_model_schema` ahead of every shape rather
+than where the binding is finally spelled: the fields are rendered before then, so an answer stored
+on the item's own registry entry would be read before the item had put one there.
+
+`write_field_type_and_schema` defers a member whose type reaches the item being defined, and one
+that reaches a type declared *below* it — `reaches_a_type_declared_later`. The second is what ends
+a cycle spanning two types: every cycle contains at least one reference pointing forward, since
+declaration positions cannot strictly decrease all the way round one, and what is left once those
+are deferred cannot cycle. The deferral is a getter rather than `z.lazy`, which at an operand
+position collapses the factory's inferred return type to `any`.
+
 ### Declaring a Default Type per Parameter
 
 JSON Schema has no type parameters, so a generic item's document is built from one concrete
@@ -406,7 +423,20 @@ them is split off. It refuses in both directions:
 - a type parameter with no entry — refused only under `#[cfg(feature = "jsonschema")]`, spanned on
   the parameter, because nothing else reads the default;
 - `default_types` on an item with no type parameter, and an empty `default_types()`, both being a
-  declaration with nothing to declare.
+  declaration with nothing to declare;
+- an entry filled at a type the field-definition dispatch has no arm for — refused only under
+  `#[cfg(feature = "jsonschema")]`, spanned on the filling. That dispatch takes a name it does not
+  recognise for another `#[model_schema]` item, which is right for a sibling declared below and
+  gibberish for `char`: the emission names a `char_schema` module nothing publishes. Tokens cannot
+  separate the two, so `is_undescribable_primitive` refuses only what provably cannot become a
+  sibling — the primitive names the language reserves that the dispatch answers for nowhere
+  (`char`, `i128`, `u128`, `f16`, `f128`).
+
+A const parameter earns its own refusal, from `const_parameter_argument_errors` at the same seam
+and gated on `typescript`/`jsonschema`: a const handed to a written type as an *argument* stands
+where a type is read, so the JSON side would call into a module named after it and the TypeScript
+side would write a name its declaration binds nothing for. A const written as an array length is
+untouched — that is the one position it renders in, as an unbounded array.
 
 There is no fallback filling. A guessed one produces a document that silently rejects valid
 payloads, which is what the declaration exists to prevent.

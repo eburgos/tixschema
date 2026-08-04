@@ -10,6 +10,8 @@ use regex_syntax::ast::{
 };
 use regex_syntax::hir;
 use std::collections::HashMap;
+#[cfg(feature = "zod")]
+use std::collections::HashSet;
 use syn::{Attribute, Expr, Field, GenericParam, Generics, Lit, LitStr, Meta, Type, Variant};
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -287,11 +289,6 @@ pub struct AliasInfo {
     pub kind: AliasKind,
     #[cfg(feature = "jsonschema")]
     pub module_name: String,
-    /// Whether the Zod binding published under this name is a factory rather than a `const`, which
-    /// is what a reference to the name has to know to write itself. Filled by
-    /// [`record_zod_factory`] as the item decides which of the two it publishes.
-    #[cfg(feature = "zod")]
-    pub publishes_zod_factory: bool,
     /// What an untagged enum's members are spelled as where an object flattens the enum itself, one
     /// per member in the order the union writes them — and empty both for every other item and
     /// wherever spelling the members says nothing the enum's own name does not already say. Filled
@@ -660,6 +657,13 @@ impl JsSpelling {
     }
 }
 
+#[cfg(feature = "zod")]
+thread_local! {
+    /// The names whose items publish a Zod factory. Kept out of [`ALIAS_INFO`] so the answer
+    /// survives the item's own registration — see [`record_zod_factory`].
+    static ZOD_FACTORY_PUBLISHERS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
 thread_local! {
     static ALIAS_INFO: RefCell<HashMap<String, AliasInfo>> = RefCell::new(HashMap::new());
 }
@@ -715,8 +719,6 @@ pub fn register_alias_info(
                 kind,
                 #[cfg(feature = "jsonschema")]
                 module_name: module_name.to_owned(),
-                #[cfg(feature = "zod")]
-                publishes_zod_factory: false,
                 #[cfg(all(feature = "serde", feature = "typescript"))]
                 ts_union_members: Vec::new(),
                 value_shape: PublishedShape::Flat(None),
@@ -855,23 +857,39 @@ pub fn record_flatten_variants(rust_ident: &str, variants: &[FlattenVariant]) {
     });
 }
 
-/// Records which of the two Zod bindings a name publishes, on the entry that name has already
-/// registered.
+/// Records which of the two Zod bindings a name publishes.
 ///
 /// A reference reads this back rather than deciding for itself. The decision belongs to the named
-/// item and is taken in one place as it expands — see
-/// [`crate::model_schema::zod_binding_suffix`] — so the binding an item publishes and every
-/// reference written to it move together, whatever the reference was spelled with.
+/// item — it turns on whether that item declares type parameters, nothing a reference can see — and
+/// is taken in one place, before the item is dispatched to its shape, so the binding an item
+/// publishes and every reference written to it move together whatever the reference was spelled
+/// with.
 ///
-/// A name not registered before the reference reading it leaves no answer at all, which is the same
-/// regime the export name already runs under — see [`ident_schema_module_name`].
+/// Held apart from the item's registry entry rather than on it, because a *self*-reference is
+/// written while the item's own expansion is still running: the entry is created as the item
+/// registers and its fields are rendered from it, so an answer stored on the entry would be read
+/// before the item that owns it had put one there — and the `false` a fresh entry carries reads as
+/// "publishes a `const`", which for a generic item names a binding nothing declares. Recorded here
+/// the answer stands from before the first field is rendered until after the last.
+///
+/// A name never recorded answers `false`, which is the right reading for every item that declares
+/// no parameters and for every name this expansion has not seen.
 #[cfg(feature = "zod")]
 pub fn record_zod_factory(rust_ident: &str, publishes: bool) {
-    ALIAS_INFO.with(|map| {
-        if let Some(info) = map.borrow_mut().get_mut(rust_ident) {
-            info.publishes_zod_factory = publishes;
+    ZOD_FACTORY_PUBLISHERS.with(|names| {
+        if publishes {
+            names.borrow_mut().insert(rust_ident.to_owned());
+        } else {
+            names.borrow_mut().remove(rust_ident);
         }
     });
+}
+
+/// Whether the Zod binding published under `rust_ident` is a factory rather than a `const` — what a
+/// reference to the name has to know to write itself. See [`record_zod_factory`].
+#[cfg(feature = "zod")]
+pub fn publishes_zod_factory(rust_ident: &str) -> bool {
+    ZOD_FACTORY_PUBLISHERS.with(|names| names.borrow().contains(rust_ident))
 }
 
 /// The characters a `\d`, `\w` or `\s` covers in *both* engines, written out as a class body.
