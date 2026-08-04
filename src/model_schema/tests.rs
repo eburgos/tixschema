@@ -697,7 +697,7 @@ fn untagged_member_reaching_an_unwritable_map_key_is_refused() {
 /// The JSON-schema values the untagged walk renders its members as.
 #[cfg(all(feature = "serde", feature = "jsonschema"))]
 fn untagged_member_values(mut item: syn::ItemEnum) -> Vec<String> {
-    collect_untagged_members(&mut item)
+    collect_untagged_members(&mut item, UNTAGGED_MODULE)
         .2
         .iter()
         .map(ToString::to_string)
