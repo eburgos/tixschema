@@ -766,8 +766,8 @@ mod jsonschema {
     #[cfg(all(feature = "chrono", feature = "object_id"))]
     use super::StoredFolder;
     use super::{
-        CountedFolder, EcmDocument, KeyedByParameter, Pair, Tagged, WireFolder, Wrapper,
-        ecm_document_schema,
+        Branch, CountedFolder, EcmDocument, Envelope, Grove, KeyedByParameter, Pair, Perch, Roost,
+        Sealed, Tagged, WireFolder, Wrapper, ecm_document_schema,
     };
 
     /// A key every instantiation writes as a string leaves the value side describable, so the
@@ -968,6 +968,59 @@ mod jsonschema {
         );
         assert_eq!(
             properties["nested"]["properties"]["held"]["properties"]["value"],
+            serde_json::json!({ "type": "string" })
+        );
+    }
+
+    /// A filling naming another item is not a literal document but a request made of that item,
+    /// and only the frame carrying the run's two values can make it. Made there, the standalone
+    /// document holds at the parameter position exactly what the named item publishes — the same
+    /// document a reference site supplying that type as an argument would have embedded.
+    #[test]
+    fn a_filling_naming_another_item_embeds_the_document_that_item_publishes() {
+        let schema = Sealed::<Envelope>::json_schema();
+        assert_eq!(schema["properties"]["body"], Envelope::json_schema());
+        assert_eq!(
+            schema["properties"]["seal"],
+            serde_json::json!({ "type": "string" })
+        );
+    }
+
+    /// A name is one name however it was reached. Reached once as a declared filling and once as a
+    /// plain field, it is still the single definition the root carries, and both arrivals are
+    /// pointers into it rather than two copies of a body.
+    #[test]
+    fn a_name_reached_as_a_filling_and_as_a_field_is_defined_once() {
+        let schema = Grove::<Branch>::json_schema();
+        let pointer = serde_json::json!({ "$ref": "#/$defs/Branch" });
+        assert_eq!(schema["properties"]["filled"], pointer);
+        assert_eq!(schema["properties"]["named"], pointer);
+
+        let defs = schema["$defs"].as_object().unwrap().clone();
+        assert_eq!(defs.len(), 1, "Got: {defs:?}");
+        assert_eq!(
+            defs["Branch"]["properties"]["children"],
+            serde_json::json!({ "type": "array", "items": pointer })
+        );
+    }
+
+    /// A cycle closing through a declared filling is the cycle every other edge closes: the name is
+    /// recognized while its own description is still running, so the filling describes as the
+    /// pointer and the frame that put the name in flight hoists the body that pointer resolves
+    /// against.
+    #[test]
+    fn a_cycle_closing_through_a_declared_filling_defers_the_same_way() {
+        let schema = Roost::<Perch>::json_schema();
+        assert_eq!(
+            schema["properties"]["host"],
+            serde_json::json!({ "$ref": "#/$defs/Perch" })
+        );
+        assert_eq!(
+            schema["$defs"]["Perch"]["properties"]["roosts"]["items"]["properties"]["host"],
+            serde_json::json!({ "$ref": "#/$defs/Perch" })
+        );
+        assert_eq!(
+            schema["$defs"]["Perch"]["properties"]["tag"],
             serde_json::json!({ "type": "string" })
         );
     }
@@ -1281,6 +1334,58 @@ pub struct MixedArguments {
 pub struct Referrer {
     pub boxed: Boxed<u32>,
     pub tagged: Tagged<String>,
+}
+
+/// A declared filling that names another item rather than a primitive. Such a filling is not a
+/// literal document: it is written by asking the named item for its own, which reads the names in
+/// flight and the definitions being hoisted — so which frame the argumentless forms evaluate the
+/// filling in is the whole of what makes this fixture expand. Read by the JSON surface alone,
+/// which is the only one that fills a parameter with a document.
+#[cfg(feature = "jsonschema")]
+#[model_schema(default_types(BodyType = Envelope))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Sealed<BodyType> {
+    pub body: BodyType,
+    pub seal: String,
+}
+
+/// A self-referential item: what puts a name in `$defs` at all.
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Branch {
+    pub children: Vec<Self>,
+    pub name: String,
+}
+
+/// The same name reached twice over, once as a declared filling and once as a plain field — the two
+/// arrivals a single hoisted definition has to answer for both of.
+#[cfg(feature = "jsonschema")]
+#[model_schema(default_types(BranchType = Branch))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Grove<BranchType> {
+    pub filled: BranchType,
+    pub named: Branch,
+}
+
+/// A cycle that closes through a declared filling: the item the filling names holds the generic
+/// item back, reaching it without arguments — which is writable only because the parameter carries
+/// a Rust-level default too. That is the one shape reaching this cycle. A cycle running through two
+/// declared fillings is a cycle in the parameter defaults themselves, which rustc refuses while
+/// computing them, before the attribute is read at all.
+#[cfg(feature = "jsonschema")]
+#[model_schema(default_types(HostType = Perch))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Roost<HostType = Perch> {
+    pub host: HostType,
+}
+
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Perch {
+    pub roosts: Vec<Roost>,
+    pub tag: String,
 }
 
 /// The same two, named from a field that forwards the referrer's own parameter into each. Read by

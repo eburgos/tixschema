@@ -80,6 +80,14 @@ fn defs_pointer(def_name: &str) -> String {
 /// take the fillings positionally, in the order the item declares its parameters, and the two
 /// argumentless forms are those same two applied to what the item declared for itself. An item
 /// declaring none publishes the pair alone: there is no slot to fill, and nothing to pass.
+///
+/// Which of the argumentless forms evaluates that declared filling is not free to choose. A
+/// filling may name another item, and such a document is written by asking that item's own
+/// `within` — which reads the names in flight and the definitions being hoisted. Only
+/// `json_schema_within` holds those, so it is the one that evaluates the declared documents, and
+/// `json_schema` reaches its own filling the same way every other rooted document is reached: by
+/// running `within` against a fresh document. An item declaring parameters is rooted exactly as
+/// one declaring none is.
 pub fn json_schema_methods(
     def_name: &str,
     body: &proc_macro2::TokenStream,
@@ -104,24 +112,27 @@ pub fn json_schema_methods(
         };
     }
     let rooted = rooted_document(
+        &quote::quote! { Self::json_schema_within(&mut in_flight, &mut hoisted_defs) },
+    );
+    let rooted_at_arguments = rooted_document(
         &quote::quote! { Self::json_schema_within_with(&mut in_flight, &mut hoisted_defs, args) },
     );
-    let declared = declared_arguments(parameters);
+    let declared = declared_delegation(parameters);
     let bindings = argument_bindings(parameters);
     quote::quote! {
         pub fn json_schema() -> serde_json::Value {
-            Self::json_schema_with(#declared)
+            #rooted
         }
 
         pub fn json_schema_with(args: &[serde_json::Value]) -> serde_json::Value {
-            #rooted
+            #rooted_at_arguments
         }
 
         pub fn json_schema_within(
             in_flight: &mut Vec<&'static str>,
             hoisted_defs: &mut serde_json::Map<String, serde_json::Value>,
         ) -> serde_json::Value {
-            Self::json_schema_within_with(in_flight, hoisted_defs, #declared)
+            #declared
         }
 
         pub fn json_schema_within_with(
@@ -182,10 +193,23 @@ fn rooted_document(described: &proc_macro2::TokenStream) -> proc_macro2::TokenSt
     }
 }
 
-/// The filling an item declared for itself, as the argument list its argumentless forms pass on.
-fn declared_arguments(parameters: &[SchemaParameter]) -> proc_macro2::TokenStream {
+/// The filling an item declared for itself, handed on to the form that takes fillings — the body
+/// of the argumentless `within`, which is the one frame that owns the recursion state.
+///
+/// The documents are bound to a local before the delegation rather than written into the call. A
+/// filling naming another item describes through that item's own `within`, which reads the run's
+/// two values; a borrow taken for the delegation would still be live while the filling asked for
+/// its own, and neither value exists at all in a frame that does not receive them. Bound here,
+/// each filling runs to completion in turn and the borrows are handed on only once the array
+/// holds them all — the remedy a reference site carrying a nested generic argument already uses.
+///
+/// Declaration order, which is the order the fillings are read back off the argument list in.
+fn declared_delegation(parameters: &[SchemaParameter]) -> proc_macro2::TokenStream {
     let declared = parameters.iter().map(|parameter| &parameter.default);
-    quote::quote! { &[#(#declared),*] }
+    quote::quote! {
+        let arguments = [#(#declared),*];
+        Self::json_schema_within_with(in_flight, hoisted_defs, &arguments)
+    }
 }
 
 /// The locals the body reads its parameters through, bound off the argument list positionally.
