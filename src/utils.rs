@@ -200,6 +200,30 @@ impl WireLeaf {
     }
 }
 
+/// What a `#[model_schema()]` item publishes as a value, as the constrained-brand guard reads
+/// shapes.
+///
+/// One word cannot answer for a name that publishes a family. A generic item whose written target
+/// *is* one of its own parameters writes whatever the instantiation hands it, so the only flat
+/// answer available at its declaration is the opaque one every parameter describes as — and a
+/// brand written over `Later<String>` would then be refused for a shape the emission never
+/// composes, while the same declaration written above it is admitted for want of any record at
+/// all. So such a name records the position instead, and the reader fills it with the argument the
+/// reference carries.
+///
+/// A target with its own fixed shape — a `Vec<T>`, a map, a tuple — records that shape, which no
+/// filling changes.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PublishedShape {
+    /// The one shape written under this name, whatever fills it — `None` where that shape is one a
+    /// string check lands on, and the answer an unrecorded name leaves.
+    Flat(Option<&'static str>),
+    /// The name publishes its own type parameter at this position in the list it declares them,
+    /// so what it publishes is whatever the argument written there resolves to.
+    Parameter(usize),
+}
+
 #[derive(Clone)]
 pub struct AliasInfo {
     pub export_name: String,
@@ -213,11 +237,11 @@ pub struct AliasInfo {
     #[cfg(feature = "zod")]
     pub publishes_zod_factory: bool,
     /// What the value surface written under this name is, in the vocabulary a constrained brand's
-    /// refusal names shapes by — and `None` both when that surface is one string checks land on and
-    /// when nothing has been recorded at all. Filled by [`record_value_shape`] as each item
-    /// registers.
+    /// refusal names shapes by — and [`PublishedShape::Flat(None)`] both when that surface is one
+    /// string checks land on and when nothing has been recorded at all. Filled by
+    /// [`record_value_shape`] as each item registers.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    pub value_shape: Option<&'static str>,
+    pub value_shape: PublishedShape,
     /// What the value surface written under this name puts on the wire, one entry per leaf of it,
     /// and empty when nothing has been recorded at all. Filled by [`record_wire_leaves`] as each
     /// item registers.
@@ -597,7 +621,7 @@ pub fn register_alias_info(
                 module_name: module_name.to_owned(),
                 #[cfg(feature = "zod")]
                 publishes_zod_factory: false,
-                value_shape: None,
+                value_shape: PublishedShape::Flat(None),
                 #[cfg(all(feature = "serde", feature = "zod"))]
                 wire: Vec::new(),
                 #[cfg(feature = "zod")]
@@ -616,15 +640,19 @@ pub fn register_alias_info(
 /// published. So each item answers for itself as it registers, and a brand over a name reads the
 /// answer back rather than guessing at it.
 ///
-/// `None` is what an unanswered name and a string-checked one both leave, and the guard treats them
-/// alike: a name it cannot classify keeps the emission it has always had. That is the same regime
-/// the map-key registry already runs — `AliasKind::Unknown` is a name that was not registered
-/// before the type reading it — rather than a second one.
+/// [`PublishedShape::Flat(None)`] is what an unanswered name and a string-checked one both leave,
+/// and the guard treats them alike: a name it cannot classify keeps the emission it has always
+/// had. That is the same regime the map-key registry already runs — `AliasKind::Unknown` is a name
+/// that was not registered before the type reading it — rather than a second one.
+///
+/// A name whose written target *is* one of its own parameters records that position instead of a
+/// word, because one word would have to stand for every instantiation and only the opaque one
+/// does — see [`PublishedShape`].
 ///
 /// A chain resolves one link at a time and cannot cycle, because an entry is only ever built from
 /// entries registered before it.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-pub fn record_value_shape(rust_ident: &str, shape: Option<&'static str>) {
+pub fn record_value_shape(rust_ident: &str, shape: PublishedShape) {
     ALIAS_INFO.with(|map| {
         if let Some(info) = map.borrow_mut().get_mut(rust_ident) {
             info.value_shape = shape;
