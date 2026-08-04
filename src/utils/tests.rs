@@ -318,6 +318,28 @@ const NON_TRIVIAL_PATTERNS: [&str; 16] = [
     "a|b",
 ];
 
+/// The negated classes the verdict was decided over: a single member, the ranges an author reaches
+/// for to bound one to ASCII, an escape, and the `\d` the guard writes out to `0-9` on its way in.
+/// The last is the one that shows rewriting cannot help — its members come out ASCII and the
+/// complement is still taken two different ways.
+const NEGATED_CLASS_PATTERNS: [&str; 6] = [
+    "^[^a]$",
+    "^[^0-9]$",
+    r"^[^\n]$",
+    "^[^a-z]$",
+    r"^[^\x00-\x7F]$",
+    r"^[^\d]$",
+];
+
+/// Every regex this crate writes into a generated schema itself, rather than carrying over from an
+/// author's `pattern`.
+///
+/// An author's pattern reaches the three surfaces through the guard, which equalises what it can
+/// and refuses the rest. One the crate writes reaches them directly, so without this list there
+/// are two contracts and only one of them is enforced.
+#[cfg(feature = "object_id")]
+const CRATE_EMITTED_PATTERNS: [&str; 1] = [OBJECT_ID_HEX_PATTERN];
+
 #[cfg(feature = "serde")]
 /// The haystacks a classified pattern is held to, in the two senses that matter: every character
 /// the equalised classes are compared over, and the strings the rewrite tests use, which carry the
@@ -360,28 +382,6 @@ fn accepts(trivial: &TrivialPattern, haystack: &str) -> bool {
         TrivialPattern::StartsWith(needle) => haystack.starts_with(needle),
     }
 }
-
-/// The negated classes the verdict was decided over: a single member, the ranges an author reaches
-/// for to bound one to ASCII, an escape, and the `\d` the guard writes out to `0-9` on its way in.
-/// The last is the one that shows rewriting cannot help — its members come out ASCII and the
-/// complement is still taken two different ways.
-const NEGATED_CLASS_PATTERNS: [&str; 6] = [
-    "^[^a]$",
-    "^[^0-9]$",
-    r"^[^\n]$",
-    "^[^a-z]$",
-    r"^[^\x00-\x7F]$",
-    r"^[^\d]$",
-];
-
-/// Every regex this crate writes into a generated schema itself, rather than carrying over from an
-/// author's `pattern`.
-///
-/// An author's pattern reaches the three surfaces through the guard, which equalises what it can
-/// and refuses the rest. One the crate writes reaches them directly, so without this list there
-/// are two contracts and only one of them is enforced.
-#[cfg(feature = "object_id")]
-const CRATE_EMITTED_PATTERNS: [&str; 1] = [OBJECT_ID_HEX_PATTERN];
 
 #[cfg(feature = "zod")]
 #[test]
