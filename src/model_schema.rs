@@ -6254,6 +6254,7 @@ const fn chrono_json_schema_format(field_type: &FieldDefType) -> Option<&'static
         | FieldDefType::String
         | FieldDefType::StringLiteral(_)
         | FieldDefType::Tuple(..)
+        | FieldDefType::TypeParam(_)
         | FieldDefType::U8
         | FieldDefType::U16
         | FieldDefType::U32
