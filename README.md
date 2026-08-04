@@ -755,6 +755,35 @@ export type DocumentRecord = {
 };
 ```
 
+### Type Parameters
+
+A generic alias and a generic branded newtype are the two items that can name their own type parameters, and every surface reads such a name under one rule.
+
+**TypeScript binds the parameter for real.** It is a type surface, and the declaration it emits carries the parameter list: `export type WrapperType<T> = Array<T>` is a generic type, and a use site fills `T` in.
+
+**Zod and JSON Schema erase it to the opaque value** -- `z.unknown()` and `{}`. A parameter names no type until the item is instantiated, and one schema is written for every instantiation, so the parameter admits any value while the shape around it -- an array, a map's keys, a tuple's arity -- stays described. Zod could not do otherwise even in principle: it publishes *values*, and a `const` takes no type parameters, so a parameter left to render would name a `$Schema` binding no emitted module declares, and the pasted output would throw a `ReferenceError` before reading a payload. The exported binding's annotation follows its value, taking the same opaque argument the value was composed with.
+
+```rust
+#[model_schema()]
+pub type Wrapper<T> = Vec<T>;
+```
+
+```typescript
+export type WrapperType<T> = Array<T>;
+
+const WrapperType$RawSchema = z.array(z.unknown());
+
+export const WrapperType$Schema: ZodType<WrapperType<unknown>> = WrapperType$RawSchema;
+```
+
+```json
+{ "type": "array", "items": {} }
+```
+
+Only the item's *own* parameters erase. A name the expansion cannot resolve because the type lives elsewhere keeps its `Name$Schema` reference, since that type publishes the binding.
+
+One consequence is worth stating outright: an opaque value carries no string checks, so a branded newtype cannot apply `pattern`, `minLength`, or `maxLength` to one of its own type parameters. See [Branded Newtype Validation Constraints](#branded-newtype-validation-constraints).
+
 ### Branded Newtypes
 
 `#[serde(transparent)]` tuple structs with a single public field generate branded TypeScript types. The newtype is invisible in JSON serialization but carries a distinct type identity in TypeScript, preventing accidental mixing of different ID types.
@@ -807,8 +836,8 @@ export type CorrelationId = string & { readonly [__brand_CorrelationId]: true };
 Notes:
 
 - If the Rust type name ends with `Json`, the suffix is stripped in the generated TypeScript (e.g., `UserIdJson` becomes `UserId`). Otherwise, the Rust name is used as-is.
-- Generic parameter names (e.g., `ID_TYPE`) are preserved exactly.
-- A brand describes what its inner writes whether or not the inner names the brand's type parameters, so `TagList<T>(pub Vec<T>)` is an array on every surface — `Array<T>`, `z.array(T$Schema)`, `$ZodBranded<ZodArray, "TagList">`, `{"type": "array", "items": {}}` — and not the bare parameter. The parameter itself carries what an uninstantiated parameter carries anywhere else: its own name in TypeScript, the `$Schema` binding named after it in Zod, and the permissive empty schema in JSON, since one schema is written for every instantiation.
+- Generic parameter names (e.g., `ID_TYPE`) are preserved exactly in the TypeScript type.
+- A brand describes what its inner writes whether or not the inner names the brand's type parameters, so `TagList<T>(pub Vec<T>)` is an array on every surface — `Array<T>`, `z.array(z.unknown())`, `$ZodBranded<ZodArray, "TagList">`, `{"type": "array", "items": {}}` — and not the bare parameter. The parameter itself carries what an uninstantiated parameter carries anywhere else, under the rule in [Type Parameters](#type-parameters).
 - Serde transparent serialization works normally -- the wrapper is invisible in JSON.
 - Use branded newtypes for opaque IDs and phantom types to prevent passing the wrong ID type across domain boundaries.
 
@@ -872,7 +901,23 @@ A generic brand carries the requirement as a `Display` bound on each type parame
 
 You can add `pattern`, `minLength`, and `maxLength` constraints directly on the `#[model_schema()]` attribute for branded newtypes. Constraints are enforced in three places: the generated Zod schema, serde deserialization, and a `validate()` method on the type.
 
-**The inner type has to be one whose schema is a string** — `String`, `PathBuf`, `ObjectId`, a chrono date/time type, another brand, or a generic parameter. A numeric, boolean, container (`Vec`, array, `HashMap`, tuple), or opaque (`serde_json::Value`) inner is rejected at expansion time, because the three constraints are string checks and each surface would read them differently: Zod's `.min`/`.max` become bounds on the value itself, JSON Schema ignores `minLength`/`maxLength`/`pattern` outside `"type": "string"`, and `validate()` measures the inner's `Display` rendering.
+**The inner type has to be one whose schema is a string** — `String`, `PathBuf`, `ObjectId`, a chrono date/time type, or another brand. A numeric, boolean, container (`Vec`, array, `HashMap`, tuple), or opaque inner is rejected at expansion time, because the three constraints are string checks and each surface would read them differently: Zod's `.min`/`.max` become bounds on the value itself, JSON Schema ignores `minLength`/`maxLength`/`pattern` outside `"type": "string"`, and `validate()` measures the inner's `Display` rendering.
+
+An opaque inner is `serde_json::Value` **or one of the brand's own type parameters**, which both validating surfaces read as the opaque value (see [Type Parameters](#type-parameters)). There is nothing there for the checks to attach to: Zod 4's `z.unknown()` carries no `.min`/`.max` at all, and `.brand()` hands back that same schema rather than a wrapper that could. Constrain a string-typed inner instead, or brand at the instantiation:
+
+```rust
+// Rejected: the checks would have to measure a value no surface has a shape for.
+#[model_schema(minLength = 3)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct GenericSlug<T>(pub T);
+
+// Accepted: the inner is a string, and the brand says so.
+#[model_schema(minLength = 3)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Slug(pub String);
+```
 
 **The inner type also has to implement `Display`,** since validation runs against `to_string()`. That holds whether or not the brand passes `no_display`: the flag drops the `Display` impl, not the requirement.
 
@@ -969,7 +1014,7 @@ error: model_schema: branded newtype `BadNum` applies string constraints (patter
   |                   ^^^
 ```
 
-An inner type the macro cannot resolve — another brand, a user type, a generic parameter — is
+An inner type the macro cannot resolve because it lives elsewhere — another brand, a user type — is
 admitted here and checked for `Display` instead, so a non-`Display` one is still reported at the
 field:
 

@@ -2271,6 +2271,37 @@ fn an_alias_type_parameter_is_erased_at_every_depth() {
     }
 }
 
+/// The same erasure at the same depths on the value surface, where the consequence of skipping it
+/// is louder: a Zod `const` cannot be parameterised, so a parameter left to render names a
+/// `$Schema` binding no emitted module declares and the pasted output throws before a payload is
+/// read. Asserted over the identical alias list the JSON test walks, so the two surfaces cannot
+/// erase at different depths.
+#[cfg(feature = "zod")]
+#[test]
+fn an_alias_type_parameter_is_erased_at_every_depth_on_the_value_surface() {
+    for alias_source in [
+        "pub type Holder<V> = V;",
+        "pub type Holder<V> = Vec<V>;",
+        "pub type Holder<V> = Option<V>;",
+        "pub type Holder<V> = (String, V);",
+        "pub type Holder<V> = HashMap<String, V>;",
+        "pub type Holder<V> = HashMap<String, Vec<V>>;",
+    ] {
+        let alias: syn::ItemType = syn::parse_str(alias_source).unwrap();
+        let field_def = super::get_field_def("HolderType", &alias.ty, "");
+        let tokens = super::generate_alias_zod_method(&alias, "HolderType", "Holder", &field_def)
+            .to_string();
+        assert!(
+            !tokens.contains("V$Schema"),
+            "for {alias_source}, got: {tokens}"
+        );
+        assert!(
+            tokens.contains("\"HolderType<unknown>\""),
+            "for {alias_source}, got: {tokens}"
+        );
+    }
+}
+
 /// The stub this replaced answered every alias with an object carrying a lone `warning` key, which
 /// under JSON Schema constrains nothing — every slot naming an alias accepted every payload. No
 /// emission may carry one again.
@@ -2290,9 +2321,12 @@ fn no_json_schema_emission_carries_a_warning_key() {
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn alias_zod_method_carries_no_cfg_attribute() {
+    let alias: syn::ItemType = syn::parse_quote!(
+        pub type Alias = String;
+    );
     let ty: syn::Type = syn::parse_quote!(String);
     let field_def = super::get_field_def("AliasType", &ty, "");
-    let tokens = super::generate_alias_zod_method("AliasType", "Alias", &field_def);
+    let tokens = super::generate_alias_zod_method(&alias, "AliasType", "Alias", &field_def);
     assert_no_cfg_attribute(&tokens, "generate_alias_zod_method");
 }
 
@@ -2531,10 +2565,14 @@ fn string_constraints_over_a_non_string_inner_are_rejected() {
     }
 }
 
-/// The inners that carry the constraints faithfully. A `SiblingType` — another brand, an
-/// unresolved user type, or a bare generic parameter — is admitted because expansion cannot know
-/// its shape; the constrained path's `Display` assertion is what covers it. A name carrying one
-/// argument that is not a sequence wrapper is such a name too, and stays admitted.
+/// The inners that carry the constraints faithfully. A `SiblingType` — another brand, or an
+/// unresolved user type — is admitted because expansion cannot know its shape; the constrained
+/// path's `Display` assertion is what covers it. A name carrying one argument that is not a
+/// sequence wrapper is such a name too, and stays admitted.
+///
+/// `U` is written where the brand declares no such parameter, so it is one of those unresolved
+/// names rather than a parameter: that is the whole of the line the classifier draws, and the
+/// brand's own `T` is on the other side of it in the test below.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn string_constraints_over_a_string_shaped_inner_pass() {
@@ -2543,7 +2581,7 @@ fn string_constraints_over_a_string_shaped_inner_pass() {
         "PathBuf",
         "ObjectId",
         "SomeOtherBrand",
-        "T",
+        "U",
         "SomeWrapper<String>",
     ] {
         let ty: syn::Type = syn::parse_str(inner).unwrap();
@@ -2555,6 +2593,36 @@ fn string_constraints_over_a_string_shaped_inner_pass() {
             &pattern_args(),
         );
         assert!(errors.is_empty(), "for {inner}, got: {errors:?}");
+    }
+}
+
+/// A brand constraining one of its own type parameters has nothing to hang the checks on.
+///
+/// Both validating surfaces read a parameter as the opaque value, and an opaque value takes no
+/// string checks: Zod 4's `z.unknown()` carries no `.min`/`.max`, and `.brand()` hands back that
+/// same instance rather than a wrapper that could; JSON Schema's string keywords go inert beside
+/// the `{}` a parameter describes as; and `validate()` still measures `Display`. So the parameter
+/// reaches the same refusal `serde_json::Value` reaches, through the same opaque arm — the erasure
+/// is what puts it there, and is why the guard does not have to name parameters itself.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn string_constraints_over_the_brands_own_type_parameter_are_rejected() {
+    for inner in ["T", "U"] {
+        let ty: syn::Type = syn::parse_str(inner).unwrap();
+        let errors = branded_errors_with(
+            &syn::parse_quote! {
+                #[serde(transparent)]
+                struct Branded<T, U>(pub #ty);
+            },
+            &pattern_args(),
+        );
+        assert_eq!(errors.len(), 1, "for {inner}, got: {errors:?}");
+        assert!(errors[0].contains("`Branded`"), "got: {}", errors[0]);
+        assert!(
+            errors[0].contains("opaque"),
+            "for {inner}, got: {}",
+            errors[0]
+        );
     }
 }
 
@@ -4530,7 +4598,7 @@ fn a_sibling_slot_carries_the_schema_module_reference() {
 fn brand_json_schema_over(inner_ty: &syn::Type) -> String {
     super::build_branded_json_schema_method(
         &super::ModelSchemaArgs::default(),
-        &super::branded_json_inner(&[], inner_ty),
+        &super::branded_json_inner(&super::get_field_def("_inner", inner_ty, "")),
         "Wrapped",
     )
     .to_string()
