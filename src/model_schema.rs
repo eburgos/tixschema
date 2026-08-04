@@ -147,6 +147,10 @@ const TYPESCRIPT_PREAMBLE: &str = "const createSchemaCache = <Cache extends obje
 #[cfg(all(feature = "zod", not(feature = "typescript")))]
 const TYPESCRIPT_PREAMBLE: &str = "const createSchemaCache = () => new WeakMap();";
 
+/// The indent every member of an emitted object is written at, and so the indent its `JSDoc` block
+/// is written at.
+const MEMBER_INDENT: &str = "  ";
+
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 const WRITTEN_AS_ARRAY: &str = "a JSON array";
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -2452,8 +2456,10 @@ fn build_tuple_struct_ts_definition_method(
     ts_body: &str,
 ) -> proc_macro2::TokenStream {
     let reexport = ident_reexport_ts(rust_ident, item_name, ts_generics);
-    let type_str =
-        format!("/**\n{docs}\n **/\nexport type {item_name}{ts_generics} = {ts_body};{reexport}");
+    let type_str = format!(
+        "{}\nexport type {item_name}{ts_generics} = {ts_body};{reexport}",
+        jsdoc_block(docs, "")
+    );
     quote! {
         pub fn ts_definition() -> String {
             #type_str.to_owned()
@@ -3931,6 +3937,29 @@ fn item_jsdoc_body(lines: &[String]) -> String {
         .join("\n")
 }
 
+/// The complete `JSDoc` block a body is written as, at the indent of whatever it documents: the
+/// opener, the body's own lines carried to that indent, and the `*/` that closes it.
+///
+/// Every surface splices this whole. Spelling the delimiters beside each member instead is what let
+/// a block open at its member's indent and continue at column 0, and let one writer close with a
+/// `**/` that closes nothing — a block comment already ended by the `*/` inside it, trailed by a
+/// stray `/`. The body arrives already prefixed with ` * ` per line, so the indent is all that is
+/// added and the text a block carries is untouched.
+fn jsdoc_block(body: &str, indent: &str) -> String {
+    let mut block = format!("{indent}/**\n");
+    for line in body.lines() {
+        let _ = writeln!(block, "{indent}{line}");
+    }
+    let _ = write!(block, "{indent} */");
+    block
+}
+
+/// The `JSDoc` block a member is written under: [`jsdoc_block`] at the one indent every emitted
+/// member sits at.
+fn member_jsdoc_block(body: &str) -> String {
+    jsdoc_block(body, MEMBER_INDENT)
+}
+
 /// The one-line description a set of lines is published as, escaped for the `description: "…"` it
 /// is spliced into.
 ///
@@ -4615,7 +4644,7 @@ fn render_external_variant(
         let json = quote! {};
 
         return (
-            format!("/**\n{docs}\n**/\n  \"{key}\""),
+            format!("{}\n  \"{key}\"", member_jsdoc_block(docs)),
             format!("z.literal(\"{key}\")"),
             json,
         );
@@ -4679,7 +4708,10 @@ fn render_external_variant(
     };
 
     (
-        format!("{{  /**\n{docs}\n**/\n  \"{key}\": {content_ts};\n}}"),
+        format!(
+            "{{\n{}\n  \"{key}\": {content_ts};\n}}",
+            member_jsdoc_block(docs)
+        ),
         zod,
         json,
     )
@@ -6050,7 +6082,8 @@ fn tagged_variant_parts(
         optional_fields: Vec::new(),
         schema_code: format!("{{\n  {tag_name}: z.literal(\"{discriminator_value}\"),\n"),
         type_code: format!(
-            "{{  /**\n{discriminator_docs}\n**/\n  {tag_name}: \"{discriminator_value}\";\n"
+            "{{\n{}\n  {tag_name}: \"{discriminator_value}\";\n",
+            member_jsdoc_block(discriminator_docs)
         ),
     }
 }
@@ -6183,8 +6216,8 @@ fn write_named_variant_fields(
         // Add TypeScript type definition
         let _ = writeln!(
             variant_type_code,
-            "  /**\n{}\n**/\n  {}{}: {};",
-            fld.docs,
+            "{}\n  {}{}: {};",
+            member_jsdoc_block(&fld.docs),
             fld.name,
             fld.optional_key_marker(),
             fld.typescript_typename()
@@ -7660,8 +7693,8 @@ fn write_field_type_and_schema(
     // Always write TypeScript type
     let _ = writeln!(
         type_code,
-        "  /**\n{}\n**/\n  {}{}: {};",
-        fld.docs,
+        "{}\n  {}{}: {};",
+        member_jsdoc_block(&fld.docs),
         fld.name,
         fld.optional_key_marker(),
         fld.typescript_typename()
@@ -9062,34 +9095,31 @@ fn generate_ts_definition_method(
     let typescript_type_gen = if fields_empty {
         if has_flatten {
             quote::quote! {
-                format!("{}\n\nexport type {}{} = {};{}", docs, #item_name, #ts_generics, #intersection_only, #reexport)
+                format!("{}export type {}{} = {};{}", docs, #item_name, #ts_generics, #intersection_only, #reexport)
             }
         } else {
             quote::quote! {
-                format!(r#"/**\n{}\n**/\nexport type {}{} = Record<string, never>;{}"#, docs, #item_name, #ts_generics, #reexport)
+                format!("{}export type {}{} = Record<string, never>;{}", docs, #item_name, #ts_generics, #reexport)
             }
         }
     } else if has_flatten {
         quote::quote! {
-            format!("{}\n\nexport type {}{} = {{\n{}\n}}{};{}", docs, #item_name, #ts_generics, #type_code, #intersection_suffix, #reexport)
+            format!("{}export type {}{} = {{\n{}}}{};{}", docs, #item_name, #ts_generics, #type_code, #intersection_suffix, #reexport)
         }
     } else {
         quote::quote! {
-            format!("{}\n\nexport type {}{} = {{\n{}\n}};{}", docs, #item_name, #ts_generics, #type_code, #reexport)
+            format!("{}export type {}{} = {{\n{}}};{}", docs, #item_name, #ts_generics, #type_code, #reexport)
         }
     };
 
-    #[cfg(all(feature = "jsonschema", feature = "typescript"))]
-    let json_docs_gen = generate_json_docs_part();
+    #[cfg(feature = "jsonschema")]
+    let json_docs_gen = bind_item_jsdoc_local(docs, true);
 
     #[cfg(not(feature = "jsonschema"))]
-    let json_docs_gen = quote::quote! {
-        let docs = format!("/**\n{docs}\n **/\n");
-    };
+    let json_docs_gen = bind_item_jsdoc_local(docs, false);
 
     quote::quote! {
         pub fn ts_definition() -> String {
-            let docs = #docs;
             #json_docs_gen
             #typescript_type_gen
         }
@@ -9479,7 +9509,7 @@ fn generate_zod_schema_method(
     #[cfg(feature = "zod")]
     {
         let reexport = ident_reexport_zod(rust_ident, item_name, zod_binding_suffix(parameters));
-        let own = format!("z.strictObject({{\n{schema_code}\n}}){show_opts}");
+        let own = format!("z.strictObject({{\n{schema_code}}}){show_opts}");
         let (preamble, expression) = zod_merged_statements(item_name, &own, flatten_schemas);
         // Note: Example injection is handled by the delegating method on the type itself.
         let body = zod_published_binding(item_name, parameters, &preamble, &expression, &reexport);
@@ -9509,36 +9539,36 @@ fn generate_zod_schema_method(
     }
 }
 
-#[cfg(all(feature = "jsonschema", feature = "typescript"))]
-fn generate_json_docs_part() -> proc_macro2::TokenStream {
-    quote::quote! {
-        let prettified = serde_json::to_string_pretty(&Self::json_schema()).unwrap().lines().map(|l| format!(" * {l}")).collect::<Vec<_>>().join("\n");
-        let docs = format!("/**\n{docs}\n * JSON Schema:\n{prettified}\n **/\n");
+/// Binds the `docs` local an item's `ts_definition()` opens with: the item's `JSDoc` block, its
+/// body enriched with the item's JSON schema where the caller says this build can produce one, and
+/// a trailing newline, so what the block documents is the line straight beneath it.
+///
+/// The block cannot be built by [`jsdoc_block`] here — the JSON schema is only there once the
+/// expanded code runs — so this is where its shape is spelled for the runtime side, once, rather
+/// than once per item kind.
+#[cfg(feature = "typescript")]
+fn bind_item_jsdoc_local(docs: &str, with_json_schema: bool) -> proc_macro2::TokenStream {
+    if with_json_schema {
+        quote::quote! {
+            let prettified = serde_json::to_string_pretty(&Self::json_schema()).unwrap().lines().map(|l| format!(" * {l}")).collect::<Vec<_>>().join("\n");
+            let docs = format!("/**\n{}\n * JSON Schema:\n{}\n */\n", #docs, prettified);
+        }
+    } else {
+        quote::quote! {
+            let docs = format!("/**\n{}\n */\n", #docs);
+        }
     }
 }
 
-/// Binds the `docs` local that an enum's `ts_definition()` renders, enriched with the JSON
-/// schema when this build of tixschema can produce one.
+/// Binds the `docs` local an enum's `ts_definition()` renders, enriched with the JSON schema when
+/// this build of tixschema can produce one.
 ///
 /// The enrichment reads `Self::json_schema()`, so it may only be emitted when tixschema's own
 /// features put that method in the schema module — deciding here rather than emitting a `cfg`
 /// keeps the reader and the method in agreement regardless of the consumer's feature table.
 #[cfg(feature = "typescript")]
 fn generate_enum_json_docs_part(docs: &str) -> proc_macro2::TokenStream {
-    #[cfg(all(feature = "jsonschema", feature = "zod"))]
-    {
-        quote::quote! {
-            let prettified = serde_json::to_string_pretty(&Self::json_schema()).unwrap().lines().map(|l| format!(" * {l}")).collect::<Vec<_>>().join("\n");
-            let docs = format!("/**\n{}\n * JSON Schema:\n{}\n **/\n", #docs, prettified);
-        }
-    }
-
-    #[cfg(not(all(feature = "jsonschema", feature = "zod")))]
-    {
-        quote::quote! {
-            let docs = format!("/**\n{}\n**/\n", #docs);
-        }
-    }
+    bind_item_jsdoc_local(docs, cfg!(all(feature = "jsonschema", feature = "zod")))
 }
 
 #[cfg(feature = "jsonschema")]
@@ -9761,12 +9791,12 @@ fn generate_ts_alias_method(
     let target_ts = field_def.typescript_typename();
     let reexport = ident_reexport_ts(rust_ident, export_name, ts_generics);
 
-    let docs_block = docs.to_owned();
+    let docs_block = jsdoc_block(docs, "");
 
     quote! {
         pub fn ts_definition() -> String {
             format!(
-                "/**\n{}\n**/\nexport type {} = {};{}",
+                "{}\nexport type {} = {};{}",
                 #docs_block,
                 #alias_name_ts,
                 #target_ts,
