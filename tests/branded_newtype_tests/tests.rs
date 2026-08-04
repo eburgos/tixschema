@@ -390,7 +390,7 @@ mod objectid_branded_surface_tests {
     use mongodb::bson::oid::ObjectId;
 
     const OID_ZOD_BASE: &str =
-        r#"z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" })"#;
+        r#"z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/i, { message: "Invalid ObjectId" })"#;
 
     #[model_schema()]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -444,7 +444,7 @@ mod objectid_branded_surface_tests {
             PlainObjectId::json_schema(),
             serde_json::json!({
                 "type": "object",
-                "properties": { "$oid": { "type": "string", "pattern": r"^[a-f\d]{24}$" } },
+                "properties": { "$oid": { "type": "string", "pattern": "^[a-f0-9]{24}$" } },
                 "required": ["$oid"],
                 "additionalProperties": false
             })
@@ -483,7 +483,7 @@ mod objectid_branded_surface_tests {
                 "properties": {
                     "$oid": {
                         "type": "string",
-                        "pattern": r"^[a-f\d]{24}$",
+                        "pattern": "^[a-f0-9]{24}$",
                         "allOf": [{ "pattern": "^[0-9a-fA-F]{24}$" }]
                     }
                 },
@@ -570,7 +570,7 @@ mod objectid_branded_surface_tests {
                 "type": "array",
                 "items": {
                     "type": "object",
-                    "properties": { "$oid": { "type": "string", "pattern": r"^[a-f\d]{24}$" } },
+                    "properties": { "$oid": { "type": "string", "pattern": "^[a-f0-9]{24}$" } },
                     "required": ["$oid"],
                     "additionalProperties": false
                 }
