@@ -359,6 +359,125 @@ mod constrained_objectid_branded_tests {
         let result: Result<StrictObjectId, _> = serde_json::from_str(json);
         assert!(result.is_ok(), "Should accept valid ObjectId via serde");
     }
+
+    /// The wire an `ObjectId` brand is described against: serde writes the extended-JSON `$oid`
+    /// object, never the bare hex, for the brand exactly as for the `ObjectId` it wraps.
+    #[test]
+    fn an_objectid_brand_writes_the_oid_object_its_inner_writes() {
+        let oid = ObjectId::parse_str("507f1f77bcf86cd799439011").unwrap();
+        assert_eq!(
+            serde_json::to_string(&StrictObjectId(oid)).unwrap(),
+            r#"{"$oid":"507f1f77bcf86cd799439011"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&oid).unwrap(),
+            serde_json::to_string(&StrictObjectId(oid)).unwrap()
+        );
+    }
+}
+
+/// The three surfaces of an `ObjectId`-inner brand, pinned against the `$oid` object serde writes
+/// for it. The `ObjectId` wire form is an object, so no surface may describe the brand as a string.
+#[cfg(all(
+    feature = "object_id",
+    feature = "serde",
+    feature = "zod",
+    feature = "typescript",
+    feature = "jsonschema"
+))]
+mod objectid_branded_surface_tests {
+    use super::*;
+    use mongodb::bson::oid::ObjectId;
+
+    const OID_ZOD_BASE: &str =
+        r#"z.object({ $oid: z.string().regex(/^[a-f\d]{24}$/i, { message: "Invalid ObjectId" })"#;
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct PlainObjectId(pub ObjectId);
+
+    #[model_schema(pattern = "^[0-9a-fA-F]{24}$")]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct HexObjectId(pub ObjectId);
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct HoldsObjectId {
+        pub id: ObjectId,
+    }
+
+    #[test]
+    fn an_unconstrained_objectid_brand_describes_the_oid_object_on_every_surface() {
+        assert_eq!(
+            PlainObjectId::ts_definition(),
+            r#"export type PlainObjectId = ObjectId & $brand<"PlainObjectId">;"#
+        );
+        let zod = PlainObjectId::zod_schema();
+        assert!(
+            zod.contains(&format!(
+                "const PlainObjectId$RawSchema = {OID_ZOD_BASE} }}).brand<"
+            )),
+            "Got:\n{zod}"
+        );
+        assert!(
+            zod.contains(r#"PlainObjectId$Schema: $ZodBranded<ZodObject, "PlainObjectId">"#),
+            "Got:\n{zod}"
+        );
+        assert_eq!(
+            PlainObjectId::json_schema(),
+            serde_json::json!({
+                "type": "object",
+                "properties": { "$oid": { "type": "string" } },
+                "required": ["$oid"],
+                "additionalProperties": false
+            })
+        );
+    }
+
+    /// A brand's string constraints measure the inner's `Display` — the bare hex — which on the
+    /// wire is the `$oid` member, so both schema surfaces carry them there. Zod has no string
+    /// check to apply to the object itself.
+    #[test]
+    fn a_constrained_objectid_brand_carries_its_constraints_on_the_oid_member() {
+        let zod = HexObjectId::zod_schema();
+        assert!(
+            zod.contains(&format!(
+                "const HexObjectId$RawSchema = {OID_ZOD_BASE}.check(z.regex(/^[0-9a-fA-F]{{24}}$/)) }}).brand<"
+            )),
+            "Got:\n{zod}"
+        );
+        assert!(
+            !zod.contains(") }).check("),
+            "a string check must never sit on the $oid object. Got:\n{zod}"
+        );
+        assert!(
+            zod.contains(r#"HexObjectId$Schema: $ZodBranded<ZodObject, "HexObjectId">"#),
+            "Got:\n{zod}"
+        );
+        assert_eq!(
+            HexObjectId::json_schema(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "$oid": { "type": "string", "pattern": "^[0-9a-fA-F]{24}$" }
+                },
+                "required": ["$oid"],
+                "additionalProperties": false
+            })
+        );
+    }
+
+    /// A transparent brand is nothing on the wire, so it describes exactly what its inner
+    /// describes where that inner is named directly.
+    #[test]
+    fn an_unconstrained_objectid_brand_describes_what_the_field_position_describes() {
+        assert_eq!(
+            PlainObjectId::json_schema(),
+            HoldsObjectId::json_schema()["properties"]["id"]
+        );
+    }
 }
 
 // Branded newtype referenced from a struct (all features enabled)
