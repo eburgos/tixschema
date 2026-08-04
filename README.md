@@ -759,8 +759,8 @@ Generated TypeScript (with `zod` feature):
 
 ```typescript
 export type UserId<ID_TYPE> = ID_TYPE & z.$brand<"UserId">;
-const UserId$RawSchema = z.string().brand<"UserId">();
-export const UserId$Schema: ZodType<UserId<string>> = UserId$RawSchema;
+const UserId$RawSchema = ID_TYPE$Schema.brand<"UserId">();
+export const UserId$Schema: $ZodBranded<typeof ID_TYPE$Schema, "UserId"> = UserId$RawSchema;
 
 export type CorrelationId = string & z.$brand<"CorrelationId">;
 const CorrelationId$RawSchema = z.string().brand<"CorrelationId">();
@@ -783,6 +783,7 @@ Notes:
 
 - If the Rust type name ends with `Json`, the suffix is stripped in the generated TypeScript (e.g., `UserIdJson` becomes `UserId`). Otherwise, the Rust name is used as-is.
 - Generic parameter names (e.g., `ID_TYPE`) are preserved exactly.
+- A brand describes what its inner writes whether or not the inner names the brand's type parameters, so `TagList<T>(pub Vec<T>)` is an array on every surface — `Array<T>`, `z.array(T$Schema)`, `$ZodBranded<ZodArray, "TagList">`, `{"type": "array", "items": {}}` — and not the bare parameter. The parameter itself carries what an uninstantiated parameter carries anywhere else: its own name in TypeScript, the `$Schema` binding named after it in Zod, and the permissive empty schema in JSON, since one schema is written for every instantiation.
 - Serde transparent serialization works normally -- the wrapper is invisible in JSON.
 - Use branded newtypes for opaque IDs and phantom types to prevent passing the wrong ID type across domain boundaries.
 

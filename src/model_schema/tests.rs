@@ -2612,8 +2612,9 @@ fn branded_newtype_over_option_is_rejected() {
     assert!(errors[0].contains("null"), "got: {}", errors[0]);
 }
 
-/// The generic arm renders the type parameter and drops the `Option` wrapper outright, so the
-/// shape is no more representable there than in the concrete case.
+/// An inner naming a type parameter is read exactly as a concrete one is, so the `Option`
+/// collapses onto what it holds there too and the shape is no more representable than in the
+/// concrete case.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn generic_branded_newtype_over_option_is_rejected() {
@@ -4477,7 +4478,7 @@ fn a_sibling_slot_carries_the_schema_module_reference() {
 fn brand_json_schema_over(inner_ty: &syn::Type) -> String {
     super::build_branded_json_schema_method(
         &super::ModelSchemaArgs::default(),
-        &super::branded_json_inner(false, inner_ty),
+        &super::branded_json_inner(&[], inner_ty),
         "Wrapped",
     )
     .to_string()
