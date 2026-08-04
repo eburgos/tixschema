@@ -59,6 +59,10 @@ use crate::utils::{TrivialPattern, trivial_pattern};
 #[cfg(feature = "serde")]
 use crate::features::serde::{SerdeFieldMeta, SerdeTypeMeta};
 use crate::features::serde::{has_serde_default, parse_serde_key_omission};
+// The type is named only where a slot's own omission is read, which is where a surface describes
+// the tuple that slot sits in.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+use crate::features::serde::SerdeKeyOmission;
 
 #[cfg(feature = "serde")]
 use crate::field_type::{parse_serde_field_attributes, parse_serde_type_attributes};
@@ -610,6 +614,23 @@ struct Surface {
 enum RecordedWire {
     Leaves(Vec<WireLeaf>),
     Named(Option<&'static str>),
+}
+
+/// What a tuple struct publishes, which is not always the tuple of its declared slots.
+///
+/// serde writes a struct declaring exactly one slot as that slot's value alone, with nothing around
+/// it, and every other arity as an array of the slots it still carries. The two are separated here,
+/// at the one place that knows both how many slots were declared and which of them reach the wire,
+/// so no renderer downstream has to guess which shape a slot list stands for — a distinction the
+/// list alone cannot carry, since a two-slot struct with one slot off the wire writes a one-element
+/// array while a one-slot struct writes a bare value.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+enum TupleStructShape {
+    /// The fixed-arity array serde writes for every other declared arity, holding the slots the
+    /// wire carries.
+    Array(Vec<FieldDef>),
+    /// The bare value serde writes for a struct declaring exactly one slot.
+    BareValue(Box<FieldDef>),
 }
 
 /// What the item around a field says about it: everything [`process_field`] needs that is not the
@@ -1247,11 +1268,13 @@ fn enum_schema_example_method(
     docs_vec: Option<&[String]>,
     name: &syn::Ident,
     generics: &syn::Generics,
+    args: &ModelSchemaArgs,
 ) -> Option<proc_macro2::TokenStream> {
     item_schema_example_method(
         docs_vec.and_then(extract_example_from_docs).as_ref(),
         name,
         generics,
+        args,
     )
 }
 
@@ -1263,19 +1286,26 @@ const fn enum_schema_example_method(
     _docs_vec: Option<&[String]>,
     _name: &syn::Ident,
     _generics: &syn::Generics,
+    _args: &ModelSchemaArgs,
 ) -> Option<proc_macro2::TokenStream> {
     None
 }
 
-/// The type a doc example's value is annotated with: the item's own name, with every parameter it
-/// declares instantiated at `String`.
+/// The type a doc example's value is annotated with: the item's own name, with every type parameter
+/// it declares instantiated at the type `default_types` declares for it, or at `String` where it
+/// declares none.
 ///
 /// The example is Rust the expansion has to compile, and a parameter names no type to compile it
-/// at — a bare ident is `E0107` before anything runs. Nothing in the attribute says which filling
-/// to pick and the example code itself names only one, so the convention is `String`: the one
-/// concrete type every example can be written against, whatever the item holds. The argument list
-/// is as long as the parameter list rather than one long, so an item declaring two parameters is
-/// annotated with two arguments.
+/// at — a bare ident is `E0107` before anything runs. `default_types` is the one argument that
+/// names a concrete type per parameter, so a parameter it fills is annotated at the author's own
+/// statement of what the item holds: an annotation picked over that filling would contradict it
+/// (`E0308`) and would fail any bound the filling satisfies and the picked type does not
+/// (`E0277`). Where the filling itself fails a bound, the item is refused on the declaration that
+/// named it rather than here. A parameter with no filling falls back to `String`, the one concrete
+/// type an example can be written against absent a statement of what the item holds; with
+/// `jsonschema` on the fillings are already required for every parameter, so the fallback is
+/// reached only in a build without it. The argument list is as long as the parameter list rather
+/// than one long, so an item declaring two parameters is annotated with two arguments.
 ///
 /// Lifetimes and consts are not here, [`type_parameters_in_scope`] leaving both out: a lifetime in
 /// a `let` annotation elides, and a const has no filling this convention could name.
@@ -1283,11 +1313,17 @@ const fn enum_schema_example_method(
 fn schema_example_value_type(
     name: &syn::Ident,
     generic_params: &[String],
+    default_types: &[(syn::Ident, syn::Type)],
 ) -> proc_macro2::TokenStream {
     if generic_params.is_empty() {
         return quote! { #name };
     }
-    let args = generic_params.iter().map(|_| quote! { String });
+    let args = generic_params.iter().map(|param| {
+        default_types
+            .iter()
+            .find(|(declared, _)| declared == param.as_str())
+            .map_or_else(|| quote! { String }, |(_, ty)| quote! { #ty })
+    });
     quote! { #name<#(#args),*> }
 }
 
@@ -1302,10 +1338,15 @@ fn item_schema_example_method(
     example_code: Option<&String>,
     name: &syn::Ident,
     generics: &syn::Generics,
+    args: &ModelSchemaArgs,
 ) -> Option<proc_macro2::TokenStream> {
     let code = example_code?;
     let code_tokens: proc_macro2::TokenStream = code.parse().unwrap();
-    let value_ty = schema_example_value_type(name, &type_parameters_in_scope(generics));
+    let value_ty = schema_example_value_type(
+        name,
+        &type_parameters_in_scope(generics),
+        &args.default_types,
+    );
     Some(quote! {
         pub fn schema_example() -> serde_json::Value {
             let value: #value_ty = {
@@ -1324,6 +1365,7 @@ const fn item_schema_example_method(
     _example_code: Option<&String>,
     _name: &syn::Ident,
     _generics: &syn::Generics,
+    _args: &ModelSchemaArgs,
 ) -> Option<proc_macro2::TokenStream> {
     None
 }
@@ -2113,12 +2155,13 @@ fn missing_default_message(name: &syn::Ident, declared: &[&syn::Ident]) -> Strin
 /// const.
 ///
 /// A doc example is Rust the expansion has to compile, so its value is annotated with the item's
-/// own name at one instantiation — every parameter filled in, `String` being the filling for a type
-/// parameter. A const takes no filling from that convention: `String` names a type, and a const is
-/// a value. Nor can one be read off the item, since no value is the one every const-parameterised
-/// example is written at, and picking one here would render the example at a length the author
-/// never wrote. So the example is refused where it was written, rather than expanded into an
-/// annotation that fails `E0107` before anything runs.
+/// own name at one instantiation — every parameter filled in, a type parameter taking the type
+/// `default_types` declares for it or `String` where it declares none. A const takes no filling
+/// from that convention: both spellings name a type, and a const is a value. Nor can one be read
+/// off the item, since `default_types` declares types and no value is the one every
+/// const-parameterised example is written at, so one picked here would render the example at a
+/// length the author never wrote. So the example is refused where it was written, rather than
+/// expanded into an annotation that fails `E0107` before anything runs.
 ///
 /// Answered at the one seam every expanded shape is dispatched from, so a struct and an enum cannot
 /// come to answer differently, and a branded newtype is answered before the struct path splits it
@@ -2181,13 +2224,13 @@ fn const_parameter_example_message(consts: &[&syn::Ident]) -> String {
         "`#[model_schema]` cannot build a `schema_example()` for an item that declares a const \
          parameter, and this item declares {names}. The example is Rust compiled at one \
          instantiation, so its value is annotated with this item's own name and every parameter \
-         filled in: a type parameter is filled at `String`, the one concrete type every example can \
-         be written against, and a const takes no filling from that convention — `String` names a \
-         type, a const is a value, and no value is the one every const-parameterised example is \
-         written at, so one chosen here would render the example at a length this item's author \
-         never wrote. This is refused because the `zod` feature is enabled, `zod` being the only \
-         surface that reads an example. Remove the ` ```rust example ` block, or the const \
-         parameter, whichever this item can do without."
+         filled in: a type parameter is filled at the type `default_types` declares for it, or at \
+         `String` where it declares none, and a const takes no filling from that convention — both \
+         spellings name a type, a const is a value, and no value is the one every \
+         const-parameterised example is written at, so one chosen here would render the example at \
+         a length this item's author never wrote. This is refused because the `zod` feature is \
+         enabled, `zod` being the only surface that reads an example. Remove the ` ```rust example \
+         ` block, or the const parameter, whichever this item can do without."
     )
 }
 
@@ -2280,11 +2323,23 @@ fn branded_option_inner_error(
 ///
 /// One of the brand's *own* type parameters is not such a name: it says its shape outright too,
 /// because both validating surfaces have already settled that it has none. Reading the inner off
-/// [`value_surface_field_def`] puts it in front of the opaque arm, where it belongs — Zod 4's
+/// [`surface_field_def`] puts it in front of the opaque arm, where it belongs — Zod 4's
 /// `z.unknown()` carries no `.min`/`.max` at all, and `.brand()` returns the same instance rather
 /// than a wrapper that could, so there is nothing for the checks to attach to; JSON Schema's
 /// string keywords go inert beside the `{}` a parameter describes as; and `validate()` still
 /// measures `Display`. Three surfaces, three answers — the disagreement this guard exists to stop.
+///
+/// A name written *over* one of those parameters is the same answer reached one module out, and is
+/// the one absence the registry's silence must not be read as consent for. `Later<T>` names a type
+/// whose schema the brand composes from the argument the caller supplies, so the checks land on
+/// whatever that argument turns out to be: Zod appends them to a shape the call site decides, the
+/// one JSON document written for every instantiation still holds the `{}` a parameter describes as,
+/// and `validate()` still measures `Display` — a numeric filling being rejected for its digit count
+/// rather than for its value. Refusing it is what keeps the guard's answer a fact about the
+/// declaration: the same two items written in the other order already refuse, the registry having
+/// classified the inner by then, and an author cannot act on a diagnostic that fires on where a
+/// type is written. What stays admitted is the unresolved *concrete* name, whose instantiation the
+/// declaration has already fixed.
 ///
 /// Resolved through the same `get_field_def` call the renderers make, so the guard and the
 /// contract cannot disagree about what a shape is.
@@ -2299,9 +2354,8 @@ fn branded_constraint_inner_error(
         return None;
     }
     let inner = branded_inner_value_surface(generics, inner_field);
-    let shape = non_string_inner_shape(&inner)?;
-    let message = if let FieldDefType::SiblingType(inner_name, _) = &inner.field_type {
-        format!(
+    let message = match (&inner.field_type, non_string_inner_shape(&inner)) {
+        (FieldDefType::SiblingType(inner_name, _), Some(shape)) => format!(
             "model_schema: branded newtype `{name}` applies string constraints (pattern, \
              minLength, maxLength) to `{inner_name}`, which this crate writes as the {shape} \
              value the checks are then appended to — and that binding carries no string for them \
@@ -2310,16 +2364,29 @@ fn branded_constraint_inner_error(
              outside `\"type\": \"string\"`, and `validate()` measures the inner's `Display` \
              rendering — three surfaces, three answers. Brand a string-typed inner, or drop the \
              constraints."
-        )
-    } else {
-        format!(
+        ),
+        (FieldDefType::SiblingType(inner_name, _), None) => {
+            let parameter = inner.argument_parameter_name()?;
+            format!(
+                "model_schema: branded newtype `{name}` applies string constraints (pattern, \
+                 minLength, maxLength) to `{inner_name}`, whose schema this crate builds from the \
+                 type parameter `{parameter}` — so the checks land on whatever the instantiation \
+                 supplies for it, and one declaration covers every instantiation: Zod appends \
+                 `.min`/`.max` to a schema the call site decides the shape of, JSON Schema writes \
+                 them beside the `{{}}` a parameter describes as, where they go inert, and \
+                 `validate()` measures the inner's `Display` rendering — three surfaces, three \
+                 answers. Brand a string-typed inner, or drop the constraints."
+            )
+        }
+        (_, Some(shape)) => format!(
             "model_schema: branded newtype `{name}` applies string constraints (pattern, \
              minLength, maxLength) to a {shape} inner type, which cannot carry them: Zod reads \
              `.min`/`.max` as bounds on the value itself and has no regex check for a non-string \
              schema, JSON Schema ignores `minLength`/`maxLength`/`pattern` outside `\"type\": \
              \"string\"`, and `validate()` measures the inner's `Display` rendering — three \
              surfaces, three answers. Brand a string-typed inner, or drop the constraints."
-        )
+        ),
+        (_, None) => return None,
     };
     Some(syn::Error::new_spanned(inner_field, message).to_compile_error())
 }
@@ -2527,7 +2594,7 @@ fn branded_pattern_error(name: &Ident, args: &ModelSchemaArgs) -> Option<proc_ma
 /// for and what it records for the next brand to read cannot come apart.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn branded_inner_value_surface(generics: &syn::Generics, inner_field: &Field) -> FieldDef {
-    value_surface_field_def(generics, &get_field_def("_inner", &inner_field.ty, ""))
+    surface_field_def(generics, &get_field_def("_inner", &inner_field.ty, ""))
 }
 
 /// What the registry records for a brand.
@@ -3029,8 +3096,12 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
     // schema_example must be directly on the type (not in the module) because the example code
     // uses type names that may not be accessible from the nested module.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    let schema_example_method =
-        item_schema_example_method(docs_and_example.1.as_ref(), &name, &item_struct.generics);
+    let schema_example_method = item_schema_example_method(
+        docs_and_example.1.as_ref(),
+        &name,
+        &item_struct.generics,
+        args,
+    );
 
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     let validate_method = struct_validate_method(&collected.3, &module_ident);
@@ -3076,13 +3147,79 @@ const fn is_tuple_struct(item_struct: &syn::ItemStruct) -> bool {
     matches!(item_struct.fields, syn::Fields::Unnamed(_))
 }
 
-/// Walks a tuple struct's slots, returning their field defs in declaration order and the
-/// `compile_error!` tokens of every guard a slot violates.
+/// Whether the slot at `index` of a tuple struct declaring `declared_slots` slots carries serde
+/// attributes the wire answers for.
+///
+/// Captured from serde: a struct declaring exactly one slot writes and reads that slot's value
+/// whatever `skip`, `skip_serializing` or `skip_deserializing` says about it — a one-slot
+/// `#[serde(skip)]` struct holding `"s"` writes `"s"` and reads `"s"` back. So the slot spellings
+/// below are read only where serde reads them, which is a struct declaring more than one.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+const fn slot_attributes_reach_the_wire(declared_slots: usize) -> bool {
+    declared_slots > 1
+}
+
+/// Rejects a tuple-struct slot whose serde attributes drop it out of one of serde's two directions
+/// and not the other.
+///
+/// Captured from serde, on `struct S(#[serde(...)] Option<String>, String)` holding
+/// `(Some("s"), "x")`:
+/// - `skip_serializing` alone writes `["x"]` and reads only `["s","x"]`, refusing `["x"]` as
+///   `invalid length 1, expected tuple struct S with 2 elements`;
+/// - `skip_deserializing` alone writes `["s","x"]` and reads only `["x"]`, refusing `["s","x"]` as
+///   `trailing characters`;
+/// - `skip_serializing_if` writes `["s","x"]` or `["x"]` as its predicate decides, and reads only
+///   `["s","x"]`.
+///
+/// In each of them the array serde writes is not an array serde reads. A named field in the same
+/// position is describable — the key is simply absent from one payload and present in the other,
+/// which an optional key covers — but a slot is written by its place, so the two payloads differ in
+/// their arity and no fixed-arity tuple describes both. The declaration is refused rather than
+/// described, the way the named field whose omitted key serde cannot read back already is.
+///
+/// Not gated on the `serde` feature, and neither is the drop this stands beside: both read only the
+/// omission walk, which every build performs, and a toggle that changed the answer would leave one
+/// declaration refused in one build and described in another.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn check_slot_wire_is_readable(
+    field: &Field,
+    index: usize,
+    declared_slots: usize,
+    type_name: &str,
+    omission: SerdeKeyOmission,
+) -> Result<(), syn::Error> {
+    if !slot_attributes_reach_the_wire(declared_slots) || !omission.drops_one_direction_only() {
+        return Ok(());
+    }
+    Err(syn::Error::new_spanned(
+        field,
+        format!(
+            "model_schema: slot {index} of tuple struct `{type_name}` carries a serde attribute \
+             that drops it from only one of serde's two directions, so the array serde writes is \
+             not an array serde reads — one of them carries the slot and the other does not. A \
+             slot is written by its place rather than under a key, so there is no optional \
+             spelling to describe both and no schema can be written for the pair. Use \
+             #[serde(skip)] to take the slot off the wire in both directions, or drop the \
+             attribute so the slot is written and read in its place."
+        ),
+    ))
+}
+
+/// Walks a tuple struct's slots, returning the shape they publish and the `compile_error!` tokens
+/// of every guard a slot violates.
 ///
 /// Unlike [`collect_struct_fields`] the walk does not split on `#[serde(flatten)]`: a positional
 /// slot has no key for a flattened member to merge into, and dropping one here would silently
 /// change the arity the surfaces describe. The per-slot validators are dropped because a
 /// positional slot cannot carry a constraint — the guard that says so is what comes back instead.
+///
+/// A slot serde carries in neither direction is the one thing that does leave the walk. Captured:
+/// `struct S(#[serde(skip)] Option<String>, String)` holding `(Some("s"), "x")` writes `["x"]` and
+/// reads `["x"]` back, refusing `["s","x"]` as `trailing characters` — the slot is absent from the
+/// array in both directions, and the slots after it move up. So the described tuple is the slots
+/// that remain, which shrinks its arity, its `prefixItems` and its element types together. Every
+/// slot's def is still built before that decision, so a slot leaves the wire without taking the
+/// guards it violates with it.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn collect_tuple_slots(
     fields: &mut syn::Fields,
@@ -3091,12 +3228,19 @@ fn collect_tuple_slots(
     type_name: &str,
     generics: &syn::Generics,
     container_defaulted: bool,
-) -> (Vec<FieldDef>, Vec<proc_macro2::TokenStream>) {
+) -> (TupleStructShape, Vec<proc_macro2::TokenStream>) {
+    let declared_slots = fields.len();
     let type_parameters = type_parameters_in_scope(generics);
     let mut slots: Vec<FieldDef> = Vec::new();
     let mut guard_errors: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut deferred_attrs: Vec<Vec<syn::Attribute>> = Vec::new();
-    for field in fields.iter_mut() {
+    for (index, field) in fields.iter_mut().enumerate() {
+        let omission = parse_serde_key_omission(&field.attrs);
+        if let Err(rejection) =
+            check_slot_wire_is_readable(field, index, declared_slots, type_name, omission)
+        {
+            guard_errors.push(rejection.to_compile_error());
+        }
         let (slot, _, _, slot_guard_errors) = process_field(
             &FieldContext {
                 container_defaulted,
@@ -3110,59 +3254,74 @@ fn collect_tuple_slots(
             &mut deferred_attrs,
         );
         guard_errors.extend(slot_guard_errors);
+        if slot_attributes_reach_the_wire(declared_slots) && omission.absent_from_wire() {
+            continue;
+        }
         slots.push(slot);
     }
     if guard_errors.is_empty() {
         apply_deferred_field_attrs(fields.iter_mut(), deferred_attrs);
     }
-    (slots, guard_errors)
+    (tuple_struct_shape(declared_slots, slots), guard_errors)
+}
+
+/// The shape a tuple struct's declared arity and described slots amount to.
+///
+/// The bare value is keyed on the *declared* arity, not on how many slots came back described: a
+/// struct declaring two slots with one of them off the wire writes a one-element array, and reading
+/// the described count would collapse it to the bare value serde does not write there.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn tuple_struct_shape(declared_slots: usize, mut slots: Vec<FieldDef>) -> TupleStructShape {
+    if declared_slots == 1 && slots.len() == 1 {
+        return TupleStructShape::BareValue(Box::new(slots.remove(0)));
+    }
+    TupleStructShape::Array(slots)
 }
 
 /// The TypeScript type a tuple struct describes as.
 ///
-/// A single slot is the slot's own type: serde writes a newtype struct as that value alone, with
-/// nothing around it. Every other arity — the empty one included, which writes `[]` — is the fixed
-/// tuple the same slots describe as when they are written as a tuple field.
+/// The bare value is the slot's own type: serde writes a newtype struct as that value alone, with
+/// nothing around it. Every array — the empty one included, which writes `[]` — is the fixed tuple
+/// the slots on the wire describe as when they are written as a tuple field.
 #[cfg(feature = "typescript")]
-fn tuple_struct_ts_body(slots: &[FieldDef]) -> String {
-    if let [slot] = slots {
-        return slot.typescript_slot_typename();
+fn tuple_struct_ts_body(shape: &TupleStructShape) -> String {
+    match shape {
+        TupleStructShape::Array(slots) => format!(
+            "[{}]",
+            slots
+                .iter()
+                .map(FieldDef::typescript_slot_typename)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        TupleStructShape::BareValue(slot) => slot.typescript_slot_typename(),
     }
-    format!(
-        "[{}]",
-        slots
-            .iter()
-            .map(FieldDef::typescript_slot_typename)
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
 }
 
 /// [`tuple_struct_ts_body`] for the Zod surface.
 #[cfg(feature = "zod")]
-fn tuple_struct_zod_body(slots: &[FieldDef]) -> String {
-    if let [slot] = slots {
-        return slot.zod_slot_type();
+fn tuple_struct_zod_body(shape: &TupleStructShape) -> String {
+    match shape {
+        TupleStructShape::Array(slots) => format!(
+            "z.tuple([{}])",
+            slots
+                .iter()
+                .map(FieldDef::zod_slot_type)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        TupleStructShape::BareValue(slot) => slot.zod_slot_type(),
     }
-    format!(
-        "z.tuple([{}])",
-        slots
-            .iter()
-            .map(FieldDef::zod_slot_type)
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
 }
 
 /// [`tuple_struct_ts_body`] for the JSON-schema surface, as a standalone `serde_json::Value`
 /// expression, or the diagnostic naming the type when a slot holds a value the dispatch cannot
 /// render.
 #[cfg(feature = "jsonschema")]
-fn tuple_struct_json_body(item_name: &str, slots: &[FieldDef]) -> proc_macro2::TokenStream {
-    let described = if let [slot] = slots {
-        build_tuple_element_json_schema(slot)
-    } else {
-        tuple_json_schema_value(slots)
+fn tuple_struct_json_body(item_name: &str, shape: &TupleStructShape) -> proc_macro2::TokenStream {
+    let described = match shape {
+        TupleStructShape::Array(slots) => tuple_json_schema_value(slots),
+        TupleStructShape::BareValue(slot) => build_tuple_element_json_schema(slot),
     };
     match described {
         Ok(value) => value,
@@ -3249,7 +3408,7 @@ fn process_tuple_struct(
         tuple_struct_surface(&item_struct.fields),
     );
 
-    let (slots, guard_errors) = collect_tuple_slots(
+    let (shape, guard_errors) = collect_tuple_slots(
         &mut item_struct.fields,
         rename_all,
         &module_name,
@@ -3271,28 +3430,32 @@ fn process_tuple_struct(
 
     let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![
         #[cfg(feature = "jsonschema")]
-        json_schema_methods(&item_name, &tuple_struct_json_body(&item_name, &slots)),
+        json_schema_methods(&item_name, &tuple_struct_json_body(&item_name, &shape)),
         #[cfg(feature = "typescript")]
         build_tuple_struct_ts_definition_method(
             &build_jsdoc_body(docs_and_example.0.as_deref(), &item_name),
             &item_name,
             &name.to_string(),
             &ts_generic_params(&item_struct.generics),
-            &tuple_struct_ts_body(&slots),
+            &tuple_struct_ts_body(&shape),
         ),
         #[cfg(feature = "zod")]
         build_tuple_struct_zod_schema_method(
             &item_name,
             &name.to_string(),
             &type_parameters_in_scope(&item_struct.generics),
-            &tuple_struct_zod_body(&slots),
+            &tuple_struct_zod_body(&shape),
         ),
     ];
 
     // schema_example must be directly on the type (not in the module) because the example code
     // uses type names that may not be accessible from the nested module.
-    let schema_example_method =
-        item_schema_example_method(docs_and_example.1.as_ref(), &name, &item_struct.generics);
+    let schema_example_method = item_schema_example_method(
+        docs_and_example.1.as_ref(),
+        &name,
+        &item_struct.generics,
+        args,
+    );
 
     let delegate_impl_items = build_struct_delegate_items(
         &module_ident,
@@ -3625,24 +3788,30 @@ fn build_branded_json_schema_method(
     json_schema_methods(def_name, &body)
 }
 
-/// The `FieldDef` a value-level surface renders from: the written one with every reference to the
-/// enclosing item's own type parameters replaced by the opaque type.
+/// The `FieldDef` every surface renders from: the written one with each name that is one of the
+/// enclosing item's own type parameters classified as the parameter it is.
 ///
-/// The one seam the Zod and JSON surfaces share for a parameter, and so the reason an alias and a
-/// brand cannot drift apart over one — see [`FieldDef::erase_type_parameters`] for the rule and
-/// for why TypeScript reads the written def instead.
+/// All three surfaces read this one def, which is why a parameter cannot come to mean two things
+/// about one declaration. What each of them then makes of it differs — the two validating surfaces
+/// describe it as the opaque value, TypeScript renders the name its own declaration binds — and
+/// that difference is [`FieldDef::erase_type_parameters`]'s to state rather than this seam's. A
+/// name left unclassified reads as a reference to a generated type of that name on every surface at
+/// once, which is what puts a parameter in a `Record<…>` key position TypeScript cannot bind.
+///
+/// A struct reaches the same def by erasing each field as it is collected; this is where the item
+/// shapes holding a single written target — an alias, a brand — reach it.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-fn value_surface_field_def(generics: &syn::Generics, written: &FieldDef) -> FieldDef {
+fn surface_field_def(generics: &syn::Generics, written: &FieldDef) -> FieldDef {
     let mut erased = written.clone();
     erased.erase_type_parameters(&type_parameters_in_scope(generics));
     erased
 }
 
 /// The one def both validating surfaces read a branded newtype's inner off, so neither can render
-/// a type parameter the other has erased — see [`value_surface_field_def`].
+/// a type parameter the other has erased — see [`surface_field_def`].
 #[cfg(any(feature = "zod", feature = "jsonschema"))]
 fn branded_value_inner(generics: &syn::Generics, inner_ty: &syn::Type) -> FieldDef {
-    value_surface_field_def(generics, &get_field_def("_inner", inner_ty, ""))
+    surface_field_def(generics, &get_field_def("_inner", inner_ty, ""))
 }
 
 /// Resolves the TypeScript inner type name and generic parameter list for a branded newtype.
@@ -3671,7 +3840,7 @@ fn branded_ts_type_and_generics(
 }
 
 /// Resolves the JSON schema shape for a branded newtype's inner field, read off the def
-/// [`value_surface_field_def`] has already erased the brand's own type parameters out of.
+/// [`surface_field_def`] has already erased the brand's own type parameters out of.
 ///
 /// So a parameter admits any value while the shape it sits in — an array, a map's keys, a tuple's
 /// arity — is still described, which is what `#[serde(transparent)]` puts on the wire.
@@ -3800,7 +3969,7 @@ fn branded_inner_composite(inner: &FieldDef) -> Option<BrandedComposite> {
 /// `ObjectId` is the value the schema itself describes. An `ObjectId` writes `{"$oid": hex}`, so
 /// its `Display` is the `$oid` member and the checks land there.
 ///
-/// The inner is the def [`value_surface_field_def`] has already erased the brand's own type
+/// The inner is the def [`surface_field_def`] has already erased the brand's own type
 /// parameters out of, so a parameter composes into the value as `z.unknown()` rather than as a
 /// binding nothing declares. The checks never land on one: an opaque inner carries no string for
 /// them to measure and is refused by [`branded_constraint_inner_error`] before this.
@@ -4187,12 +4356,13 @@ fn build_branded_schema_example(
     example_code: Option<&String>,
     name: &Ident,
     generic_params: &[String],
+    args: &ModelSchemaArgs,
 ) -> proc_macro2::TokenStream {
     let Some(code) = example_code else {
         return quote! {};
     };
     let code_tokens: proc_macro2::TokenStream = code.parse().unwrap();
-    let value_ty = schema_example_value_type(name, generic_params);
+    let value_ty = schema_example_value_type(name, generic_params, &args.default_types);
     quote! {
         pub fn schema_example() -> serde_json::Value {
             let value: #value_ty = {
@@ -4466,7 +4636,7 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
 
     #[cfg(feature = "zod")]
     let schema_example_tokens =
-        build_branded_schema_example(example_code.as_ref(), &name, &generic_params);
+        build_branded_schema_example(example_code.as_ref(), &name, &generic_params, args);
     #[cfg(not(feature = "zod"))]
     let schema_example_tokens = quote! {};
 
@@ -4567,11 +4737,11 @@ fn process_enum(item_enum: syn::ItemEnum, args: &ModelSchemaArgs) -> TokenStream
         #[cfg(not(feature = "serde"))]
         let rename_all = None;
 
-        process_plain_enum(item_enum, &name, rename_all, &item_name)
+        process_plain_enum(item_enum, &name, rename_all, &item_name, args)
     } else {
         #[cfg(feature = "serde")]
         if serde_type_meta.untagged {
-            return process_untagged_enum(item_enum, &name, &item_name);
+            return process_untagged_enum(item_enum, &name, &item_name, args);
         }
 
         // Neither tagging key named, so serde writes the externally tagged form and that is what
@@ -4584,6 +4754,7 @@ fn process_enum(item_enum: syn::ItemEnum, args: &ModelSchemaArgs) -> TokenStream
                 &name,
                 serde_type_meta.rename_all.as_deref(),
                 &item_name,
+                args,
             );
         }
 
@@ -4600,6 +4771,7 @@ fn process_enum(item_enum: syn::ItemEnum, args: &ModelSchemaArgs) -> TokenStream
                 tag,
                 serde_type_meta.rename_all.as_deref(),
                 &item_name,
+                args,
             );
         }
 
@@ -4627,6 +4799,7 @@ fn process_enum(item_enum: syn::ItemEnum, args: &ModelSchemaArgs) -> TokenStream
             &content_name,
             rename_all.as_deref(),
             &item_name,
+            args,
         )
     }
 }
@@ -4848,6 +5021,7 @@ fn process_plain_enum(
     name: &syn::Ident,
     rename_all: Option<&str>,
     item_name: &str,
+    args: &ModelSchemaArgs,
 ) -> TokenStream {
     // Compute the schema module name and register the enum so other types can find it.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -4913,9 +5087,12 @@ fn process_plain_enum(
 
     // schema_example must be directly on the type (not in the module) because the example code
     // uses type names that may not be accessible from the nested module.
+    #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
+    let _: &_ = &args;
+
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     let schema_example_method =
-        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics);
+        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics, args);
 
     // Build schema module impl items (without schema_example)
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
@@ -5148,6 +5325,7 @@ fn process_discriminated_enum(
     content_name: &str,
     rename_all: Option<&str>,
     item_name: &str,
+    args: &ModelSchemaArgs,
 ) -> TokenStream {
     // Compute the schema module name and register the enum so other types can find it.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -5174,7 +5352,7 @@ fn process_discriminated_enum(
     }
     let rendered = render_discriminated_variants(tag_name, content_name, item_name, &variants.0);
     #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
-    let _: &_ = &(name, &rendered);
+    let _: &_ = &(name, &rendered, args);
 
     #[cfg(feature = "jsonschema")]
     let main_schema_code = discriminated_main_schema_code(&rendered.2);
@@ -5228,7 +5406,7 @@ fn process_discriminated_enum(
     // uses type names that may not be accessible from the nested module.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     let schema_example_method =
-        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics);
+        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics, args);
 
     // Build schema module impl items (without schema_example)
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
@@ -5599,6 +5777,7 @@ fn process_externally_tagged_enum(
     name: &syn::Ident,
     rename_all: Option<&str>,
     item_name: &str,
+    args: &ModelSchemaArgs,
 ) -> TokenStream {
     // Compute the schema module name and register the enum so other types can find it.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -5643,7 +5822,7 @@ fn process_externally_tagged_enum(
     #[cfg(not(feature = "zod"))]
     let _: &_ = &schema_code;
     #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
-    let _: &_ = &name;
+    let _: &_ = &(name, args);
 
     #[cfg(feature = "typescript")]
     let docs = build_jsdoc_body(docs_vec.as_deref(), item_name);
@@ -5674,7 +5853,7 @@ fn process_externally_tagged_enum(
 
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     let schema_example_method =
-        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics);
+        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics, args);
 
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![
@@ -6008,6 +6187,7 @@ fn process_internally_tagged_enum(
     tag_name: &str,
     rename_all: Option<&str>,
     item_name: &str,
+    args: &ModelSchemaArgs,
 ) -> TokenStream {
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     // Every other enum shape is written as a union of what its variants render as.
@@ -6050,7 +6230,7 @@ fn process_internally_tagged_enum(
     #[cfg(not(feature = "zod"))]
     let _: &_ = &schema_code;
     #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
-    let _: &_ = &name;
+    let _: &_ = &(name, args);
 
     #[cfg(feature = "typescript")]
     let docs = build_jsdoc_body(docs_vec.as_deref(), item_name);
@@ -6081,7 +6261,7 @@ fn process_internally_tagged_enum(
 
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     let schema_example_method =
-        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics);
+        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics, args);
 
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![
@@ -6955,6 +7135,7 @@ fn process_untagged_enum(
     mut item_enum: syn::ItemEnum,
     name: &syn::Ident,
     item_name: &str,
+    args: &ModelSchemaArgs,
 ) -> TokenStream {
     // Compute the schema module name and register the enum so other types can find it.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -6995,11 +7176,11 @@ fn process_untagged_enum(
     let _: &_ = &zod_merge_parts;
 
     #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
-    let _: &_ = &(name, item_name, &ts_parts, &zod_parts, &json_parts);
+    let _: &_ = &(name, item_name, &ts_parts, &zod_parts, &json_parts, args);
 
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     let schema_example_method =
-        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics);
+        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics, args);
 
     // Build schema module impl items (without schema_example)
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
@@ -9383,7 +9564,7 @@ fn field_ident_string(field: &Field) -> String {
 fn apply_serde_key_omission(field_def: &mut FieldDef, field: &Field) {
     let omission = parse_serde_key_omission(&field.attrs);
     field_def.omits_value = field.ident.is_some() && omission.omits_key;
-    field_def.absent_from_wire = field_def.omits_value && omission.skips_deserializing;
+    field_def.absent_from_wire = field.ident.is_some() && omission.absent_from_wire();
 }
 
 /// Adds the field to the list every surface is built from, unless the wire carries its key in
@@ -10945,6 +11126,13 @@ fn generate_discriminated_enum_zod_schema_method(
 /// Builds the alias module's `ts_definition()`, or nothing when `typescript` is off. The doc
 /// block and the generic parameter list are only meaningful to TypeScript, so they are gathered
 /// inside the gate rather than by the caller.
+///
+/// The target is read through [`surface_field_def`], the same seam the two validating methods
+/// beside this one read it through, so the alias classifies its own parameters exactly as a struct
+/// classifies its fields. TypeScript still renders each parameter as the name the declaration binds
+/// — that is what a classified parameter renders as here — with the one exception the declaration
+/// itself forces: a parameter reached in a map's key position states the string keys serde writes,
+/// because `Record<K, V>` binds `K extends keyof any` and a parameter satisfies no such bound.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn generate_alias_ts_definition_method(
     alias: &ItemType,
@@ -10960,7 +11148,7 @@ fn generate_alias_ts_definition_method(
             export_name,
             &alias.ident.to_string(),
             &ts_generic_params(&alias.generics),
-            field_def,
+            &surface_field_def(&alias.generics, field_def),
         )
     }
     #[cfg(not(feature = "typescript"))]
@@ -11030,9 +11218,8 @@ fn generate_alias_json_schema_method(
 ) -> proc_macro2::TokenStream {
     #[cfg(feature = "jsonschema")]
     {
-        let body =
-            build_tuple_element_json_schema(&value_surface_field_def(&alias.generics, field_def))
-                .unwrap_or_else(|rejection| alias_json_schema_rejection(export_name, &rejection));
+        let body = build_tuple_element_json_schema(&surface_field_def(&alias.generics, field_def))
+            .unwrap_or_else(|rejection| alias_json_schema_rejection(export_name, &rejection));
         json_schema_methods(export_name, &body)
     }
     #[cfg(not(feature = "jsonschema"))]
@@ -11046,7 +11233,7 @@ fn generate_alias_json_schema_method(
 
 /// Builds the alias module's `zod_schema()`, or nothing when `zod` is off.
 ///
-/// The value is rendered from the target read through [`value_surface_field_def`], so a parameter
+/// The value is rendered from the target read through [`surface_field_def`], so a parameter
 /// is the argument the alias's own factory binds for it rather than the `Name$Schema` binding an
 /// unresolved type is named after — a binding no emitted module declares.
 ///
@@ -11068,7 +11255,7 @@ fn generate_alias_zod_method(
         // The alias's rendered Zod is its FieldDef expression (a tuple alias yields
         // the null-flavored `z.tuple([...])`, a scalar yields `z.string()`, a sibling
         // yields `Name$Schema`).
-        let schema_code = value_surface_field_def(&alias.generics, field_def).zod_type();
+        let schema_code = surface_field_def(&alias.generics, field_def).zod_type();
         let parameters = type_parameters_in_scope(&alias.generics);
         let reexport = ident_reexport_zod(
             rust_ident,

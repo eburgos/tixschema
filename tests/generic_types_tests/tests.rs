@@ -21,7 +21,8 @@
 mod typescript {
     use super::{
         Adjacent, External, FolderTree, Holder, Internal, KeyedByParameter, LifetimeStruct, Pair,
-        PlainConst, Positional, Untagged, WireFolder, Wrapper,
+        PlainConst, Positional, Untagged, WireFolder, Wrapper, concrete_alias_schema,
+        keyed_alias_schema,
     };
 
     /// The key states the string keys serde writes, the way the two validating surfaces already
@@ -54,6 +55,42 @@ mod typescript {
             "Got: {ts}"
         );
         assert!(!ts.contains("Record<KeyType"), "Got: {ts}");
+    }
+
+    /// An alias reaches the same rule, its own target being classified the way a struct's fields
+    /// are. Both members of the declaration are held: the target and the re-export written from it,
+    /// the second binding the parameters the first spends.
+    #[test]
+    fn a_parameter_keyed_map_alias_states_the_string_key_and_keeps_the_value_parameter() {
+        let ts = keyed_alias_schema::Schema::ts_definition();
+        assert!(
+            ts.contains(
+                "export type KeyedAliasType<KeyType, ValueType> = \
+                 Partial<Record<string, ValueType>>;"
+            ),
+            "Got: {ts}"
+        );
+        assert!(
+            ts.contains(
+                "export type KeyedAlias<KeyType, ValueType> = KeyedAliasType<KeyType, ValueType>;"
+            ),
+            "Got: {ts}"
+        );
+        assert!(!ts.contains("Record<KeyType"), "Got: {ts}");
+    }
+
+    /// Nothing parameterised, nothing to classify: the alias renders what it always rendered.
+    #[test]
+    fn an_alias_declaring_no_parameter_renders_its_target_as_written() {
+        let ts = concrete_alias_schema::Schema::ts_definition();
+        assert!(
+            ts.contains("export type ConcreteAliasType = Partial<Record<string, number>>;"),
+            "Got: {ts}"
+        );
+        assert!(
+            ts.contains("export type ConcreteAlias = ConcreteAliasType;"),
+            "Got: {ts}"
+        );
     }
 
     /// The declaration binds what the fields under it are written with, so a field typed with a
@@ -203,7 +240,7 @@ mod zod {
     use super::{
         Adjacent, Carried, Envelope, External, FolderTree, Holder, Internal, KeyedByParameter,
         LifetimeStruct, Pair, PlainConst, Positional, Quintet, Referrer, Summarised, Tagged,
-        Untagged, WireFolder, Wrapper,
+        Untagged, WireFolder, Wrapper, keyed_alias_schema,
     };
 
     /// A record key has to produce string keys, and serde says every instantiation this map has
@@ -228,6 +265,36 @@ mod zod {
         // appear is the parameter standing where the KEY schema goes.
         assert!(!zod.contains("z.record(keyType"), "Got: {zod}");
         assert!(!zod.contains("KeyType$Schema"), "Got: {zod}");
+    }
+
+    /// The alias reaches the same two answers through the same classification, and the factory it
+    /// publishes is where they compose: the parameter written as the map's VALUE is the argument
+    /// the factory binds, while the one written as its KEY states the string guarantee and so
+    /// leaves its own argument unspent — the signature still binds it, the declaration having
+    /// written it.
+    #[test]
+    fn a_parameter_keyed_map_alias_composes_the_factory_argument_with_the_string_key() {
+        let zod = keyed_alias_schema::Schema::zod_schema();
+        assert!(
+            zod.contains("const buildKeyedAliasType$Schema = "),
+            "Got: {zod}"
+        );
+        assert!(
+            zod.contains("  z.record(z.string(), valueType);"),
+            "Got: {zod}"
+        );
+        // The key's argument is still bound where the declaration wrote it, spent or not; only a
+        // build that declares types spells the binding out.
+        #[cfg(feature = "typescript")]
+        assert!(
+            zod.contains(
+                "const buildKeyedAliasType$Schema = \
+                 <KeyType extends ZodType, ValueType extends ZodType>(\n  keyType: KeyType,"
+            ),
+            "Got: {zod}"
+        );
+        assert!(!zod.contains("z.record(z.unknown()"), "Got: {zod}");
+        assert!(!zod.contains("z.record(keyType"), "Got: {zod}");
     }
 
     /// A concrete key keeps its own answer: a bare string opens the object, and a key serde
@@ -913,8 +980,9 @@ pub struct Envelope {
     pub trace: String,
 }
 
-/// A generic alias, and a generic branded newtype: the two surfaces that publish a `const` rather
-/// than a factory, and so the two a parameter inside still reaches as the opaque value.
+/// A generic alias, and a generic branded newtype: the two item shapes holding a single written
+/// target rather than a list of fields, and so the two whose parameters are classified at that
+/// target rather than one field at a time.
 #[model_schema(name = "Boxed", default_types(ValueType = String))]
 pub type Boxed<ValueType> = Vec<ValueType>;
 
@@ -922,6 +990,19 @@ pub type Boxed<ValueType> = Vec<ValueType>;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Tagged<ValueType>(pub ValueType);
+
+/// One parameter in a map's key position, one in its value position — what
+/// [`KeyedByParameter`] holds for a struct, held here for an alias. Consumed only by the surface
+/// modules, so it exists only where one of them compiles.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[model_schema(default_types(KeyType = String, ValueType = u32))]
+pub type KeyedAlias<KeyType, ValueType> = HashMap<KeyType, ValueType>;
+
+/// The same target with nothing parameterised, held beside the one above so the classification
+/// cannot move a non-generic alias.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[model_schema()]
+pub type ConcreteAlias = HashMap<String, u32>;
 
 /// A generic type that also flattens, which is the one shape where the parameters and the deferred
 /// read of another type's binding have to hold at once.
@@ -1023,6 +1104,18 @@ pub struct Summarised<ValueType> {
 #[test]
 fn a_parameter_with_no_default_still_expands_where_no_json_document_is_built() {
     assert_eq!(Undefaulted { id: 1_u32 }.id, 1);
+}
+
+/// Each alias named by a value, the way every other declaration shape here is: an alias that binds
+/// parameters is still the type it names, and a filling of it is a map serde writes as an object.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_generic_alias_expands_to_rust_that_compiles() {
+    let keyed: KeyedAlias<String, u32> = HashMap::from([("k".to_owned(), 1_u32)]);
+    assert_eq!(keyed["k"], 1);
+
+    let concrete: ConcreteAlias = HashMap::from([("k".to_owned(), 2_u32)]);
+    assert_eq!(concrete["k"], 2);
 }
 
 /// The pair the attribute used to produce on any generic item: `E0107` on the emitted `impl`,

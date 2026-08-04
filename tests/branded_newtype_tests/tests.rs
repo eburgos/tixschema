@@ -1642,6 +1642,28 @@ mod branded_sibling_inner_tests {
     #[serde(transparent)]
     pub struct LateSlug(pub String);
 
+    // The same forward declaration with the inner's argument fixed where it is written, which is
+    // what the refusal for a parameterised inner does not reach. Written above `LateTag` on
+    // purpose: what the registry records for a generic publisher is one shape for every
+    // instantiation, so the same pair written in the other order is refused for the recorded shape
+    // instead — a difference this fixture keeps in view rather than papering over.
+    #[model_schema(minLength = 3)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct FixedTag(pub LateTag<String>);
+
+    // The same inner reached through a parameter instead, unconstrained — which is what a generic
+    // brand publishes a factory for.
+    #[model_schema(default_types(TagType = String))]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct OpenTag<TagType>(pub LateTag<TagType>);
+
+    #[model_schema(default_types(TagType = String))]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct LateTag<TagType>(pub TagType);
+
     #[test]
     fn a_sibling_brand_writes_the_object_its_inner_writes() {
         let part = Part {
@@ -1767,6 +1789,54 @@ mod branded_sibling_inner_tests {
             zod.contains(
                 r#"const EarlySlug$RawSchema = LateSlug$Schema.min(3).brand<"EarlySlug">()"#
             ),
+            "Got:\n{zod}"
+        );
+    }
+
+    /// A fixed argument is not a parameter, so the refusal beside it leaves this declaration where
+    /// it was: the checks are appended to the factory call, and every surface holds the string the
+    /// declaration fixed. This is the admission the guard makes for a name the registry has no
+    /// answer for, reached by a name that carries an argument.
+    #[test]
+    fn a_constrained_brand_over_a_fixed_instantiation_carries_its_checks() {
+        assert_eq!(
+            FixedTag::json_schema(),
+            serde_json::json!({ "allOf": [{}, { "minLength": 3_u32 }] })
+        );
+        let zod = FixedTag::zod_schema();
+        assert!(
+            zod.contains(
+                r#"const FixedTag$RawSchema = LateTag$SchemaFactory(z.string()).min(3).brand<"FixedTag">()"#
+            ),
+            "Got:\n{zod}"
+        );
+        FixedTag(LateTag("abcd".to_owned())).validate().unwrap();
+        assert_eq!(
+            FixedTag(LateTag("ab".to_owned())).validate().unwrap_err(),
+            vec!["value is too short: minimum length is 3, got 2".to_owned()]
+        );
+    }
+
+    /// Nothing the refusal added reaches a brand carrying no checks: it still publishes the
+    /// factory, still composes the inner's own factory inside it, and still binds the parameter it
+    /// was declared with.
+    #[test]
+    fn an_unconstrained_generic_brand_over_a_parameterised_inner_is_unchanged() {
+        assert_eq!(
+            OpenTag::<String>::ts_definition(),
+            r#"export type OpenTag<TagType> = LateTag<TagType> & $brand<"OpenTag">;"#
+        );
+        let zod = OpenTag::<String>::zod_schema();
+        assert!(
+            zod.contains("const buildOpenTag$Schema = <TagType extends ZodType>("),
+            "Got:\n{zod}"
+        );
+        assert!(
+            zod.contains("  LateTag$SchemaFactory(tagType).meta({"),
+            "Got:\n{zod}"
+        );
+        assert!(
+            zod.contains("export const OpenTag$SchemaFactory = <TagType extends ZodType>("),
             "Got:\n{zod}"
         );
     }
