@@ -1590,6 +1590,18 @@ mod branded_sibling_inner_tests {
     #[serde(transparent)]
     pub struct ShortSlug(pub Slug);
 
+    // A constrained brand written *before* the string-shaped sibling it names, so nothing is
+    // recorded for that name when the brand asks what it publishes.
+    #[model_schema(minLength = 3)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct EarlySlug(pub LateSlug);
+
+    #[model_schema(maxLength = 10)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct LateSlug(pub String);
+
     #[test]
     fn a_sibling_brand_writes_the_object_its_inner_writes() {
         let part = Part {
@@ -1689,6 +1701,32 @@ mod branded_sibling_inner_tests {
         );
         assert!(
             zod.contains(r#"ShortSlug$Schema: $ZodBranded<typeof Slug$Schema, "ShortSlug">"#),
+            "Got:\n{zod}"
+        );
+    }
+
+    /// A brand reaching a name before the named item has expanded is asking a registry that has
+    /// nothing recorded for it, and the constrained brand keeps the emission it has always had
+    /// rather than being refused for where its inner happens to be written.
+    ///
+    /// That absence is the same one an unresolved user type leaves — a type this crate never
+    /// expands, whose schema the author supplies — so refusing on it would refuse the second for
+    /// the sake of the first, and would make a diagnostic out of declaration order: moving a
+    /// declaration would turn a compiling program into a refused one without changing what it
+    /// means. The `Display` assertion still bounds the Rust surface either way.
+    #[test]
+    fn a_constrained_brand_over_a_forward_declared_sibling_keeps_its_emission() {
+        assert_eq!(
+            EarlySlug::json_schema(),
+            serde_json::json!({
+                "allOf": [{ "type": "string", "maxLength": 10_u32 }, { "minLength": 3_u32 }]
+            })
+        );
+        let zod = EarlySlug::zod_schema();
+        assert!(
+            zod.contains(
+                r#"const EarlySlug$RawSchema = LateSlug$Schema.min(3).brand<"EarlySlug">()"#
+            ),
             "Got:\n{zod}"
         );
     }

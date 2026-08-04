@@ -134,6 +134,12 @@ pub struct AliasInfo {
     pub kind: AliasKind,
     #[cfg(feature = "jsonschema")]
     pub module_name: String,
+    /// What the value surface written under this name is, in the vocabulary a constrained brand's
+    /// refusal names shapes by — and `None` both when that surface is one string checks land on and
+    /// when nothing has been recorded at all. Filled by [`record_value_shape`] as each item
+    /// registers.
+    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+    pub value_shape: Option<&'static str>,
     /// What an untagged enum's members are spelled as on the Zod surface, and empty for every other
     /// item. Filled by [`record_zod_union_members`] once the enum's own expansion has rendered
     /// them.
@@ -501,10 +507,36 @@ pub fn register_alias_info(
                 kind,
                 #[cfg(feature = "jsonschema")]
                 module_name: module_name.to_owned(),
+                value_shape: None,
                 #[cfg(feature = "zod")]
                 zod_union_members: Vec::new(),
             },
         );
+    });
+}
+
+/// Records what the value surface written under a name is, on the entry that name has just
+/// registered.
+///
+/// The question is the constrained-brand guard's: a brand appends `.min`/`.max`/a regex check to
+/// its inner's own schema binding, and a name is the one inner spelling whose binding this
+/// expansion cannot read off the declaration — the schema lives in the module the *named* item
+/// published. So each item answers for itself as it registers, and a brand over a name reads the
+/// answer back rather than guessing at it.
+///
+/// `None` is what an unanswered name and a string-checked one both leave, and the guard treats them
+/// alike: a name it cannot classify keeps the emission it has always had. That is the same regime
+/// the map-key registry already runs — `AliasKind::Unknown` is a name that was not registered
+/// before the type reading it — rather than a second one.
+///
+/// A chain resolves one link at a time and cannot cycle, because an entry is only ever built from
+/// entries registered before it.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+pub fn record_value_shape(rust_ident: &str, shape: Option<&'static str>) {
+    ALIAS_INFO.with(|map| {
+        if let Some(info) = map.borrow_mut().get_mut(rust_ident) {
+            info.value_shape = shape;
+        }
     });
 }
 
