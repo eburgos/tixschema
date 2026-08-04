@@ -103,7 +103,7 @@ pub struct UserWithOptionals {
 
 ### Collections and Maps
 
-`Vec<T>` becomes `Array<T>`, and so does every other std wrapper serde writes as a JSON array of its element: `VecDeque<T>`, `LinkedList<T>`, `BinaryHeap<T>`, `HashSet<T>`, and `BTreeSet<T>`. Each is that array on the wire, so each is typed and validated as that array — the element decides what the array holds. Nesting is kept at whatever depth it is written: a `Vec<Vec<T>>` (or `HashSet<Vec<T>>`, or any other mix of those wrappers) writes an array of arrays, so it becomes `Array<Array<T>>`, `z.array(z.array(...))`, and a JSON schema whose `items` is itself an array. Only `HashMap<String, T>` is supported (non-string keys will cause compilation errors).
+`Vec<T>` becomes `Array<T>`, and so does every other std wrapper serde writes as a JSON array of its element: `VecDeque<T>`, `LinkedList<T>`, `BinaryHeap<T>`, `HashSet<T>`, and `BTreeSet<T>`. Each is that array on the wire, so each is typed and validated as that array — the element decides what the array holds. Nesting is kept at whatever depth it is written: a `Vec<Vec<T>>` (or `HashSet<Vec<T>>`, or any other mix of those wrappers) writes an array of arrays, so it becomes `Array<Array<T>>`, `z.array(z.array(...))`, and a JSON schema whose `items` is itself an array.
 
 A fixed-size array `[T; N]` is that array too, with its length described. serde writes exactly `N` items and reads one back only at that length, so the two validating surfaces say so: the JSON schema pins the level with `"minItems": N` and `"maxItems": N`, and Zod appends `.length(N)`. The bound belongs to the level it was written at, so `Vec<[T; 3]>` is an unbounded array of 3-element arrays and `[Vec<T>; 3]` is a 3-element array of unbounded ones. TypeScript stays `Array<T>`: the fixed-length form its type system has is the N-element tuple, which has to be written out element by element and stops being readable long before `N` stops being legal. A length the macro cannot read — a const generic parameter, a `const` item, any computed expression — describes as an unbounded array, the macro running before there is a value to ask for; a slice `[T]` has no length to describe at all.
 
@@ -120,6 +120,33 @@ pub struct UserWithCollections {
     pub settings: Option<HashMap<String, String>>,
 }
 ```
+
+`HashMap<K, V>` and `BTreeMap<K, V>` are both read as maps, and the key decides what the map describes as. A `String` key is the open case: any string is a key, so the JSON schema puts the value's schema under `"additionalProperties"`, TypeScript writes `Partial<Record<string, V>>`, and Zod writes `z.record(z.string(), V)`.
+
+A key written as a plain `#[model_schema()]` enum is the narrowed case: the enum's members become the object's properties and nothing else is allowed, so the JSON schema lists each member with the value's schema and closes the object with `"additionalProperties": false`, while TypeScript and Zod name the enum itself as the key type — `Partial<Record<Slot, V>>` and `z.record(Slot$Schema, V)`. The members are named as serde writes them, so a `#[serde(rename_all = "...")]` on the enum renames the properties too. This holds wherever the enum is declared relative to the type that writes the map, and through a `#[model_schema()]` alias of one.
+
+```rust
+use std::collections::HashMap;
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum Slot {
+    Primary,
+    Secondary,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+pub struct Schedule {
+    // {"type": "object", "properties": {"Primary": {...}, "Secondary": {...}},
+    //  "additionalProperties": false}
+    pub slots: HashMap<Slot, String>,
+}
+```
+
+A key path is the one spelling that can name an enum, so a key path the expansion can prove is *not* a plain enum — a struct, a branded newtype, a tagged or untagged enum, or a `#[model_schema()]` alias of any of them — is refused where it is written, at whatever depth the map sits at, naming the type as the author spelled it. A key path the expansion has not seen yet, one declared after the type that writes the map or one from another crate, cannot be ruled out and is emitted as an enumerating key; a key that turns out to have no members surfaces as an `E0599` at the key type instead. A sequence-wrapped key — a `Vec`, a `[T; N]`, one of the sets — is refused outright, serde writing no object at all for a map keyed by one. All three are covered under [Compilation Errors](#compilation-errors), with the exact diagnostic each produces.
+
+Every other key is neither open nor enumerable, and none of them is refused. The JSON schema describes such a map as an object and says nothing about its members — `{"type": "object", "additionalProperties": true}` — while TypeScript and Zod keep the key's own type, so a `HashMap<u32, String>` is `Partial<Record<number, string>>` and `z.record(z.number().int(), z.string())`. serde writes the object with the key's string form for its keys: `7` becomes `"7"`, `true` becomes `"true"`, a chrono `NaiveDate` its ISO rendering. Only the narrowing is missing, not the object.
 
 ### Pointers and Borrowed Values
 
@@ -1487,7 +1514,7 @@ If the `serde` feature is disabled but serde attributes are present, you will se
 
 2. **Type References**: Nested types reference each other by their TypeScript name (with the `Json` suffix stripped if present).
 
-3. **HashMap Keys**: Only `HashMap<String, T>` is supported. Non-string keys will cause compilation errors.
+3. **Map Keys**: `HashMap` and `BTreeMap` are both supported, and the key decides what the map describes as: a `String` key gives an object open to any string key, and a plain `#[model_schema()]` enum key gives one closed to the enum's members. A key path proved to be neither, and any sequence-wrapped key, is refused at expansion; every other key describes as an open object. See [Collections and Maps](#collections-and-maps).
 
 4. **Array Types**: `Vec<T>` becomes `Array<T>` in TypeScript, one `Array<...>` per level written — `Vec<Vec<T>>` is `Array<Array<T>>`.
 
@@ -1553,29 +1580,30 @@ tixschema = { features = ["serde"] }
 
 ### Compilation Errors
 
-#### Unsupported Map Key Types
+#### Map Keys Without Enumerable Members
 
-**Error:** Compilation fails with complex HashMap key types.
+**Error:** *a map key must be a plain `#[model_schema()]` enum, whose members become the object's keys — `<type>` resolves to a type with no `enum_members()`*, reported at the field; or `no associated function or constant named enum_members found for <type>` (`E0599`), reported at the map's key type.
 
-Only `HashMap<String, T>` is supported:
+A map key written as a type path must be a plain `#[model_schema()]` enum, whose members become the object's keys. A `String` key is the other supported spelling, and every key that is neither is covered under [Collections and Maps](#collections-and-maps) — this entry is about the two diagnostics a type path earns.
+
+A key the expansion has already seen and knows is not a plain enum — a struct, a branded newtype, a tagged or untagged enum, or a `#[model_schema()]` alias of one of those — is named directly, at the field that writes the map:
 
 ```rust
-// Wrong: not supported
-pub struct BadConfig {
-    pub settings: HashMap<i32, String>,
+#[model_schema()]
+pub struct Doc {
+    pub id: String,
 }
 
-// Correct: use string keys
-pub struct Config {
-    pub settings: HashMap<String, String>,
+// Wrong: `Doc` is a struct, so it has no members for the object's keys
+#[model_schema()]
+pub struct BadCounts {
+    pub counts: HashMap<Doc, u32>, // reported at the field, naming `Doc`
 }
 ```
 
-#### Map Keys Without Enumerable Members
+An alias resolves through to what it names, so an alias of a struct is refused under the alias's own name, and a `#[model_schema()]` alias whose target *is* such a map is refused at the alias.
 
-**Error:** `no associated function or constant named enum_members found for <type>` (`E0599`), reported at the map's key type.
-
-A map key written as a type path must be a plain `#[model_schema()]` enum, whose members become the object's keys. A key the expansion has already seen is named directly — *a map key must be a plain `#[model_schema()]` enum ...* — but items expand in the order they are written, so a key declared after the type that writes the map, like one from another crate, has not been seen yet and is emitted as an enumerating key. When such a key carries no `enum_members()`, the requirement surfaces as an `E0599` at the key type:
+Items expand in the order they are written, though, so a key declared after the type that writes the map, like one from another crate, has not been seen yet and is emitted as an enumerating key. When such a key carries no `enum_members()`, the same requirement surfaces as an `E0599` at the key type:
 
 ```rust
 // Wrong: `LateKey` resolves to `String`, which has no members to enumerate
@@ -1601,6 +1629,28 @@ pub struct Config {
 ```
 
 Declaration order decides only which of the two diagnostics is reported. A plain enum key works wherever it is declared.
+
+#### Sequence-Wrapped Map Keys
+
+**Error:** *a map key must be a value serde writes as a string ... this key is a sequence of `<type>`*, reported at the field.
+
+A JSON object key is a string. A sequence writes a JSON array, so `serde_json` refuses to serialize a map keyed by one at all — `key must be a string`, raised at serialization time, with no object and no array-of-pairs fallback. There is no wire form for a schema to describe, so the spelling is refused rather than described:
+
+```rust
+// Wrong: the key writes an array, which serde will not use as an object key
+#[model_schema()]
+pub struct BadCounts {
+    pub counts: HashMap<Vec<Slot>, u32>,
+}
+
+// Correct: the key is the element itself, whose members become the object's keys
+#[model_schema()]
+pub struct Counts {
+    pub counts: HashMap<Slot, u32>,
+}
+```
+
+Every sequence spelling earns this — `Vec`, `[T; N]`, and the sets — the wrapper being what serde writes as an array. The message names the element rather than the wrapper, the parser having already collapsed those spellings onto their array levels. A sequence in the map's *value* is untouched: only the key has to be a string.
 
 #### Function-Local Types
 

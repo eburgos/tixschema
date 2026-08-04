@@ -402,6 +402,11 @@ mod objectid_branded_surface_tests {
     #[serde(transparent)]
     pub struct HexObjectId(pub ObjectId);
 
+    #[model_schema(no_display)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct ObjectIdList(pub Vec<ObjectId>);
+
     #[model_schema()]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub struct HoldsObjectId {
@@ -476,6 +481,37 @@ mod objectid_branded_surface_tests {
         assert_eq!(
             PlainObjectId::json_schema(),
             HoldsObjectId::json_schema()["properties"]["id"]
+        );
+    }
+
+    /// An arrayed `ObjectId` writes the array around the `$oid` object, which is a container and
+    /// so is described by the slot dispatch — the same rendering the unbranded tuple struct over
+    /// the same `Vec` publishes, hex pattern and open object included. Slot position and field
+    /// position spell the `$oid` object differently; the brand follows the slot it is
+    /// rendered through.
+    #[test]
+    fn an_arrayed_objectid_brand_describes_the_array_of_oid_objects() {
+        let zod = ObjectIdList::zod_schema();
+        assert!(
+            zod.contains(&format!(
+                "const ObjectIdList$RawSchema = z.array({OID_ZOD_BASE} }})).brand<"
+            )),
+            "Got:\n{zod}"
+        );
+        assert!(
+            zod.contains(r#"ObjectIdList$Schema: $ZodBranded<ZodArray, "ObjectIdList">"#),
+            "Got:\n{zod}"
+        );
+        assert_eq!(
+            ObjectIdList::json_schema(),
+            serde_json::json!({
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": { "$oid": { "type": "string", "pattern": "^[a-f\\d]{24}$" } },
+                    "required": ["$oid"]
+                }
+            })
         );
     }
 }
@@ -815,6 +851,321 @@ mod branded_no_display_tests {
     fn test_no_display_brand_still_generates_zod() {
         let zod = Tags::zod_schema();
         assert!(zod.contains("brand<\"Tags\">"), "Got: {zod}");
+    }
+}
+
+/// The four surfaces of a brand whose inner writes a container, pinned against what serde writes
+/// for it.
+///
+/// `#[serde(transparent)]` puts the inner on the wire by itself, so an array inner writes an
+/// array, a map inner an object, and a tuple inner the fixed-arity array — never a string. The
+/// TypeScript type and the Zod value already described those; the Zod type annotation and the JSON
+/// schema are pinned here beside them, so a consumer type-checking the exported binding and one
+/// validating a payload read the same shape.
+#[cfg(all(
+    feature = "jsonschema",
+    feature = "serde",
+    feature = "typescript",
+    feature = "zod"
+))]
+mod branded_composite_inner_tests {
+    use super::*;
+    use alloc::collections::BTreeSet;
+    use std::collections::HashMap;
+
+    #[model_schema(no_display)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct ByteQuad(pub [u8; 4]);
+
+    #[model_schema(no_display)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct Grid(pub Vec<Vec<i32>>);
+
+    #[model_schema(no_display)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct LabelList(pub Vec<String>);
+
+    #[model_schema(no_display)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct LabelPair(pub (String, u32));
+
+    #[model_schema(no_display)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct LabelSet(pub BTreeSet<String>);
+
+    #[model_schema(no_display)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct Payload(pub serde_json::Value);
+
+    #[model_schema(no_display)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct SparseLabels(pub Vec<Option<String>>);
+
+    #[model_schema(no_display)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct WeightMap(pub HashMap<String, u32>);
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Label {
+        pub key: String,
+    }
+
+    #[model_schema(no_display)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct LabelRow(pub Vec<Label>);
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct HoldsComposites {
+        pub labels: Vec<String>,
+        pub pair: (String, u32),
+        pub weights: HashMap<String, u32>,
+    }
+
+    #[test]
+    fn a_container_brand_writes_the_container_its_inner_writes() {
+        for (rendered, expected) in [
+            (
+                serde_json::to_string(&LabelList(vec!["a".to_owned()])).unwrap(),
+                r#"["a"]"#,
+            ),
+            (
+                serde_json::to_string(&WeightMap(HashMap::from([("a".to_owned(), 1_u32)])))
+                    .unwrap(),
+                r#"{"a":1}"#,
+            ),
+            (
+                serde_json::to_string(&LabelPair(("a".to_owned(), 1_u32))).unwrap(),
+                r#"["a",1]"#,
+            ),
+            (
+                serde_json::to_string(&LabelSet(BTreeSet::from(["a".to_owned()]))).unwrap(),
+                r#"["a"]"#,
+            ),
+            (
+                serde_json::to_string(&ByteQuad([1, 2, 3, 4])).unwrap(),
+                "[1,2,3,4]",
+            ),
+            (
+                serde_json::to_string(&Payload(serde_json::json!({ "x": 1_u32 }))).unwrap(),
+                r#"{"x":1}"#,
+            ),
+            (
+                serde_json::to_string(&SparseLabels(vec![Some("a".to_owned()), None])).unwrap(),
+                r#"["a",null]"#,
+            ),
+            (
+                serde_json::to_string(&Grid(vec![vec![1_i32, 2_i32]])).unwrap(),
+                "[[1,2]]",
+            ),
+        ] {
+            assert_eq!(rendered, expected);
+        }
+    }
+
+    #[test]
+    fn a_container_brand_reads_back_what_it_wrote() {
+        let labels = LabelList(vec!["a".to_owned()]);
+        assert_eq!(
+            serde_json::from_str::<LabelList>(&serde_json::to_string(&labels).unwrap()).unwrap(),
+            labels
+        );
+        let weights = WeightMap(HashMap::from([("a".to_owned(), 1_u32)]));
+        assert_eq!(
+            serde_json::from_str::<WeightMap>(&serde_json::to_string(&weights).unwrap()).unwrap(),
+            weights
+        );
+        let pair = LabelPair(("a".to_owned(), 1_u32));
+        assert_eq!(
+            serde_json::from_str::<LabelPair>(&serde_json::to_string(&pair).unwrap()).unwrap(),
+            pair
+        );
+    }
+
+    #[test]
+    fn an_array_brand_describes_the_array_on_every_surface() {
+        assert_eq!(
+            LabelList::ts_definition(),
+            r#"export type LabelList = Array<string> & $brand<"LabelList">;"#
+        );
+        let zod = LabelList::zod_schema();
+        assert!(
+            zod.contains(r#"const LabelList$RawSchema = z.array(z.string()).brand<"LabelList">()"#),
+            "Got:\n{zod}"
+        );
+        assert!(
+            zod.contains(r#"LabelList$Schema: $ZodBranded<ZodArray, "LabelList">"#),
+            "Got:\n{zod}"
+        );
+        assert_eq!(
+            LabelList::json_schema(),
+            serde_json::json!({ "type": "array", "items": { "type": "string" } })
+        );
+    }
+
+    #[test]
+    fn a_map_brand_describes_the_object_on_every_surface() {
+        assert_eq!(
+            WeightMap::ts_definition(),
+            r#"export type WeightMap = Partial<Record<string, number>> & $brand<"WeightMap">;"#
+        );
+        let zod = WeightMap::zod_schema();
+        assert!(
+            zod.contains(
+                r#"const WeightMap$RawSchema = z.record(z.string(), z.number().int()).brand<"WeightMap">()"#
+            ),
+            "Got:\n{zod}"
+        );
+        assert!(
+            zod.contains(r#"WeightMap$Schema: $ZodBranded<ZodRecord, "WeightMap">"#),
+            "Got:\n{zod}"
+        );
+        assert_eq!(
+            WeightMap::json_schema(),
+            serde_json::json!({ "type": "object", "additionalProperties": { "type": "integer" } })
+        );
+    }
+
+    #[test]
+    fn a_tuple_brand_describes_the_fixed_arity_array_on_every_surface() {
+        assert_eq!(
+            LabelPair::ts_definition(),
+            r#"export type LabelPair = [string, number] & $brand<"LabelPair">;"#
+        );
+        let zod = LabelPair::zod_schema();
+        assert!(
+            zod.contains(
+                r#"const LabelPair$RawSchema = z.tuple([z.string(), z.number().int()]).brand<"LabelPair">()"#
+            ),
+            "Got:\n{zod}"
+        );
+        assert!(
+            zod.contains(r#"LabelPair$Schema: $ZodBranded<ZodTuple, "LabelPair">"#),
+            "Got:\n{zod}"
+        );
+        assert_eq!(
+            LabelPair::json_schema(),
+            serde_json::json!({
+                "type": "array",
+                "prefixItems": [{ "type": "string" }, { "type": "integer" }],
+                "items": false,
+                "minItems": 2_u32,
+                "maxItems": 2_u32
+            })
+        );
+    }
+
+    /// A sequence wrapper describes as the `Vec` of the same element does, and a fixed-size
+    /// `[T; N]` carries the arity serde reads back — both through the brand, as they do everywhere
+    /// else.
+    #[test]
+    fn a_set_and_a_fixed_array_brand_describe_their_arrays() {
+        assert_eq!(
+            LabelSet::json_schema(),
+            serde_json::json!({ "type": "array", "items": { "type": "string" } })
+        );
+        assert!(
+            LabelSet::zod_schema().contains(r#"$ZodBranded<ZodArray, "LabelSet">"#),
+            "Got:\n{}",
+            LabelSet::zod_schema()
+        );
+        assert_eq!(
+            ByteQuad::json_schema(),
+            serde_json::json!({
+                "type": "array",
+                "items": { "type": "integer" },
+                "minItems": 4_u32,
+                "maxItems": 4_u32
+            })
+        );
+        assert!(
+            ByteQuad::zod_schema().contains(r#"$ZodBranded<ZodArray, "ByteQuad">"#),
+            "Got:\n{}",
+            ByteQuad::zod_schema()
+        );
+    }
+
+    /// An opaque inner carries no type name to narrow with, so the brand admits any value — the
+    /// permissive empty schema, matching the `unknown` type and the `z.unknown()` value.
+    #[test]
+    fn an_opaque_brand_admits_any_value() {
+        assert_eq!(
+            Payload::ts_definition(),
+            r#"export type Payload = unknown & $brand<"Payload">;"#
+        );
+        let zod = Payload::zod_schema();
+        assert!(
+            zod.contains(r#"const Payload$RawSchema = z.unknown().brand<"Payload">()"#),
+            "Got:\n{zod}"
+        );
+        assert!(
+            zod.contains(r#"Payload$Schema: $ZodBranded<ZodUnknown, "Payload">"#),
+            "Got:\n{zod}"
+        );
+        assert_eq!(Payload::json_schema(), serde_json::json!({}));
+    }
+
+    /// A `None` inside the array is an item rather than an omission, and the levels nest — the
+    /// brand carries both, because the array levels are the inner's own.
+    #[test]
+    fn a_nested_and_a_nullable_element_brand_keep_their_levels() {
+        assert_eq!(
+            Grid::json_schema(),
+            serde_json::json!({
+                "type": "array",
+                "items": { "type": "array", "items": { "type": "integer" } }
+            })
+        );
+        assert_eq!(
+            SparseLabels::json_schema(),
+            serde_json::json!({
+                "type": "array",
+                "items": { "anyOf": [{ "type": "string" }, { "type": "null" }] }
+            })
+        );
+    }
+
+    /// An element that names another type is carried by that type's own schema, as it is in every
+    /// other position — so the brand defers rather than describing an open object.
+    #[test]
+    fn an_arrayed_sibling_brand_carries_the_siblings_own_schema() {
+        assert_eq!(
+            LabelRow::json_schema(),
+            serde_json::json!({
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": { "key": { "type": "string" } },
+                    "required": ["key"]
+                }
+            })
+        );
+        assert!(
+            LabelRow::zod_schema().contains(r#"$ZodBranded<ZodArray, "LabelRow">"#),
+            "Got:\n{}",
+            LabelRow::zod_schema()
+        );
+    }
+
+    /// A transparent brand is nothing on the wire, so it describes exactly what its inner
+    /// describes where that inner is named directly.
+    #[test]
+    fn a_container_brand_describes_what_the_field_position_describes() {
+        let holder = HoldsComposites::json_schema();
+        assert_eq!(LabelList::json_schema(), holder["properties"]["labels"]);
+        assert_eq!(LabelPair::json_schema(), holder["properties"]["pair"]);
+        assert_eq!(WeightMap::json_schema(), holder["properties"]["weights"]);
     }
 }
 
