@@ -928,9 +928,11 @@ assert!(slug.validate().is_ok());
 let bad = SlugId("ab".to_string());
 match bad.validate() {
     Ok(()) => unreachable!(),
-    Err(errors) => println!("{:?}", errors), // ["'value' is too short: minimum length is 3, got 2"]
+    Err(errors) => println!("{:?}", errors), // ["value is too short: minimum length is 3, got 2"]
 }
 ```
+
+A brand names the rejected value `value`, bare, where a struct field is named and quoted (`'username'`): a newtype has one value and no field name to quote.
 
 You can use any combination of the three constraints:
 
@@ -1127,8 +1129,8 @@ match reg.validate() {
         for e in &errors {
             println!("Error: {e}");
         }
-        // "username: too short (minimum length 3, got 2)"
-        // "age: too large (maximum 120, got 150)"
+        // "'username' is too short: minimum length is 3, got 2"
+        // "'age' is too large: maximum is 120, got 150"
     }
 }
 ```
