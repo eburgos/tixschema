@@ -12,7 +12,7 @@ use crate::features::model_schema_prop::ModelSchemaPropMeta;
 use crate::utils::{lookup_alias_info, safe_type_name};
 
 #[cfg(feature = "zod")]
-use crate::utils::escape_js_regex_literal;
+use crate::utils::{ZodUnionMember, escape_js_regex_literal};
 
 #[cfg(feature = "chrono")]
 use crate::features::chrono;
@@ -1026,7 +1026,7 @@ impl FieldDef {
     /// in the name's place would drop it. The outermost `Option` is not one of those: it is what
     /// [`Self::zod_merged_schema`] already leaves to the merge.
     #[cfg(feature = "zod")]
-    pub fn zod_union_members(&self) -> Vec<String> {
+    pub fn zod_union_members(&self) -> Vec<ZodUnionMember> {
         let wrapped = self
             .model_schema_prop_meta
             .as_ref()
