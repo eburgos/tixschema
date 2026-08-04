@@ -34,6 +34,9 @@ use super::tuple_struct_zod_body;
 #[cfg(feature = "jsonschema")]
 use super::tuple_struct_json_body;
 
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+use super::{check_slot_wire_is_readable, parse_serde_key_omission, tuple_struct_shape};
+
 use syn::spanned::Spanned as _;
 
 /// The variants of [`rendered_discriminated_union`]'s enum, in the order they are declared.
@@ -77,6 +80,19 @@ const UNPORTABLE_PROBE_PATTERNS: [(&str, &str); 6] = [
     ("^[[:alpha:]]+$", "POSIX class"),
     (r"[\w&&\d]", "`&&` class intersection"),
     (r"\x{41}", "braced code point escape"),
+];
+
+/// Every slot spelling the refusal reads, beside whether it is refused. A slot dropped from one of
+/// serde's directions and not the other is; the pair that drops both is the wire the description
+/// already answers for, and everything else is a slot written in its place.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+const SLOT_OMISSION_SPELLINGS: [(&str, bool); 6] = [
+    ("skip_serializing", true),
+    ("skip_serializing_if = \"Option::is_none\"", true),
+    ("skip_deserializing", true),
+    ("skip", false),
+    ("skip_serializing, skip_deserializing", false),
+    ("default", false),
 ];
 
 /// The covered wrappers, under the names a dispatch reads them by.
@@ -6519,15 +6535,21 @@ fn tuple_slots(spellings: &[&str]) -> Vec<super::FieldDef> {
         .collect()
 }
 
+/// The shape a struct declaring exactly the given slots publishes, none of them off the wire.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn whole_tuple(spellings: &[&str]) -> super::TupleStructShape {
+    tuple_struct_shape(spellings.len(), tuple_slots(spellings))
+}
+
 /// One slot is the slot's own type — serde writes a newtype struct as that value alone — and every
 /// other arity is the fixed tuple serde writes as an array.
 #[cfg(feature = "typescript")]
 #[test]
 fn a_tuple_struct_describes_as_its_arity_in_typescript() {
-    assert_eq!(tuple_struct_ts_body(&tuple_slots(&[])), "[]");
-    assert_eq!(tuple_struct_ts_body(&tuple_slots(&["String"])), "string");
+    assert_eq!(tuple_struct_ts_body(&whole_tuple(&[])), "[]");
+    assert_eq!(tuple_struct_ts_body(&whole_tuple(&["String"])), "string");
     assert_eq!(
-        tuple_struct_ts_body(&tuple_slots(&["String", "u32"])),
+        tuple_struct_ts_body(&whole_tuple(&["String", "u32"])),
         "[string, number]"
     );
 }
@@ -6536,13 +6558,13 @@ fn a_tuple_struct_describes_as_its_arity_in_typescript() {
 #[cfg(feature = "zod")]
 #[test]
 fn a_tuple_struct_describes_as_its_arity_in_zod() {
-    assert_eq!(tuple_struct_zod_body(&tuple_slots(&[])), "z.tuple([])");
+    assert_eq!(tuple_struct_zod_body(&whole_tuple(&[])), "z.tuple([])");
     assert_eq!(
-        tuple_struct_zod_body(&tuple_slots(&["String"])),
+        tuple_struct_zod_body(&whole_tuple(&["String"])),
         "z.string()"
     );
     assert_eq!(
-        tuple_struct_zod_body(&tuple_slots(&["String", "u32"])),
+        tuple_struct_zod_body(&whole_tuple(&["String", "u32"])),
         "z.tuple([z.string(), z.number().int()])"
     );
 }
@@ -6552,17 +6574,101 @@ fn a_tuple_struct_describes_as_its_arity_in_zod() {
 #[cfg(feature = "jsonschema")]
 #[test]
 fn a_tuple_struct_describes_as_its_arity_in_json_schema() {
-    let empty = tuple_struct_json_body("Nothing", &tuple_slots(&[])).to_string();
+    let empty = tuple_struct_json_body("Nothing", &whole_tuple(&[])).to_string();
     assert!(empty.contains("prefixItems"), "Got: {empty}");
     assert!(empty.contains("minItems"), "Got: {empty}");
 
-    let single = tuple_struct_json_body("Plain", &tuple_slots(&["String"])).to_string();
+    let single = tuple_struct_json_body("Plain", &whole_tuple(&["String"])).to_string();
     assert!(single.contains("string"), "Got: {single}");
     assert!(!single.contains("prefixItems"), "Got: {single}");
 
-    let pair = tuple_struct_json_body("Pair", &tuple_slots(&["String", "u32"])).to_string();
+    let pair = tuple_struct_json_body("Pair", &whole_tuple(&["String", "u32"])).to_string();
     assert!(pair.contains("prefixItems"), "Got: {pair}");
     assert!(pair.contains("maxItems"), "Got: {pair}");
+}
+
+/// The bare value is the *declared* arity's, not the described list's. Captured from serde: a
+/// struct declaring two slots with the first one taken off the wire writes `["x"]` — a one-element
+/// array, not the bare `"x"` a struct declaring one slot writes — so a described list that has
+/// shrunk to one still describes as an array.
+#[cfg(feature = "typescript")]
+#[test]
+fn a_slot_dropped_off_the_wire_leaves_the_tuple_an_array() {
+    let shrunk = tuple_struct_shape(2, tuple_slots(&["String"]));
+    assert_eq!(tuple_struct_ts_body(&shrunk), "[string]");
+    assert_eq!(
+        tuple_struct_ts_body(&tuple_struct_shape(1, tuple_slots(&["String"]))),
+        "string"
+    );
+}
+
+/// The same reading on the JSON surface, where the arity is written twice as its own bounds.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_slot_dropped_off_the_wire_shrinks_the_described_arity() {
+    let shrunk = tuple_struct_json_body("Pair", &tuple_struct_shape(2, tuple_slots(&["u32"])));
+    let rendered = shrunk.to_string();
+    assert!(rendered.contains("prefixItems"), "Got: {rendered}");
+    assert!(rendered.contains("1usize"), "Got: {rendered}");
+    assert!(!rendered.contains("2usize"), "Got: {rendered}");
+}
+
+/// A two-slot struct whose second slot is written at the given spelling.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn slot_pair(spelling: &str) -> syn::ItemStruct {
+    syn::parse_str(&format!(
+        "struct Pair(String, #[serde({spelling})] Option<String>);"
+    ))
+    .unwrap()
+}
+
+/// Runs the slot refusal over that struct's second slot, with the declared arity supplied rather
+/// than counted, so the lone-slot exemption can be read off the same declaration.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn slot_guard_result(item: &syn::ItemStruct, declared_slots: usize) -> Result<(), syn::Error> {
+    let field = item.fields.iter().nth(1).unwrap();
+    check_slot_wire_is_readable(
+        field,
+        1,
+        declared_slots,
+        "Pair",
+        parse_serde_key_omission(&field.attrs),
+    )
+}
+
+/// The refusal message for the slot at that spelling, and `None` where it is left alone.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn slot_refusal(spelling: &str, declared_slots: usize) -> Option<String> {
+    slot_guard_result(&slot_pair(spelling), declared_slots)
+        .err()
+        .map(|err| err.to_string())
+}
+
+/// Captured from serde on `struct S(#[serde(...)] Option<String>, String)`: `skip_serializing`
+/// alone writes `["x"]` and reads only `["s","x"]`, `skip_deserializing` alone writes `["s","x"]`
+/// and reads only `["x"]`. The array serde writes is not an array serde reads, and a slot has no
+/// optional spelling to describe both, so the declaration is refused.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_slot_dropped_from_one_direction_only_is_refused() {
+    for (spelling, refused) in SLOT_OMISSION_SPELLINGS {
+        let refusal = slot_refusal(spelling, 2);
+        assert_eq!(refusal.is_some(), refused, "{spelling}: {refusal:?}");
+        if let Some(message) = refusal {
+            assert!(message.contains("slot 1"), "{spelling}: {message}");
+            assert!(message.contains("`Pair`"), "{spelling}: {message}");
+        }
+    }
+}
+
+/// Captured from serde: a struct declaring exactly one slot writes and reads that slot's value
+/// whatever the skip spellings say, so none of them has a wire to be refused for there.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_lone_slot_is_refused_for_no_spelling() {
+    for (spelling, _) in SLOT_OMISSION_SPELLINGS {
+        assert_eq!(slot_refusal(spelling, 1), None, "for: {spelling}");
+    }
 }
 
 /// A path writes a string on the wire, which is the value the rendered constraint describes, so
