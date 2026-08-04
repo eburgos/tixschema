@@ -375,6 +375,15 @@ a function taking one required schema argument per parameter — while a type th
 parameter keeps exporting `X$Schema` exactly as before. `zod_binding_suffix` is the one seam that
 decides which, and `zod_published_binding` the one seam that writes either.
 
+Beside the factory, a generic type also exports `X$SchemaDefault` — the factory called at the
+type's own declared `default_types`, so a consumer who wants the ordinary filling shares the memo
+rather than building a second schema for it. `zod_default_block` builds the const, through
+`default_zod_argument`, the same `get_field_def` path every field renders through; where a
+declared default names another generic item at exactly the arguments that item calls its own,
+the rendered argument folds onto that item's `$SchemaDefault` instead of reconstructing a factory
+call the memo would not share with it — see `record_zod_default_arguments`. `zod_binding_reexport`
+covers both bindings wherever a renamed item re-exports its factory.
+
 Each factory memoizes on the identity of its arguments, one cache level per parameter, so two
 calls with the same argument objects return the identical schema and no two argument lists
 collide. The levels are written out to the exact depth the type declares rather than looped over:

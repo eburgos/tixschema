@@ -39,7 +39,8 @@ use core::iter::once;
 
 #[cfg(feature = "zod")]
 use crate::utils::{
-    escape_js_regex_literal, extract_example_from_docs, record_zod_factory, zod_factory_argument,
+    escape_js_regex_literal, extract_example_from_docs, publishes_zod_factory,
+    record_zod_default_arguments, record_zod_factory, zod_default_arguments, zod_factory_argument,
 };
 
 #[cfg(all(feature = "zod", feature = "object_id"))]
@@ -1238,8 +1239,13 @@ fn process_type_alias(item_type: ItemType, args: &ModelSchemaArgs) -> TokenStrea
     let ts_method = generate_alias_ts_definition_method(&alias, &export_name, &alias_field_def);
     let json_schema_method =
         generate_alias_json_schema_method(&alias, &export_name, &alias_field_def, args);
-    let zod_method =
-        generate_alias_zod_method(&alias, &export_name, &rust_ident_str, &alias_field_def);
+    let zod_method = generate_alias_zod_method(
+        &alias,
+        &export_name,
+        &rust_ident_str,
+        &alias_field_def,
+        &args.default_types,
+    );
 
     let output = quote! {
         #alias
@@ -1446,11 +1452,7 @@ fn build_struct_delegate_items(
     #[cfg(feature = "zod")]
     let has_example = schema_example_method.is_some();
     #[cfg(feature = "zod")]
-    let reexport = ident_reexport_zod(
-        rust_ident,
-        item_name,
-        zod_binding_suffix(rust_ident, parameters),
-    );
+    let reexport = zod_binding_reexport(rust_ident, item_name, parameters);
     #[cfg(not(feature = "zod"))]
     let _: &_ = &(item_name, rust_ident, parameters);
     #[cfg(not(feature = "zod"))]
@@ -1904,6 +1906,7 @@ fn struct_schema_impl_items(
             item_name,
             rust_ident,
             &type_parameters,
+            &args.default_types,
             &bodies.1,
             "",
             &flatten.1,
@@ -4215,14 +4218,19 @@ fn build_tuple_struct_zod_schema_method(
     item_name: &str,
     rust_ident: &str,
     parameters: &[String],
+    default_types: &[(syn::Ident, syn::Type)],
     zod_body: &str,
 ) -> proc_macro2::TokenStream {
-    let reexport = ident_reexport_zod(
-        rust_ident,
+    let reexport = zod_binding_reexport(rust_ident, item_name, parameters);
+    let schema_str = zod_published_binding(
         item_name,
-        zod_binding_suffix(rust_ident, parameters),
+        rust_ident,
+        parameters,
+        default_types,
+        "",
+        zod_body,
+        &reexport,
     );
-    let schema_str = zod_published_binding(item_name, parameters, "", zod_body, &reexport);
     quote! {
         pub fn zod_schema() -> String {
             #schema_str.to_owned()
@@ -4305,6 +4313,7 @@ fn process_tuple_struct(
             &item_name,
             &name.to_string(),
             &type_parameters_in_scope(&item_struct.generics),
+            &args.default_types,
             &tuple_struct_zod_body(&shape),
         ),
     ];
@@ -4991,15 +5000,19 @@ fn build_branded_zod_schema_method(
     plain_description: &str,
 ) -> proc_macro2::TokenStream {
     let expression = branded_zod_expression(args, item_name, parameters, inner, plain_description);
-    let reexport = ident_reexport_zod(
-        rust_ident,
-        item_name,
-        zod_binding_suffix(rust_ident, parameters),
-    );
+    let reexport = zod_binding_reexport(rust_ident, item_name, parameters);
     let body = if parameters.is_empty() {
         branded_zod_const_block(item_name, inner, &expression, &reexport)
     } else {
-        zod_factory_block(item_name, parameters, "", &expression, &reexport)
+        zod_factory_block(
+            item_name,
+            rust_ident,
+            parameters,
+            &args.default_types,
+            "",
+            &expression,
+            &reexport,
+        )
     };
     quote! {
         pub fn zod_schema() -> String {
@@ -6496,6 +6509,7 @@ fn process_discriminated_enum(
         item_name,
         &name.to_string(),
         &type_parameters_in_scope(&item_enum.generics),
+        &args.default_types,
         &schema_code,
     );
 
@@ -7033,6 +7047,7 @@ fn process_externally_tagged_enum(
         item_name,
         &name.to_string(),
         &type_parameters_in_scope(&item_enum.generics),
+        &args.default_types,
         &schema_code,
     );
 
@@ -7447,6 +7462,7 @@ fn process_internally_tagged_enum(
         item_name,
         &name.to_string(),
         &type_parameters_in_scope(&item_enum.generics),
+        &args.default_types,
         &schema_code,
     );
 
@@ -8467,6 +8483,7 @@ fn build_untagged_schema_impl_items(
         item_name,
         &item_enum.ident.to_string(),
         &type_parameters_in_scope(&item_enum.generics),
+        &args.default_types,
         &schema_code,
     );
 
@@ -12010,6 +12027,28 @@ fn zod_binding_suffix(rust_ident: &str, parameters: &[String]) -> &'static str {
     }
 }
 
+/// The zod re-export text an item's module ends with — the factory's own alongside the default's,
+/// so a renamed generic item's alias answers to both names exactly as its own declaration does.
+///
+/// [`ident_reexport_zod`] writes one binding at a time; a type with no parameter has only one to
+/// write, and a generic type has two — its factory and the default this task adds beside it.
+#[cfg(feature = "zod")]
+fn zod_binding_reexport(rust_ident: &str, export_name: &str, parameters: &[String]) -> String {
+    let mut reexport = ident_reexport_zod(
+        rust_ident,
+        export_name,
+        zod_binding_suffix(rust_ident, parameters),
+    );
+    if !parameters.is_empty() {
+        reexport.push_str(&ident_reexport_zod(
+            rust_ident,
+            export_name,
+            "$SchemaDefault",
+        ));
+    }
+    reexport
+}
+
 /// The identifier holding the expression a factory's arguments compose into. Bound beside the
 /// factory rather than inlined in it, so the factory's return type can be read back off it and
 /// neither can drift from the other.
@@ -12160,6 +12199,91 @@ fn zod_factory_memoized_binding(item_name: &str, parameters: &[String]) -> Strin
     )
 }
 
+/// The `FieldDef` one `default_types` entry parses as: the declared filling for `parameter`, or —
+/// absent one — `String`, [`schema_example_value_type`]'s own fallback for the identical gap.
+/// Reached only in a build without `jsonschema`, the one feature that requires every parameter to
+/// declare one.
+#[cfg(feature = "zod")]
+fn declared_default_field(parameter: &str, default_types: &[(syn::Ident, syn::Type)]) -> FieldDef {
+    default_types
+        .iter()
+        .find(|(declared, _)| declared == parameter)
+        .map_or_else(
+            || get_field_def(parameter, &syn::parse_quote!(String), ""),
+            |(_, ty)| get_field_def(parameter, ty, ""),
+        )
+}
+
+/// The Zod argument one declared default composes: the ordinary rendering [`FieldDef::zod_type`]
+/// gives every field, or — where the default names another generic item at exactly the arguments
+/// that item calls its own — that item's own `$SchemaDefault`.
+///
+/// The fold matters beyond spelling: the factory's memo keys on argument identity, so two
+/// `z.string()` literals written at two call sites are two different objects and share nothing,
+/// while reading the sibling's own binding back reuses the very object its `$SchemaDefault` is
+/// pinned to — which is also what carries in whatever checks and brand the sibling's own default
+/// declared, rather than reconstructing a plain instantiation beside them. See
+/// [`record_zod_default_arguments`].
+///
+/// Left alone otherwise: a default written with different arguments still validates through the
+/// sibling's factory, exactly as a struct field of the same type does.
+#[cfg(feature = "zod")]
+fn default_zod_argument(field: &FieldDef) -> String {
+    if field.array_depth == 0
+        && !field.is_optional()
+        && let FieldDefType::SiblingType(name, args) = &field.field_type
+        && publishes_zod_factory(name)
+        && let Some(info) = lookup_alias_info(name)
+    {
+        let rendered: Vec<String> = args.iter().map(FieldDef::zod_type).collect();
+        if zod_default_arguments(name).as_deref() == Some(rendered.as_slice()) {
+            return format!("{}$SchemaDefault", info.export_name);
+        }
+    }
+    field.zod_type()
+}
+
+/// What a generic item appends after its factory: the factory called with each parameter's
+/// declared default, so `X$SchemaDefault === X$SchemaFactory(<the same arguments>)` by
+/// construction — through the very factory a hand-written call would go through, never the
+/// builder, which skips the memo and would build a second schema for the same filling.
+///
+/// Its own argument list is recorded through [`record_zod_default_arguments`] before this
+/// returns, so an item declared below this one can read it back through [`default_zod_argument`]
+/// and fold onto this very binding where its own declared default names this item at the same
+/// arguments.
+#[cfg(feature = "zod")]
+fn zod_default_block(
+    item_name: &str,
+    rust_ident: &str,
+    parameters: &[String],
+    default_types: &[(syn::Ident, syn::Type)],
+) -> String {
+    let fields: Vec<FieldDef> = parameters
+        .iter()
+        .map(|parameter| declared_default_field(parameter, default_types))
+        .collect();
+    let arguments: Vec<String> = fields.iter().map(default_zod_argument).collect();
+    record_zod_default_arguments(rust_ident, arguments.clone());
+
+    #[cfg(feature = "typescript")]
+    let annotation = format!(
+        ": ZodType<{item_name}<{}>>",
+        fields
+            .iter()
+            .map(FieldDef::typescript_typename)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    #[cfg(not(feature = "typescript"))]
+    let annotation = String::new();
+
+    format!(
+        "\n\nexport const {item_name}$SchemaDefault{annotation} = {item_name}$SchemaFactory({});",
+        arguments.join(", ")
+    )
+}
+
 /// What a generic type's Zod surface is written as: the builder holding the schema its arguments
 /// compose into, the return type read back off it, the cache interfaces, and the exported factory.
 ///
@@ -12167,10 +12291,16 @@ fn zod_factory_memoized_binding(item_name: &str, parameters: &[String]) -> Strin
 /// type has no one schema to publish — the caller has to say what fills each parameter before
 /// anything can validate. What it publishes instead is the function that answers that, and the
 /// cache is what keeps a filling asked for twice from becoming two schemas.
+///
+/// Beside the factory, this also publishes `$SchemaDefault` — see [`zod_default_block`] — the
+/// factory called at the item's own declared defaults, so a consumer who wants the ordinary
+/// filling never has to construct the argument list by hand.
 #[cfg(feature = "zod")]
 fn zod_factory_block(
     item_name: &str,
+    rust_ident: &str,
     parameters: &[String],
+    default_types: &[(syn::Ident, syn::Type)],
     preamble: &str,
     expression: &str,
     reexport: &str,
@@ -12211,9 +12341,11 @@ fn zod_factory_block(
     #[cfg(not(feature = "typescript"))]
     let returns = String::new();
 
+    let default_block = zod_default_block(item_name, rust_ident, parameters, default_types);
+
     format!(
         "{built}\n\n{declarations}export const {item_name}$SchemaFactory = \
-         {bounds}({arguments}\n){returns} => {{\n{body}\n}};{reexport}"
+         {bounds}({arguments}\n){returns} => {{\n{body}\n}};{default_block}{reexport}"
     )
 }
 
@@ -12246,7 +12378,9 @@ fn zod_const_block(item_name: &str, preamble: &str, expression: &str, reexport: 
 #[cfg(feature = "zod")]
 fn zod_published_binding(
     item_name: &str,
+    rust_ident: &str,
     parameters: &[String],
+    default_types: &[(syn::Ident, syn::Type)],
     preamble: &str,
     expression: &str,
     reexport: &str,
@@ -12254,7 +12388,15 @@ fn zod_published_binding(
     if parameters.is_empty() {
         zod_const_block(item_name, preamble, expression, reexport)
     } else {
-        zod_factory_block(item_name, parameters, preamble, expression, reexport)
+        zod_factory_block(
+            item_name,
+            rust_ident,
+            parameters,
+            default_types,
+            preamble,
+            expression,
+            reexport,
+        )
     }
 }
 
@@ -12385,21 +12527,26 @@ fn generate_zod_schema_method(
     item_name: &str,
     rust_ident: &str,
     parameters: &[String],
+    default_types: &[(syn::Ident, syn::Type)],
     schema_code: &str,
     show_opts: &str,
     flatten_schemas: &[MergedOperand],
 ) -> proc_macro2::TokenStream {
     #[cfg(feature = "zod")]
     {
-        let reexport = ident_reexport_zod(
-            rust_ident,
-            item_name,
-            zod_binding_suffix(rust_ident, parameters),
-        );
+        let reexport = zod_binding_reexport(rust_ident, item_name, parameters);
         let own = format!("z.strictObject({{\n{schema_code}}}){show_opts}");
         let (preamble, expression) = zod_merged_statements(item_name, &own, flatten_schemas);
         // Note: Example injection is handled by the delegating method on the type itself.
-        let body = zod_published_binding(item_name, parameters, &preamble, &expression, &reexport);
+        let body = zod_published_binding(
+            item_name,
+            rust_ident,
+            parameters,
+            default_types,
+            &preamble,
+            &expression,
+            &reexport,
+        );
 
         quote::quote! {
             pub fn zod_schema() -> String {
@@ -12414,6 +12561,7 @@ fn generate_zod_schema_method(
             item_name,
             rust_ident,
             parameters,
+            default_types,
             schema_code,
             show_opts,
             flatten_schemas,
@@ -12621,16 +12769,21 @@ fn generate_discriminated_enum_zod_schema_method(
     item_name: &str,
     rust_ident: &str,
     parameters: &[String],
+    default_types: &[(syn::Ident, syn::Type)],
     schema_code: &str,
 ) -> proc_macro2::TokenStream {
     #[cfg(feature = "zod")]
     {
-        let reexport = ident_reexport_zod(
-            rust_ident,
+        let reexport = zod_binding_reexport(rust_ident, item_name, parameters);
+        let schema_str = zod_published_binding(
             item_name,
-            zod_binding_suffix(rust_ident, parameters),
+            rust_ident,
+            parameters,
+            default_types,
+            "",
+            schema_code,
+            &reexport,
         );
-        let schema_str = zod_published_binding(item_name, parameters, "", schema_code, &reexport);
         quote::quote! {
             pub fn zod_schema() -> String {
                 #schema_str.to_owned()
@@ -12640,7 +12793,13 @@ fn generate_discriminated_enum_zod_schema_method(
 
     #[cfg(not(feature = "zod"))]
     {
-        let _: &_ = &(item_name, rust_ident, parameters, schema_code);
+        let _: &_ = &(
+            item_name,
+            rust_ident,
+            parameters,
+            default_types,
+            schema_code,
+        );
         quote::quote! {
             // Zod schema method not available - zod feature disabled
             // To enable: add "zod" to your features
@@ -12780,6 +12939,7 @@ fn generate_alias_zod_method(
     export_name: &str,
     rust_ident: &str,
     field_def: &FieldDef,
+    default_types: &[(syn::Ident, syn::Type)],
 ) -> proc_macro2::TokenStream {
     #[cfg(feature = "zod")]
     {
@@ -12788,12 +12948,16 @@ fn generate_alias_zod_method(
         // yields `Name$Schema`).
         let schema_code = surface_field_def(&alias.generics, field_def).zod_type();
         let parameters = type_parameters_in_scope(&alias.generics);
-        let reexport = ident_reexport_zod(
-            rust_ident,
+        let reexport = zod_binding_reexport(rust_ident, export_name, &parameters);
+        let body = zod_published_binding(
             export_name,
-            zod_binding_suffix(rust_ident, &parameters),
+            rust_ident,
+            &parameters,
+            default_types,
+            "",
+            &schema_code,
+            &reexport,
         );
-        let body = zod_published_binding(export_name, &parameters, "", &schema_code, &reexport);
         quote! {
             pub fn zod_schema() -> String {
                 #body.to_owned()
@@ -12804,7 +12968,7 @@ fn generate_alias_zod_method(
     {
         // Without the `zod` feature, `FieldDef::zod_type` does not exist; nothing in
         // this build has zod enabled, so the schema method would be cfg'd out anyway.
-        let _: &_ = &(alias, export_name, rust_ident, field_def);
+        let _: &_ = &(alias, export_name, rust_ident, field_def, default_types);
         quote! {}
     }
 }

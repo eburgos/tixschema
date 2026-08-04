@@ -765,9 +765,11 @@ pub fn model_schema_prop(_args: TokenStream, input: TokenStream) -> TokenStream 
 /// ```
 ///
 /// A generic type publishes `X$SchemaFactory` rather than `X$Schema`, because a Zod schema is a
-/// runtime value and one value cannot stand for every filling of a parameter. Each factory
-/// memoizes on the identity of the arguments it was handed, and `createSchemaCache` is the helper
-/// they all build those caches with:
+/// runtime value and one value cannot stand for every filling of a parameter. It also publishes
+/// `X$SchemaDefault`, the factory called at the type's own declared `default_types` — the ordinary
+/// filling, memoized like any other call so a consumer of the common case never has to construct
+/// the argument list by hand. Each factory memoizes on the identity of the arguments it was
+/// handed, and `createSchemaCache` is the helper they all build those caches with:
 ///
 #[cfg_attr(
     feature = "typescript",
