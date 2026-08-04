@@ -5093,6 +5093,21 @@ fn register_branded_newtype(
 }
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+/// Registers the brand, then records the consult question its own registration could not answer —
+/// in that order, so a brand naming itself cannot answer its own.
+fn register_brand_with_questions(
+    item_struct: &syn::ItemStruct,
+    args: &ModelSchemaArgs,
+    rust_ident: &str,
+    item_name: &str,
+    module_name: &str,
+) {
+    register_branded_newtype(item_struct, rust_ident, item_name, module_name);
+    if let Some(question) = deferred_shape_question(item_struct, args) {
+        record_shape_question(question);
+    }
+}
+
 fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> TokenStream {
     if let Some(output) = branded_guard_failure_output(&item_struct, args) {
         return output;
@@ -5104,13 +5119,7 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
     let module_name = ident_schema_module_name(&rust_ident);
     let module_ident = Ident::new(&module_name, name.span());
 
-    register_branded_newtype(&item_struct, &rust_ident, &item_name, &module_name);
-
-    // Recorded after the registration that reads such questions, so a brand naming itself cannot
-    // answer its own.
-    if let Some(question) = deferred_shape_question(&item_struct, args) {
-        record_shape_question(question);
-    }
+    register_brand_with_questions(&item_struct, args, &rust_ident, &item_name, &module_name);
 
     // Extract docs and example
     #[cfg(feature = "zod")]
