@@ -271,6 +271,89 @@ const EQUALISED_PATTERNS: [(&str, &str); 10] = [
     (r"^\d{3}\.\d{3}-\d{2}$", r"^[0-9]{3}\.[0-9]{3}-[0-9]{2}$"),
 ];
 
+#[cfg(feature = "serde")]
+/// Patterns a regex engine is avoidable work for, in every shape `clippy::trivial_regex` proves
+/// one is — a bare literal, and a literal run under a leading `^`, a trailing `$`, or both.
+const TRIVIAL_PATTERNS: [&str; 10] = [
+    "^/",
+    "^abc",
+    r"^foo\.bar",
+    "^\u{e9}",
+    "abc$",
+    "/$",
+    "^abc$",
+    "^/$",
+    "^$",
+    "abc",
+];
+
+#[cfg(feature = "serde")]
+/// Patterns that keep their regex. The first eight are the shapes the shipped tests and the
+/// reports write; the rest are the near misses — a literal with one non-literal part in it, and
+/// the constructs whose trivial reading the lint offers no call for and this crate therefore
+/// declines to make one up for.
+const NON_TRIVIAL_PATTERNS: [&str; 16] = [
+    "^[a-z]+$",
+    "^/[a-z]+$",
+    "^[0-9a-fA-F]{24}$",
+    "^[a-z0-9_]+$",
+    r"^\s*$",
+    "(?<word>[a-z]+)",
+    r"^[0-9]{3}\.[0-9]{3}-[0-9]{2}$",
+    "^[a-z]+",
+    "^a[0-9]",
+    "[0-9]a$",
+    "^a[0-9]b$",
+    "",
+    "^",
+    "$",
+    r"\b",
+    "a|b",
+];
+
+#[cfg(feature = "serde")]
+/// The haystacks a classified pattern is held to, in the two senses that matter: every character
+/// the equalised classes are compared over, and the strings the rewrite tests use, which carry the
+/// delimiters and the near-miss prefixes a `^/` sort of pattern turns on.
+fn trivial_haystacks() -> Vec<String> {
+    CROSS_ENGINE_HAYSTACKS
+        .iter()
+        .chain(REWRITE_HAYSTACKS.iter())
+        .map(|haystack| (*haystack).to_owned())
+        .chain(
+            [
+                "/",
+                "/var",
+                "var/",
+                "/var/log",
+                "abc",
+                "xabc",
+                "abcx",
+                "xabcx",
+                "foo.bar",
+                "fooxbar",
+                "\u{e9}t\u{e9}",
+                "t\u{e9}",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .collect()
+}
+
+#[cfg(feature = "serde")]
+/// What a classified pattern says about one haystack — the verdict the emitted call reaches,
+/// reached here instead so it can be held against the regex the call replaced.
+fn accepts(trivial: &TrivialPattern, haystack: &str) -> bool {
+    match trivial {
+        TrivialPattern::Contains(needle) => haystack.contains(needle),
+        TrivialPattern::EndsWith(needle) => haystack.ends_with(needle),
+        TrivialPattern::Equals(needle) => haystack == needle,
+        TrivialPattern::IsEmpty => haystack.is_empty(),
+        TrivialPattern::StartsWith(needle) => haystack.starts_with(needle),
+    }
+}
+
 #[cfg(feature = "zod")]
 #[test]
 fn test_extract_example_simple() {
@@ -819,5 +902,72 @@ fn test_portable_pattern_quotes_the_regex_crate_on_a_pattern_it_refuses() {
         "panic",
     ] {
         assert!(rejection.contains(needle), "{needle} missing: {rejection}");
+    }
+}
+
+#[cfg(feature = "serde")]
+/// Every shape the lint proves a regex is avoidable work for is classified as the call the lint
+/// names for it, with the needle the pattern's own escapes resolve to.
+#[test]
+fn test_trivial_pattern_names_the_call_the_lint_names() {
+    let expected = [
+        ("^/", TrivialPattern::StartsWith("/".to_owned())),
+        ("^abc", TrivialPattern::StartsWith("abc".to_owned())),
+        (
+            r"^foo\.bar",
+            TrivialPattern::StartsWith("foo.bar".to_owned()),
+        ),
+        ("^\u{e9}", TrivialPattern::StartsWith("\u{e9}".to_owned())),
+        ("abc$", TrivialPattern::EndsWith("abc".to_owned())),
+        ("/$", TrivialPattern::EndsWith("/".to_owned())),
+        ("^abc$", TrivialPattern::Equals("abc".to_owned())),
+        ("^/$", TrivialPattern::Equals("/".to_owned())),
+        ("^$", TrivialPattern::IsEmpty),
+        ("abc", TrivialPattern::Contains("abc".to_owned())),
+    ];
+    assert_eq!(
+        expected.len(),
+        TRIVIAL_PATTERNS.len(),
+        "every classified pattern needs the call it is classified as written down"
+    );
+    for (pattern, call) in expected {
+        assert_eq!(
+            trivial_pattern(pattern),
+            Some(call),
+            "{pattern} was not classified as the call the lint names for it"
+        );
+    }
+}
+
+#[cfg(feature = "serde")]
+/// A pattern of any real shape keeps its regex, and so do the two the lint calls trivial without
+/// naming a call: what a wrong reading would cost is a constraint that admits a different set of
+/// values than it was written to, and there is nothing to gain by guessing at one.
+#[test]
+fn test_trivial_pattern_leaves_every_other_pattern_its_regex() {
+    for pattern in NON_TRIVIAL_PATTERNS {
+        assert!(
+            trivial_pattern(pattern).is_none(),
+            "{pattern} was classified as trivial and is not"
+        );
+    }
+}
+
+#[cfg(feature = "serde")]
+/// The classified call and the regex it replaces accept the same haystacks and reject the same
+/// haystacks — which is the whole of what a `pattern` constraint says.
+#[test]
+fn test_trivial_pattern_accepts_exactly_what_its_regex_accepts() {
+    let haystacks = trivial_haystacks();
+    for pattern in TRIVIAL_PATTERNS {
+        let trivial = trivial_pattern(pattern).unwrap();
+        let regex = regex::Regex::new(pattern).unwrap();
+        for haystack in &haystacks {
+            assert_eq!(
+                accepts(&trivial, haystack),
+                regex.is_match(haystack),
+                "{pattern} and the call it was classified as part ways over {haystack:?}"
+            );
+        }
     }
 }

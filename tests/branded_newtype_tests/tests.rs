@@ -197,6 +197,14 @@ mod constrained_branded_tests {
     #[serde(transparent)]
     pub struct SlugId(pub String);
 
+    /// A pattern simple enough that a regex engine is avoidable work — the brand-side spelling of
+    /// what a consumer denying `clippy::nursery` cannot compile if the validator builds a regex
+    /// for it anyway.
+    #[model_schema(pattern = "^/")]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct MountPath(pub String);
+
     #[test]
     fn test_constrained_branded_zod_has_constraints() {
         let zod = SlugId::zod_schema();
@@ -270,6 +278,35 @@ mod constrained_branded_tests {
         let result: Result<SlugId, _> = serde_json::from_str("\"hello_world\"");
         assert!(result.is_ok(), "Should accept valid value via serde");
         assert_eq!(result.unwrap(), SlugId("hello_world".to_owned()));
+    }
+
+    /// The brand's simple pattern turns away the same values the regex would have, with the same
+    /// words, and still reaches every surface as written.
+    #[test]
+    fn test_anchored_single_character_prefix_branded() {
+        let zod = MountPath::zod_schema();
+        assert!(
+            zod.contains(".check(z.regex(/^\\//))"),
+            "Should contain pattern. Got:\n{zod}"
+        );
+
+        MountPath("/var/log".to_owned()).validate().unwrap();
+
+        let result = MountPath("var/log".to_owned()).validate();
+        assert_eq!(
+            result.unwrap_err()[0],
+            "value does not match pattern '^/'",
+            "Rejection should read exactly as the regex path words it"
+        );
+
+        assert!(
+            serde_json::from_str::<MountPath>("\"/etc\"").is_ok(),
+            "Should accept a rooted path via serde"
+        );
+        assert!(
+            serde_json::from_str::<MountPath>("\"etc\"").is_err(),
+            "Should reject an unrooted path via serde"
+        );
     }
 
     #[test]

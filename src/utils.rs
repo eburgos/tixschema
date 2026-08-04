@@ -1,11 +1,15 @@
 use core::cell::RefCell;
 use core::ops::Range;
+#[cfg(feature = "serde")]
+use core::slice::from_ref;
 use regex_syntax::ast::parse::Parser as PatternParser;
 use regex_syntax::ast::{
     Assertion, AssertionKind, Ast, ClassPerl, ClassPerlKind, ClassSet, ClassSetBinaryOpKind,
     ClassSetItem, Flag, FlagsItemKind, Group, GroupKind, HexLiteralKind, Literal, LiteralKind,
     SpecialLiteralKind,
 };
+#[cfg(feature = "serde")]
+use regex_syntax::hir;
 use std::collections::HashMap;
 use syn::{Attribute, Expr, Field, Lit, LitStr, Meta, Variant};
 
@@ -101,6 +105,27 @@ pub enum AliasKind {
     Stringified,
     /// Undecidable at this expansion — an alias naming a type that was not registered before it.
     Unknown,
+}
+
+/// The `str` method call a `pattern` says the same thing as, for the patterns a regex engine is
+/// avoidable work for.
+///
+/// Each variant carries the needle in the spelling the check takes it, which is the literal the
+/// pattern's own escapes already resolved to and not the pattern text: `^foo\.bar` starts with
+/// `foo.bar`, five bytes shorter than what was written.
+#[cfg(feature = "serde")]
+#[derive(Debug, PartialEq, Eq)]
+pub enum TrivialPattern {
+    /// `abc` -- the value has this string somewhere in it.
+    Contains(String),
+    /// `abc$` -- the value ends with this string.
+    EndsWith(String),
+    /// `^abc$` -- the value is this string.
+    Equals(String),
+    /// `^$` -- the value is the empty string.
+    IsEmpty,
+    /// `^abc` -- the value begins with this string.
+    StartsWith(String),
 }
 
 #[derive(Clone)]
@@ -883,6 +908,104 @@ fn js_spelling(pattern: &str) -> Result<String, String> {
         });
     }
     Ok(walk.rewritten(pattern))
+}
+
+/// What a `pattern` accepts stated without a regex, for exactly the patterns
+/// `clippy::trivial_regex` proves one is unnecessary for -- and `None` for every other pattern,
+/// which keeps its `regex::Regex` and is the only thing that reads a pattern of any real shape.
+///
+/// The lint is right, and it is the consumer who pays for being wrong: the `Regex::new` it fires
+/// on is written by this crate into the consumer's crate, so the diagnostic lands on their
+/// `#[model_schema]` attribute with no edit available at that site. Answering it means emitting
+/// the call it asks for, and the emitted call has to accept and reject the same values the regex
+/// did, byte for byte, or a pattern would mean one thing in a consumer denying the lint and
+/// another in one that does not.
+///
+/// So the classification is clippy's own, read off `clippy_lints/src/regex.rs::is_trivial_regex`
+/// (rust-lang/rust-clippy) and mirrored arm for arm: a bare literal, and a concatenation whose
+/// only non-literal parts are a leading `^`, a trailing `$`, or both. It is deliberately no wider
+/// than that. A shape the lint does not name is left on the regex path, where it costs nothing;
+/// a shape misread as trivial would silently change which values a constraint admits.
+///
+/// The two shapes the lint calls trivial and offers no replacement for -- a pattern that matches
+/// everything (`""`, `^`, `$`), and one whose alternatives are all empty (`|`) -- are not
+/// classified here: there is no call to emit for them, only the absence of a check.
+///
+/// The HIR walked is the one the lint reads, parsed with the options it parses with, so what is
+/// classified here is what it classifies. Anchors are the whole-haystack `Look::Start` and
+/// `Look::End` alone -- the line anchors `(?m)` turns those into never reach this crate, since
+/// [`portable_pattern`] refuses an inline flag before a pattern is ever emitted.
+#[cfg(feature = "serde")]
+pub fn trivial_pattern(pattern: &str) -> Option<TrivialPattern> {
+    let parsed = regex_syntax::ParserBuilder::new()
+        .unicode(true)
+        .utf8(true)
+        .build()
+        .parse(pattern)
+        .ok()?;
+    match parsed.kind() {
+        hir::HirKind::Literal(_) => literal_needle(from_ref(&parsed)).map(TrivialPattern::Contains),
+        hir::HirKind::Concat(parts) => trivial_concat(parts),
+        hir::HirKind::Empty
+        | hir::HirKind::Class(_)
+        | hir::HirKind::Look(_)
+        | hir::HirKind::Repetition(_)
+        | hir::HirKind::Capture(_)
+        | hir::HirKind::Alternation(_) => None,
+    }
+}
+
+/// A concatenation's equivalent check, decided by what sits at its two ends.
+///
+/// The arms are in the lint's order, and the fall-through it relies on is not reachable from any
+/// of them: a concatenation that starts or ends with an anchor holds something that is not a
+/// literal, so the all-literals reading is already ruled out by the time an anchored arm's needle
+/// comes back missing.
+#[cfg(feature = "serde")]
+fn trivial_concat(parts: &[hir::Hir]) -> Option<TrivialPattern> {
+    let opens_at_text_start = is_anchor(parts.first()?, hir::Look::Start);
+    let closes_at_text_end = is_anchor(parts.last()?, hir::Look::End);
+    let inner = parts.get(1..parts.len() - 1).unwrap_or_default();
+
+    if opens_at_text_start && closes_at_text_end {
+        if inner.is_empty() {
+            return Some(TrivialPattern::IsEmpty);
+        }
+        return literal_needle(inner).map(TrivialPattern::Equals);
+    }
+    if opens_at_text_start && matches!(*parts.last()?.kind(), hir::HirKind::Literal(_)) {
+        return literal_needle(&parts[1..]).map(TrivialPattern::StartsWith);
+    }
+    if closes_at_text_end && matches!(*parts.first()?.kind(), hir::HirKind::Literal(_)) {
+        return literal_needle(&parts[..parts.len() - 1]).map(TrivialPattern::EndsWith);
+    }
+    literal_needle(parts).map(TrivialPattern::Contains)
+}
+
+/// Whether one part of a concatenation is the given whole-haystack anchor.
+#[cfg(feature = "serde")]
+fn is_anchor(part: &hir::Hir, anchor: hir::Look) -> bool {
+    matches!(*part.kind(), hir::HirKind::Look(look) if look == anchor)
+}
+
+/// The non-empty `str` a run of parts spells, or `None` where any of them is not a literal.
+///
+/// An empty needle would name a check that always passes, which is a different statement than any
+/// of these variants makes; bytes that are not UTF-8 name no `str` at all. Neither is reachable
+/// through a `pattern` parsed in UTF-8 mode, and both keep the regex rather than guess.
+#[cfg(feature = "serde")]
+fn literal_needle(parts: &[hir::Hir]) -> Option<String> {
+    let mut bytes: Vec<u8> = Vec::new();
+    for part in parts {
+        let hir::HirKind::Literal(hir::Literal(run)) = part.kind() else {
+            return None;
+        };
+        bytes.extend_from_slice(run);
+    }
+    if bytes.is_empty() {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
 }
 
 /// Escapes a regex pattern for splicing between the `/` delimiters of a JavaScript regex literal.
