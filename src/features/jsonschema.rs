@@ -165,7 +165,7 @@ fn closed_object_body(json_schema_fields: &[proc_macro2::TokenStream]) -> proc_m
 /// still be stopped.
 /// The four things the merge asks of a schema it is handed, as the tokens the merging block opens
 /// with: how two objects join, whether a schema is a deferred name, what type it commits its value
-/// to, and which branches it offers.
+/// to, and which branches it offers under which spelling.
 fn merge_readers() -> proc_macro2::TokenStream {
     let defs_prefix = DEFS_PREFIX;
     quote::quote! {
@@ -215,20 +215,97 @@ fn merge_readers() -> proc_macro2::TokenStream {
             schema.get("type")?.as_str()
         }
 
-        // What serde picked one of. A discriminated enum spells its union `oneOf` and an untagged
-        // one `anyOf`, and the merge owes both the same answer: the value that reached it wrote
-        // whichever branch matched, so the branch is what the base joins.
-        fn branches_of(schema: &serde_json::Value) -> Vec<&serde_json::Value> {
-            if let Some(union) = schema
-                .get("oneOf")
-                .or_else(|| schema.get("anyOf"))
-                .and_then(serde_json::Value::as_array)
-            {
-                union.iter().collect()
-            } else if schema.is_object() {
-                vec![schema]
+        // What serde picked one of, and how the source spelled the choice. A discriminated enum
+        // writes `oneOf` and an untagged one `anyOf`; the merge owes both the same branches — the
+        // value that reached it wrote whichever branch matched, so the branch is what the base
+        // joins — and owes each its own spelling, which is what says whether a payload two branches
+        // admit is an error or the ordinary case.
+        //
+        // A schema that is no union is the one-branch union of itself, and one branch is merged in
+        // place rather than wrapped, so the spelling carried for it is never the one written.
+        fn branches_of(schema: &serde_json::Value) -> (&'static str, Vec<&serde_json::Value>) {
+            for keyword in ["oneOf", "anyOf"] {
+                if let Some(union) = schema.get(keyword).and_then(serde_json::Value::as_array) {
+                    return (keyword, union.iter().collect());
+                }
+            }
+            if schema.is_object() {
+                ("oneOf", vec![schema])
             } else {
-                Vec::new()
+                ("oneOf", Vec::new())
+            }
+        }
+    }
+}
+
+/// What the merge holds while it multiplies, as the tokens that declare it.
+///
+/// The spelling travels with the source that used it, because the two spellings say different
+/// things about a payload more than one branch admits. A discriminated enum's members are
+/// exclusive, so `oneOf` costs it nothing; an untagged enum is first-match-wins, and members whose
+/// key sets overlap admit each other's payloads as a matter of course — under `oneOf` the document
+/// would reject exactly what serde writes for the narrower member. So the branches a source
+/// multiplies out are held under that source's own wrapper, and a second source multiplies each of
+/// them again from there: the wrappers nest rather than flatten into one, and each branch set keeps
+/// the rule its own union was written under.
+fn merged_tree() -> proc_macro2::TokenStream {
+    quote::quote! {
+        enum Merged {
+            Object(serde_json::Map<String, serde_json::Value>),
+            Union(&'static str, Vec<Merged>),
+        }
+
+        impl Merged {
+            // Every leaf gains the members of one branch of the source, so a source reaches the
+            // branches an earlier source left behind rather than only the object it started from.
+            fn multiplied(
+                self,
+                members: &[&serde_json::Map<String, serde_json::Value>],
+                spelling: &'static str,
+            ) -> Self {
+                match self {
+                    Self::Union(keyword, branches) => Self::Union(
+                        keyword,
+                        branches
+                            .into_iter()
+                            .map(|branch| branch.multiplied(members, spelling))
+                            .collect(),
+                    ),
+                    Self::Object(base) => {
+                        let mut merged: Vec<serde_json::Map<String, serde_json::Value>> = members
+                            .iter()
+                            .map(|member| merge_object_schemas(&base, member))
+                            .collect();
+                        // One key set is an object rather than a choice between objects, so a
+                        // source with a single member writes no wrapper and its spelling goes
+                        // unread.
+                        if merged.len() == 1 {
+                            Self::Object(merged.swap_remove(0))
+                        } else {
+                            Self::Union(spelling, merged.into_iter().map(Self::Object).collect())
+                        }
+                    }
+                }
+            }
+
+            fn into_value(self) -> serde_json::Value {
+                match self {
+                    Self::Object(members) => serde_json::Value::Object(members),
+                    Self::Union(keyword, branches) => {
+                        let mut out = serde_json::Map::new();
+                        out.insert(
+                            "type".to_string(),
+                            serde_json::Value::String("object".to_string()),
+                        );
+                        out.insert(
+                            keyword.to_string(),
+                            serde_json::Value::Array(
+                                branches.into_iter().map(Self::into_value).collect(),
+                            ),
+                        );
+                        serde_json::Value::Object(out)
+                    }
+                }
             }
         }
     }
@@ -242,7 +319,8 @@ fn merge_readers() -> proc_macro2::TokenStream {
 /// name carries none of the members it stands for, so it is read back out of the definitions first,
 /// the same way the whole merged body is.
 ///
-/// Reads `fs_body` and `label` from the frame that merges, and binds `fs_objects`.
+/// Reads `fs_body` and `label` from the frame that merges, and binds `fs_objects` beside the
+/// spelling the source gave its union.
 fn branch_objects(diagnostic: &MergeDiagnostic<'_>) -> proc_macro2::TokenStream {
     let MergeDiagnostic {
         cycle_remedy,
@@ -251,7 +329,7 @@ fn branch_objects(diagnostic: &MergeDiagnostic<'_>) -> proc_macro2::TokenStream 
         subject,
     } = *diagnostic;
     quote::quote! {
-        let fs_branches = branches_of(fs_body);
+        let (fs_spelling, fs_branches) = branches_of(fs_body);
         let mut fs_objects: Vec<&serde_json::Map<String, serde_json::Value>> = Vec::new();
         for (position, fb) in fs_branches.iter().enumerate() {
             let branch = match deferred_name(fb) {
@@ -304,13 +382,15 @@ pub fn merged_object_value(
     let labels = merged.iter().map(|source| source.label.as_str());
     let values = merged.iter().map(|source| &source.value);
     let readers = merge_readers();
+    let tree = merged_tree();
     quote::quote! {
         {
+            #tree
             #readers
 
             let flattened: Vec<(&'static str, serde_json::Value)> = vec![ #((#labels, #values)),* ];
 
-            let mut branches: Vec<serde_json::Map<String, serde_json::Value>> = vec![#base];
+            let mut described = Merged::Object(#base);
             for (label, fs) in &flattened {
                 // An entry still only reserved is this merge coming back around to a name whose
                 // body is still being written: there is nothing to merge, and the type it would
@@ -344,28 +424,10 @@ pub fn merged_object_value(
                 if fs_objects.is_empty() {
                     continue;
                 }
-                let mut next = Vec::new();
-                for base in &branches {
-                    for fb in &fs_objects {
-                        next.push(merge_object_schemas(base, fb));
-                    }
-                }
-                branches = next;
+                described = described.multiplied(&fs_objects, fs_spelling);
             }
 
-            if branches.len() == 1 {
-                serde_json::Value::Object(branches.swap_remove(0))
-            } else {
-                let mut out = serde_json::Map::new();
-                out.insert("type".to_string(), serde_json::Value::String("object".to_string()));
-                out.insert(
-                    "oneOf".to_string(),
-                    serde_json::Value::Array(
-                        branches.into_iter().map(serde_json::Value::Object).collect(),
-                    ),
-                );
-                serde_json::Value::Object(out)
-            }
+            described.into_value()
         }
     }
 }
