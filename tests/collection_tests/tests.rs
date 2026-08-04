@@ -643,6 +643,20 @@ struct DocumentedSequenceFields {
     undocumented_vec: Vec<String>,
 }
 
+/// The member spelling an `Option` field written with a `skip_serializing_if` renders as.
+///
+/// serde drops the key for a `None`, so the payload has no such key and the member is written with
+/// an optional one. Only a build that reads the attribute knows that: without the `serde` feature
+/// none is read, and the key stays written with an `undefined` value.
+#[cfg(feature = "typescript")]
+fn omitted_member(name: &str, ts_type: &str) -> String {
+    if cfg!(feature = "serde") {
+        format!("{name}?: {ts_type};")
+    } else {
+        format!("{name}: {ts_type} | undefined;")
+    }
+}
+
 fn one<T, C>(item: T) -> C
 where
     C: FromIterator<T>,
@@ -2523,11 +2537,16 @@ fn test_unwrapped_map_fields_keep_the_object_they_describe_as() {
 #[cfg(all(feature = "typescript", feature = "zod"))]
 fn test_wrapped_map_fields_typescript_generation() {
     let ts_definition = WrappedMapFields::ts_definition();
+    let optional_labels = omitted_member("optional_labels", "Partial<Record<string, string>>");
+    let optional_wrapped_labels = omitted_member(
+        "optional_wrapped_labels",
+        "Array<Partial<Record<string, string>>>",
+    );
     for expected in [
         "bucket_counts: Partial<Record<MetricBucket, number>>;",
         "labels: Partial<Record<string, string>>;",
-        "optional_labels: Partial<Record<string, string>> | undefined;",
-        "optional_wrapped_labels: Array<Partial<Record<string, string>>> | undefined;",
+        optional_labels.as_str(),
+        optional_wrapped_labels.as_str(),
         "raw_keyed_counts: Partial<Record<number, number>>;",
         "wrapped_bucket_counts: Array<Partial<Record<MetricBucket, number>>>;",
         "wrapped_labels: Array<Partial<Record<string, string>>>;",
@@ -3283,13 +3302,14 @@ fn test_nested_sequence_slots_describe_at_the_depth_they_are_written() {
 #[cfg(feature = "typescript")]
 fn test_nested_sequences_type_at_the_depth_they_are_written() {
     let ts_definition = NestedSequenceFields::ts_definition();
+    let optional_rows = omitted_member("optional_rows", "Array<Array<number>>");
     for spelling in [
         "aliased_rows: Array<Array<MetricTagRefType>>;",
         "constrained_rows: Array<Array<string>>;",
         "deep_ids: Array<Array<Array<number>>>;",
         "fixed_grid: Array<Array<number>>;",
         "labels: Array<Array<string>>;",
-        "optional_rows: Array<Array<number>> | undefined;",
+        optional_rows.as_str(),
         "set_of_rows: Array<Array<number>>;",
         "sibling_rows: Array<Array<MetricTag>>;",
         "small_ids: Array<Array<number>>;",
@@ -3384,9 +3404,17 @@ fn test_an_alias_of_a_nested_sequence_publishes_its_depth() {
 #[cfg(feature = "typescript")]
 fn test_a_doc_comment_reaches_ts_from_a_collapsed_wrapper_field() {
     let ts = DocumentedSequenceFields::ts_definition();
+    let documented_nested = format!(
+        " * Documented nested field.\n * \n**/\n  {}",
+        omitted_member("documented_nested", "Array<number>")
+    );
+    let documented_optional = format!(
+        " * Documented optional field.\n * \n**/\n  {}",
+        omitted_member("documented_optional", "string")
+    );
     for spelling in [
-        " * Documented nested field.\n * \n**/\n  documented_nested: Array<number> | undefined;",
-        " * Documented optional field.\n * \n**/\n  documented_optional: string | undefined;",
+        documented_nested.as_str(),
+        documented_optional.as_str(),
         " * Documented set field.\n * \n**/\n  documented_set: Array<string>;",
         " * Documented vec field.\n * \n**/\n  documented_vec: Array<string>;",
         " * undocumented_vec\n * \n**/\n  undocumented_vec: Array<string>;",

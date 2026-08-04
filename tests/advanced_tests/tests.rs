@@ -275,6 +275,24 @@ fn assert_ts_contains_fields(ts_definition: &str, assertions: &[(&str, &str)]) {
     }
 }
 
+/// Holds the members whose key serde drops for a `None` to the spelling that admits the payload
+/// without the key. Only a build that reads the attribute knows the key can go, so without the
+/// `serde` feature the key stays written and carries an `undefined` value instead.
+#[cfg(all(feature = "typescript", feature = "zod"))]
+fn assert_ts_contains_omitted_fields(ts_definition: &str, assertions: &[(&str, &str)]) {
+    for (field, expected_type) in assertions {
+        let expected = if cfg!(feature = "serde") {
+            format!("{field}?: {expected_type};")
+        } else {
+            format!("{field}: {expected_type} | undefined;")
+        };
+        assert!(
+            ts_definition.contains(&expected),
+            "missing {expected}, got: {ts_definition}"
+        );
+    }
+}
+
 #[cfg(all(feature = "typescript", feature = "zod"))]
 fn assert_zod_contains_fields(zod_schema: &str, assertions: &[(&str, &str)]) {
     for (field, expected_pattern) in assertions {
@@ -338,7 +356,7 @@ fn test_complex_nested_ts_definition() {
     assert!(company_definition.contains("settings: CompanySettings;"));
 
     // Check optional fields in nested structures
-    assert!(employee_definition.contains("manager: string | undefined;"));
+    assert!(employee_definition.contains("manager?: string;"));
 
     // Check discriminated union
     assert!(retirement_definition.contains("type: \"option401k\""));
@@ -441,12 +459,17 @@ fn test_edge_cases_ts_definition() {
             ("strings", "Array<string>"),
             ("numbers", "Array<number>"),
             ("booleans", "Array<boolean>"),
-            ("optional_strings", "Array<string> | undefined"),
-            ("optional_numbers", "Array<number> | undefined"),
             ("string_map", "Partial<Record<string, string>>"),
-            ("nested_optional", "ContactInfo | undefined"),
             ("nested_array", "Array<ContactInfo>"),
-            ("optional_nested_array", "Array<ContactInfo> | undefined"),
+        ],
+    );
+    assert_ts_contains_omitted_fields(
+        &ts_definition,
+        &[
+            ("optional_strings", "Array<string>"),
+            ("optional_numbers", "Array<number>"),
+            ("nested_optional", "ContactInfo"),
+            ("optional_nested_array", "Array<ContactInfo>"),
         ],
     );
 
@@ -521,7 +544,7 @@ fn test_complex_discriminated_union() {
     assert!(ts_definition.contains("totalAmount: number;"));
     assert!(ts_definition.contains("paymentMethod: string;"));
     // Address type reference should not have Json suffix
-    assert!(ts_definition.contains("shippingAddress: Address | undefined;"));
+    assert!(ts_definition.contains("shippingAddress?: Address;"));
     assert!(ts_definition.contains("scheduledStart: string;"));
     assert!(ts_definition.contains("estimatedDuration: number;"));
     assert!(ts_definition.contains("affectedServices: Array<string>;"));
@@ -554,7 +577,13 @@ fn test_documented_struct() {
     assert!(ts_definition.contains("email: string;"));
     assert!(ts_definition.contains("is_active: boolean;"));
     // HashMap becomes Partial<Record<...>>
-    assert!(ts_definition.contains("metadata: Partial<Record<string, string>> | undefined;"));
+    // The key serde drops for a `None`, spelled as the build that reads the attribute renders it.
+    let metadata = if cfg!(feature = "serde") {
+        "metadata?: Partial<Record<string, string>>;"
+    } else {
+        "metadata: Partial<Record<string, string>> | undefined;"
+    };
+    assert!(ts_definition.contains(metadata), "Got: {ts_definition}");
 }
 
 // Test validation of generated JSON schemas

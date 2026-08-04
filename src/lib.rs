@@ -50,7 +50,7 @@ use proc_macro::TokenStream;
 /// //   id: string,
 /// //   firstName: string,
 /// //   lastName: string,
-/// //   age: number | undefined,
+/// //   age?: number,
 /// //   roles: Array<string>,
 /// // };
 /// //
@@ -114,7 +114,7 @@ use proc_macro::TokenStream;
 /// // } | {
 /// //   type: "userDeleted";
 /// //   userId: string;
-/// //   reason: string | undefined;
+/// //   reason?: string;
 /// // };
 /// ```
 ///
@@ -153,7 +153,7 @@ pub struct Document {
 //   author_id: ObjectId;
 //   tags: Array<ObjectId>;
 //   metadata: Partial<Record<string, ObjectId>>;
-//   parent_id: ObjectId | undefined;
+//   parent_id?: ObjectId;
 // };
 //
 // export const Document$Schema = z.strictObject({
