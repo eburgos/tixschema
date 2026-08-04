@@ -318,6 +318,25 @@ const NON_TRIVIAL_PATTERNS: [&str; 16] = [
     "a|b",
 ];
 
+/// Every shape the guard proves admits every value, written the ways an author reaches one: the
+/// four the report names, then the same emptiness reached through a capture, a repetition that may
+/// run zero times, an alternative that may be skipped, and a single text anchor with nothing but
+/// those beside it.
+const UNCONSTRAINING_PATTERNS: [&str; 12] = [
+    "", "^", "$", "|", "()", "(^)", "a*", "a?", "a|", "^a*", "a*$", "(?:ab)*",
+];
+
+/// Patterns that turn some value away, kept beside [`UNCONSTRAINING_PATTERNS`] as the near misses
+/// that decide where the line sits.
+///
+/// `^$` and `^a*$` pin both ends of the value to one position, which is a constraint however
+/// little sits between them. `\b` and `\B` ask the value for a word boundary, or for the absence
+/// of one at every position, and the empty string has neither. `a+` and `(?:ab)+` demand the run
+/// they repeat at least once.
+const CONSTRAINING_PATTERNS: [&str; 8] = [
+    "^$", "^a*$", r"\b", r"\B", "a+", "(?:ab)+", "^[a-z]+$", r"^\s*$",
+];
+
 /// The negated classes the verdict was decided over: a single member, the ranges an author reaches
 /// for to bound one to ASCII, an escape, and the `\d` the guard writes out to `0-9` on its way in.
 /// The last is the one that shows rewriting cannot help — its members come out ASCII and the
@@ -339,6 +358,16 @@ const NEGATED_CLASS_PATTERNS: [&str; 6] = [
 /// are two contracts and only one of them is enforced.
 #[cfg(feature = "object_id")]
 const CRATE_EMITTED_PATTERNS: [&str; 1] = [OBJECT_ID_HEX_PATTERN];
+
+/// The strings a classification is proved against — every character the equalised classes are
+/// compared over, plus the delimiters and near-miss prefixes the rewrite tests carry.
+fn classification_haystacks() -> Vec<&'static str> {
+    CROSS_ENGINE_HAYSTACKS
+        .into_iter()
+        .chain(REWRITE_HAYSTACKS)
+        .chain(["ab", "abab", "xay", "word boundary", "  "])
+        .collect()
+}
 
 #[cfg(feature = "serde")]
 /// The haystacks a classified pattern is held to, in the two senses that matter: every character
@@ -1088,5 +1117,86 @@ fn test_trivial_pattern_accepts_exactly_what_its_regex_accepts() {
                 "{pattern} and the call it was classified as part ways over {haystack:?}"
             );
         }
+    }
+}
+
+/// Runs both `pattern` guards the way the attribute parsers run them, and hands back the refusal
+/// as the author reads it.
+fn constraining(pattern: &str) -> Result<String, String> {
+    let lit = LitStr::new(pattern, proc_macro2::Span::call_site());
+    portable_pattern(&lit)
+        .and_then(|portable| constraining_pattern(&lit, portable))
+        .map_err(|rejection| rejection.to_string())
+}
+
+/// The verdict is proved against the regex the pattern would have been checked by, not asserted
+/// beside it: a pattern the guard calls unconstraining has to match every haystack in the corpus,
+/// and one it lets through has to turn at least one of them away.
+#[test]
+fn test_the_unconstraining_verdict_is_the_regex_crate_s_own() {
+    let haystacks = classification_haystacks();
+    for pattern in UNCONSTRAINING_PATTERNS {
+        let regex = regex::Regex::new(pattern).unwrap();
+        for haystack in &haystacks {
+            assert!(
+                regex.is_match(haystack),
+                "{pattern} is called unconstraining and turns {haystack:?} away"
+            );
+        }
+    }
+    for pattern in CONSTRAINING_PATTERNS {
+        let regex = regex::Regex::new(pattern).unwrap();
+        assert!(
+            haystacks.iter().any(|haystack| !regex.is_match(haystack)),
+            "{pattern} is left on the regex path and turns nothing in the corpus away"
+        );
+    }
+}
+
+/// A pattern that matches at some position of every string is refused where it is written, and the
+/// refusal says what is wrong with it rather than naming a construct.
+#[test]
+fn test_a_pattern_admitting_every_value_is_refused() {
+    for pattern in UNCONSTRAINING_PATTERNS {
+        let rejection = constraining(pattern).unwrap_err();
+        for needle in ["pattern", "admits every value", "constrains nothing"] {
+            assert!(
+                rejection.contains(needle),
+                "{needle} missing for {pattern}: {rejection}"
+            );
+        }
+    }
+}
+
+/// A pattern that turns some value away keeps its place, `\b` included.
+///
+/// `\b` is the one shape `clippy::trivial_regex` flags that this guard deliberately does not
+/// answer for. A probe run before this guard existed put `#[model_schema_prop(pattern = r"\b")]`
+/// through `cargo clippy --all-targets -- -D warnings` in a crate denying `clippy::nursery`, and
+/// the lint fired — `error: trivial regex ... the regex is unlikely to be useful as it is`, landing
+/// on the `#[model_schema()]` attribute. It fires anyway, and refusing `\b` here would be refusing
+/// a real constraint: the empty string holds no word boundary, so the pattern turns a value away.
+#[test]
+fn test_a_pattern_turning_some_value_away_clears_the_guard() {
+    for pattern in CONSTRAINING_PATTERNS {
+        assert!(
+            constraining(pattern).is_ok(),
+            "{pattern} constrains something and was refused: {:?}",
+            constraining(pattern)
+        );
+    }
+}
+
+/// The patterns the shipped tests and the report write all say something, so none of them changes
+/// verdict under the new guard — the classified trivial shapes above all.
+#[cfg(feature = "serde")]
+#[test]
+fn test_the_shapes_already_classified_still_clear_the_guard() {
+    for pattern in TRIVIAL_PATTERNS.into_iter().chain(PORTABLE_PATTERNS) {
+        assert_eq!(
+            constraining(pattern).as_deref(),
+            Ok(pattern),
+            "{pattern} was refused, or came back in a different spelling"
+        );
     }
 }

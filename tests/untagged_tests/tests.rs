@@ -6,6 +6,10 @@ use tixschema::model_schema;
 #[cfg(all(feature = "jsonschema", feature = "object_id"))]
 use mongodb::bson::oid::ObjectId;
 
+/// The members of `StringArrayUnion`, in the order the union declares them.
+#[cfg(feature = "jsonschema")]
+const STRING_ARRAY_MEMBERS: [&str; 3] = ["rows", "slugs", "tags"];
+
 /// The members of `WrappedUnion`, in the order the union declares them.
 #[cfg(any(feature = "jsonschema", feature = "typescript", feature = "zod"))]
 const WRAPPED_MEMBERS: [&str; 3] = ["ids", "ordered", "queued"];
@@ -114,9 +118,28 @@ enum ShapedUnion {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 enum WrappedUnion {
-    Ids { ids: HashSet<u32> },
-    Ordered { ordered: BTreeSet<u32> },
-    Queued { queued: VecDeque<u32> },
+    Ids { ids: HashSet<String> },
+    Ordered { ordered: BTreeSet<String> },
+    Queued { queued: VecDeque<String> },
+}
+
+// A `String` under array levels, written in untagged members: bare, bounded, and nested. The value
+// a member holds is written straight into the array wrap, so the one value built from statements
+// has to reach that wrap the way every other member value does.
+#[model_schema()]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum StringArrayUnion {
+    Rows {
+        rows: Vec<Vec<String>>,
+    },
+    Slugs {
+        #[model_schema_prop(minLength = 2, pattern = "^[a-z]+$")]
+        slugs: Vec<String>,
+    },
+    Tags {
+        tags: Vec<String>,
+    },
 }
 
 // The field-position twins: the same members written as struct fields. Field position is the
@@ -140,9 +163,19 @@ struct ShapedFields {
 #[model_schema()]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WrappedFields {
-    ids: HashSet<u32>,
-    ordered: BTreeSet<u32>,
-    queued: VecDeque<u32>,
+    ids: HashSet<String>,
+    ordered: BTreeSet<String>,
+    queued: VecDeque<String>,
+}
+
+#[cfg(feature = "jsonschema")]
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StringArrayFields {
+    rows: Vec<Vec<String>>,
+    #[model_schema_prop(minLength = 2, pattern = "^[a-z]+$")]
+    slugs: Vec<String>,
+    tags: Vec<String>,
 }
 
 // An untagged struct variant carrying a constrained member, beside the same member written in a
@@ -716,18 +749,18 @@ fn test_untagged_tuple_member_zod() {
 fn test_untagged_wrapper_member_wire() {
     for value in [
         WrappedUnion::Ids {
-            ids: HashSet::from([7_u32]),
+            ids: HashSet::from(["north".to_owned()]),
         },
         WrappedUnion::Ordered {
-            ordered: BTreeSet::from([7_u32]),
+            ordered: BTreeSet::from(["north".to_owned()]),
         },
         WrappedUnion::Queued {
-            queued: VecDeque::from([7_u32]),
+            queued: VecDeque::from(["north".to_owned()]),
         },
     ] {
         let wire = serde_json::to_value(&value).unwrap();
         let (member, written) = wire.as_object().unwrap().iter().next().unwrap();
-        assert_eq!(*written, serde_json::json!([7_u32]), "for: {member}");
+        assert_eq!(*written, serde_json::json!(["north"]), "for: {member}");
         assert_eq!(
             serde_json::from_value::<WrappedUnion>(wire.clone()).unwrap(),
             value,
@@ -751,7 +784,7 @@ fn test_untagged_wrapper_member_json_schema() {
     for (branch, member) in any_of.iter().zip(WRAPPED_MEMBERS) {
         assert_eq!(
             branch["properties"][member],
-            serde_json::json!({ "type": "array", "items": { "type": "integer" } }),
+            serde_json::json!({ "type": "array", "items": { "type": "string" } }),
             "Got:\n{schema}"
         );
         assert_eq!(
@@ -769,7 +802,7 @@ fn test_untagged_wrapper_member_json_schema() {
 #[cfg(feature = "jsonschema")]
 fn test_untagged_wrapper_member_schema_admits_the_captured_wire() {
     let queued = WrappedUnion::Queued {
-        queued: VecDeque::from([7_u32, 8_u32]),
+        queued: VecDeque::from(["north".to_owned(), "south".to_owned()]),
     };
     let wire = serde_json::to_value(&queued).unwrap();
     let schema = WrappedUnion::json_schema();
@@ -777,9 +810,9 @@ fn test_untagged_wrapper_member_schema_admits_the_captured_wire() {
     let written = wire["queued"].as_array().unwrap();
 
     assert_eq!(member["type"], serde_json::json!("array"), "Got:\n{schema}");
-    assert_eq!(member["items"]["type"], serde_json::json!("integer"));
+    assert_eq!(member["items"]["type"], serde_json::json!("string"));
     assert!(
-        written.iter().all(serde_json::Value::is_u64),
+        written.iter().all(serde_json::Value::is_string),
         "Got:\n{wire}"
     );
 }
@@ -790,7 +823,7 @@ fn test_untagged_wrapper_member_typescript() {
     let ts = WrappedUnion::ts_definition();
     for member in WRAPPED_MEMBERS {
         assert!(
-            ts.contains(&format!("{{ {member}: Array<number> }}")),
+            ts.contains(&format!("{{ {member}: Array<string> }}")),
             "Got:\n{ts}"
         );
     }
@@ -803,10 +836,148 @@ fn test_untagged_wrapper_member_zod() {
     for member in WRAPPED_MEMBERS {
         assert!(
             zod.contains(&format!(
-                "z.strictObject({{ {member}: z.array(z.number().int()), }})"
+                "z.strictObject({{ {member}: z.array(z.string()), }})"
             )),
             "Got:\n{zod}"
         );
+    }
+}
+
+/// What serde writes for an untagged member holding a `String` under array levels — the capture the
+/// schema is held against. Bare, bounded and nested all write the array of strings the field of the
+/// same written type writes.
+#[test]
+fn test_untagged_string_array_member_wire() {
+    for (value, written) in [
+        (
+            StringArrayUnion::Rows {
+                rows: vec![vec!["north".to_owned()]],
+            },
+            serde_json::json!({ "rows": [["north"]] }),
+        ),
+        (
+            StringArrayUnion::Slugs {
+                slugs: vec!["north".to_owned()],
+            },
+            serde_json::json!({ "slugs": ["north"] }),
+        ),
+        (
+            StringArrayUnion::Tags {
+                tags: vec!["north".to_owned()],
+            },
+            serde_json::json!({ "tags": ["north"] }),
+        ),
+    ] {
+        let wire = serde_json::to_value(&value).unwrap();
+        assert_eq!(wire, written);
+        assert_eq!(
+            serde_json::from_value::<StringArrayUnion>(wire.clone()).unwrap(),
+            value,
+            "for: {wire}"
+        );
+    }
+}
+
+/// A member holding a `String` under array levels describes as the array of strings serde writes,
+/// and as the struct field written from the same type describes. The member's value used to be the
+/// one the array wrap could not carry: a Rust block landing where the wrap's `serde_json::json!`
+/// reads a JSON object, which is the expansion that never reached a compiler.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_untagged_string_array_member_json_schema() {
+    let schema = StringArrayUnion::json_schema();
+    let fields = StringArrayFields::json_schema();
+    let any_of = schema["anyOf"].as_array().unwrap();
+    assert_eq!(any_of.len(), 3, "Got:\n{schema}");
+
+    for (branch, member) in any_of.iter().zip(STRING_ARRAY_MEMBERS) {
+        assert_eq!(
+            branch["properties"][member], fields["properties"][member],
+            "the field-position twin must render `{member}`:\n{schema}"
+        );
+        assert_eq!(branch["required"], serde_json::json!([member]));
+    }
+
+    assert_eq!(
+        any_of[2]["properties"]["tags"],
+        serde_json::json!({ "type": "array", "items": { "type": "string" } }),
+        "Got:\n{schema}"
+    );
+    assert_eq!(
+        any_of[0]["properties"]["rows"],
+        serde_json::json!({
+            "type": "array",
+            "items": { "type": "array", "items": { "type": "string" } }
+        }),
+        "Got:\n{schema}"
+    );
+}
+
+/// A bounded `String` under array levels keeps its bounds on the items, where the value they
+/// constrain sits — the array itself carries none. Held against the field twin, which is where the
+/// same bounds are written today.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_untagged_string_array_member_keeps_its_bounds_on_the_items() {
+    let schema = StringArrayUnion::json_schema();
+    let slugs = &schema["anyOf"][1]["properties"]["slugs"];
+
+    assert_eq!(
+        *slugs,
+        serde_json::json!({
+            "type": "array",
+            "items": { "type": "string", "minLength": 2_u32, "pattern": "^[a-z]+$" }
+        }),
+        "Got:\n{schema}"
+    );
+    assert_eq!(
+        *slugs,
+        StringArrayFields::json_schema()["properties"]["slugs"],
+        "the field-position twin must render the same bounded items"
+    );
+}
+
+/// The wrapper spellings of the same element reach the array wrap too, so a `HashSet<String>` in a
+/// member describes as the `Vec<String>` beside it does — the headline spelling, held against both
+/// the wrapper union and the bare-array one.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_untagged_wrapper_of_string_describes_as_the_bare_string_array() {
+    let wrapped = WrappedUnion::json_schema();
+    let arrayed = StringArrayUnion::json_schema();
+
+    for (branch, member) in wrapped["anyOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(WRAPPED_MEMBERS)
+    {
+        assert_eq!(
+            branch["properties"][member], arrayed["anyOf"][2]["properties"]["tags"],
+            "`{member}` must describe as the bare `Vec<String>` member:\n{wrapped}"
+        );
+    }
+}
+
+#[test]
+#[cfg(feature = "typescript")]
+fn test_untagged_string_array_member_typescript() {
+    let ts = StringArrayUnion::ts_definition();
+    for member in ["{ tags: Array<string> }", "{ rows: Array<Array<string>> }"] {
+        assert!(ts.contains(member), "Got:\n{ts}");
+    }
+}
+
+#[test]
+#[cfg(feature = "zod")]
+fn test_untagged_string_array_member_zod() {
+    let zod = StringArrayUnion::zod_schema();
+    for member in [
+        "z.strictObject({ tags: z.array(z.string()), })",
+        "z.strictObject({ rows: z.array(z.array(z.string())), })",
+        "z.strictObject({ slugs: z.array(z.string().min(2).check(z.regex(/^[a-z]+$/))), })",
+    ] {
+        assert!(zod.contains(member), "Got:\n{zod}");
     }
 }
 

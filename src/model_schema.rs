@@ -42,7 +42,7 @@ use crate::features::object_id::get_object_id_zod_schema_with;
 use crate::features::object_id::OBJECT_ID_HEX_PATTERN;
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-use crate::utils::{AliasKind, lookup_alias_info, portable_pattern};
+use crate::utils::{AliasKind, constraining_pattern, lookup_alias_info, portable_pattern};
 
 #[cfg(feature = "serde")]
 use crate::utils::{TrivialPattern, trivial_pattern};
@@ -94,7 +94,7 @@ use crate::utils::{get_item_docs, ident_reexport_ts};
 use crate::utils::ident_reexport_zod;
 
 #[cfg(feature = "zod")]
-use crate::utils::record_zod_union_members;
+use crate::utils::{ZodUnionMember, record_zod_union_members};
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::register_alias_info;
@@ -158,6 +158,14 @@ type RenderedVariants = (
     Vec<proc_macro2::TokenStream>,
 );
 
+/// What an untagged enum's members contribute to an object that merges it, which only the Zod
+/// surface multiplies out and so only it has a member type for. The other tables carry the same
+/// slot spelled as what they never read.
+#[cfg(all(feature = "serde", feature = "zod"))]
+type ZodMergeParts = Vec<ZodUnionMember>;
+#[cfg(all(feature = "serde", not(feature = "zod")))]
+type ZodMergeParts = Vec<String>;
+
 /// Per-member data collected from an untagged enum: the TypeScript member types, the Zod member
 /// schemas, what those Zod members contribute to an object that merges the enum, the JSON-schema
 /// value tokens, the `compile_error!` tokens for any field-level guard violations, the per-member
@@ -166,7 +174,7 @@ type RenderedVariants = (
 type UntaggedMemberData = (
     Vec<String>,
     Vec<String>,
-    Vec<String>,
+    ZodMergeParts,
     Vec<proc_macro2::TokenStream>,
     Vec<proc_macro2::TokenStream>,
     Vec<proc_macro2::TokenStream>,
@@ -440,10 +448,10 @@ struct ModelSchemaArgs {
     /// earned a `pattern_rejection`.
     pattern: Option<String>,
     /// What keeps `pattern` off the surfaces it was written for -- a regex the `regex` crate
-    /// cannot parse, or a construct a JavaScript regex literal cannot carry -- spanned on the
-    /// literal it was written as. Only the brand path splices the argument, and only a schema
-    /// feature builds that path; without one, a type-level constraint never reaches a surface at
-    /// all.
+    /// cannot parse, a construct a JavaScript regex literal cannot carry, or a shape that admits
+    /// every value and so says nothing on any of them -- spanned on the literal it was written as.
+    /// Only the brand path splices the argument, and only a schema feature builds that path;
+    /// without one, a type-level constraint never reaches a surface at all.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     pattern_rejection: Option<syn::Error>,
 }
@@ -463,7 +471,7 @@ struct MergedOperand {
     /// `spelling`. Zod only: TypeScript distributes an intersection over a union on its own, so
     /// there the union is spelled as the one operand it is.
     #[cfg(feature = "zod")]
-    members: Vec<String>,
+    members: Vec<ZodUnionMember>,
     optional: bool,
     spelling: String,
 }
@@ -669,7 +677,7 @@ fn unknown_arg_rejection(meta: &Meta) -> syn::Error {
 /// read that one was given, not what it says.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn record_pattern(result: &mut ModelSchemaArgs, lit_str: &syn::LitStr) {
-    match portable_pattern(lit_str) {
+    match portable_pattern(lit_str).and_then(|portable| constraining_pattern(lit_str, portable)) {
         Ok(pattern) => result.pattern = Some(pattern),
         Err(rejection) => {
             result.pattern_rejection = Some(rejection);
@@ -832,7 +840,8 @@ fn process_type_alias(item_type: ItemType, args: &ModelSchemaArgs) -> TokenStrea
     let ts_method = generate_alias_ts_definition_method(&alias, &export_name, &alias_field_def);
     let json_schema_method =
         generate_alias_json_schema_method(&alias, &export_name, &alias_field_def);
-    let zod_method = generate_alias_zod_method(&export_name, &rust_ident_str, &alias_field_def);
+    let zod_method =
+        generate_alias_zod_method(&alias, &export_name, &rust_ident_str, &alias_field_def);
 
     let output = quote! {
         #alias
@@ -1462,8 +1471,10 @@ fn cfg_attr_guard_error(rejection: &syn::Error, item: &str) -> proc_macro2::Toke
 /// Turns a rejected `pattern` into `compile_error!` tokens naming what carries it, keeping the
 /// literal's span so the diagnostic points at the pattern as written.
 ///
-/// Why a pattern is refused is [`crate::utils::portable_pattern`]'s to say — the crate cannot parse
-/// it, or JavaScript reads it as something else — so the refusal is quoted rather than restated.
+/// Why a pattern is refused is the guard that refused it's to say — [`crate::utils::portable_pattern`]
+/// where the crate cannot parse it or JavaScript reads it as something else,
+/// [`crate::utils::constraining_pattern`] where it admits every value — so the refusal is quoted
+/// rather than restated.
 fn pattern_guard_error(rejection: &syn::Error, subject: &str) -> proc_macro2::TokenStream {
     syn::Error::new(
         rejection.span(),
@@ -1603,16 +1614,24 @@ fn branded_option_inner_error(
 /// number schema at all. A container inner never reaches that disagreement — it has no `Display`
 /// to render.
 ///
-/// A `SiblingType` inner — another brand, an unresolved user type, or a bare generic parameter —
-/// is admitted, because expansion cannot know its shape. That is why the constrained path asserts
-/// `Display` separately: the guard bounds the schema surfaces, the assertion bounds the Rust one.
-/// A sequence wrapper is the one `SiblingType` spelling that says its shape outright, and is
-/// refused as the array it is.
+/// A `SiblingType` inner — another brand, or an unresolved user type — is admitted, because
+/// expansion cannot know its shape. That is why the constrained path asserts `Display` separately:
+/// the guard bounds the schema surfaces, the assertion bounds the Rust one. A sequence wrapper is
+/// the one `SiblingType` spelling that says its shape outright, and is refused as the array it is.
+///
+/// One of the brand's *own* type parameters is not such a name: it says its shape outright too,
+/// because both validating surfaces have already settled that it has none. Reading the inner off
+/// [`value_surface_field_def`] puts it in front of the opaque arm, where it belongs — Zod 4's
+/// `z.unknown()` carries no `.min`/`.max` at all, and `.brand()` returns the same instance rather
+/// than a wrapper that could, so there is nothing for the checks to attach to; JSON Schema's
+/// string keywords go inert beside the `{}` a parameter describes as; and `validate()` still
+/// measures `Display`. Three surfaces, three answers — the disagreement this guard exists to stop.
 ///
 /// Resolved through the same `get_field_def` call the renderers make, so the guard and the
 /// contract cannot disagree about what a shape is.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn branded_constraint_inner_error(
+    generics: &syn::Generics,
     name: &Ident,
     inner_field: &Field,
     args: &ModelSchemaArgs,
@@ -1620,7 +1639,10 @@ fn branded_constraint_inner_error(
     if !args.has_string_constraints() {
         return None;
     }
-    let shape = non_string_inner_shape(&get_field_def("_inner", &inner_field.ty, ""))?;
+    let shape = non_string_inner_shape(&value_surface_field_def(
+        generics,
+        &get_field_def("_inner", &inner_field.ty, ""),
+    ))?;
     Some(
         syn::Error::new_spanned(
             inner_field,
@@ -1721,8 +1743,8 @@ const fn branded_cfg_attr_guard_errors(
     Vec::new()
 }
 
-/// The `compile_error!` tokens for a brand whose `pattern` argument the `regex` crate rejects, or
-/// `None` when it carries none or it parses.
+/// The `compile_error!` tokens for a brand whose `pattern` argument a guard refuses, or `None`
+/// when it carries none or it clears them.
 ///
 /// The brand is the only shape that reads a type-level `pattern`, and it splices the string into
 /// the Rust validator, the Zod literal and the JSON schema alike; every other shape is refused the
@@ -1800,6 +1822,7 @@ fn branded_guard_errors(
         .into_iter()
         .chain(branded_option_inner_error(&item_struct.ident, inner_field))
         .chain(branded_constraint_inner_error(
+            &item_struct.generics,
             &item_struct.ident,
             inner_field,
             args,
@@ -1847,6 +1870,48 @@ fn flattened_field_guard_error(
     )
 }
 
+/// The `compile_error!` tokens for a `#[serde(flatten)]` field naming an untagged union one of
+/// whose recorded members serde does not write as an object, or `None` for every other field.
+///
+/// The union itself is left alone — an untagged enum may hold a scalar, and it is only the merge
+/// that has no object to join one to. What the multiplication would write for such a member is the
+/// object intersected with the scalar, a branch no payload satisfies and nothing reports; serde
+/// refuses the value outright, and the JSON-schema merge refuses the declaration in the words
+/// repeated here. Refused at expansion because that is the only place holding the field the author
+/// would have to change.
+///
+/// A union declared below the object has recorded nothing, so this answers for no member of it —
+/// the same bound the multiplication itself has, and the same one the merge's fallback documents.
+#[cfg(all(feature = "serde", feature = "zod"))]
+fn flattened_union_member_guard_error(
+    field: &syn::Field,
+    type_name: &str,
+) -> Option<proc_macro2::TokenStream> {
+    let inner = get_field_def("_flattened", &field.ty, "");
+    let FieldDefType::SiblingType(inner_name, _) = &inner.field_type else {
+        return None;
+    };
+    let member = inner
+        .zod_union_members()
+        .into_iter()
+        .find(|member| member.non_object.is_some())?;
+    let named = member.non_object?;
+    let branch = member.branch_path();
+    Some(
+        syn::Error::new_spanned(
+            &field.ty,
+            format!(
+                "model_schema: `{type_name}`: `#[serde(flatten)]` of `{inner_name}` writes a \
+                 union member that is not an object — its branch {branch} describes a `{named}`, \
+                 which has no members to merge, and what serde writes for that member does not \
+                 join the object being written; write the field as a named member so the value \
+                 gets a key of its own."
+            ),
+        )
+        .to_compile_error(),
+    )
+}
+
 /// Processes every field of a struct, returning the regular field defs, the `#[serde(flatten)]`
 /// field defs, the per-field serde validation functions and `validate()` body fragments, and the
 /// `compile_error!` tokens for any field-level guard violations.
@@ -1877,6 +1942,11 @@ fn collect_struct_fields(
         ))]
         if is_flatten {
             guard_errors.extend(flattened_field_guard_error(field, type_name));
+        }
+
+        #[cfg(all(feature = "serde", feature = "zod"))]
+        if is_flatten {
+            guard_errors.extend(flattened_union_member_guard_error(field, type_name));
         }
 
         let (f_def, validation_fn, validate_body, field_guard_errors) = process_field(
@@ -2354,21 +2424,6 @@ fn process_tuple_struct(
     )
 }
 
-/// Processes a branded newtype (transparent single-field tuple struct) and generates
-/// TypeScript branded type definitions and Zod brand schemas.
-///
-/// A branded newtype is detected when a struct has **both** `#[serde(transparent)]` and exactly
-/// one unnamed field. The generated output depends on the active features:
-///
-/// - With `zod` + `typescript`: emits a Zod `.brand<"Name">()` schema and a
-///   `type Name<T> = T & z.$brand<"Name">` alias.
-/// - With `typescript` only (no `zod`): emits a `unique symbol` brand pattern and an
-///   `assertName()` type-assertion helper function.
-///
-/// Generic parameters on the struct are preserved in the TypeScript output. For non-generic
-/// newtypes, the inner field's Rust type is resolved to its TypeScript equivalent. For generic
-/// newtypes, the Zod schema always uses `z.string()` as the base because the generic parameter
-/// cannot be resolved at macro-expansion time.
 /// Builds the `validate_value`/`deserialize_value` functions for a constrained branded newtype.
 ///
 /// Returns `None` when the newtype has no string constraints. A path inner is measured by the
@@ -2680,13 +2735,25 @@ fn build_branded_json_schema_method(
     json_schema_methods(def_name, &body)
 }
 
+/// The `FieldDef` a value-level surface renders from: the written one with every reference to the
+/// enclosing item's own type parameters replaced by the opaque type.
+///
+/// The one seam the Zod and JSON surfaces share for a parameter, and so the reason an alias and a
+/// brand cannot drift apart over one — see [`FieldDef::erase_type_parameters`] for the rule and
+/// for why TypeScript reads the written def instead.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn value_surface_field_def(generics: &syn::Generics, written: &FieldDef) -> FieldDef {
+    let mut erased = written.clone();
+    erased.erase_type_parameters(&type_parameters_in_scope(generics));
+    erased
+}
+
 /// The TypeScript argument list a generic item's own name takes where a Zod binding's annotation
 /// names it: one `unknown` per parameter, and nothing at all for an item that declares none.
 ///
 /// The annotation states the type of the value beside it, and that value was composed with every
-/// parameter rendered opaque — so the name it is written under has to be filled in the same way.
-/// Naming the generic bare instead is a TypeScript error in its own right, the type requiring its
-/// arguments.
+/// parameter erased — so the name it is written under has to be filled in the same way. Naming the
+/// generic bare instead is a TypeScript error in its own right, the type requiring its arguments.
 #[cfg(feature = "zod")]
 fn erased_type_arguments(generics: &syn::Generics) -> String {
     let parameters = type_parameters_in_scope(generics);
@@ -2694,6 +2761,13 @@ fn erased_type_arguments(generics: &syn::Generics) -> String {
         return String::new();
     }
     format!("<{}>", vec!["unknown"; parameters.len()].join(", "))
+}
+
+/// The one def both validating surfaces read a branded newtype's inner off, so neither can render
+/// a type parameter the other has erased — see [`value_surface_field_def`].
+#[cfg(any(feature = "zod", feature = "jsonschema"))]
+fn branded_value_inner(generics: &syn::Generics, inner_ty: &syn::Type) -> FieldDef {
+    value_surface_field_def(generics, &get_field_def("_inner", inner_ty, ""))
 }
 
 /// Resolves the TypeScript inner type name and generic parameter list for a branded newtype.
@@ -2721,15 +2795,13 @@ fn branded_ts_type_and_generics(
     (ts_inner_type, ts_generics)
 }
 
-/// Resolves the JSON schema shape for a branded newtype's inner field.
+/// Resolves the JSON schema shape for a branded newtype's inner field, read off the def
+/// [`value_surface_field_def`] has already erased the brand's own type parameters out of.
 ///
-/// The brand's own type parameters are replaced by the opaque type before the inner is classified,
-/// exactly as [`alias_json_schema_field_def`] replaces an alias's: a parameter names no type until
-/// the brand is instantiated, and the schema is written once for every instantiation. So the
-/// parameter admits any value while the shape it sits in — an array, a map's keys, a tuple's arity
-/// — is still described, which is what `#[serde(transparent)]` puts on the wire.
+/// So a parameter admits any value while the shape it sits in — an array, a map's keys, a tuple's
+/// arity — is still described, which is what `#[serde(transparent)]` puts on the wire.
 ///
-/// An `ObjectId`, a composite and a named type are then read off their own `FieldDef`, because none
+/// An `ObjectId`, a composite and a named type are then read off that same `FieldDef`, because none
 /// of them writes a value one `"type"` keyword describes; a chrono type writes a string one keyword
 /// names but not the only one it carries. Every remaining inner maps from the resolved TypeScript
 /// type name.
@@ -2738,15 +2810,13 @@ fn branded_ts_type_and_generics(
 /// answers for the array around whatever it holds — which is what `#[serde(transparent)]` puts on
 /// the wire — rather than for the item.
 #[cfg(feature = "jsonschema")]
-fn branded_json_inner(generic_params: &[String], inner_ty: &syn::Type) -> BrandedJsonInner {
-    let mut inner = get_field_def("_inner", inner_ty, "");
-    inner.erase_type_parameters(generic_params);
+fn branded_json_inner(inner: &FieldDef) -> BrandedJsonInner {
     #[cfg(feature = "object_id")]
-    if branded_inner_is_object_id(&inner) {
+    if branded_inner_is_object_id(inner) {
         return BrandedJsonInner::ObjectId;
     }
-    if branded_inner_composite(&inner).is_some() {
-        return BrandedJsonInner::Slot(Box::new(inner));
+    if branded_inner_composite(inner).is_some() {
+        return BrandedJsonInner::Slot(Box::new(inner.clone()));
     }
     #[cfg(feature = "chrono")]
     if let Some(format) = chrono_json_schema_format(&inner.field_type) {
@@ -2756,7 +2826,7 @@ fn branded_json_inner(generic_params: &[String], inner_ty: &syn::Type) -> Brande
     // names, through the reference every other position defers it through — which is what makes a
     // forward declaration and a cycle behave for a brand as they behave for a field.
     if matches!(inner.field_type, FieldDefType::SiblingType(..)) {
-        return BrandedJsonInner::Slot(Box::new(inner));
+        return BrandedJsonInner::Slot(Box::new(inner.clone()));
     }
     BrandedJsonInner::Scalar(match inner.typescript_typename().as_str() {
         "number" => "number".to_owned(),
@@ -2851,15 +2921,15 @@ fn branded_inner_composite(inner: &FieldDef) -> Option<BrandedComposite> {
 /// `ObjectId` is the value the schema itself describes. An `ObjectId` writes `{"$oid": hex}`, so
 /// its `Display` is the `$oid` member and the checks land there.
 ///
-/// A brand's own type parameters are rendered here as they are anywhere else the value expression
-/// reaches one: through the `Name$Schema` binding `zod_array_base` names every unresolved type
-/// after, which is what a generic alias's value already publishes for a parameter.
+/// The inner is the def [`value_surface_field_def`] has already erased the brand's own type
+/// parameters out of, so a parameter composes into the value as `z.unknown()` rather than as a
+/// binding nothing declares. The checks never land on one: an opaque inner carries no string for
+/// them to measure and is refused by [`branded_constraint_inner_error`] before this.
 #[cfg(feature = "zod")]
-fn branded_zod_inner(args: &ModelSchemaArgs, inner_ty: &syn::Type) -> String {
+fn branded_zod_inner(args: &ModelSchemaArgs, inner: &FieldDef) -> String {
     let checks = branded_zod_string_checks(args);
-    let inner = get_field_def("_inner", inner_ty, "");
     #[cfg(feature = "object_id")]
-    if branded_inner_is_object_id(&inner) {
+    if branded_inner_is_object_id(inner) {
         return get_object_id_zod_schema_with(&checks);
     }
     format!("{}{checks}", inner.zod_type())
@@ -2881,17 +2951,15 @@ fn branded_zod_inner(args: &ModelSchemaArgs, inner_ty: &syn::Type) -> String {
 /// was called on, so the binding's type is the base schema's type whether or not the brand
 /// constrains it.
 ///
-/// A type parameter is a name like any other, so it is annotated through that same named-inner arm
-/// — the type of the binding the value was composed from — and the two surfaces cannot disagree
-/// about what the brand wraps.
+/// A type parameter reaches this off the erased def, as `z.unknown()` — the opaque arm — so the
+/// annotation follows the value rather than naming a binding the value no longer composes from.
 #[cfg(all(feature = "zod", feature = "typescript"))]
-fn branded_zod_type_name(inner_ty: &syn::Type) -> String {
-    let inner = get_field_def("_inner", inner_ty, "");
+fn branded_zod_type_name(inner: &FieldDef) -> String {
     #[cfg(feature = "object_id")]
-    if branded_inner_is_object_id(&inner) {
+    if branded_inner_is_object_id(inner) {
         return "ZodObject".to_owned();
     }
-    if let Some(composite) = branded_inner_composite(&inner) {
+    if let Some(composite) = branded_inner_composite(inner) {
         return match composite {
             BrandedComposite::Array => "ZodArray".to_owned(),
             BrandedComposite::Map => "ZodRecord".to_owned(),
@@ -2946,18 +3014,22 @@ fn build_branded_ts_definition_method(
 }
 
 /// Builds the `zod_schema()` method for a branded newtype's schema module.
+///
+/// The value and the annotation are both read off the one erased inner, so the type the binding
+/// claims and the schema it holds cannot describe different things.
 #[cfg(feature = "zod")]
 fn build_branded_zod_schema_method(
+    args: &ModelSchemaArgs,
     item_name: &str,
     rust_ident: &str,
-    inner_ty: &syn::Type,
-    zod_inner: &str,
+    inner: &FieldDef,
     plain_description: &str,
 ) -> proc_macro2::TokenStream {
+    let zod_inner = branded_zod_inner(args, inner);
     let reexport = ident_reexport_zod(rust_ident, item_name);
     #[cfg(feature = "typescript")]
     {
-        let zod_type_name = branded_zod_type_name(inner_ty);
+        let zod_type_name = branded_zod_type_name(inner);
         let zod_type_annotation = format!("$ZodBranded<{zod_type_name}, \"{item_name}\">");
         quote! {
             pub fn zod_schema() -> String {
@@ -2970,7 +3042,7 @@ fn build_branded_zod_schema_method(
     }
     #[cfg(not(feature = "typescript"))]
     {
-        let _: &_ = &inner_ty;
+        let _: &_ = &inner;
         quote! {
             pub fn zod_schema() -> String {
                 format!(
@@ -3326,6 +3398,23 @@ fn branded_guard_failure_output(
     )
 }
 
+/// Processes a branded newtype — a `#[serde(transparent)]` struct holding exactly one unnamed
+/// field — into the parts [`assemble_branded_output`] joins: the struct itself, the `Display` impl
+/// it earns, its schema module, and the delegate impl forwarding to that module.
+///
+/// A brand adds its own name to what its inner already writes, and each surface says so in the
+/// spelling that surface has for the marker. TypeScript intersects the inner's rendering with
+/// `$brand<"Name">`, the marker the `zod` runtime supplies; without `zod` there is no such marker
+/// to name, so the intersection is written against a `unique symbol` declared beside the type, and
+/// those two lines are the whole emission. Zod brands the inner's own schema with
+/// `.brand<"Name">()`, carries the item's description in the `.meta({ description })` every item
+/// carries it in, and annotates the exported binding `$ZodBranded<Class, "Name">` for the `Class`
+/// read off the very inner that rendering was built from.
+///
+/// Generic parameters on the struct are preserved in the TypeScript output, whose declaration
+/// binds them. The two validating surfaces read the inner off the erased def instead, so a
+/// parameter reaching either of them describes as the opaque value — see
+/// [`FieldDef::erase_type_parameters`].
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> TokenStream {
     if let Some(output) = branded_guard_failure_output(&item_struct, args) {
@@ -3372,11 +3461,11 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
     #[cfg(not(any(feature = "typescript", feature = "zod")))]
     let _: &_ = &inner_ty;
 
-    #[cfg(feature = "jsonschema")]
-    let json_inner = branded_json_inner(&generic_params, inner_ty);
+    #[cfg(any(feature = "zod", feature = "jsonschema"))]
+    let value_inner = branded_value_inner(&item_struct.generics, inner_ty);
 
-    #[cfg(feature = "zod")]
-    let zod_inner = branded_zod_inner(args, inner_ty);
+    #[cfg(feature = "jsonschema")]
+    let json_inner = branded_json_inner(&value_inner);
 
     // --- Generate ts_definition method ---
     #[cfg(feature = "typescript")]
@@ -3386,10 +3475,10 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
     // --- Generate zod_schema method ---
     #[cfg(feature = "zod")]
     let zod_schema_method = build_branded_zod_schema_method(
+        args,
         &item_name,
         &rust_ident,
-        inner_ty,
-        &zod_inner,
+        &value_inner,
         &plain_description,
     );
 
@@ -5158,6 +5247,13 @@ fn untagged_named_json_value(field_defs: &[FieldDef]) -> proc_macro2::TokenStrea
 
 /// Builds the `{ "type": "string", ... }` JSON-schema value token for a `String` field, including
 /// any `pattern` / `minLength` / `maxLength` constraints from its `model_schema_prop` metadata.
+///
+/// The constraints are written as insertions, so the value is a block — and the block is
+/// parenthesized, which is what lets it be a value at all. Its caller hands the result to the array
+/// wrap, which writes it into a `serde_json::json!` literal, where a leading brace opens a JSON
+/// object rather than a Rust block and the macro dies inside its own array expansion. The parens
+/// are the same ones an enum-keyed map's `properties` block is written under, for the same reason:
+/// they are what makes a block an expression the literal can carry.
 #[cfg(all(feature = "serde", feature = "jsonschema"))]
 fn string_field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
     let meta = fld.model_schema_prop_meta.as_ref();
@@ -5188,7 +5284,7 @@ fn string_field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
         }
     });
     quote! {
-        {
+        ({
             let mut string_schema = serde_json::Map::new();
             string_schema.insert(
                 "type".to_string(),
@@ -5198,7 +5294,7 @@ fn string_field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
             #min_insert
             #max_insert
             serde_json::Value::Object(string_schema)
-        }
+        })
     }
 }
 
@@ -5319,9 +5415,9 @@ fn collect_untagged_members(
     let mut ts_parts: Vec<String> = Vec::new();
     let mut zod_parts: Vec<String> = Vec::new();
     #[cfg(feature = "zod")]
-    let mut zod_merge_parts: Vec<String> = Vec::new();
+    let mut zod_merge_parts: ZodMergeParts = Vec::new();
     #[cfg(not(feature = "zod"))]
-    let zod_merge_parts: Vec<String> = Vec::new();
+    let zod_merge_parts: ZodMergeParts = Vec::new();
     let mut json_parts: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut guard_errors: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut validation_fns: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -5398,7 +5494,12 @@ fn collect_untagged_members(
         match render_untagged_variant(&kind, variant, &field_defs, &enum_type_name) {
             Ok((ts, zod, json_val)) => {
                 #[cfg(feature = "zod")]
-                zod_merge_parts.extend(zod_merge_branches(&kind, &field_defs, &zod));
+                zod_merge_parts.extend(zod_merge_branches(
+                    &kind,
+                    &field_defs,
+                    &zod,
+                    ts_parts.len() + 1,
+                ));
                 ts_parts.push(ts);
                 zod_parts.push(zod);
                 json_parts.push(json_val);
@@ -5424,16 +5525,83 @@ fn collect_untagged_members(
 /// This is where the recorded member list is multiplied out, so what the registry hands a merge is
 /// the leaf set rather than a chain to walk. A member reached through an `Option` is left as it was
 /// rendered: its absence is a bare `null` on the wire, which is not a key set and joins no object.
+///
+/// `branch` is the member's own one-based position, which the leaves of a nested union are reached
+/// through and so keep as the head of theirs — the multiplication flattens the chain and the trail
+/// is what still says where a leaf was written.
 #[cfg(all(feature = "serde", feature = "zod"))]
-fn zod_merge_branches(kind: &VariantKind, field_defs: &[FieldDef], rendered: &str) -> Vec<String> {
-    let members = match (kind, field_defs) {
+fn zod_merge_branches(
+    kind: &VariantKind,
+    field_defs: &[FieldDef],
+    rendered: &str,
+    branch: usize,
+) -> Vec<ZodUnionMember> {
+    let nested = match (kind, field_defs) {
         (VariantKind::TupleSingle, [fld]) if !fld.is_optional() => fld.zod_union_members(),
         _ => Vec::new(),
     };
-    if members.is_empty() {
-        vec![rendered.to_owned()]
-    } else {
-        members
+    if nested.is_empty() {
+        let non_object = match (kind, field_defs) {
+            (VariantKind::TupleSingle, [fld]) => zod_member_non_object(fld),
+            _ => None,
+        };
+        return vec![ZodUnionMember {
+            branch: vec![branch],
+            non_object,
+            spelling: rendered.to_owned(),
+        }];
+    }
+    nested
+        .into_iter()
+        .map(|leaf| {
+            let mut trail = vec![branch];
+            trail.extend(leaf.branch);
+            ZodUnionMember {
+                branch: trail,
+                non_object: leaf.non_object,
+                spelling: leaf.spelling,
+            }
+        })
+        .collect()
+}
+
+/// What serde writes an untagged union's member as, when the member's own written type proves that
+/// is not an object, and `None` when nothing here proves it.
+///
+/// Named by the JSON type keyword the JSON-schema surface writes for the same member, so the two
+/// merges refuse the same member in the same words. That surface reads the keyword off a document
+/// it has already built; here there is only the type, so the answer is a partial one by
+/// construction — a name the registry stands for and a map are left to the merge that does read
+/// them, and a union member is not asked at all, its own leaves having already been recorded.
+#[cfg(all(feature = "serde", feature = "zod"))]
+fn zod_member_non_object(fld: &FieldDef) -> Option<&'static str> {
+    if fld.is_array() {
+        return Some("array");
+    }
+    match &fld.field_type {
+        FieldDefType::Boolean => Some("boolean"),
+        FieldDefType::F32 | FieldDefType::F64 => Some("number"),
+        FieldDefType::I8
+        | FieldDefType::I16
+        | FieldDefType::I32
+        | FieldDefType::I64
+        | FieldDefType::Isize
+        | FieldDefType::U8
+        | FieldDefType::U16
+        | FieldDefType::U32
+        | FieldDefType::U64
+        | FieldDefType::Usize => Some("integer"),
+        FieldDefType::String | FieldDefType::StringLiteral(_) => Some("string"),
+        #[cfg(feature = "chrono")]
+        FieldDefType::DateTime
+        | FieldDefType::NaiveDate
+        | FieldDefType::NaiveDateTime
+        | FieldDefType::NaiveTime => Some("string"),
+        FieldDefType::Tuple(_) => Some("array"),
+        FieldDefType::SiblingType(name, _) => is_sequence_wrapper(name).then_some("array"),
+        #[cfg(feature = "object_id")]
+        FieldDefType::ObjectId => None,
+        FieldDefType::Map(_, _) | FieldDefType::TypeParam(_) | FieldDefType::Unknown => None,
     }
 }
 
@@ -6007,7 +6175,9 @@ fn write_tuple_multiple_variant_fields(
 /// refuses to deserialize is refused here too.
 ///
 /// `item_schema` is a `serde_json::Value` expression, as is the result. Callers holding a literal
-/// fragment want [`arrayed_json_schema_fragment`].
+/// fragment want [`arrayed_json_schema_fragment`]. It is written into a `serde_json::json!`
+/// literal, where a value that opens with a brace reads as a JSON object rather than as a Rust
+/// block, so a caller whose value is a block hands it over parenthesized.
 #[cfg(feature = "jsonschema")]
 fn arrayed_json_schema_value(
     fld: &FieldDef,
@@ -8687,7 +8857,11 @@ fn zod_operand_contributions(operand: &MergedOperand) -> Vec<&str> {
     if operand.members.is_empty() {
         vec![operand.spelling.as_str()]
     } else {
-        operand.members.iter().map(String::as_str).collect()
+        operand
+            .members
+            .iter()
+            .map(|member| member.spelling.as_str())
+            .collect()
     }
 }
 
@@ -9093,29 +9267,6 @@ fn generate_ts_alias_method(
     }
 }
 
-/// The alias target as the JSON mapping reads it: every reference to one of the alias's own type
-/// parameters replaced by the opaque type.
-///
-/// A parameter names no type until the alias is instantiated, and every position that references an
-/// alias references it uninstantiated — a field written as `Pair<A, B>` carries the alias module's
-/// one schema. So a parameter admits any value, as an opaque field does, while the shape around it
-/// — arity, array-ness, a map's keys — is still described.
-#[cfg(feature = "jsonschema")]
-fn alias_json_schema_field_def(alias: &ItemType, field_def: &FieldDef) -> FieldDef {
-    let parameters: Vec<String> = alias
-        .generics
-        .params
-        .iter()
-        .filter_map(|param| match param {
-            syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
-            syn::GenericParam::Const(_) | syn::GenericParam::Lifetime(_) => None,
-        })
-        .collect();
-    let mut erased = field_def.clone();
-    erased.erase_type_parameters(&parameters);
-    erased
-}
-
 /// The diagnostic an alias whose target the dispatch cannot render emits, in place of the whole
 /// `json_schema()` body.
 ///
@@ -9149,8 +9300,9 @@ fn generate_alias_json_schema_method(
 ) -> proc_macro2::TokenStream {
     #[cfg(feature = "jsonschema")]
     {
-        let body = build_tuple_element_json_schema(&alias_json_schema_field_def(alias, field_def))
-            .unwrap_or_else(|rejection| alias_json_schema_rejection(export_name, &rejection));
+        let body =
+            build_tuple_element_json_schema(&value_surface_field_def(&alias.generics, field_def))
+                .unwrap_or_else(|rejection| alias_json_schema_rejection(export_name, &rejection));
         json_schema_methods(export_name, &body)
     }
     #[cfg(not(feature = "jsonschema"))]
@@ -9162,8 +9314,17 @@ fn generate_alias_json_schema_method(
     }
 }
 
+/// Builds the alias module's `zod_schema()`, or nothing when `zod` is off.
+///
+/// The value is rendered from the target read through [`value_surface_field_def`], for the reason
+/// [`FieldDef::erase_type_parameters`] records: a `const` cannot be parameterised, so a parameter
+/// left as the `Name$Schema` binding an unresolved type is named after would reference a binding
+/// no emitted module declares. The exported binding's annotation then follows the value, taking
+/// the same opaque argument the value was composed with — a generic alias named bare in it would
+/// be a TypeScript error of its own.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn generate_alias_zod_method(
+    alias: &ItemType,
     export_name: &str,
     rust_ident: &str,
     field_def: &FieldDef,
@@ -9174,13 +9335,14 @@ fn generate_alias_zod_method(
         // the null-flavored `z.tuple([...])`, a scalar yields `z.string()`, a sibling
         // yields `Name$Schema`). Bind it to `$RawSchema` and re-export the annotated
         // `$Schema`, mirroring how struct/enum schemas expose their const.
-        let schema_code = field_def.zod_type();
+        let schema_code = value_surface_field_def(&alias.generics, field_def).zod_type();
+        let annotated_name = format!("{export_name}{}", erased_type_arguments(&alias.generics));
         let reexport = ident_reexport_zod(rust_ident, export_name);
         quote! {
             pub fn zod_schema() -> String {
                 format!(
                     "const {}$RawSchema = {};\n\nexport const {}$Schema: ZodType<{}> = {}$RawSchema;{}",
-                    #export_name, #schema_code, #export_name, #export_name, #export_name, #reexport
+                    #export_name, #schema_code, #export_name, #annotated_name, #export_name, #reexport
                 )
             }
         }
@@ -9189,7 +9351,7 @@ fn generate_alias_zod_method(
     {
         // Without the `zod` feature, `FieldDef::zod_type` does not exist; nothing in
         // this build has zod enabled, so the schema method would be cfg'd out anyway.
-        let _: &_ = &(export_name, rust_ident, field_def);
+        let _: &_ = &(alias, export_name, rust_ident, field_def);
         quote! {}
     }
 }

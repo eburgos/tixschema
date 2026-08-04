@@ -12,7 +12,7 @@ use crate::features::model_schema_prop::ModelSchemaPropMeta;
 use crate::utils::{lookup_alias_info, safe_type_name};
 
 #[cfg(feature = "zod")]
-use crate::utils::escape_js_regex_literal;
+use crate::utils::{ZodUnionMember, escape_js_regex_literal};
 
 #[cfg(feature = "chrono")]
 use crate::features::chrono;
@@ -372,6 +372,12 @@ impl FieldDef {
     /// pasting the output gets a `ReferenceError` before a payload is read. That is why only the
     /// enclosing item's *own* parameters are rewritten: a genuinely unresolved sibling type keeps
     /// its `$Schema` reference, because the type it names does publish that binding.
+    ///
+    /// The rewrite carries into what a schema surface may then claim about the value. An opaque
+    /// value takes no string checks — Zod 4's `z.unknown()` carries no `.min`/`.max`, and
+    /// `.brand()` hands back the very same instance rather than a wrapper that could — so a
+    /// branded newtype constraining one of its own parameters is refused, through the opaque arm
+    /// of `non_string_inner_shape` this rewrite puts it in front of.
     ///
     /// Recurses through `SiblingType` generics, `Map` keys/values, and `Tuple` elements. Applied
     /// after the field guards have read the field, so every guard asks its question of the type
@@ -1042,7 +1048,7 @@ impl FieldDef {
     /// in the name's place would drop it. The outermost `Option` is not one of those: it is what
     /// [`Self::zod_merged_schema`] already leaves to the merge.
     #[cfg(feature = "zod")]
-    pub fn zod_union_members(&self) -> Vec<String> {
+    pub fn zod_union_members(&self) -> Vec<ZodUnionMember> {
         let wrapped = self
             .model_schema_prop_meta
             .as_ref()

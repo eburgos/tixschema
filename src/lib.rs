@@ -36,32 +36,104 @@ use proc_macro::TokenStream;
 /// #[serde(rename_all = "camelCase")]
 /// #[model_schema()]
 /// pub struct User {
-///     pub id: String,
-///     pub first_name: String,
-///     pub last_name: String,
 ///     #[serde(skip_serializing_if = "Option::is_none")]
 ///     pub age: Option<u32>,
+///     pub first_name: String,
+///     pub id: String,
+///     pub last_name: String,
 ///     pub roles: Vec<String>,
 /// }
-///
-/// // This will generate a ts_definition() method that returns:
-/// //
-/// // export type User = {
-/// //   id: string,
-/// //   firstName: string,
-/// //   lastName: string,
-/// //   age: number | undefined,
-/// //   roles: Array<string>,
-/// // };
-/// //
-/// // export const User$Schema: ZodType<User> = z.strictObject({
-/// //   id: z.string(),
-/// //   firstName: z.string(),
-/// //   lastName: z.string(),
-/// //   age: z.union([z.number(), z.undefined()]).prefault(undefined),
-/// //   roles: z.array(z.string()),
-/// // });
 /// ```
+///
+/// Each output block below is a run of the declaration above it under the default features, pasted
+/// verbatim. The two methods answer separately -- `ts_definition()` returns the TypeScript alone,
+/// `zod_schema()` the Zod alone -- and the JSON Schema carried by each leading `JSDoc` block is
+/// written only while the `jsonschema` feature is on.
+///
+/// `User::ts_definition()`:
+///
+#[doc = r#"```typescript
+/**
+ * User
+ * 
+ * JSON Schema:
+ * {
+ *   "type": "object",
+ *   "additionalProperties": false,
+ *   "properties": {
+ *     "age": {
+ *       "type": "integer"
+ *     },
+ *     "firstName": {
+ *       "type": "string"
+ *     },
+ *     "id": {
+ *       "type": "string"
+ *     },
+ *     "lastName": {
+ *       "type": "string"
+ *     },
+ *     "roles": {
+ *       "type": "array",
+ *       "items": {
+ *         "type": "string"
+ *       }
+ *     }
+ *   },
+ *   "required": [
+ *     "firstName",
+ *     "id",
+ *     "lastName",
+ *     "roles"
+ *   ]
+ * }
+ **/
+
+
+export type User = {
+  /**
+ * age
+ * 
+**/
+  age: number | undefined;
+  /**
+ * firstName
+ * 
+**/
+  firstName: string;
+  /**
+ * id
+ * 
+**/
+  id: string;
+  /**
+ * lastName
+ * 
+**/
+  lastName: string;
+  /**
+ * roles
+ * 
+**/
+  roles: Array<string>;
+
+};
+```"#]
+///
+/// `User::zod_schema()`:
+///
+#[doc = "```typescript
+const User$RawSchema = z.strictObject({
+  age: z.union([z.number().int(), z.undefined()]).prefault(undefined),
+  firstName: z.string(),
+  id: z.string(),
+  lastName: z.string(),
+  roles: z.array(z.string()),
+
+});
+
+export const User$Schema: ZodType<User> = User$RawSchema;
+```"]
 ///
 /// ## Enum Support
 ///
@@ -75,14 +147,42 @@ use proc_macro::TokenStream;
 /// #[model_schema()]
 /// pub enum Status {
 ///     Active,
-///     Pending,
 ///     Inactive,
+///     Pending,
 /// }
-///
-/// // Generates:
-/// // export type Status = "active" | "pending" | "inactive";
-/// // export const Status$Schema: ZodType<Status> = z.enum(["active", "pending", "inactive"]);
 /// ```
+///
+/// `Status::ts_definition()`:
+///
+#[doc = r#"```typescript
+/**
+ * Status
+ * 
+ * JSON Schema:
+ * {
+ *   "type": "string",
+ *   "enum": [
+ *     "active",
+ *     "inactive",
+ *     "pending"
+ *   ]
+ * }
+ **/
+export type Status =
+  | "active"
+  | "inactive"
+  | "pending";
+```"#]
+///
+/// `Status::zod_schema()`:
+///
+#[doc = r#"```typescript
+const Status$RawSchema = z.enum(["active", "inactive", "pending"]).meta({
+  description: "Status",
+});
+
+export const Status$Schema: ZodType<Status> = Status$RawSchema;
+```"#]
 ///
 /// ## Tagged Unions (Discriminated Unions)
 ///
@@ -96,27 +196,117 @@ use proc_macro::TokenStream;
 /// #[model_schema()]
 /// pub enum Event {
 ///     UserCreated {
-///         user_id: String,
 ///         timestamp: String,
+///         user_id: String,
 ///     },
 ///     UserDeleted {
-///         user_id: String,
 ///         #[serde(skip_serializing_if = "Option::is_none")]
 ///         reason: Option<String>,
-///     }
+///         user_id: String,
+///     },
 /// }
-///
-/// // Generates a discriminated union in TypeScript:
-/// // export type Event = {
-/// //   type: "userCreated";
-/// //   userId: string;
-/// //   timestamp: string;
-/// // } | {
-/// //   type: "userDeleted";
-/// //   userId: string;
-/// //   reason: string | undefined;
-/// // };
 /// ```
+///
+/// `Event::ts_definition()`, a discriminated union:
+///
+#[doc = r#"```typescript
+/**
+ * Event
+ * 
+ * JSON Schema:
+ * {
+ *   "type": "object",
+ *   "oneOf": [
+ *     {
+ *       "additionalProperties": false,
+ *       "properties": {
+ *         "type": {
+ *           "type": "string",
+ *           "const": "userCreated"
+ *         },
+ *         "timestamp": {
+ *           "type": "string"
+ *         },
+ *         "userId": {
+ *           "type": "string"
+ *         }
+ *       },
+ *       "required": [
+ *         "type",
+ *         "timestamp",
+ *         "userId"
+ *       ]
+ *     },
+ *     {
+ *       "additionalProperties": false,
+ *       "properties": {
+ *         "type": {
+ *           "type": "string",
+ *           "const": "userDeleted"
+ *         },
+ *         "reason": {
+ *           "type": "string"
+ *         },
+ *         "userId": {
+ *           "type": "string"
+ *         }
+ *       },
+ *       "required": [
+ *         "type",
+ *         "userId"
+ *       ]
+ *     }
+ *   ]
+ * }
+ **/
+export type Event = {  /**
+ * userCreated
+ * 
+**/
+  type: "userCreated";
+  /**
+ * timestamp
+ * 
+**/
+  timestamp: string;
+  /**
+ * userId
+ * 
+**/
+  userId: string;
+} | {  /**
+ * userDeleted
+ * 
+**/
+  type: "userDeleted";
+  /**
+ * reason
+ * 
+**/
+  reason: string | undefined;
+  /**
+ * userId
+ * 
+**/
+  userId: string;
+};
+```"#]
+///
+/// `Event::zod_schema()`:
+///
+#[doc = r#"```typescript
+const Event$RawSchema = z.discriminatedUnion("type", [z.strictObject({
+  type: z.literal("userCreated"),
+  timestamp: z.string(),
+  userId: z.string(),
+}), z.strictObject({
+  type: z.literal("userDeleted"),
+  reason: z.union([z.string(), z.undefined()]).prefault(undefined),
+  userId: z.string(),
+})]);
+
+export const Event$Schema: ZodType<Event> = Event$RawSchema;
+```"#]
 ///
 /// ## `MongoDB` `ObjectId` Support
 ///
@@ -131,39 +321,168 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // Dummy ObjectId for doc test (in real usage, use mongodb::bson::oid::ObjectId)
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct ObjectId(String);
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectId(pub String);
 
 #[derive(Serialize, Deserialize)]
 #[model_schema()]
 pub struct Document {
-    pub id: ObjectId,
-    pub title: String,
     pub author_id: ObjectId,
-    pub tags: Vec<ObjectId>,
+    pub id: ObjectId,
     pub metadata: HashMap<String, ObjectId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<ObjectId>,
+    pub tags: Vec<ObjectId>,
+    pub title: String,
 }
+```
 
-// Generates:
-// export type Document = {
-//   id: ObjectId;
-//   title: string;
-//   author_id: ObjectId;
-//   tags: Array<ObjectId>;
-//   metadata: Partial<Record<string, ObjectId>>;
-//   parent_id: ObjectId | undefined;
-// };
-//
-// export const Document$Schema = z.strictObject({
-//   id: z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) }),
-//   title: z.string(),
-//   author_id: z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) }),
-//   tags: z.array(z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) })),
-//   metadata: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) })),
-//   parent_id: z.union([z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) }), z.undefined()]).prefault(undefined),
-// });
+`Document::ts_definition()`:
+
+```typescript
+/**
+ * Document
+ * 
+ * JSON Schema:
+ * {
+ *   "type": "object",
+ *   "additionalProperties": false,
+ *   "properties": {
+ *     "author_id": {
+ *       "type": "object",
+ *       "properties": {
+ *         "$oid": {
+ *           "type": "string",
+ *           "pattern": "^[a-f0-9]{24}$"
+ *         }
+ *       },
+ *       "required": [
+ *         "$oid"
+ *       ],
+ *       "additionalProperties": false
+ *     },
+ *     "id": {
+ *       "type": "object",
+ *       "properties": {
+ *         "$oid": {
+ *           "type": "string",
+ *           "pattern": "^[a-f0-9]{24}$"
+ *         }
+ *       },
+ *       "required": [
+ *         "$oid"
+ *       ],
+ *       "additionalProperties": false
+ *     },
+ *     "metadata": {
+ *       "type": "object",
+ *       "additionalProperties": {
+ *         "type": "object",
+ *         "properties": {
+ *           "$oid": {
+ *             "type": "string",
+ *             "pattern": "^[a-f0-9]{24}$"
+ *           }
+ *         },
+ *         "required": [
+ *           "$oid"
+ *         ],
+ *         "additionalProperties": false
+ *       }
+ *     },
+ *     "parent_id": {
+ *       "type": "object",
+ *       "properties": {
+ *         "$oid": {
+ *           "type": "string",
+ *           "pattern": "^[a-f0-9]{24}$"
+ *         }
+ *       },
+ *       "required": [
+ *         "$oid"
+ *       ],
+ *       "additionalProperties": false
+ *     },
+ *     "tags": {
+ *       "type": "array",
+ *       "items": {
+ *         "type": "object",
+ *         "properties": {
+ *           "$oid": {
+ *             "type": "string",
+ *             "pattern": "^[a-f0-9]{24}$"
+ *           }
+ *         },
+ *         "required": [
+ *           "$oid"
+ *         ],
+ *         "additionalProperties": false
+ *       }
+ *     },
+ *     "title": {
+ *       "type": "string"
+ *     }
+ *   },
+ *   "required": [
+ *     "author_id",
+ *     "id",
+ *     "metadata",
+ *     "tags",
+ *     "title"
+ *   ]
+ * }
+ **/
+
+
+export type Document = {
+  /**
+ * author_id
+ * 
+**/
+  author_id: ObjectId;
+  /**
+ * id
+ * 
+**/
+  id: ObjectId;
+  /**
+ * metadata
+ * 
+**/
+  metadata: Partial<Record<string, ObjectId>>;
+  /**
+ * parent_id
+ * 
+**/
+  parent_id: ObjectId | undefined;
+  /**
+ * tags
+ * 
+**/
+  tags: Array<ObjectId>;
+  /**
+ * title
+ * 
+**/
+  title: string;
+
+};
+```
+
+`Document::zod_schema()`:
+
+```typescript
+const Document$RawSchema = z.strictObject({
+  author_id: z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) }),
+  id: z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) }),
+  metadata: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) })),
+  parent_id: z.union([z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) }), z.undefined()]).prefault(undefined),
+  tags: z.array(z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) })),
+  title: z.string(),
+
+});
+
+export const Document$Schema: ZodType<Document> = Document$RawSchema;
 ```
 "#
 )]
@@ -225,6 +544,13 @@ pub struct Document {
 /// A generic brand carries the requirement as a `Display` bound on each type parameter, so a
 /// non-`Display` type argument is rejected where the brand is used, not where it is declared.
 ///
+/// String constraints stop at the brand's own type parameters. TypeScript binds a parameter for
+/// real, but the two validating surfaces read it as the opaque value — one schema is written for
+/// every instantiation — and an opaque value takes no string checks: Zod 4's `z.unknown()` carries
+/// no `.min`/`.max`, and `.brand()` returns that same schema rather than a wrapper that could. So
+/// `#[model_schema(minLength = 3)] struct Slug<T>(pub T);` is refused at the inner field. Constrain
+/// a string-typed inner instead.
+///
 #[proc_macro_attribute]
 pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
     exec_model_schema(args, input)
@@ -273,6 +599,11 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 /// and inline flag directives (`(?i)`). `(?P<name>...)` is accepted and emitted as the
 /// `(?<name>...)` both grammars read.
 ///
+/// It also has to turn some value away. A pattern every string satisfies — `""`, `^`, `$`, `|`,
+/// `a*` — constrains nothing, and is refused at expansion rather than published as a check that
+/// checks nothing. `^$` is not one of them: it pins both ends of the value to one position, which
+/// only the empty string has.
+///
 /// A `PathBuf` field carries these too, as does the `Path` borrow behind a wrapper: serde writes a
 /// path as a JSON string, and the checks measure that string — the path's `to_string_lossy`
 /// rendering, which is the exact wire value for every path serde can write.
@@ -299,8 +630,10 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 ///
 /// ### The `validate()` Method
 ///
-/// When any field has constraints, the macro also generates a `validate(&self) -> Result<(), Vec<String>>`
-/// method for validating instances constructed in code. Serde deserialization validates automatically.
+/// With `serde` and a schema output feature (`zod`, `typescript`, or `jsonschema`) both active, a
+/// type carrying at least one constrained field also gets a
+/// `validate(&self) -> Result<(), Vec<String>>` method for validating instances constructed in
+/// code. Serde deserialization validates automatically.
 ///
 /// ```rust
 /// use tixschema::{model_schema, model_schema_prop};
@@ -317,8 +650,8 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 /// }
 /// ```
 ///
-/// When a schema output feature is active (`zod`, `typescript`, or `jsonschema`), the macro also
-/// generates a `validate(&self) -> Result<(), Vec<String>>` method:
+/// Every constrained field that fails contributes its own message, each naming the field it came
+/// from:
 ///
 /// ```text
 /// let reg = RegistrationJson { username: "ab".to_string(), age: 150 };
@@ -328,8 +661,8 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 ///         for e in &errors {
 ///             println!("Error: {e}");
 ///         }
-///         // "username: too short (minimum length 3, got 2)"
-///         // "age: too large (maximum 120, got 150)"
+///         // "'username' is too short: minimum length is 3, got 2"
+///         // "'age' is too large: maximum is 120, got 150"
 ///     }
 /// }
 /// ```

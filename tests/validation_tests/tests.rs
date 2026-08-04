@@ -1198,6 +1198,39 @@ fn test_pattern_anchored_single_character_prefix() {
     );
 }
 
+/// `^$` is written out of the two anchors a pattern admitting every value is written out of, and
+/// it is the one arrangement of them that still says something: both ends of the value at one
+/// position, which only the empty string has. It keeps validating, and it keeps compiling under a
+/// deny set that has no edit available at the attribute.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_pattern_pinning_both_ends_to_one_position() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct PatternBlankSlot {
+        #[model_schema_prop(pattern = "^$")]
+        pub slot: String,
+    }
+
+    PatternBlankSlot {
+        slot: String::new(),
+    }
+    .validate()
+    .unwrap();
+
+    let rejected = PatternBlankSlot {
+        slot: "x".to_owned(),
+    };
+    let errors = rejected.validate().unwrap_err();
+    assert_eq!(
+        errors[0], "'slot' does not match pattern '^$'",
+        "Rejection should read exactly as the regex path words it: {errors:?}"
+    );
+}
+
 // ==================== Constraints under Option / wrappers / sequences ====================
 
 #[cfg(all(
@@ -2273,6 +2306,50 @@ fn test_readme_branded_validate_example_prints_what_the_generator_writes() {
         assert!(
             readme.contains(error.as_str()),
             "the README no longer shows this error verbatim: {error}"
+        );
+    }
+}
+
+/// The shipped rustdoc quotes the messages a failed `validate()` prints, so the block is checked
+/// against a run of the very type it declares rather than against memory. It sits in a `text` fence
+/// no doctest reaches, which is why the check lives out here.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_crate_rustdoc_quotes_the_messages_the_generator_writes() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize)]
+    pub struct RegistrationJson {
+        #[model_schema_prop(minimum = 0, maximum = 120)]
+        pub age: u32,
+
+        #[model_schema_prop(minLength = 3, maxLength = 30)]
+        pub username: String,
+    }
+
+    let errors = RegistrationJson {
+        age: 150,
+        username: "ab".to_owned(),
+    }
+    .validate()
+    .unwrap_err();
+
+    assert_eq!(
+        errors,
+        vec![
+            "'age' is too large: maximum is 120, got 150".to_owned(),
+            "'username' is too short: minimum length is 3, got 2".to_owned(),
+        ]
+    );
+
+    let rustdoc = include_str!("../../src/lib.rs");
+    for message in &errors {
+        let shown = format!("// \"{message}\"");
+        assert!(
+            rustdoc.contains(&shown),
+            "src/lib.rs no longer shows {shown}"
         );
     }
 }

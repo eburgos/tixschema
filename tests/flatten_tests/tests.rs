@@ -249,8 +249,9 @@ enum LaterEither {
     Second(FlatSecond),
 }
 
-/// The same shape with one member serde writes as a string rather than an object. The union names
-/// no type of its own, so nothing before the merge can tell the two apart.
+/// The same shape with one member serde writes as a string rather than an object. Standing on its
+/// own it is an ordinary union — an untagged enum may hold a scalar — and every surface describes
+/// it.
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(untagged)]
@@ -259,12 +260,39 @@ enum FlatScalarEither {
     Text(String),
 }
 
+/// Flattening it is what no value satisfies, and the Zod surface refuses the declaration once the
+/// members it multiplies over say which of them serde writes as a scalar. So the struct exists
+/// only where nothing records those members, which is where the JSON-schema merge answers for the
+/// same declaration at run time instead.
+#[cfg(not(feature = "zod"))]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct FlatOverScalarUntagged {
     #[serde(flatten)]
     either: FlatScalarEither,
     own: String,
+}
+
+/// The same union declared *below* the object that flattens it. The recording holds what has
+/// already expanded, so this one carries no members and the Zod merge names it as the one operand
+/// it is — the fallback a forward reference already takes — while the JSON-schema merge, which
+/// reads the members back at run time, refuses it wherever it is declared.
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct FlatOverLaterScalarUntagged {
+    #[serde(flatten)]
+    either: LaterScalarEither,
+    own: String,
+}
+
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum LaterScalarEither {
+    Obj(FlatFirst),
+    Text(String),
 }
 
 /// A union member that names itself, and the struct that flattens the union. The member describes
@@ -1038,6 +1066,7 @@ fn test_the_untagged_flatten_schema_accepts_every_payload_serde_writes() {
 
 /// A union member serde writes as a string is a member serde cannot flatten at all.
 #[test]
+#[cfg(not(feature = "zod"))]
 fn test_flattening_an_untagged_enum_over_a_string_member_is_unserializable() {
     let refusal = serde_json::to_value(FlatOverScalarUntagged {
         own: "o".to_owned(),
@@ -1051,9 +1080,26 @@ fn test_flattening_an_untagged_enum_over_a_string_member_is_unserializable() {
     );
 }
 
+/// The same value written for the union declared below the object, which every table holds: what
+/// serde refuses is the declaration, not the spelling any one surface gave it.
+#[test]
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+fn test_flattening_a_later_untagged_enum_over_a_string_member_is_unserializable() {
+    let refusal = serde_json::to_value(FlatOverLaterScalarUntagged {
+        own: "o".to_owned(),
+        either: LaterScalarEither::Text("t".to_owned()),
+    })
+    .unwrap_err()
+    .to_string();
+    assert!(
+        refusal.contains("can only flatten structs and maps"),
+        "Got: {refusal}"
+    );
+}
+
 /// So the merge refuses the whole union, naming the branch that cannot join the object.
 #[test]
-#[cfg(feature = "jsonschema")]
+#[cfg(all(feature = "jsonschema", not(feature = "zod")))]
 #[should_panic(
     expected = "`FlatOverScalarUntagged`: `#[serde(flatten)]` of `FlatScalarEither` writes a union member that is not an object — its branch 2 describes a `string`"
 )]
@@ -1061,12 +1107,23 @@ fn test_a_string_member_of_a_flattened_untagged_enum_is_refused_by_the_merge() {
     assert!(FlatOverScalarUntagged::json_schema().is_object());
 }
 
+/// And it refuses it in those same words wherever the union was declared, which is the one reading
+/// of the declaration that survives the Zod surface refusing it at expansion.
+#[test]
+#[cfg(feature = "jsonschema")]
+#[should_panic(
+    expected = "`FlatOverLaterScalarUntagged`: `#[serde(flatten)]` of `LaterScalarEither` writes a union member that is not an object — its branch 2 describes a `string`"
+)]
+fn test_a_string_member_of_a_later_flattened_untagged_enum_is_refused_by_the_merge() {
+    assert!(FlatOverLaterScalarUntagged::json_schema().is_object());
+}
+
 /// The remedy that refusal names is the same one every flattened non-object gets.
 #[test]
 #[cfg(feature = "jsonschema")]
 #[should_panic(expected = "write the field as a named member so the value gets a key of its own")]
 fn test_the_untagged_branch_refusal_names_the_remedy() {
-    assert!(FlatOverScalarUntagged::json_schema().is_object());
+    assert!(FlatOverLaterScalarUntagged::json_schema().is_object());
 }
 
 /// A union member that names itself writes its own keys beside the struct's, the same as any other
@@ -1781,4 +1838,40 @@ fn test_an_internally_tagged_flatten_schema_is_byte_identical() {
     const EXPECTED: &str = "export const DataElementSampleValueEntry$Schema = z.strictObject({\n  dataElementId: z.string(),\n\n}).and(z.lazy(() => DataElementSampleValueVariant$Schema));";
 
     assert_eq!(DataElementSampleValueEntry::zod_schema(), EXPECTED);
+}
+
+/// A union holding a member serde writes as a scalar is a union like any other while nothing
+/// flattens it: the member is a branch of the choice, where a scalar is exactly what a payload may
+/// be, and the schema is spelled byte for byte as it was before the merge could tell the two apart.
+#[test]
+#[cfg(feature = "zod")]
+fn test_a_standalone_union_with_a_scalar_member_is_byte_identical() {
+    #[cfg(feature = "typescript")]
+    const EXPECTED: &str = "const FlatScalarEither$RawSchema = z.union([FlatFirst$Schema, z.string()]);\n\nexport const FlatScalarEither$Schema: ZodType<FlatScalarEither> = FlatScalarEither$RawSchema;";
+    #[cfg(not(feature = "typescript"))]
+    const EXPECTED: &str =
+        "export const FlatScalarEither$Schema = z.union([FlatFirst$Schema, z.string()]);";
+
+    assert_eq!(FlatScalarEither::zod_schema(), EXPECTED);
+}
+
+/// And flattening one is refused at expansion rather than emitted — the branch that used to be
+/// written for the scalar member was the object intersected with it, which no payload satisfies and
+/// which nothing reported. The declaration that would carry it does not exist under this feature,
+/// so what the refusal is pinned against is the field it names.
+///
+/// The reach is the recording's: a union declared below the object records nothing for the merge to
+/// read, so that one is still named as the one operand it is.
+#[test]
+#[cfg(feature = "zod")]
+fn test_a_union_with_a_scalar_member_declared_below_is_still_named_as_one_operand() {
+    let zod = FlatOverLaterScalarUntagged::zod_schema();
+    assert!(
+        zod.contains("}).and(z.lazy(() => LaterScalarEither$Schema));"),
+        "expected the union named as one operand, got: {zod}"
+    );
+    assert!(
+        !zod.contains(".and(z.lazy(() => z.string()))"),
+        "the scalar member reached the intersection in: {zod}"
+    );
 }
