@@ -1089,6 +1089,23 @@ Some constructs are **refused**, because no spelling makes the readers agree:
 - `\x{...}`, `\u{...}`, `\U...` and octal escapes -- code point escapes JavaScript reads differently or not at all. Write the character.
 - An unescaped `]` opening a class, as in `[]-a]`. This one is refused rather than escaped because escaping it changes the meaning: `[]-a]` is the three members `]`, `-` and `a`, and `[\]-a]` is a range.
 
+#### A `pattern` has to turn some value away
+
+A pattern every string satisfies is refused too, for a different reason: it is a constraint that constrains nothing. `""`, `^`, `$`, `|`, `a*` and `^a*` all match at some position of every string, so the generated validator would reject no value and the Zod and JSON schemas would publish a check every payload passes -- an attribute that reads as a guarantee and is not one. The derive fails at expansion, naming the field or the brand.
+
+The verdict is read off the parsed pattern rather than off its text, so the same shape written any way gets the same answer -- and the near misses keep theirs:
+
+| Pattern | Verdict |
+|---|---|
+| `""`, `^`, `$`, `\|`, `()`, `(^)` | Refused -- matches at a position every string has |
+| `a*`, `a?`, `a\|`, `^a*`, `a*$` | Refused -- the repeated part may run zero times, or the alternative may be skipped |
+| `^$` | Accepted -- both ends at one position, which only the empty string has |
+| `^a*$` | Accepted -- both ends pinned around a run of `a` |
+| `\b`, `\B` | Accepted -- the empty string holds no word boundary |
+| `a+`, `^[a-z]+$` | Accepted -- a character has to be there |
+
+One case is left standing. `clippy::trivial_regex`, which a consumer denying `clippy::nursery` gets, also flags `\b` -- as "the regex is unlikely to be useful as it is", naming no replacement -- and reports it against the `#[model_schema]` attribute, where there is no edit available. `\b` keeps its regex anyway: it is a real constraint, and answering the lint would mean dropping a check the author asked for.
+
 ### Numeric Constraints (minimum, maximum)
 
 ```rust

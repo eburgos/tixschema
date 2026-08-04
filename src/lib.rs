@@ -273,6 +273,11 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 /// and inline flag directives (`(?i)`). `(?P<name>...)` is accepted and emitted as the
 /// `(?<name>...)` both grammars read.
 ///
+/// It also has to turn some value away. A pattern every string satisfies — `""`, `^`, `$`, `|`,
+/// `a*` — constrains nothing, and is refused at expansion rather than published as a check that
+/// checks nothing. `^$` is not one of them: it pins both ends of the value to one position, which
+/// only the empty string has.
+///
 /// A `PathBuf` field carries these too, as does the `Path` borrow behind a wrapper: serde writes a
 /// path as a JSON string, and the checks measure that string — the path's `to_string_lossy`
 /// rendering, which is the exact wire value for every path serde can write.

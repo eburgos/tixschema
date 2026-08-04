@@ -1695,6 +1695,51 @@ fn a_field_pattern_naming_a_group_the_rust_way_clears_the_guard() {
     assert!(errors.is_empty(), "got: {errors:?}");
 }
 
+/// A pattern every string satisfies is refused where it is written, naming the field, the way a
+/// bound written where no surface reads one is. The alternative — taking it and emitting no check
+/// — would leave the author a contract nothing enforces, and would leave the emitted
+/// `validate_..._value(value: &str)` with `value` unread, which the consumer's own deny set turns
+/// into a second failure it has no edit for.
+#[test]
+fn a_field_pattern_admitting_every_value_names_the_field_and_says_so() {
+    for pattern in ["", "^", "$", "|", "a*", "^a*"] {
+        let errors = field_prop_guard_errors(&syn::parse_quote! {
+            struct Report {
+                #[model_schema_prop(pattern = #pattern)]
+                name: String,
+            }
+        });
+        assert_eq!(errors.len(), 1, "for {pattern:?}, got: {errors:?}");
+        for needle in [
+            "compile_error",
+            "field `name`",
+            "admits every value",
+            "constrains nothing",
+        ] {
+            assert!(
+                errors[0].contains(needle),
+                "{needle} missing for {pattern:?}: {}",
+                errors[0]
+            );
+        }
+    }
+}
+
+/// The shapes written out of the same pieces that still turn a value away clear the guard: `^$`
+/// asks for the empty string, `^a*$` for a run of `a`, and `\b` for a word boundary.
+#[test]
+fn a_field_pattern_written_out_of_the_same_pieces_that_still_constrains_clears_the_guard() {
+    for pattern in ["^$", "^a*$", r"\b"] {
+        let errors = field_prop_guard_errors(&syn::parse_quote! {
+            struct Report {
+                #[model_schema_prop(pattern = #pattern)]
+                name: String,
+            }
+        });
+        assert!(errors.is_empty(), "for {pattern:?}, got: {errors:?}");
+    }
+}
+
 /// A field carrying no `pattern` at all must not acquire one of these errors.
 #[test]
 fn an_unpatterned_field_is_left_alone() {
@@ -2368,6 +2413,39 @@ fn a_brand_pattern_javascript_cannot_carry_names_the_type_and_the_construct() {
 fn a_brand_pattern_naming_a_group_the_rust_way_clears_the_guard() {
     let errors = brand_pattern_errors("^(?P<word>[a-z]+)$");
     assert!(errors.is_empty(), "got: {errors:?}");
+}
+
+/// The brand carries the same `pattern` to the same three surfaces a field does, so a pattern that
+/// says nothing has to be refused here too — and it is the only string constraint the brand has,
+/// so taking it would publish a `validate()` that turns nothing away.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_brand_pattern_admitting_every_value_names_the_type_and_says_so() {
+    for pattern in ["", "^", "$", "|", "a*", "^a*"] {
+        let errors = brand_pattern_errors(pattern);
+        assert_eq!(errors.len(), 1, "for {pattern:?}, got: {errors:?}");
+        for needle in [
+            "compile_error",
+            "type `UserId`",
+            "admits every value",
+            "constrains nothing",
+        ] {
+            assert!(
+                errors[0].contains(needle),
+                "{needle} missing for {pattern:?}: {}",
+                errors[0]
+            );
+        }
+    }
+}
+
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_brand_pattern_that_still_constrains_clears_the_guard() {
+    for pattern in ["^$", "^a*$", r"\b"] {
+        let errors = brand_pattern_errors(pattern);
+        assert!(errors.is_empty(), "for {pattern:?}, got: {errors:?}");
+    }
 }
 
 /// The brand renders its inner into the brand rather than walking it as a field, so the map-key
@@ -5454,5 +5532,41 @@ fn a_pattern_of_any_real_shape_keeps_its_regex() {
          static RE : LazyLock < regex :: Regex > = LazyLock :: new (|| { regex :: Regex :: new (\"^[a-z]+$\") . unwrap () }) ; \
          if ! RE . is_match (value) { \
          return Err (format ! (\"'{}' does not match pattern '{}'\" , \"field\" , \"^[a-z]+$\")) ; } } Ok (()) } "
+    );
+}
+
+/// `^$` is the empty-string check, not a degenerate pattern: it pins both ends of the value to one
+/// position. It keeps the `is_empty()` call it has been emitted as, byte for byte, now that the
+/// shapes written out of the same two anchors are refused.
+#[cfg(feature = "serde")]
+#[test]
+fn the_empty_string_pattern_keeps_the_call_it_was_already_emitted_as() {
+    assert_eq!(
+        emitted_pattern_validator("^$"),
+        "pub fn validate_field_value (value : & str) -> Result < () , String > \
+         { if ! value . is_empty () { \
+         return Err (format ! (\"'{}' does not match pattern '{}'\" , \"field\" , \"^$\")) ; } Ok (()) } "
+    );
+}
+
+/// `\b` is trivial to `clippy::trivial_regex` and names no `str` call, so it keeps the regex — and
+/// the lint keeps firing on it in the consumer, which is the one case left standing here.
+///
+/// The verdict is from a probe, not an assumption: `#[model_schema_prop(pattern = r"\b")]` run
+/// through `cargo clippy --all-targets -- -D warnings` in a crate denying `clippy::nursery`
+/// reported `error: trivial regex ... the regex is unlikely to be useful as it is`, against the
+/// `#[model_schema()]` attribute. It is left standing because `\b` turns a value away — the empty
+/// string holds no word boundary — so there is a check here to keep, and answering the lint would
+/// mean dropping it.
+#[cfg(feature = "serde")]
+#[test]
+fn a_word_boundary_pattern_keeps_its_regex() {
+    assert_eq!(
+        emitted_pattern_validator(r"\b"),
+        "pub fn validate_field_value (value : & str) -> Result < () , String > \
+         { { use std :: sync :: LazyLock ; \
+         static RE : LazyLock < regex :: Regex > = LazyLock :: new (|| { regex :: Regex :: new (\"\\\\b\") . unwrap () }) ; \
+         if ! RE . is_match (value) { \
+         return Err (format ! (\"'{}' does not match pattern '{}'\" , \"field\" , \"\\\\b\")) ; } } Ok (()) } "
     );
 }

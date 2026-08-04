@@ -47,7 +47,7 @@ use crate::features::object_id::get_object_id_zod_schema_with;
 use crate::features::object_id::OBJECT_ID_HEX_PATTERN;
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-use crate::utils::{AliasKind, lookup_alias_info, portable_pattern};
+use crate::utils::{AliasKind, constraining_pattern, lookup_alias_info, portable_pattern};
 
 #[cfg(feature = "serde")]
 use crate::utils::{TrivialPattern, trivial_pattern};
@@ -439,10 +439,10 @@ struct ModelSchemaArgs {
     /// earned a `pattern_rejection`.
     pattern: Option<String>,
     /// What keeps `pattern` off the surfaces it was written for -- a regex the `regex` crate
-    /// cannot parse, or a construct a JavaScript regex literal cannot carry -- spanned on the
-    /// literal it was written as. Only the brand path splices the argument, and only a schema
-    /// feature builds that path; without one, a type-level constraint never reaches a surface at
-    /// all.
+    /// cannot parse, a construct a JavaScript regex literal cannot carry, or a shape that admits
+    /// every value and so says nothing on any of them -- spanned on the literal it was written as.
+    /// Only the brand path splices the argument, and only a schema feature builds that path;
+    /// without one, a type-level constraint never reaches a surface at all.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     pattern_rejection: Option<syn::Error>,
 }
@@ -662,7 +662,7 @@ fn unknown_arg_rejection(meta: &Meta) -> syn::Error {
 /// read that one was given, not what it says.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn record_pattern(result: &mut ModelSchemaArgs, lit_str: &syn::LitStr) {
-    match portable_pattern(lit_str) {
+    match portable_pattern(lit_str).and_then(|portable| constraining_pattern(lit_str, portable)) {
         Ok(pattern) => result.pattern = Some(pattern),
         Err(rejection) => {
             result.pattern_rejection = Some(rejection);
@@ -1368,8 +1368,10 @@ fn cfg_attr_guard_error(rejection: &syn::Error, item: &str) -> proc_macro2::Toke
 /// Turns a rejected `pattern` into `compile_error!` tokens naming what carries it, keeping the
 /// literal's span so the diagnostic points at the pattern as written.
 ///
-/// Why a pattern is refused is [`crate::utils::portable_pattern`]'s to say — the crate cannot parse
-/// it, or JavaScript reads it as something else — so the refusal is quoted rather than restated.
+/// Why a pattern is refused is the guard that refused it's to say — [`crate::utils::portable_pattern`]
+/// where the crate cannot parse it or JavaScript reads it as something else,
+/// [`crate::utils::constraining_pattern`] where it admits every value — so the refusal is quoted
+/// rather than restated.
 fn pattern_guard_error(rejection: &syn::Error, subject: &str) -> proc_macro2::TokenStream {
     syn::Error::new(
         rejection.span(),
@@ -1627,8 +1629,8 @@ const fn branded_cfg_attr_guard_errors(
     Vec::new()
 }
 
-/// The `compile_error!` tokens for a brand whose `pattern` argument the `regex` crate rejects, or
-/// `None` when it carries none or it parses.
+/// The `compile_error!` tokens for a brand whose `pattern` argument a guard refuses, or `None`
+/// when it carries none or it clears them.
 ///
 /// The brand is the only shape that reads a type-level `pattern`, and it splices the string into
 /// the Rust validator, the Zod literal and the JSON schema alike; every other shape is refused the

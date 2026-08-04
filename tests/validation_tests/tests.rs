@@ -1198,6 +1198,39 @@ fn test_pattern_anchored_single_character_prefix() {
     );
 }
 
+/// `^$` is written out of the two anchors a pattern admitting every value is written out of, and
+/// it is the one arrangement of them that still says something: both ends of the value at one
+/// position, which only the empty string has. It keeps validating, and it keeps compiling under a
+/// deny set that has no edit available at the attribute.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_pattern_pinning_both_ends_to_one_position() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct PatternBlankSlot {
+        #[model_schema_prop(pattern = "^$")]
+        pub slot: String,
+    }
+
+    PatternBlankSlot {
+        slot: String::new(),
+    }
+    .validate()
+    .unwrap();
+
+    let rejected = PatternBlankSlot {
+        slot: "x".to_owned(),
+    };
+    let errors = rejected.validate().unwrap_err();
+    assert_eq!(
+        errors[0], "'slot' does not match pattern '^$'",
+        "Rejection should read exactly as the regex path words it: {errors:?}"
+    );
+}
+
 // ==================== Constraints under Option / wrappers / sequences ====================
 
 #[cfg(all(
