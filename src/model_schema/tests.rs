@@ -4931,6 +4931,27 @@ fn emitted_string_module(spelling: &str) -> String {
     .to_string()
 }
 
+/// The validator emitted for a `String` field constrained by `pattern`, as tokens — everything the
+/// schema module holds ahead of the deserializer.
+#[cfg(feature = "serde")]
+fn emitted_pattern_validator(pattern: &str) -> String {
+    let ty: syn::Type = syn::parse_str("String").unwrap();
+    let meta = ModelSchemaPropMeta {
+        pattern: Some(pattern.to_owned()),
+        ..ModelSchemaPropMeta::default()
+    };
+    let module = generate_string_validation_code(
+        "field",
+        &helper_name_stem("field", None),
+        &meta,
+        &constrained_shape(&ty).unwrap(),
+        &ty,
+    )
+    .module_items
+    .to_string();
+    module[..module.find("pub fn deserialize_field").unwrap()].to_owned()
+}
+
 /// Just the deserializer of [`emitted_string_module`], which is everything after the validator.
 #[cfg(feature = "serde")]
 fn emitted_string_deserializer(spelling: &str) -> String {
@@ -5365,5 +5386,42 @@ fn a_wrapped_path_field_deserializes_its_declared_type() {
     assert_eq!(
         emitted_string_deserializer("Box<Path>"),
         emitted_string_deserializer("Box<str>").replace("Box < str >", "Box < Path >")
+    );
+}
+
+/// A `pattern` a regex engine is avoidable work for is emitted as the `str` call
+/// `clippy::trivial_regex` names for it, with a one-character needle as a `char` so the emitted
+/// call also answers `clippy::single_char_pattern`. Both lints are denied by the crates this code
+/// is written into, and neither has an edit available at the `#[model_schema]` attribute the
+/// diagnostic lands on.
+#[cfg(feature = "serde")]
+#[test]
+fn a_trivial_pattern_is_emitted_as_the_call_it_says_the_same_thing_as() {
+    assert_eq!(
+        emitted_pattern_validator("^/"),
+        "pub fn validate_field_value (value : & str) -> Result < () , String > \
+         { if ! value . starts_with ('/') { \
+         return Err (format ! (\"'{}' does not match pattern '{}'\" , \"field\" , \"^/\")) ; } Ok (()) } "
+    );
+    assert_eq!(
+        emitted_pattern_validator("^abc$"),
+        "pub fn validate_field_value (value : & str) -> Result < () , String > \
+         { if value != \"abc\" { \
+         return Err (format ! (\"'{}' does not match pattern '{}'\" , \"field\" , \"^abc$\")) ; } Ok (()) } "
+    );
+}
+
+/// A `pattern` of any real shape keeps the regex it has always been checked by, built once per
+/// process, and the words it is turned away with do not move either way.
+#[cfg(feature = "serde")]
+#[test]
+fn a_pattern_of_any_real_shape_keeps_its_regex() {
+    assert_eq!(
+        emitted_pattern_validator("^[a-z]+$"),
+        "pub fn validate_field_value (value : & str) -> Result < () , String > \
+         { { use std :: sync :: LazyLock ; \
+         static RE : LazyLock < regex :: Regex > = LazyLock :: new (|| { regex :: Regex :: new (\"^[a-z]+$\") . unwrap () }) ; \
+         if ! RE . is_match (value) { \
+         return Err (format ! (\"'{}' does not match pattern '{}'\" , \"field\" , \"^[a-z]+$\")) ; } } Ok (()) } "
     );
 }

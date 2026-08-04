@@ -50,6 +50,9 @@ use crate::features::object_id::OBJECT_ID_HEX_PATTERN;
 use crate::utils::{AliasKind, lookup_alias_info, portable_pattern};
 
 #[cfg(feature = "serde")]
+use crate::utils::{TrivialPattern, trivial_pattern};
+
+#[cfg(feature = "serde")]
 use crate::features::serde::{SerdeFieldMeta, SerdeTypeMeta, has_serde_default};
 
 #[cfg(feature = "serde")]
@@ -2182,21 +2185,15 @@ fn build_branded_validation(
             });
         }
         if let Some(pattern) = &args.pattern {
-            let pattern_lit = pattern.clone();
-            checks.push(quote! {
-                {
-                    use std::sync::LazyLock;
-                    static RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-                        regex::Regex::new(#pattern_lit).unwrap()
-                    });
-                    if !RE.is_match(value) {
-                        return Err(format!(
-                            "value does not match pattern '{}'",
-                            #pattern_lit
-                        ));
-                    }
-                }
-            });
+            checks.push(pattern_check(
+                pattern,
+                &quote! {
+                    return Err(format!(
+                        "value does not match pattern '{}'",
+                        #pattern
+                    ));
+                },
+            ));
         }
 
         let validate_fn = quote! {
@@ -7121,6 +7118,78 @@ fn helper_name_stem(field_ident: &str, variant_ident: Option<&str>) -> String {
     )
 }
 
+/// The check a `pattern` constraint holds `value` to, taking `failure` where the value is turned
+/// away.
+///
+/// A pattern that a regex engine is avoidable work for — see [`crate::utils::trivial_pattern`] for
+/// which those are — is emitted as the `str` call it says the same thing as, because the
+/// `regex::Regex::new` otherwise emitted here lands in the consumer's crate, where
+/// `clippy::trivial_regex` reports it against a `#[model_schema]` attribute that has no edit
+/// available to answer it. Everything else keeps the regex, built once per process.
+///
+/// `failure` is spliced in unchanged either way: the two paths turn away the same values, and say
+/// the same words about the pattern as written when they do.
+#[cfg(feature = "serde")]
+fn pattern_check(pattern: &str, failure: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    trivial_pattern(pattern).map_or_else(
+        || {
+            quote! {
+                {
+                    use std::sync::LazyLock;
+                    static RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+                        regex::Regex::new(#pattern).unwrap()
+                    });
+                    if !RE.is_match(value) {
+                        #failure
+                    }
+                }
+            }
+        },
+        |trivial| {
+            let turned_away = pattern_rejects(&trivial);
+            quote! {
+                if #turned_away {
+                    #failure
+                }
+            }
+        },
+    )
+}
+
+/// The condition under which a trivial pattern turns `value` away — the negation of what it
+/// accepts, which is the form the emitted check reads it in.
+#[cfg(feature = "serde")]
+fn pattern_rejects(trivial: &TrivialPattern) -> proc_macro2::TokenStream {
+    match trivial {
+        TrivialPattern::IsEmpty => quote! { !value.is_empty() },
+        TrivialPattern::Equals(needle) => quote! { value != #needle },
+        TrivialPattern::StartsWith(needle) => {
+            let sought = needle_pattern(needle);
+            quote! { !value.starts_with(#sought) }
+        }
+        TrivialPattern::EndsWith(needle) => {
+            let sought = needle_pattern(needle);
+            quote! { !value.ends_with(#sought) }
+        }
+        TrivialPattern::Contains(needle) => {
+            let sought = needle_pattern(needle);
+            quote! { !value.contains(#sought) }
+        }
+    }
+}
+
+/// A needle in the spelling the `str` pattern methods want it where the call is written into a
+/// crate that denies `clippy::single_char_pattern`: one character as a `char`, anything else as
+/// the string it is. Both name the same pattern to the same method.
+#[cfg(feature = "serde")]
+fn needle_pattern(needle: &str) -> proc_macro2::TokenStream {
+    let mut chars = needle.chars();
+    if let (Some(only), None) = (chars.next(), chars.next()) {
+        return quote! { #only };
+    }
+    quote! { #needle }
+}
+
 /// The parameter a string validator takes and the rendering its checks read `value` from.
 ///
 /// A path is the one leaf the checks cannot be handed as-is: it arrives borrowed — the form every
@@ -7199,21 +7268,15 @@ fn generate_string_validation_code(
     }
 
     if let Some(pattern) = &meta.pattern {
-        let pattern_lit = pattern.clone();
-        checks.push(quote! {
-            {
-                use std::sync::LazyLock;
-                static RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-                    regex::Regex::new(#pattern_lit).unwrap()
-                });
-                if !RE.is_match(value) {
-                    return Err(format!(
-                        "'{}' does not match pattern '{}'",
-                        #field_name_lit, #pattern_lit
-                    ));
-                }
-            }
-        });
+        checks.push(pattern_check(
+            pattern,
+            &quote! {
+                return Err(format!(
+                    "'{}' does not match pattern '{}'",
+                    #field_name_lit, #pattern
+                ));
+            },
+        ));
     }
 
     let deserializer = if wraps.is_empty() {
