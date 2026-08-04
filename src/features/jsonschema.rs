@@ -150,24 +150,6 @@ fn closed_object_body(json_schema_fields: &[proc_macro2::TokenStream]) -> proc_m
     }
 }
 
-/// A base object's members with the members of every schema merged beside them.
-///
-/// serde writes a `#[serde(flatten)]` base and an internally tagged variant's newtype content the
-/// same way — what is merged contributes its members to the object the base is writing — so both
-/// describe through this one merge rather than each spelling its own. `base` is a
-/// `serde_json::Map` expression and every entry of `merged` a `serde_json::Value` one; the result
-/// is a `serde_json::Value`.
-///
-/// A merged schema that is itself a union multiplies out rather than collapsing, so each branch
-/// stays a closed object naming exactly the members that branch writes. Both spellings of a union
-/// are read: a discriminated enum's `oneOf` and an untagged one's `anyOf` alike name what serde
-/// picked one of, and the merged schema is the union of the merges.
-///
-/// Only a value serde writes as an object has members to contribute, and the expansion cannot
-/// always tell which types those are — a name reaches the merge without saying what it writes. The
-/// schema it produces does say, so the merge reads it there: a description naming any type but
-/// `object` is refused rather than merged, which is the last point at which the wrong schema can
-/// still be stopped.
 /// The four things the merge asks of a schema it is handed, as the tokens the merging block opens
 /// with: how two objects join, whether a schema is a deferred name, what type it commits its value
 /// to, and which branches it offers under which spelling.
@@ -495,6 +477,31 @@ fn branch_expansion() -> proc_macro2::TokenStream {
     }
 }
 
+/// A base object's members with the members of every schema merged beside them.
+///
+/// serde writes a `#[serde(flatten)]` base and an internally tagged variant's newtype content the
+/// same way — what is merged contributes its members to the object the base is writing — so both
+/// describe through this one merge rather than each spelling its own. `base` is a
+/// `serde_json::Map` expression and every entry of `merged` a `serde_json::Value` one; the result
+/// is a `serde_json::Value`.
+///
+/// A merged schema that is itself a union multiplies out rather than collapsing, so each branch
+/// stays a closed object naming exactly the members that branch writes. Both spellings of a union
+/// are read: a discriminated enum's `oneOf` and an untagged one's `anyOf` alike name what serde
+/// picked one of, and the merged schema is the union of the merges. A source reached through an
+/// `Option` offers its own absence beside whatever it described as, the two key sets being what the
+/// field actually writes.
+///
+/// Only a value serde writes as an object has members to contribute, and the expansion cannot
+/// always tell which types those are — a name reaches the merge without saying what it writes. The
+/// schema it produces does say, so the merge reads it there: a description naming any type but
+/// `object` is refused rather than merged, which is the last point at which the wrong schema can
+/// still be stopped. A flatten edge that closes a cycle is refused on the same terms, named for the
+/// frame that read it.
+///
+/// The reading itself is the tokens [`merge_readers`] emits, and what the multiplication is carried
+/// in is [`merged_tree`]; both are written into the block this returns, so the whole merge is one
+/// expression the caller can place wherever a `serde_json::Value` is wanted.
 pub fn merged_object_value(
     base: &proc_macro2::TokenStream,
     merged: &[MergedSource],

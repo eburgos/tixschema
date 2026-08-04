@@ -1,16 +1,39 @@
 use core::cell::RefCell;
-#[cfg(feature = "typescript")]
-use core::iter;
+use core::ops::Range;
 use regex_syntax::ast::parse::Parser as PatternParser;
 use regex_syntax::ast::{
-    Assertion, AssertionKind, Ast, ClassSet, ClassSetBinaryOpKind, ClassSetItem, Flag,
-    FlagsItemKind, Group, GroupKind, HexLiteralKind, Literal, LiteralKind, SpecialLiteralKind,
+    Assertion, AssertionKind, Ast, ClassPerl, ClassPerlKind, ClassSet, ClassSetBinaryOpKind,
+    ClassSetItem, Flag, FlagsItemKind, Group, GroupKind, HexLiteralKind, Literal, LiteralKind,
+    SpecialLiteralKind,
 };
 use std::collections::HashMap;
 use syn::{Attribute, Expr, Field, Lit, LitStr, Meta, Variant};
 
 #[cfg(any(feature = "typescript", feature = "zod"))]
 use syn::{ItemEnum, ItemStruct};
+
+/// The JavaScript engine generation the emitted Zod regex literals and JSON Schema `pattern`
+/// keywords are written for, and therefore the line the guard admits and refuses along.
+///
+/// A pattern this crate emits is read by whatever engine loads the generated schema, not by the
+/// one that happened to be installed where the derive ran, so the admission list has to be
+/// decided against a version written down rather than measured. ES2018 is the floor because it is
+/// what the guard's own translations already assume: `(?P<name>...)` is rewritten to
+/// `(?<name>...)`, and named capture groups are ES2018. Nothing else the crate emits needs
+/// anything newer, so nothing is bought by raising it.
+const JS_ENGINE_BASELINE: &str = "ES2018";
+
+/// What a JavaScript regex literal makes of the three flags the ECMA-262 regular expression
+/// modifiers proposal did add.
+///
+/// An engine at [`JS_ENGINE_BASELINE`] predates the proposal and rejects the group opening; a
+/// recent one parses it and matches what the `regex` crate matches. That is why these are refused
+/// against the recorded baseline rather than against whichever runtime is at hand — the schema is
+/// read wherever it is loaded, not where it was generated.
+const MODIFIER_GROUP_ABOVE_BASELINE_READ_AS: &str = "a group opening the ECMA-262 regular \
+                                                     expression modifiers proposal added, which \
+                                                     an engine predating it rejects as it parses \
+                                                     the literal";
 
 /// What a JavaScript regex literal makes of a flag the `(?...:...)` form cannot carry. ES2025's
 /// regular expression modifiers spell `i`, `m` and `s`, and the parse fails on anything else.
@@ -25,6 +48,29 @@ const UNICODE_CLASS_READ_AS: &str = "an escaped `p` or `P` followed by a literal
 
 /// A Unicode class, in the three spellings the `regex` crate reads one by.
 const UNICODE_CLASS_WRITTEN: &str = "a Unicode class -- `\\p{...}`, `\\pL` or `\\P{...}`";
+
+/// Why a construct both grammars parse still cannot go to the JavaScript surfaces: a flagless
+/// literal tests one UTF-16 code unit where the `regex` crate tests one character, so a lone
+/// character outside the Basic Multilingual Plane fills a one-character pattern there and never
+/// here. Writing the class out settles which characters are named; it cannot settle how many code
+/// units one of them is, and a spliced literal carries no `u` flag to settle it with.
+const ASTRAL_DIVERGENCE: &str = "a character outside the Basic Multilingual Plane, which the \
+                                 `regex` crate counts as one character and a flagless literal as \
+                                 the two code units it is written from -- so the set is the same \
+                                 and the count is not, and no spelling of the class closes that";
+
+/// Why a construct cannot reach the JavaScript surfaces as the author wrote it. The three are
+/// different failures and the rejection says which one it is.
+#[derive(Clone, Copy)]
+enum Divergence {
+    /// A JavaScript regex literal reads the bytes only on an engine newer than the baseline the
+    /// emitted schemas target.
+    AboveBaseline,
+    /// A JavaScript regex literal has no reading for the bytes at all.
+    Unreadable,
+    /// Both grammars read the bytes and pick out different characters by them.
+    ValueSet,
+}
 
 /// What a registered Rust ident, *written as a type path*, resolves to — the one question a map key
 /// asks of a name: what does serde write for a key spelled this way. A plain unit enum answers with
@@ -75,19 +121,24 @@ pub struct AliasInfo {
 /// from `[+--]`, a set difference — which the bytes alone do not say.
 #[derive(Default)]
 struct JsSpelling {
-    /// Byte offsets of the `P` in each `(?P<name>` the pattern opens.
+    /// The byte span of each construct that is rewritten, beside what it is rewritten to.
     ///
-    /// This is the only rewrite the guard makes, and it is safe because it is local: the bytes
-    /// around a group's opening are fixed, so dropping the `P` cannot change how anything else in
-    /// the pattern parses. Escaping a class-opening `]` looks like the same kind of fix and is
-    /// not — `[]-a]` is three members and `[\]-a]` is a range — which is why that one is refused
-    /// rather than rewritten.
-    named_group_markers: Vec<usize>,
+    /// Every rewrite is local — it replaces one construct's own span and leaves the bytes around
+    /// it alone — which is what makes it safe to apply them all in one pass: `(?P<name>` loses its
+    /// `P`, and a `\d`, `\w` or `\s` is replaced by the members it stands for. The `regex` crate
+    /// reads the results back exactly as it read the originals, so the one string that goes to all
+    /// three surfaces still means to the Rust validator what the guard decided it means.
+    ///
+    /// Escaping a class-opening `]` looks like the same kind of fix and is not — `[]-a]` is three
+    /// members and `[\]-a]` is a range — which is why that one is refused rather than rewritten.
+    edits: Vec<(Range<usize>, &'static str)>,
     refusal: Option<Unportable>,
 }
 
-/// A construct the `regex` crate reads that a JavaScript regex literal has no reading for.
+/// A construct the `regex` crate reads that a JavaScript regex literal cannot be handed as written.
 struct Unportable {
+    /// Which of the three ways it fails to carry over.
+    divergence: Divergence,
     /// What the same bytes are inside a JavaScript regex literal instead.
     read_as: &'static str,
     /// The construct, as the rejection names it.
@@ -129,9 +180,14 @@ impl JsSpelling {
 
     fn ast(&mut self, ast: &Ast) {
         match ast {
-            // `.`, `\d` and `\w` are in both grammars and differ only in whether they are
-            // Unicode-aware, which divides what they match rather than what they are.
-            Ast::Empty(_) | Ast::Dot(_) | Ast::ClassPerl(_) => {}
+            Ast::Empty(_) => {}
+            Ast::Dot(_) => self.refuse_value_set(
+                "the `.` any-character class",
+                "one UTF-16 code unit other than a line terminator, where the `regex` crate reads \
+                 one character other than a line feed -- so the two already part ways over a \
+                 carriage return",
+            ),
+            Ast::ClassPerl(perl) => self.perl_class(perl, false),
             Ast::Flags(_) => self.refuse(
                 "an inline flag directive `(?...)`",
                 "a group opening no JavaScript regex parses",
@@ -155,7 +211,8 @@ impl JsSpelling {
 
     fn class_item(&mut self, item: &ClassSetItem) {
         match item {
-            ClassSetItem::Empty(_) | ClassSetItem::Perl(_) => {}
+            ClassSetItem::Empty(_) => {}
+            ClassSetItem::Perl(perl) => self.perl_class(perl, true),
             ClassSetItem::Literal(literal) => self.literal(literal, true),
             ClassSetItem::Range(range) => {
                 self.literal(&range.start, true);
@@ -209,7 +266,8 @@ impl JsSpelling {
                 if *starts_with_p {
                     // `(?P<name>` and `(?<name>` are one construct under two spellings, and the
                     // `P` that tells them apart sits two bytes into the group's span.
-                    self.named_group_markers.push(group.span.start.offset + 2);
+                    let marker = group.span.start.offset + 2;
+                    self.edits.push((marker..marker + 1, ""));
                 }
             }
             GroupKind::NonCapturing(flags) => {
@@ -217,18 +275,47 @@ impl JsSpelling {
                     let FlagsItemKind::Flag(flag) = &item.kind else {
                         continue;
                     };
-                    let written = match flag {
-                        Flag::CaseInsensitive | Flag::MultiLine | Flag::DotMatchesNewLine => {
-                            continue;
-                        }
-                        Flag::SwapGreed => "the swap-greed flag on a `(?U:...)` group",
-                        Flag::Unicode => "the Unicode flag on a `(?u:...)` group",
-                        Flag::CRLF => "the CRLF flag on a `(?R:...)` group",
-                        Flag::IgnoreWhitespace => {
-                            "the ignore-whitespace flag on a `(?x:...)` group"
-                        }
+                    // `i`, `m` and `s` are the three the modifiers proposal added, so they are
+                    // refused for post-dating the baseline; the rest were never in ECMA-262 and
+                    // are refused outright. Both refusals name the group the flag was written on.
+                    let (written, divergence, read_as) = match flag {
+                        Flag::CaseInsensitive => (
+                            "the case-insensitive flag on a `(?i:...)` group",
+                            Divergence::AboveBaseline,
+                            MODIFIER_GROUP_ABOVE_BASELINE_READ_AS,
+                        ),
+                        Flag::MultiLine => (
+                            "the multi-line flag on a `(?m:...)` group",
+                            Divergence::AboveBaseline,
+                            MODIFIER_GROUP_ABOVE_BASELINE_READ_AS,
+                        ),
+                        Flag::DotMatchesNewLine => (
+                            "the dot-matches-newline flag on a `(?s:...)` group",
+                            Divergence::AboveBaseline,
+                            MODIFIER_GROUP_ABOVE_BASELINE_READ_AS,
+                        ),
+                        Flag::SwapGreed => (
+                            "the swap-greed flag on a `(?U:...)` group",
+                            Divergence::Unreadable,
+                            MODIFIER_GROUP_READ_AS,
+                        ),
+                        Flag::Unicode => (
+                            "the Unicode flag on a `(?u:...)` group",
+                            Divergence::Unreadable,
+                            MODIFIER_GROUP_READ_AS,
+                        ),
+                        Flag::CRLF => (
+                            "the CRLF flag on a `(?R:...)` group",
+                            Divergence::Unreadable,
+                            MODIFIER_GROUP_READ_AS,
+                        ),
+                        Flag::IgnoreWhitespace => (
+                            "the ignore-whitespace flag on a `(?x:...)` group",
+                            Divergence::Unreadable,
+                            MODIFIER_GROUP_READ_AS,
+                        ),
                     };
-                    self.refuse(written, MODIFIER_GROUP_READ_AS);
+                    self.record(divergence, written, read_as);
                 }
             }
         }
@@ -278,22 +365,61 @@ impl JsSpelling {
         self.refuse(written, read_as);
     }
 
-    /// Records `written` as the pattern's refusal, keeping the first construct the walk reached.
-    fn refuse(&mut self, written: &'static str, read_as: &'static str) {
-        self.refusal.get_or_insert(Unportable { read_as, written });
+    /// Equalises a `\d`, `\w` or `\s` — or refuses its negation.
+    ///
+    /// The plain forms name a set each engine reads its own way, and the members they share can be
+    /// written out, so they are. The negated forms name a *complement*, and a complement taken one
+    /// code unit at a time is not the complement taken one character at a time however the members
+    /// are spelled: `[^0-9]` diverges over an astral character exactly as `\D` does. Nothing is
+    /// gained by rewriting them, so they are refused with the divergence named.
+    fn perl_class(&mut self, perl: &ClassPerl, in_class: bool) {
+        if perl.negated {
+            self.refuse_value_set(
+                negated_perl_class_written(&perl.kind),
+                "the complement of the ASCII class, taken one UTF-16 code unit at a time, where \
+                 the `regex` crate takes the complement of the Unicode class one character at a \
+                 time -- writing the ASCII members out settles the first difference and leaves \
+                 the second",
+            );
+            return;
+        }
+        let (bare, bracketed) = perl_class_equalised(&perl.kind);
+        let members = if in_class { bare } else { bracketed };
+        self.edits
+            .push((perl.span.start.offset..perl.span.end.offset, members));
     }
 
-    /// `pattern` with every `(?P<name>` it opens rewritten to `(?<name>`.
+    /// Records `written` as the pattern's refusal, keeping the first construct the walk reached.
+    fn record(&mut self, divergence: Divergence, written: &'static str, read_as: &'static str) {
+        self.refusal.get_or_insert(Unportable {
+            divergence,
+            read_as,
+            written,
+        });
+    }
+
+    /// Refuses a construct a JavaScript regex literal has no reading for at all.
+    fn refuse(&mut self, written: &'static str, read_as: &'static str) {
+        self.record(Divergence::Unreadable, written, read_as);
+    }
+
+    /// Refuses a construct both grammars read and pick out different characters by.
+    fn refuse_value_set(&mut self, written: &'static str, read_as: &'static str) {
+        self.record(Divergence::ValueSet, written, read_as);
+    }
+
+    /// `pattern` with every construct the walk collected an equalising spelling for replaced by it.
     fn rewritten(mut self, pattern: &str) -> String {
-        if self.named_group_markers.is_empty() {
+        if self.edits.is_empty() {
             return pattern.to_owned();
         }
-        self.named_group_markers.sort_unstable();
+        self.edits.sort_unstable_by_key(|(span, _)| span.start);
         let mut result = String::with_capacity(pattern.len());
         let mut cut = 0;
-        for marker in self.named_group_markers {
-            result.push_str(&pattern[cut..marker]);
-            cut = marker + 1;
+        for (span, replacement) in self.edits {
+            result.push_str(&pattern[cut..span.start]);
+            result.push_str(replacement);
+            cut = span.end;
         }
         result.push_str(&pattern[cut..]);
         result
@@ -324,6 +450,34 @@ pub fn register_alias_info(
             },
         );
     });
+}
+
+/// The characters a `\d`, `\w` or `\s` covers in *both* engines, written out as a class body.
+///
+/// The `regex` crate reads the three as Unicode classes and a flagless JavaScript literal reads
+/// the narrower ASCII ones, so the reading the two share is the ASCII one, spelled out. For `\s`
+/// the two Unicode sets are not even nested — the `regex` crate spaces U+0085 and JavaScript does
+/// not, JavaScript spaces U+FEFF and the `regex` crate does not — which leaves the ASCII run as
+/// the only common ground rather than merely the safe one.
+///
+/// Returned as the bare body and the bracketed class, because where the construct sits decides
+/// which is written: a class nested inside a class is a construct the guard refuses, so a `\d`
+/// inside one contributes its members and not another `[...]`.
+const fn perl_class_equalised(kind: &ClassPerlKind) -> (&'static str, &'static str) {
+    match *kind {
+        ClassPerlKind::Digit => ("0-9", "[0-9]"),
+        ClassPerlKind::Word => ("0-9A-Za-z_", "[0-9A-Za-z_]"),
+        ClassPerlKind::Space => (r"\t\n\v\f\r ", r"[\t\n\v\f\r ]"),
+    }
+}
+
+/// How a rejection names the negated form of a perl class.
+const fn negated_perl_class_written(kind: &ClassPerlKind) -> &'static str {
+    match *kind {
+        ClassPerlKind::Digit => r"the `\D` negated digit class",
+        ClassPerlKind::Word => r"the `\W` negated word class",
+        ClassPerlKind::Space => r"the `\S` negated whitespace class",
+    }
 }
 
 pub fn lookup_alias_info(rust_ident: &str) -> Option<AliasInfo> {
@@ -366,6 +520,43 @@ pub fn compute_alias_export_name(rust_ident: &str, override_name: Option<&str>) 
     )
 }
 
+/// The spelling every reference to a `#[model_schema()]` item falls back to when the registry
+/// cannot answer for it, which is what a reference standing *before* the item expanded has and
+/// nothing else — the ident with the `Json` suffix taken off, that being what the field walk
+/// records for a sibling and what [`ident_schema_module_name`] names the module from.
+///
+/// An item exported under this spelling already answers at it. One exported under any other — an
+/// alias, which is given the `Type` suffix, or anything carrying a `name = "…"` override — does
+/// not, so it publishes the ident as a name of its own on each nominal surface: the two
+/// declaration orders then spell the reference differently, and both spellings are defined by the
+/// same emission. The module seam settled the same question for the JSON surface, which addresses
+/// a Rust path rather than a name.
+#[cfg(any(feature = "typescript", feature = "zod"))]
+fn ident_reexport_name(rust_ident: &str, export_name: &str) -> Option<String> {
+    let referenced = safe_type_name(rust_ident);
+    (referenced != export_name).then_some(referenced)
+}
+
+/// The `TypeScript` line an item publishes under its own Rust ident, or nothing when it is already
+/// exported under it. The parameter list is repeated on both sides so a generic item stays generic
+/// through the re-export.
+#[cfg(feature = "typescript")]
+pub fn ident_reexport_ts(rust_ident: &str, export_name: &str, ts_generics: &str) -> String {
+    ident_reexport_name(rust_ident, export_name).map_or_else(String::new, |referenced| {
+        format!("\n\nexport type {referenced}{ts_generics} = {export_name}{ts_generics};")
+    })
+}
+
+/// The zod counterpart of [`ident_reexport_ts`] — a binding, not a second schema, so the two names
+/// carry the one schema the item published. It is written unannotated because a zod-only build has
+/// no `ZodType` to annotate it with, and the binding's own type is the exported schema's.
+#[cfg(feature = "zod")]
+pub fn ident_reexport_zod(rust_ident: &str, export_name: &str) -> String {
+    ident_reexport_name(rust_ident, export_name).map_or_else(String::new, |referenced| {
+        format!("\n\nexport const {referenced}$Schema = {export_name}$Schema;")
+    })
+}
+
 /// [`compute_alias_export_name`] for a declared item — a struct, an enum, a tuple struct, a branded
 /// newtype. Without an override the item keeps the name it is declared under, which is the one
 /// difference from an alias: an alias has no surface name of its own and is given the `Type` suffix.
@@ -375,30 +566,6 @@ pub fn compute_alias_export_name(rust_ident: &str, override_name: Option<&str>) 
 /// it is exported as.
 pub fn compute_item_export_name(rust_ident: &str, override_name: Option<&str>) -> String {
     override_name.map_or_else(|| safe_type_name(rust_ident), ToOwned::to_owned)
-}
-
-/// Builds the `JSDoc` comment body an alias's `export type` is emitted under, which is what
-/// `build_jsdoc_body` builds for a declared item and for the members inside it. Between them they
-/// are every `JSDoc` body the crate writes, so the rule below holds wherever one is written rather
-/// than at the call sites that reach for one.
-///
-/// An alias's ` ```rust example ` block is dropped before its lines reach the body, the way every
-/// item shape drops it: the block is Rust source, and nothing reads it as such once it is sitting in
-/// a `TypeScript` comment. An alias documented with nothing but an example is left naming itself,
-/// as an undocumented one is.
-#[cfg(feature = "typescript")]
-pub fn format_docs_for_ts(docs: &[String], fallback_name: &str) -> String {
-    let described = strip_examples_from_docs(docs);
-    if described.is_empty() {
-        format!(" * {fallback_name}\n * ")
-    } else {
-        described
-            .iter()
-            .map(|line| format!(" * {line}"))
-            .chain(iter::once(" * ".to_owned()))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
 }
 
 #[cfg(any(feature = "typescript", feature = "zod"))]
@@ -642,12 +809,21 @@ const fn js_line_terminator_escape(ch: char) -> Option<&'static str> {
 /// grammars disagree rather than collide, matches a different set of strings than the Rust
 /// validator it was written beside. Both verdicts are reached here, at expansion.
 ///
-/// Where the grammars merely spell one construct differently the spelling is rewritten instead of
-/// refused: `(?P<name>...)` becomes `(?<name>...)`. That rewrite is the only one, and it is a
-/// spelling the `regex` crate reads too, so the one string that goes to all three surfaces still
-/// means to the validator exactly what it meant before. A `]` opening a character class looks like
-/// the same kind of fix and is not — `[]-a]` is three members and `[\]-a]` is a range — so it is
-/// refused rather than escaped.
+/// Where a construct has a spelling both grammars read alike, it is rewritten instead of refused,
+/// and the rewrite is what every surface receives — the Rust validator included, which is what
+/// keeps the three from validating different sets. There are two: `(?P<name>...)` becomes
+/// `(?<name>...)`, one group under two spellings; and `\d`, `\w` and `\s` become the members they
+/// stand for, the `regex` crate reading the three as Unicode classes where a flagless literal
+/// reads the narrower ASCII ones. The first changes nothing about what the pattern matches. The
+/// second narrows the Rust side on purpose, to the set the JavaScript side was going to enforce
+/// regardless.
+///
+/// What has no such spelling is refused with the construct named. That covers `.` and the negated
+/// `\D`, `\W` and `\S`: a flagless literal matches one UTF-16 code unit where the `regex` crate
+/// matches one character, so writing the members out settles which characters are named and never
+/// how many code units one of them is. A `]` opening a character class looks like a fixable
+/// spelling and is not — `[]-a]` is three members and `[\]-a]` is a range — so it too is refused
+/// rather than escaped.
 pub fn portable_pattern(lit: &LitStr) -> Result<String, syn::Error> {
     let pattern = lit.value();
     if let Err(err) = regex::Regex::new(&pattern) {
@@ -676,14 +852,35 @@ fn js_spelling(pattern: &str) -> Result<String, String> {
     let mut walk = JsSpelling::default();
     walk.ast(&ast);
     if let Some(refusal) = walk.refusal.as_ref() {
-        return Err(format!(
-            "`pattern` uses {}, which the `regex` crate reads and a JavaScript regex literal does \
-             not: there the same bytes are {}. The Zod schema splices this string between `/` \
-             delimiters and the JSON Schema `pattern` keyword is an ECMA-262 regex, so the \
-             constraint would say one thing in the Rust validator and another -- or nothing at all \
-             -- on the surfaces generated beside it.",
-            refusal.written, refusal.read_as
-        ));
+        return Err(match refusal.divergence {
+            Divergence::Unreadable => format!(
+                "`pattern` uses {}, which the `regex` crate reads and a JavaScript regex literal \
+                 does not: there the same bytes are {}. The Zod schema splices this string \
+                 between `/` delimiters and the JSON Schema `pattern` keyword is an ECMA-262 \
+                 regex, so the constraint would say one thing in the Rust validator and another \
+                 -- or nothing at all -- on the surfaces generated beside it.",
+                refusal.written, refusal.read_as
+            ),
+            Divergence::ValueSet => format!(
+                "`pattern` uses {}, which the `regex` crate and a JavaScript regex literal both \
+                 read and cover different characters by: there the same bytes are {}. What is \
+                 left over either way is {}. The Zod schema splices this string between `/` \
+                 delimiters and the JSON Schema `pattern` keyword is an ECMA-262 regex, so the \
+                 constraint would accept one set of strings in the Rust validator and a different \
+                 set on the surfaces generated beside it. Write the characters you mean out as a \
+                 class instead.",
+                refusal.written, refusal.read_as, ASTRAL_DIVERGENCE
+            ),
+            Divergence::AboveBaseline => format!(
+                "`pattern` uses {}, which a JavaScript regex literal carries only on an engine \
+                 newer than {}, the baseline the schemas this crate generates are written for: \
+                 there the same bytes are {}. The Zod schema splices this string between `/` \
+                 delimiters and the JSON Schema `pattern` keyword is an ECMA-262 regex, so an \
+                 engine at that baseline throws where the schema loads instead of validating \
+                 anything.",
+                refusal.written, JS_ENGINE_BASELINE, refusal.read_as
+            ),
+        });
     }
     Ok(walk.rewritten(pattern))
 }

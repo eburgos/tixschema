@@ -15,7 +15,8 @@ use super::{
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use super::{
-    AliasKind, alias_map_key_guard_error, branded_guard_errors, check_map_key, register_alias_info,
+    AliasKind, alias_map_key_guard_error, branded_guard_errors, check_map_key,
+    ident_schema_module_name, register_alias_info,
 };
 
 #[cfg(feature = "typescript")]
@@ -1188,6 +1189,101 @@ fn an_alias_targeting_a_map_key_with_no_members_is_refused() {
     assert!(error.contains("Doc"), "got: {error}");
 }
 
+/// A refused item still publishes the schema module every reference to it addresses.
+///
+/// The address is derived from the Rust ident and nothing else, so it is the same whatever became
+/// of the item — which is what lets a reference stand before it. An expansion that emitted no
+/// module left every referencing type with an `E0433` naming a module the author never wrote,
+/// sitting on top of the refusal they can act on.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_refused_item_publishes_the_module_a_reference_to_it_resolves_to() {
+    let ident = syn::Ident::new("CountsByDoc", proc_macro2::Span::call_site());
+    let module = super::refused_item_schema_module(&ident).to_string();
+    assert!(
+        module.contains(&format!(
+            "pub mod {}",
+            ident_schema_module_name("CountsByDoc")
+        )),
+        "got: {module}"
+    );
+    // The refusal is the one diagnostic the author reads, so the module adds none of its own.
+    assert!(!module.contains("compile_error"), "got: {module}");
+}
+
+/// And it publishes the call a reference emits: a sibling in field position asks the module it
+/// resolves to for `json_schema_within`, so that is the method that has to be there for the
+/// reference to compile.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_refused_items_module_answers_the_call_a_reference_emits() {
+    let span = proc_macro2::Span::call_site();
+    let ident = syn::Ident::new("CountsByRefusedDoc", span);
+    let module = super::refused_item_schema_module(&ident).to_string();
+    let addressed = super::sibling_schema_module_ident("CountsByRefusedDoc", span).to_string();
+    assert!(
+        module.contains(&format!("pub mod {addressed}")),
+        "got: {module}"
+    );
+    assert!(module.contains("json_schema_within"), "got: {module}");
+}
+
+/// The type the parser reads a field's written spelling as, rendered the way every surface receives
+/// it: one `FieldDef`, so a spelling that parses alike describes alike wherever it is dispatched.
+fn parsed_field_type(field_type: &proc_macro2::TokenStream) -> String {
+    let item: syn::ItemStruct = syn::parse_quote! {
+        struct Report {
+            counts: #field_type,
+        }
+    };
+    let field = item.fields.iter().next().unwrap();
+    format!("{:?}", get_field_def("counts", &field.ty, "").field_type)
+}
+
+/// The reported failure: std's `HashMap<K, V, S>` and `HashSet<T, S>` carry a hasher past the types
+/// they write, and the arity-keyed arms read that argument as a type of its own — demoting the
+/// container to a sibling naming a schema module the expansion never writes. serde writes the same
+/// bytes whichever hasher is named, so a container is read by its own name and the arguments past
+/// its wire form are dropped before any arm is consulted.
+#[test]
+fn a_container_written_with_a_hasher_parses_as_the_container_without_one() {
+    for (written, implied) in [
+        (
+            quote::quote! { HashMap<String, u32, FxBuildHasher> },
+            quote::quote! { HashMap<String, u32> },
+        ),
+        (
+            quote::quote! { HashSet<String, FxBuildHasher> },
+            quote::quote! { HashSet<String> },
+        ),
+        (
+            quote::quote! { HashMap<String, HashSet<u32, FxBuildHasher>> },
+            quote::quote! { HashMap<String, HashSet<u32>> },
+        ),
+        (
+            quote::quote! { Option<HashSet<u32, FxBuildHasher>> },
+            quote::quote! { Option<HashSet<u32>> },
+        ),
+    ] {
+        assert_eq!(
+            parsed_field_type(&written),
+            parsed_field_type(&implied),
+            "for {written}"
+        );
+    }
+}
+
+/// A container named with fewer arguments than its wire form is written from is not that container,
+/// and is left to fall through as the sibling it was written as — where the schema module it names
+/// is reported unresolvable against the type the author wrote, rather than quietly read as a map.
+#[test]
+fn a_container_short_of_its_wire_arity_still_falls_through_as_a_sibling() {
+    assert_eq!(
+        parsed_field_type(&quote::quote! { HashMap<String> }),
+        parsed_field_type(&quote::quote! { Wrapper<String> }).replace("Wrapper", "HashMap"),
+    );
+}
+
 /// Runs the field walk the way [`super::process_field`] does and renders the guard failures its
 /// `model_schema_prop` attributes earn, so a refused key and an unparseable `pattern` are read off
 /// the same channel that carries them to the emitted item.
@@ -1651,15 +1747,17 @@ fn branded_schema_example_carries_no_cfg_attribute() {
 #[cfg(feature = "typescript")]
 #[test]
 fn plain_enum_ts_definition_carries_no_cfg_attribute() {
-    let tokens = super::generate_plain_enum_ts_definition_method(" * Status", "Status", "  'a'");
+    let tokens =
+        super::generate_plain_enum_ts_definition_method(" * Status", "Status", "Status", "  'a'");
     assert_no_cfg_attribute(&tokens, "generate_plain_enum_ts_definition_method");
 }
 
 #[cfg(feature = "typescript")]
 #[test]
 fn discriminated_enum_ts_definition_carries_no_cfg_attribute() {
-    let tokens =
-        super::generate_discriminated_enum_ts_definition_method(" * Shape", "Shape", "  'a'");
+    let tokens = super::generate_discriminated_enum_ts_definition_method(
+        " * Shape", "Shape", "Shape", "  'a'",
+    );
     assert_no_cfg_attribute(&tokens, "generate_discriminated_enum_ts_definition_method");
 }
 
@@ -1759,7 +1857,7 @@ fn no_json_schema_emission_carries_a_warning_key() {
 fn alias_zod_method_carries_no_cfg_attribute() {
     let ty: syn::Type = syn::parse_quote!(String);
     let field_def = super::get_field_def("AliasType", &ty, "");
-    let tokens = super::generate_alias_zod_method("AliasType", &field_def);
+    let tokens = super::generate_alias_zod_method("AliasType", "Alias", &field_def);
     assert_no_cfg_attribute(&tokens, "generate_alias_zod_method");
 }
 
@@ -1959,6 +2057,11 @@ fn each_string_constraint_alone_rejects_a_numeric_inner() {
 }
 
 /// The shapes whose surfaces read the string constraints as something other than a string check.
+///
+/// Every sequence spelling stands beside the `Vec` it writes the same array as. A wrapper name is
+/// what the parser leaves for all but `Vec` and `[T; N]`, and reading it as a name rather than as
+/// the array it writes is what let a set through: the JSON schema then dropped `minLength` outside
+/// a string, while Zod read `.min` as a bound on how many items the array holds.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn string_constraints_over_a_non_string_inner_are_rejected() {
@@ -1969,6 +2072,11 @@ fn string_constraints_over_a_non_string_inner_are_rejected() {
         ("bool", "boolean"),
         ("Vec<String>", "container"),
         ("[u8; 4]", "container"),
+        ("BTreeSet<String>", "container"),
+        ("BinaryHeap<String>", "container"),
+        ("HashSet<String>", "container"),
+        ("LinkedList<String>", "container"),
+        ("VecDeque<String>", "container"),
         ("HashMap<String, String>", "container"),
         ("(String, String)", "container"),
         ("serde_json::Value", "opaque"),
@@ -1990,11 +2098,19 @@ fn string_constraints_over_a_non_string_inner_are_rejected() {
 
 /// The inners that carry the constraints faithfully. A `SiblingType` — another brand, an
 /// unresolved user type, or a bare generic parameter — is admitted because expansion cannot know
-/// its shape; the constrained path's `Display` assertion is what covers it.
+/// its shape; the constrained path's `Display` assertion is what covers it. A name carrying one
+/// argument that is not a sequence wrapper is such a name too, and stays admitted.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn string_constraints_over_a_string_shaped_inner_pass() {
-    for inner in ["String", "PathBuf", "ObjectId", "SomeOtherBrand", "T"] {
+    for inner in [
+        "String",
+        "PathBuf",
+        "ObjectId",
+        "SomeOtherBrand",
+        "T",
+        "SomeWrapper<String>",
+    ] {
         let ty: syn::Type = syn::parse_str(inner).unwrap();
         let errors = branded_errors_with(
             &syn::parse_quote! {
@@ -2008,11 +2124,19 @@ fn string_constraints_over_a_string_shaped_inner_pass() {
 }
 
 /// The guard reads the constraints, not the inner type: an unconstrained brand over any of the
-/// rejected shapes is the shipped `no_display` contract and stays accepted.
+/// rejected shapes is the shipped `no_display` contract and stays accepted — a sequence wrapper
+/// included, which describes the array it writes on every surface and needs no refusal.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn an_unconstrained_brand_over_a_non_string_inner_passes() {
-    for inner in ["u64", "bool", "Vec<String>", "serde_json::Value"] {
+    for inner in [
+        "u64",
+        "bool",
+        "Vec<String>",
+        "BTreeSet<String>",
+        "VecDeque<String>",
+        "serde_json::Value",
+    ] {
         let ty: syn::Type = syn::parse_str(inner).unwrap();
         let errors = branded_errors(&syn::parse_quote! {
             #[serde(transparent)]

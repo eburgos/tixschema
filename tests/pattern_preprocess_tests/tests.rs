@@ -350,8 +350,11 @@ fn test_pattern_special_regex_chars() {
     }
 
     let schema = PatternSpecialRegex::zod_schema();
+    // The escaped dots are special regex characters and reach the literal untouched. The `\d`s
+    // are not: a flagless Zod literal reads that as ASCII where the Rust validator reads the
+    // Unicode class, so the members it stands for are written out and both read the one set.
     assert!(
-        schema.contains(r".check(z.regex(/^\d{3}\.\d{3}\.\d{3}-\d{2}$/))"),
+        schema.contains(r".check(z.regex(/^[0-9]{3}\.[0-9]{3}\.[0-9]{3}-[0-9]{2}$/))"),
         "Expected special regex chars passed through in Zod schema: {schema}"
     );
 }

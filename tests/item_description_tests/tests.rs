@@ -165,10 +165,53 @@ pub struct SuffixedBrandJson(pub String);
 #[serde(transparent)]
 pub struct BrandUnderRustName(pub String);
 
+// The one shape with no surface name of its own: an alias is exported under the `Type` suffix, and
+// falls back to that exported name the way every declared item falls back to its own. Commented
+// with `//`, since a `///` line here would be the fixture's docs and the fallback would not fire.
+#[cfg(feature = "typescript")]
+#[model_schema()]
+pub type PlainAlias = u32;
+
 #[cfg(feature = "typescript")]
 fn assert_jsdoc_opens_with(ts: &str, expected: &str) {
     let header = format!("/**\n * {expected}\n");
     assert!(ts.starts_with(&header), "expected {expected} to open: {ts}");
+}
+
+/// The surface with the item's ident re-export taken off.
+///
+/// That line is the one place an item's Rust ident is written on purpose: a reference standing
+/// before the item has only the ident to spell, so each nominal surface answers at it. Everything
+/// else the item publishes is written under the name it is exported as, which is what the
+/// assertions below are about.
+#[cfg(any(feature = "typescript", feature = "zod"))]
+fn without_ident_reexport(surface: &str, ident: &str, exported: &str) -> String {
+    surface
+        .replace(&format!("\n\nexport type {ident} = {exported};"), "")
+        .replace(
+            &format!("\n\nexport const {ident}$Schema = {exported}$Schema;"),
+            "",
+        )
+}
+
+/// The ` * ` lines a definition's `JSDoc` block is written from, with the block's own delimiters and
+/// the surrounding indentation set aside — what every shape spells from one body, and the one part
+/// of the emitted `TypeScript` the shapes may be held against each other over.
+///
+/// The rendered JSON schema an item publishes under `jsonschema` is appended after that body rather
+/// than written from it, so it is read as the end of the body and not as part of it.
+#[cfg(feature = "typescript")]
+fn jsdoc_body_lines(ts: &str) -> Vec<String> {
+    let (block, _) = ts
+        .strip_prefix("/**\n")
+        .and_then(|rest| rest.split_once("**/"))
+        .unwrap();
+    block
+        .lines()
+        .map(|line| line.trim().to_owned())
+        .take_while(|line| line != "* JSON Schema:")
+        .filter(|line| line.starts_with('*'))
+        .collect()
 }
 
 #[cfg(feature = "typescript")]
@@ -197,19 +240,48 @@ fn an_undocumented_item_names_itself_in_jsdoc_as_it_is_exported() {
 }
 
 /// The reported failure was a `JSDoc` header contradicting the `export type` one line under it, so
-/// the name the item is declared under must reach neither.
+/// the name the item is declared under must reach neither. The ident re-export is the one line
+/// that writes the ident deliberately, and is taken off before the surface is read.
 #[cfg(feature = "typescript")]
 #[test]
 fn an_undocumented_item_never_writes_its_rust_ident() {
-    for ts in [
-        StructUnderRustName::ts_definition(),
-        TupleUnderRustName::ts_definition(),
-        SlotUnderRustName::ts_definition(),
-        ShapeUnderRustName::ts_definition(),
-        AdjacentUnderRustName::ts_definition(),
-        EitherUnderRustName::ts_definition(),
+    for (ts, ident, exported) in [
+        (
+            StructUnderRustName::ts_definition(),
+            "StructUnderRustName",
+            "RenamedStruct",
+        ),
+        (
+            TupleUnderRustName::ts_definition(),
+            "TupleUnderRustName",
+            "RenamedTuple",
+        ),
+        (
+            SlotUnderRustName::ts_definition(),
+            "SlotUnderRustName",
+            "RenamedSlot",
+        ),
+        (
+            ShapeUnderRustName::ts_definition(),
+            "ShapeUnderRustName",
+            "RenamedShape",
+        ),
+        (
+            AdjacentUnderRustName::ts_definition(),
+            "AdjacentUnderRustName",
+            "RenamedAdjacent",
+        ),
+        (
+            EitherUnderRustName::ts_definition(),
+            "EitherUnderRustName",
+            "RenamedEither",
+        ),
     ] {
-        assert!(!ts.contains("UnderRustName"), "rust ident reached: {ts}");
+        let described = without_ident_reexport(&ts, ident, exported);
+        assert!(
+            !described.contains("UnderRustName"),
+            "rust ident reached: {described}"
+        );
     }
     for (ts, ident) in [
         (SuffixedStructJson::ts_definition(), "SuffixedStructJson"),
@@ -243,6 +315,37 @@ fn an_item_exported_under_its_rust_ident_keeps_the_header_it_had() {
     }
 }
 
+/// The reported failure: an undocumented alias closed its `JSDoc` on a second blank ` * ` line,
+/// where every declared item closes on the first. Nothing about a shape decides how a name is
+/// written under `/**`, so the seven shapes that publish a header write the same two lines.
+#[cfg(feature = "typescript")]
+#[test]
+fn every_undocumented_shape_writes_the_same_two_jsdoc_lines() {
+    // The alias publishes `ts_definition` from its own module rather than from the alias, so naming
+    // the type here is what keeps the fixture from being pruned as unused.
+    let aliased: PlainAlias = 3;
+    assert_eq!(aliased, 3);
+
+    for (ts, exported) in [
+        (PlainStruct::ts_definition(), "PlainStruct"),
+        (PlainTuple::ts_definition(), "PlainTuple"),
+        (PlainSlot::ts_definition(), "PlainSlot"),
+        (PlainShape::ts_definition(), "PlainShape"),
+        (PlainAdjacent::ts_definition(), "PlainAdjacent"),
+        (PlainEither::ts_definition(), "PlainEither"),
+        (
+            plain_alias_schema::Schema::ts_definition(),
+            "PlainAliasType",
+        ),
+    ] {
+        assert_eq!(
+            jsdoc_body_lines(&ts),
+            vec![format!("* {exported}"), "*".to_owned()],
+            "for {exported}: {ts}"
+        );
+    }
+}
+
 /// The fallback fires only for an item with nothing to say, so a documented one keeps its docs
 /// whatever it is exported as.
 #[cfg(feature = "typescript")]
@@ -271,9 +374,11 @@ fn a_plain_enum_describes_itself_as_it_is_exported() {
             "{exported} not described by: {zod}"
         );
     }
+    let slot = SlotUnderRustName::zod_schema();
     assert!(
-        !SlotUnderRustName::zod_schema().contains("UnderRustName"),
-        "rust ident reached the description"
+        !without_ident_reexport(&slot, "SlotUnderRustName", "RenamedSlot")
+            .contains("UnderRustName"),
+        "rust ident reached the description: {slot}"
     );
     assert!(
         !SuffixedSlotJson::zod_schema().contains("SuffixedSlotJson"),
