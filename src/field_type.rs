@@ -803,7 +803,7 @@ impl FieldDef {
             FieldDefType::Map(k, v) => {
                 format!(
                     "Partial<Record<{}, {}>>",
-                    k.typescript_typename(),
+                    k.typescript_map_key_typename(),
                     v.typescript_slot_typename()
                 )
             }
@@ -846,6 +846,29 @@ impl FieldDef {
             };
             format!("Array<{item}>")
         })
+    }
+
+    /// The key a `Partial<Record<…>>` is written with: the key's own type, except where the key is
+    /// one of the enclosing item's type parameters, which states `string` — the same answer
+    /// [`Self::zod_map_key_type`] gives, for the same reason.
+    ///
+    /// This is the one place the type surface stops rendering a parameter as itself, and the
+    /// declaration is what forces it. `Record<K, T>` is declared `K extends keyof any`, so a
+    /// declaration that hands it a parameter it binds without bounding does not type-check at all —
+    /// the consumer pasting the emitted `.ts` gets the error before writing a value. Bounding the
+    /// parameter instead moves the failure rather than fixing it: the bound propagates to every
+    /// name written over the item, and `unknown` — what a binding annotated for the erased value
+    /// fills the parameter with — does not satisfy it either.
+    ///
+    /// What the member gives up is naming the parameter. What it gains is the guarantee serde
+    /// already makes: an instantiation either writes this map's keys as strings or refuses the
+    /// whole map at serialization, so no filling of the parameter ever reaches the wire as
+    /// anything else. The value beside the key still names whatever parameter it was written with.
+    fn typescript_map_key_typename(&self) -> String {
+        if self.parameter_shape_name().is_some() {
+            return "string".to_owned();
+        }
+        self.typescript_typename()
     }
 
     /// What this field contributes to an object that writes its members beside its own, on the

@@ -451,3 +451,113 @@ fn test_description_escapes_quotes() {
     assert!(zod.contains("description:"));
     assert!(zod.contains(r#"\"quoted\""#));
 }
+
+/// A doc example on a generic item is Rust the expansion has to compile, and a parameter names no
+/// type to compile it at, so every parameter the item declares is instantiated at `String` — the
+/// convention a generic brand's example already follows.
+#[cfg(feature = "zod")]
+#[test]
+fn a_generic_struct_renders_its_example_at_the_string_instantiation() {
+    /// A generic type carrying an example block.
+    ///
+    /// ```rust example
+    /// Boxed { value: "x".to_owned() }
+    /// ```
+    #[model_schema(default_types(ValueType = String))]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub struct Boxed<ValueType> {
+        pub value: ValueType,
+    }
+
+    assert_eq!(
+        Boxed::<String>::schema_example(),
+        serde_json::json!({ "value": "x" })
+    );
+}
+
+/// The arity is whatever the item declares, so a two-parameter item takes two arguments and not
+/// one.
+#[cfg(feature = "zod")]
+#[test]
+fn a_generic_enum_renders_its_example_at_the_string_instantiation() {
+    /// A generic enum carrying an example block.
+    ///
+    /// ```rust example
+    /// Tagged::Held { held: "x".to_owned(), tag: "t".to_owned() }
+    /// ```
+    #[model_schema(default_types(HeldType = String, TagType = String))]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub enum Tagged<HeldType, TagType> {
+        Held { held: HeldType, tag: TagType },
+    }
+
+    assert_eq!(
+        Tagged::<String, String>::schema_example(),
+        serde_json::json!({ "Held": { "held": "x", "tag": "t" } })
+    );
+}
+
+/// A generic item publishes a factory, whose last `;` closes its arrow function — so the example
+/// anchors on the statement binding the schema the factory caches instead. That statement is the
+/// one place on the value every call returns that also keeps two calls with the same arguments the
+/// same schema: attaching at `return schema` would hand back an instance the cache never stored.
+#[cfg(feature = "zod")]
+#[test]
+fn a_factory_carries_its_example_on_the_schema_it_memoizes() {
+    /// A generic type carrying an example block.
+    ///
+    /// ```rust example
+    /// Held { value: "x".to_owned() }
+    /// ```
+    #[model_schema(default_types(ValueType = String))]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub struct Held<ValueType> {
+        pub value: ValueType,
+    }
+
+    let zod = Held::<String>::zod_schema();
+    assert!(
+        zod.contains(
+            "  const schema = buildHeld$Schema(valueType).meta({\n    example: \
+             {\"value\":\"x\"}\n  });\n"
+        ),
+        "Got: {zod}"
+    );
+    assert!(!zod.contains("}.meta("), "Got: {zod}");
+    assert!(
+        zod.contains("  Held$SchemaFactoryCache.set(valueType, schema);\n  return schema;\n};"),
+        "Got: {zod}"
+    );
+}
+
+/// A type that declares no parameter publishes the annotated `const`, whose own `;` still closes
+/// the value the example belongs on.
+#[cfg(feature = "zod")]
+#[test]
+fn a_plain_const_still_carries_its_example_on_the_exported_binding() {
+    /// A type carrying an example block.
+    ///
+    /// ```rust example
+    /// Kept { value: "x".to_owned() }
+    /// ```
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub struct Kept {
+        pub value: String,
+    }
+
+    let zod = Kept::zod_schema();
+    #[cfg(feature = "typescript")]
+    assert!(
+        zod.contains(
+            "export const Kept$Schema: ZodType<Kept> = Kept$RawSchema.meta({\n  example: \
+             {\"value\":\"x\"}\n});"
+        ),
+        "Got: {zod}"
+    );
+    #[cfg(not(feature = "typescript"))]
+    assert!(
+        zod.contains(".meta({\n  example: {\"value\":\"x\"}\n});"),
+        "Got: {zod}"
+    );
+}

@@ -2510,9 +2510,35 @@ fn the_cfg_probe_sees_an_emitted_cfg_attribute() {
 #[test]
 fn struct_schema_example_carries_no_cfg_attribute() {
     let name: syn::Ident = syn::parse_quote!(Report);
+    let generics = syn::Generics::default();
     let tokens =
-        super::build_struct_schema_example(Some(&"Report { id: 1 }".to_owned()), &name).unwrap();
-    assert_no_cfg_attribute(&tokens, "build_struct_schema_example");
+        super::item_schema_example_method(Some(&"Report { id: 1 }".to_owned()), &name, &generics)
+            .unwrap();
+    assert_no_cfg_attribute(&tokens, "item_schema_example_method");
+}
+
+/// The type the example is bound at carries one argument per declared parameter, the way a brand's
+/// already does — a bare ident on a generic item is `E0107` before the example is ever read. A
+/// lifetime and a const are not parameters a filling is chosen for, so neither reaches the list.
+#[cfg(feature = "zod")]
+#[test]
+fn struct_schema_example_instantiates_every_type_parameter() {
+    let name: syn::Ident = syn::parse_quote!(Report);
+    let example = "Report { id: 1 }".to_owned();
+    for (generics, expected) in [
+        (syn::Generics::default(), "let value : Report ="),
+        (syn::parse_quote!(<A>), "let value : Report < String > ="),
+        (
+            syn::parse_quote!(<A, B>),
+            "let value : Report < String , String > =",
+        ),
+        (syn::parse_quote!(<'a>), "let value : Report ="),
+    ] {
+        let rendered = super::item_schema_example_method(Some(&example), &name, &generics)
+            .unwrap()
+            .to_string();
+        assert!(rendered.contains(expected), "Got: {rendered}");
+    }
 }
 
 #[cfg(feature = "jsonschema")]
