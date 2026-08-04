@@ -72,14 +72,9 @@ mod typescript {
             ts.contains("  by_key: Partial<Record<string, ValueType>>;"),
             "Got: {ts}"
         );
-        // The omission attribute is serde's, so only a serde build reads it and writes the key
-        // optional; without serde the value stays the undefined-flavored member.
-        let maybe = if cfg!(feature = "serde") {
-            "  maybe?: ValueType;"
-        } else {
-            "  maybe: ValueType | undefined;"
-        };
-        assert!(ts.contains(maybe), "Got: {ts}");
+        // serde drops the key for a `None`, which every build reads off the attribute on the
+        // field.
+        assert!(ts.contains("  maybe?: ValueType;"), "Got: {ts}");
         assert!(ts.contains("  tuple: [KeyType, ValueType];"), "Got: {ts}");
     }
 
