@@ -25,7 +25,7 @@ use crate::{
     field_type::{
         FieldDef, FieldDefType, VariantKind, classify_variant, get_field_def, is_plain_enum,
     },
-    utils::{get_field_docs, get_variant_docs},
+    utils::{get_field_docs, get_variant_docs, strip_examples_from_docs},
 };
 
 // The item paths take their exported name from `compute_item_export_name` and their module name
@@ -74,7 +74,7 @@ use crate::features::jsonschema::{
 use crate::features::jsonschema::{MergeDiagnostic, merged_object_value};
 
 #[cfg(any(feature = "typescript", feature = "zod"))]
-use crate::utils::{get_enum_docs, get_struct_docs, strip_examples_from_docs};
+use crate::utils::{get_enum_docs, get_struct_docs};
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::{compute_alias_export_name, ident_schema_module_name};
@@ -758,21 +758,20 @@ fn has_serde_transparent(attrs: &[syn::Attribute]) -> bool {
 }
 
 /// Builds the `JSDoc` comment body (lines prefixed with ` * `) that precedes an item's
-/// `export type`. Serves the shapes that publish no zod `description` of their own — structs,
-/// tuple structs, and the tagged and untagged enums; the shapes that publish both surfaces spell
-/// them from the same lines in `build_item_docs_and_description`.
+/// `export type`, and the one each field and enum variant inside it is emitted under. The item
+/// shapes that publish a zod `description` alongside spell both from the same lines in
+/// `build_item_docs_and_description`; a member publishes no second surface.
 ///
-/// The no-docs fallback names the item as it is exported, not as it is declared in Rust, so a
-/// `JSDoc` header never contradicts the `export type` one line under it.
+/// The no-docs fallback names what is documented as it is exported, not as it is declared in Rust,
+/// so a `JSDoc` header never contradicts the line under it.
 ///
-/// An item's ` ```rust example ` block is dropped before its lines reach the body, the way
+/// A ` ```rust example ` block is dropped before its lines reach the body, the way
 /// `item_plain_doc_lines` drops it: the block is Rust source, and nothing reads it as such once it
 /// is sitting in a `TypeScript` comment. A consumer after the example reads the Rust docs.
-#[cfg(feature = "typescript")]
-fn build_item_jsdoc(docs_vec: Option<&[String]>, item_name: &str) -> String {
+fn build_jsdoc_body(docs_vec: Option<&[String]>, fallback_name: &str) -> String {
     docs_vec.map_or_else(
         || {
-            [item_name.to_owned(), String::new()]
+            [fallback_name.to_owned(), String::new()]
                 .into_iter()
                 .map(|l| format!(" * {l}"))
                 .collect::<Vec<_>>()
@@ -1582,7 +1581,7 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
     }
 
     #[cfg(feature = "typescript")]
-    let docs = build_item_jsdoc(docs_and_example.0.as_deref(), &item_name);
+    let docs = build_jsdoc_body(docs_and_example.0.as_deref(), &item_name);
     #[cfg(all(
         not(feature = "typescript"),
         any(feature = "zod", feature = "jsonschema")
@@ -1805,7 +1804,7 @@ fn process_tuple_struct(
         json_schema_methods(&item_name, &tuple_struct_json_body(&item_name, &slots)),
         #[cfg(feature = "typescript")]
         build_tuple_struct_ts_definition_method(
-            &build_item_jsdoc(docs_and_example.0.as_deref(), &item_name),
+            &build_jsdoc_body(docs_and_example.0.as_deref(), &item_name),
             &item_name,
             &tuple_struct_ts_body(&slots),
         ),
@@ -3012,8 +3011,12 @@ fn collect_plain_enum_options(
 
         #[cfg(feature = "typescript")]
         {
-            let variant_docs =
-                get_variant_docs(item).map_or_else(String::new, |doc_lines| doc_lines.join("\n"));
+            // The one member body not written as ` * ` lines: a plain enum's variants are commented
+            // inside the union rather than over a property. The example is dropped the same way,
+            // and a variant documented with nothing else is left as an undocumented one.
+            let variant_docs = get_variant_docs(item).map_or_else(String::new, |doc_lines| {
+                strip_examples_from_docs(&doc_lines).join("\n")
+            });
             enum_variant_docs.push(variant_docs);
         }
     }
@@ -3231,24 +3234,7 @@ fn collect_discriminated_variants(
             field_defs.push(f_def);
         }
 
-        let discriminator_docs = get_variant_docs(item).map_or_else(
-            || {
-                [final_name.clone(), String::new()]
-                    .into_iter()
-                    .map(|l| format!(" * {l}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            },
-            |doc_lines| {
-                doc_lines
-                    .into_iter()
-                    .flat_map(|v| v.lines().map(ToOwned::to_owned).collect::<Vec<_>>())
-                    .chain(vec![String::new()])
-                    .map(|l| format!(" * {l}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            },
-        );
+        let discriminator_docs = build_jsdoc_body(get_variant_docs(item).as_deref(), &final_name);
         variants.push(DiscriminatedVariant {
             discriminator_value: final_name,
             docs: discriminator_docs,
@@ -3370,7 +3356,7 @@ fn process_discriminated_enum(
     );
 
     #[cfg(feature = "typescript")]
-    let docs = build_item_jsdoc(docs_vec.as_deref(), item_name);
+    let docs = build_jsdoc_body(docs_vec.as_deref(), item_name);
 
     // Generate schema module methods
     #[cfg(feature = "jsonschema")]
@@ -3768,7 +3754,7 @@ fn process_externally_tagged_enum(
     let _: &_ = &name;
 
     #[cfg(feature = "typescript")]
-    let docs = build_item_jsdoc(docs_vec.as_deref(), item_name);
+    let docs = build_jsdoc_body(docs_vec.as_deref(), item_name);
 
     #[cfg(feature = "jsonschema")]
     let json_schema_method =
@@ -4163,7 +4149,7 @@ fn process_internally_tagged_enum(
     let _: &_ = &name;
 
     #[cfg(feature = "typescript")]
-    let docs = build_item_jsdoc(docs_vec.as_deref(), item_name);
+    let docs = build_jsdoc_body(docs_vec.as_deref(), item_name);
 
     #[cfg(feature = "jsonschema")]
     let json_schema_method =
@@ -4620,7 +4606,7 @@ fn process_untagged_enum(
     let schema_code = format!("z.union([{}])", zod_parts.join(", "));
 
     #[cfg(feature = "typescript")]
-    let docs = build_item_jsdoc(docs_vec.as_deref(), item_name);
+    let docs = build_jsdoc_body(docs_vec.as_deref(), item_name);
 
     // Generate schema module methods
     #[cfg(feature = "jsonschema")]
@@ -6945,7 +6931,7 @@ fn process_field(
     let field_type: &syn::Type = &field.ty;
 
     let final_name = get_final_field_name(&raw_field_ident, field_rename.as_deref(), rename_all);
-    let field_docs = build_field_docs(field, &final_name);
+    let field_docs = build_jsdoc_body(get_field_docs(field).as_deref(), &final_name);
 
     // Create the field definition and apply any model_schema_prop overrides
     let mut field_def = get_field_def(&final_name, field_type, &field_docs);
@@ -7141,28 +7127,6 @@ fn generate_field_validation(
         Some(validation_code.module_items),
         Some(validation_code.validate_body),
         None,
-    )
-}
-
-/// Builds the JSDoc-style doc string for a field from its doc comments (or a fallback).
-fn build_field_docs(field: &Field, final_name: &str) -> String {
-    get_field_docs(field).map_or_else(
-        || {
-            [final_name.to_owned(), String::new()]
-                .into_iter()
-                .map(|l| format!(" * {l}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        },
-        |doc_lines| {
-            doc_lines
-                .into_iter()
-                .flat_map(|v| v.lines().map(ToOwned::to_owned).collect::<Vec<_>>())
-                .chain(vec![String::new()])
-                .map(|l| format!(" * {l}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        },
     )
 }
 
