@@ -892,7 +892,6 @@ pub struct Undefaulted<IdType> {
     pub id: IdType,
 }
 
-
 /// The item the reference-site fixtures below point at. A generic type publishes a factory rather
 /// than a schema, so a field naming it has nothing to name — it has to call that factory with what
 /// fills each parameter.
