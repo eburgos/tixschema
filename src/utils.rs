@@ -128,6 +128,42 @@ pub enum TrivialPattern {
     StartsWith(String),
 }
 
+/// One member of an untagged union as the Zod surface writes it, beside the two things a merge
+/// that flattens the union has to know about it and cannot recover from the spelling.
+///
+/// `branch` is the trail of one-based choices the member sits at, so a member of a nested union is
+/// named `1.2` rather than twice as `2` — the position the JSON-schema merge names the same member
+/// by, the recording being already multiplied out where that merge descends.
+///
+/// `non_object` is what serde writes the member as when that is provably not an object, named by
+/// the JSON type keyword the other surface writes for it. serde flattens structs and maps and
+/// nothing else, so such a member is one no object can be merged with, on any surface.
+///
+/// Both travel under `serde` alone, which is the feature that reads `#[serde(untagged)]` and
+/// `#[serde(flatten)]` at all: without it nothing records a member and nothing merges one, and the
+/// spelling is all the Zod surface still writes.
+#[cfg(feature = "zod")]
+#[derive(Clone)]
+pub struct ZodUnionMember {
+    #[cfg(feature = "serde")]
+    pub branch: Vec<usize>,
+    #[cfg(feature = "serde")]
+    pub non_object: Option<&'static str>,
+    pub spelling: String,
+}
+
+#[cfg(all(feature = "serde", feature = "zod"))]
+impl ZodUnionMember {
+    /// The member's position, spelled the way the JSON-schema merge spells the same one.
+    pub fn branch_path(&self) -> String {
+        self.branch
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<String>>()
+            .join(".")
+    }
+}
+
 #[derive(Clone)]
 pub struct AliasInfo {
     pub export_name: String,
@@ -139,7 +175,7 @@ pub struct AliasInfo {
     /// item. Filled by [`record_zod_union_members`] once the enum's own expansion has rendered
     /// them.
     #[cfg(feature = "zod")]
-    pub zod_union_members: Vec<String>,
+    pub zod_union_members: Vec<ZodUnionMember>,
 }
 
 /// The walk over a parsed `pattern` that collects the rewrites its JavaScript spelling needs and
@@ -522,8 +558,13 @@ pub fn register_alias_info(
 /// walk is what could not be made to terminate — two unions naming each other is a shape a merge is
 /// free to reach. The recording cannot hold such a cycle, because an entry is only ever built from
 /// entries registered before it.
+///
+/// Each member carries where it sits and whether serde writes it as an object, because the merge is
+/// the position that has to answer for both and the spelling tells it neither. The member itself is
+/// left alone: an untagged enum may hold a scalar, and it is joining that scalar to an object that
+/// no value satisfies.
 #[cfg(feature = "zod")]
-pub fn record_zod_union_members(rust_ident: &str, members: &[String]) {
+pub fn record_zod_union_members(rust_ident: &str, members: &[ZodUnionMember]) {
     ALIAS_INFO.with(|map| {
         if let Some(info) = map.borrow_mut().get_mut(rust_ident) {
             info.zod_union_members = members.to_vec();

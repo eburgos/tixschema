@@ -20,6 +20,9 @@ use super::{
     ident_schema_module_name, register_alias_info,
 };
 
+#[cfg(all(feature = "serde", feature = "zod"))]
+use super::{flattened_union_member_guard_error, record_zod_union_members};
+
 #[cfg(feature = "typescript")]
 use super::tuple_struct_ts_body;
 
@@ -5506,4 +5509,146 @@ fn a_pattern_of_any_real_shape_keeps_its_regex() {
          if ! RE . is_match (value) { \
          return Err (format ! (\"'{}' does not match pattern '{}'\" , \"field\" , \"^[a-z]+$\")) ; } } Ok (()) } "
     );
+}
+
+/// The recording a merge reads the union's members off says which of them serde writes as something
+/// other than an object, that being the one thing the spelling does not carry and the one thing a
+/// merge has to know: an intersection built on such a member is an object joined to a scalar, which
+/// no payload satisfies.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_scalar_union_member_is_recorded_as_the_type_serde_writes_it_as() {
+    let mut item: syn::ItemEnum = syn::parse_quote! {
+        enum Choice {
+            Obj(Holder),
+            Text(String),
+            Count(u32),
+            Many(Vec<Holder>),
+        }
+    };
+    let (_, _, merge_parts, _, errors, _, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
+    assert!(errors.is_empty(), "got: {errors:?}");
+    let recorded: Vec<(String, Option<&str>)> = merge_parts
+        .iter()
+        .map(|member| (member.branch_path(), member.non_object))
+        .collect();
+    assert_eq!(
+        recorded,
+        vec![
+            ("1".to_owned(), None),
+            ("2".to_owned(), Some("string")),
+            ("3".to_owned(), Some("integer")),
+            ("4".to_owned(), Some("array")),
+        ]
+    );
+}
+
+/// So an object flattening that union is refused where the field was written, in the words the
+/// JSON-schema merge refuses the same declaration with. Before, the branch for the scalar member
+/// was emitted as the object intersected with it and nothing said so.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn flattening_a_union_with_a_scalar_member_is_refused_naming_the_branch() {
+    let error = recorded_union_flatten_error(
+        "ScalarChoice",
+        syn::parse_quote! {
+            enum ScalarChoice {
+                Obj(Holder),
+                Text(String),
+            }
+        },
+        &syn::parse_quote! { #[serde(flatten)] either: ScalarChoice },
+    )
+    .unwrap();
+    assert!(error.contains("compile_error"), "got: {error}");
+    assert!(
+        error.contains(
+            "`#[serde(flatten)]` of `ScalarChoice` writes a union member that is not an object"
+        ),
+        "got: {error}"
+    );
+    assert!(
+        error.contains("its branch 2 describes a `string`"),
+        "got: {error}"
+    );
+    assert!(
+        error.contains("write the field as a named member so the value gets a key of its own"),
+        "got: {error}"
+    );
+}
+
+/// A member reached through a nesting is named by the trail that reaches it, which is the position
+/// the JSON-schema merge names the same member by — the recording is multiplied out where that
+/// merge descends, so the trail is what keeps the two answers the same sentence.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_nested_scalar_union_member_is_refused_by_its_trail() {
+    recorded_union_flatten_error(
+        "NestedInner",
+        syn::parse_quote! {
+            enum NestedInner {
+                Obj(Holder),
+                Text(String),
+            }
+        },
+        &syn::parse_quote! { #[serde(flatten)] either: NestedInner },
+    );
+    let error = recorded_union_flatten_error(
+        "NestedOuter",
+        syn::parse_quote! {
+            enum NestedOuter {
+                Inner(NestedInner),
+                Other(Holder),
+            }
+        },
+        &syn::parse_quote! { #[serde(flatten)] either: NestedOuter },
+    )
+    .unwrap();
+    assert!(
+        error.contains("its branch 1.2 describes a `string`"),
+        "got: {error}"
+    );
+}
+
+/// An object flattening a union every member of which serde writes as an object is untouched, and
+/// so is one naming a type the recording holds nothing for.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn flattening_a_union_of_objects_is_not_refused() {
+    assert!(
+        recorded_union_flatten_error(
+            "ObjectChoice",
+            syn::parse_quote! {
+                enum ObjectChoice {
+                    First(Holder),
+                    Second(Other),
+                }
+            },
+            &syn::parse_quote! { #[serde(flatten)] either: ObjectChoice },
+        )
+        .is_none()
+    );
+    let unrecorded: syn::Field = syn::parse_quote! { #[serde(flatten)] base: NeverRecorded };
+    assert!(flattened_union_member_guard_error(&unrecorded, "Host").is_none());
+}
+
+/// Records an untagged enum's members the way its own expansion does, then asks the flatten guard
+/// what an object naming it would be told. Returns the rendered `compile_error!`, or `None` where
+/// the merge has nothing to refuse.
+#[cfg(all(feature = "serde", feature = "zod"))]
+fn recorded_union_flatten_error(
+    rust_ident: &str,
+    mut item: syn::ItemEnum,
+    field: &syn::Field,
+) -> Option<String> {
+    let (_, _, merge_parts, _, errors, _, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
+    assert!(errors.is_empty(), "got: {errors:?}");
+    register_alias_info(
+        rust_ident,
+        rust_ident,
+        &ident_schema_module_name(rust_ident),
+        AliasKind::NoEnumMembers,
+    );
+    record_zod_union_members(rust_ident, &merge_parts);
+    flattened_union_member_guard_error(field, "Host").map(|error| error.to_string())
 }

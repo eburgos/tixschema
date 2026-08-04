@@ -97,7 +97,7 @@ use crate::utils::{get_item_docs, ident_reexport_ts};
 use crate::utils::ident_reexport_zod;
 
 #[cfg(feature = "zod")]
-use crate::utils::record_zod_union_members;
+use crate::utils::{ZodUnionMember, record_zod_union_members};
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::register_alias_info;
@@ -161,6 +161,14 @@ type RenderedVariants = (
     Vec<proc_macro2::TokenStream>,
 );
 
+/// What an untagged enum's members contribute to an object that merges it, which only the Zod
+/// surface multiplies out and so only it has a member type for. The other tables carry the same
+/// slot spelled as what they never read.
+#[cfg(all(feature = "serde", feature = "zod"))]
+type ZodMergeParts = Vec<ZodUnionMember>;
+#[cfg(all(feature = "serde", not(feature = "zod")))]
+type ZodMergeParts = Vec<String>;
+
 /// Per-member data collected from an untagged enum: the TypeScript member types, the Zod member
 /// schemas, what those Zod members contribute to an object that merges the enum, the JSON-schema
 /// value tokens, the `compile_error!` tokens for any field-level guard violations, the per-member
@@ -169,7 +177,7 @@ type RenderedVariants = (
 type UntaggedMemberData = (
     Vec<String>,
     Vec<String>,
-    Vec<String>,
+    ZodMergeParts,
     Vec<proc_macro2::TokenStream>,
     Vec<proc_macro2::TokenStream>,
     Vec<proc_macro2::TokenStream>,
@@ -466,7 +474,7 @@ struct MergedOperand {
     /// `spelling`. Zod only: TypeScript distributes an intersection over a union on its own, so
     /// there the union is spelled as the one operand it is.
     #[cfg(feature = "zod")]
-    members: Vec<String>,
+    members: Vec<ZodUnionMember>,
     optional: bool,
     spelling: String,
 }
@@ -1770,6 +1778,48 @@ fn flattened_field_guard_error(
     )
 }
 
+/// The `compile_error!` tokens for a `#[serde(flatten)]` field naming an untagged union one of
+/// whose recorded members serde does not write as an object, or `None` for every other field.
+///
+/// The union itself is left alone — an untagged enum may hold a scalar, and it is only the merge
+/// that has no object to join one to. What the multiplication would write for such a member is the
+/// object intersected with the scalar, a branch no payload satisfies and nothing reports; serde
+/// refuses the value outright, and the JSON-schema merge refuses the declaration in the words
+/// repeated here. Refused at expansion because that is the only place holding the field the author
+/// would have to change.
+///
+/// A union declared below the object has recorded nothing, so this answers for no member of it —
+/// the same bound the multiplication itself has, and the same one the merge's fallback documents.
+#[cfg(all(feature = "serde", feature = "zod"))]
+fn flattened_union_member_guard_error(
+    field: &syn::Field,
+    type_name: &str,
+) -> Option<proc_macro2::TokenStream> {
+    let inner = get_field_def("_flattened", &field.ty, "");
+    let FieldDefType::SiblingType(inner_name, _) = &inner.field_type else {
+        return None;
+    };
+    let member = inner
+        .zod_union_members()
+        .into_iter()
+        .find(|member| member.non_object.is_some())?;
+    let named = member.non_object?;
+    let branch = member.branch_path();
+    Some(
+        syn::Error::new_spanned(
+            &field.ty,
+            format!(
+                "model_schema: `{type_name}`: `#[serde(flatten)]` of `{inner_name}` writes a \
+                 union member that is not an object — its branch {branch} describes a `{named}`, \
+                 which has no members to merge, and what serde writes for that member does not \
+                 join the object being written; write the field as a named member so the value \
+                 gets a key of its own."
+            ),
+        )
+        .to_compile_error(),
+    )
+}
+
 /// Processes every field of a struct, returning the regular field defs, the `#[serde(flatten)]`
 /// field defs, the per-field serde validation functions and `validate()` body fragments, and the
 /// `compile_error!` tokens for any field-level guard violations.
@@ -1798,6 +1848,11 @@ fn collect_struct_fields(
         ))]
         if is_flatten {
             guard_errors.extend(flattened_field_guard_error(field, type_name));
+        }
+
+        #[cfg(all(feature = "serde", feature = "zod"))]
+        if is_flatten {
+            guard_errors.extend(flattened_union_member_guard_error(field, type_name));
         }
 
         let (f_def, validation_fn, validate_body, field_guard_errors) =
@@ -5226,9 +5281,9 @@ fn collect_untagged_members(
     let mut ts_parts: Vec<String> = Vec::new();
     let mut zod_parts: Vec<String> = Vec::new();
     #[cfg(feature = "zod")]
-    let mut zod_merge_parts: Vec<String> = Vec::new();
+    let mut zod_merge_parts: ZodMergeParts = Vec::new();
     #[cfg(not(feature = "zod"))]
-    let zod_merge_parts: Vec<String> = Vec::new();
+    let zod_merge_parts: ZodMergeParts = Vec::new();
     let mut json_parts: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut guard_errors: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut validation_fns: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -5303,7 +5358,12 @@ fn collect_untagged_members(
         match render_untagged_variant(&kind, variant, &field_defs, &enum_type_name) {
             Ok((ts, zod, json_val)) => {
                 #[cfg(feature = "zod")]
-                zod_merge_parts.extend(zod_merge_branches(&kind, &field_defs, &zod));
+                zod_merge_parts.extend(zod_merge_branches(
+                    &kind,
+                    &field_defs,
+                    &zod,
+                    ts_parts.len() + 1,
+                ));
                 ts_parts.push(ts);
                 zod_parts.push(zod);
                 json_parts.push(json_val);
@@ -5329,16 +5389,83 @@ fn collect_untagged_members(
 /// This is where the recorded member list is multiplied out, so what the registry hands a merge is
 /// the leaf set rather than a chain to walk. A member reached through an `Option` is left as it was
 /// rendered: its absence is a bare `null` on the wire, which is not a key set and joins no object.
+///
+/// `branch` is the member's own one-based position, which the leaves of a nested union are reached
+/// through and so keep as the head of theirs — the multiplication flattens the chain and the trail
+/// is what still says where a leaf was written.
 #[cfg(all(feature = "serde", feature = "zod"))]
-fn zod_merge_branches(kind: &VariantKind, field_defs: &[FieldDef], rendered: &str) -> Vec<String> {
-    let members = match (kind, field_defs) {
+fn zod_merge_branches(
+    kind: &VariantKind,
+    field_defs: &[FieldDef],
+    rendered: &str,
+    branch: usize,
+) -> Vec<ZodUnionMember> {
+    let nested = match (kind, field_defs) {
         (VariantKind::TupleSingle, [fld]) if !fld.is_optional() => fld.zod_union_members(),
         _ => Vec::new(),
     };
-    if members.is_empty() {
-        vec![rendered.to_owned()]
-    } else {
-        members
+    if nested.is_empty() {
+        let non_object = match (kind, field_defs) {
+            (VariantKind::TupleSingle, [fld]) => zod_member_non_object(fld),
+            _ => None,
+        };
+        return vec![ZodUnionMember {
+            branch: vec![branch],
+            non_object,
+            spelling: rendered.to_owned(),
+        }];
+    }
+    nested
+        .into_iter()
+        .map(|leaf| {
+            let mut trail = vec![branch];
+            trail.extend(leaf.branch);
+            ZodUnionMember {
+                branch: trail,
+                non_object: leaf.non_object,
+                spelling: leaf.spelling,
+            }
+        })
+        .collect()
+}
+
+/// What serde writes an untagged union's member as, when the member's own written type proves that
+/// is not an object, and `None` when nothing here proves it.
+///
+/// Named by the JSON type keyword the JSON-schema surface writes for the same member, so the two
+/// merges refuse the same member in the same words. That surface reads the keyword off a document
+/// it has already built; here there is only the type, so the answer is a partial one by
+/// construction — a name the registry stands for and a map are left to the merge that does read
+/// them, and a union member is not asked at all, its own leaves having already been recorded.
+#[cfg(all(feature = "serde", feature = "zod"))]
+fn zod_member_non_object(fld: &FieldDef) -> Option<&'static str> {
+    if fld.is_array() {
+        return Some("array");
+    }
+    match &fld.field_type {
+        FieldDefType::Boolean => Some("boolean"),
+        FieldDefType::F32 | FieldDefType::F64 => Some("number"),
+        FieldDefType::I8
+        | FieldDefType::I16
+        | FieldDefType::I32
+        | FieldDefType::I64
+        | FieldDefType::Isize
+        | FieldDefType::U8
+        | FieldDefType::U16
+        | FieldDefType::U32
+        | FieldDefType::U64
+        | FieldDefType::Usize => Some("integer"),
+        FieldDefType::String | FieldDefType::StringLiteral(_) => Some("string"),
+        #[cfg(feature = "chrono")]
+        FieldDefType::DateTime
+        | FieldDefType::NaiveDate
+        | FieldDefType::NaiveDateTime
+        | FieldDefType::NaiveTime => Some("string"),
+        FieldDefType::Tuple(_) => Some("array"),
+        FieldDefType::SiblingType(name, _) => is_sequence_wrapper(name).then_some("array"),
+        #[cfg(feature = "object_id")]
+        FieldDefType::ObjectId => None,
+        FieldDefType::Map(_, _) | FieldDefType::Unknown => None,
     }
 }
 
@@ -8587,7 +8714,11 @@ fn zod_operand_contributions(operand: &MergedOperand) -> Vec<&str> {
     if operand.members.is_empty() {
         vec![operand.spelling.as_str()]
     } else {
-        operand.members.iter().map(String::as_str).collect()
+        operand
+            .members
+            .iter()
+            .map(|member| member.spelling.as_str())
+            .collect()
     }
 }
 
