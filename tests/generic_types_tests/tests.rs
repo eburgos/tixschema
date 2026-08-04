@@ -321,7 +321,7 @@ mod zod {
         assert!(
             zod.contains(
                 "const buildKeyedAliasType$Schema = \
-                 <KeyType extends ZodType, ValueType extends ZodType>(\n  keyType: KeyType,"
+                 <KeyType extends z.ZodType, ValueType extends z.ZodType>(\n  keyType: KeyType,"
             ),
             "Got: {zod}"
         );
@@ -489,7 +489,7 @@ mod zod {
         let zod = Wrapper::<String>::zod_schema();
         assert!(
             zod.contains(
-                "export const Wrapper$SchemaDefault: ZodType<Wrapper<string>> = \
+                "export const Wrapper$SchemaDefault: z.ZodType<Wrapper<string>> = \
                  Wrapper$SchemaFactory(z.string());"
             ),
             "Got: {zod}"
@@ -655,43 +655,43 @@ mod zod {
         let zod = Wrapper::<String>::zod_schema();
         assert!(
             zod.contains(
-                "const buildWrapper$Schema = <IdType extends ZodType>(\n  idType: IdType,\n) =>"
+                "const buildWrapper$Schema = <IdType extends z.ZodType>(\n  idType: IdType,\n) =>"
             ),
             "Got: {zod}"
         );
         assert!(
             zod.contains(
-                "type Wrapper$SchemaOf<IdType extends ZodType> = ReturnType<\n  typeof \
+                "type Wrapper$SchemaOf<IdType extends z.ZodType> = ReturnType<\n  typeof \
                  buildWrapper$Schema<IdType>\n>;"
             ),
             "Got: {zod}"
         );
         assert!(
             zod.contains(
-                "export const Wrapper$SchemaFactory = <IdType extends ZodType>(\n  idType: \
+                "export const Wrapper$SchemaFactory = <IdType extends z.ZodType>(\n  idType: \
                  IdType,\n): Wrapper$SchemaOf<IdType> => {"
             ),
             "Got: {zod}"
         );
     }
 
-    /// Each parameter is a parameter of the function for real. A bare `ZodType` annotation compiles
-    /// and infers nothing — `ZodType` defaults its own parameters — so a field validated through
+    /// Each parameter is a parameter of the function for real. A bare `z.ZodType` annotation compiles
+    /// and infers nothing — `z.ZodType` defaults its own parameters — so a field validated through
     /// one would come back as the opaque value whatever the caller supplied.
     #[cfg(feature = "typescript")]
     #[test]
     fn every_parameter_is_a_type_parameter_rather_than_a_bare_annotation() {
         let zod = Pair::<String, u32>::zod_schema();
         assert!(
-            zod.contains("<KeyType extends ZodType, ValueType extends ZodType>"),
+            zod.contains("<KeyType extends z.ZodType, ValueType extends z.ZodType>"),
             "Got: {zod}"
         );
         assert!(
             zod.contains("\n  keyType: KeyType,\n  valueType: ValueType,\n)"),
             "Got: {zod}"
         );
-        assert!(!zod.contains("keyType: ZodType"), "Got: {zod}");
-        assert!(!zod.contains("valueType: ZodType"), "Got: {zod}");
+        assert!(!zod.contains("keyType: z.ZodType"), "Got: {zod}");
+        assert!(!zod.contains("valueType: z.ZodType"), "Got: {zod}");
     }
 
     /// One parameter collapses to a single interface and a single lookup.
@@ -701,9 +701,9 @@ mod zod {
         let zod = Wrapper::<String>::zod_schema();
         assert!(
             zod.contains(
-                "interface Wrapper$SchemaFactoryCache {\n  get<IdType extends ZodType>(key: \
+                "interface Wrapper$SchemaFactoryCache {\n  get<IdType extends z.ZodType>(key: \
                  IdType): Wrapper$SchemaOf<IdType> | undefined;\n  set<IdType extends \
-                 ZodType>(key: IdType, value: Wrapper$SchemaOf<IdType>): this;\n}"
+                 z.ZodType>(key: IdType, value: Wrapper$SchemaOf<IdType>): this;\n}"
             ),
             "Got: {zod}"
         );
@@ -723,12 +723,12 @@ mod zod {
     fn each_cache_level_carries_the_parameters_resolved_above_it() {
         let zod = Quintet::<u32, u32, u32, u32, u32>::zod_schema();
         for level in [
-            "interface Quintet$SchemaFactoryCacheL1<AType extends ZodType> {\n  get<BType extends \
-             ZodType>(key: BType): Quintet$SchemaFactoryCacheL2<AType, BType> | undefined;",
-            "interface Quintet$SchemaFactoryCacheL4<AType extends ZodType, BType extends ZodType, \
-             CType extends ZodType, DType extends ZodType> {\n  get<EType extends ZodType>(key: \
+            "interface Quintet$SchemaFactoryCacheL1<AType extends z.ZodType> {\n  get<BType extends \
+             z.ZodType>(key: BType): Quintet$SchemaFactoryCacheL2<AType, BType> | undefined;",
+            "interface Quintet$SchemaFactoryCacheL4<AType extends z.ZodType, BType extends z.ZodType, \
+             CType extends z.ZodType, DType extends z.ZodType> {\n  get<EType extends z.ZodType>(key: \
              EType): Quintet$SchemaOf<AType, BType, CType, DType, EType> | undefined;",
-            "interface Quintet$SchemaFactoryCache {\n  get<AType extends ZodType>(key: AType): \
+            "interface Quintet$SchemaFactoryCache {\n  get<AType extends z.ZodType>(key: AType): \
              Quintet$SchemaFactoryCacheL1<AType> | undefined;",
             "    byCType = createSchemaCache<Quintet$SchemaFactoryCacheL2<AType, BType>>();",
         ] {
@@ -774,7 +774,7 @@ mod zod {
             "Got: {zod}"
         );
         assert!(!zod.contains("interface "), "Got: {zod}");
-        assert!(!zod.contains("ZodType"), "Got: {zod}");
+        assert!(!zod.contains("z.ZodType"), "Got: {zod}");
     }
 
     /// The alias and the brand write the same untyped factory, and the brand's marker drops the
@@ -788,13 +788,13 @@ mod zod {
             alias.contains("const buildBoxed$Schema = (\n  valueType,\n) =>"),
             "Got: {alias}"
         );
-        assert!(!alias.contains("ZodType"), "Got: {alias}");
+        assert!(!alias.contains("z.ZodType"), "Got: {alias}");
         assert!(!alias.contains("$Schema:"), "Got: {alias}");
 
         let brand = Tagged::<String>::zod_schema();
         assert!(brand.contains("}).brand();"), "Got: {brand}");
         assert!(!brand.contains(".brand<"), "Got: {brand}");
-        assert!(!brand.contains("ZodType"), "Got: {brand}");
+        assert!(!brand.contains("z.ZodType"), "Got: {brand}");
     }
 
     /// An alias and a branded newtype are generic publishers like any other, so each binds an

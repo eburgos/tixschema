@@ -386,7 +386,9 @@ fn test_scalar_alias_zod_schema() {
         "Scalar alias should bind its Zod to $RawSchema. Got: {zod}"
     );
     assert!(
-        zod.contains("export const DocumentId$Schema: ZodType<DocumentId> = DocumentId$RawSchema;"),
+        zod.contains(
+            "export const DocumentId$Schema: z.ZodType<DocumentId> = DocumentId$RawSchema;"
+        ),
         "Scalar alias should re-export an annotated $Schema. Got: {zod}"
     );
     assert!(
@@ -410,7 +412,7 @@ fn test_tuple_alias_zod_schema() {
     );
     assert!(
         zod.contains(
-            "export const CompactLinkRow$Schema: ZodType<CompactLinkRow> = CompactLinkRow$RawSchema;"
+            "export const CompactLinkRow$Schema: z.ZodType<CompactLinkRow> = CompactLinkRow$RawSchema;"
         ),
         "Tuple alias should re-export an annotated $Schema. Got: {zod}"
     );

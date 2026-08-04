@@ -106,7 +106,7 @@ fn test_typescript_enabled_plain_enum_zod_schema() {
         "const TypeScriptTestStatus$RawSchema = z.enum([\"active\", \"inactive\", \"pending\"])"
     ));
     // Should contain typed $Schema referencing $RawSchema
-    assert!(zod_schema.contains("export const TypeScriptTestStatus$Schema: ZodType<TypeScriptTestStatus> = TypeScriptTestStatus$RawSchema;"));
+    assert!(zod_schema.contains("export const TypeScriptTestStatus$Schema: z.ZodType<TypeScriptTestStatus> = TypeScriptTestStatus$RawSchema;"));
     // Now includes .meta() with description
     assert!(zod_schema.contains(".meta({"));
 
@@ -137,7 +137,7 @@ fn test_typescript_enabled_discriminated_enum_zod_schema() {
     assert!(zod_schema.contains("const TypeScriptTestPayment$RawSchema = "));
     assert!(zod_schema.contains("z.discriminatedUnion"));
     // Should contain typed $Schema referencing $RawSchema
-    assert!(zod_schema.contains("export const TypeScriptTestPayment$Schema: ZodType<TypeScriptTestPayment> = TypeScriptTestPayment$RawSchema;"));
+    assert!(zod_schema.contains("export const TypeScriptTestPayment$Schema: z.ZodType<TypeScriptTestPayment> = TypeScriptTestPayment$RawSchema;"));
 
     // Should NOT contain TypeScript type definition
     assert!(!zod_schema.contains("export type TypeScriptTestPayment"));
@@ -169,7 +169,7 @@ fn test_typescript_disabled_struct_zod_schema_javascript_style() {
     assert!(zod_schema.contains("active: z.boolean()"));
 
     // Should NOT contain TypeScript type annotations
-    assert!(!zod_schema.contains(": ZodType<TypeScriptTestUser>"));
+    assert!(!zod_schema.contains(": z.ZodType<TypeScriptTestUser>"));
     assert!(!zod_schema.contains("export type TypeScriptTestUser"));
 }
 
@@ -183,7 +183,7 @@ fn test_typescript_disabled_plain_enum_zod_schema_typescript_not_serde_style() {
     assert!(zod_schema.contains(
         "const TypeScriptTestStatus$RawSchema = z.enum([\"Active\", \"Inactive\", \"Pending\"])"
     ));
-    assert!(zod_schema.contains("export const TypeScriptTestStatus$Schema: ZodType<TypeScriptTestStatus> = TypeScriptTestStatus$RawSchema;"));
+    assert!(zod_schema.contains("export const TypeScriptTestStatus$Schema: z.ZodType<TypeScriptTestStatus> = TypeScriptTestStatus$RawSchema;"));
     assert!(zod_schema.contains(".meta({"));
 
     assert!(!zod_schema.contains("export type TypeScriptTestStatus"));
@@ -199,7 +199,7 @@ fn test_typescript_disabled_plain_enum_zod_schema_typescript_serde_style() {
     assert!(zod_schema.contains(
         "const TypeScriptTestStatus$RawSchema = z.enum([\"active\", \"inactive\", \"pending\"])"
     ));
-    assert!(zod_schema.contains("export const TypeScriptTestStatus$Schema: ZodType<TypeScriptTestStatus> = TypeScriptTestStatus$RawSchema;"));
+    assert!(zod_schema.contains("export const TypeScriptTestStatus$Schema: z.ZodType<TypeScriptTestStatus> = TypeScriptTestStatus$RawSchema;"));
     assert!(zod_schema.contains(".meta({"));
 
     assert!(!zod_schema.contains("export type TypeScriptTestStatus"));
@@ -218,7 +218,7 @@ fn test_typescript_disabled_plain_enum_zod_schema_javascript_serde_style() {
     assert!(zod_schema.contains(".meta({"));
 
     // Should NOT contain TypeScript type annotations
-    assert!(!zod_schema.contains(": ZodType<TypeScriptTestStatus>"));
+    assert!(!zod_schema.contains(": z.ZodType<TypeScriptTestStatus>"));
     assert!(!zod_schema.contains("export type TypeScriptTestStatus"));
 }
 
@@ -235,7 +235,7 @@ fn test_typescript_disabled_plain_enum_zod_schema_javascript_not_serde_style() {
     assert!(zod_schema.contains(".meta({"));
 
     // Should NOT contain TypeScript type annotations
-    assert!(!zod_schema.contains(": ZodType<TypeScriptTestStatus>"));
+    assert!(!zod_schema.contains(": z.ZodType<TypeScriptTestStatus>"));
     assert!(!zod_schema.contains("export type TypeScriptTestStatus"));
 }
 
@@ -249,7 +249,7 @@ fn test_typescript_disabled_discriminated_enum_zod_schema_javascript_style() {
     assert!(zod_schema.contains("z.discriminatedUnion"));
 
     // Should NOT contain TypeScript type annotations
-    assert!(!zod_schema.contains(": ZodType<TypeScriptTestPayment>"));
+    assert!(!zod_schema.contains(": z.ZodType<TypeScriptTestPayment>"));
     assert!(!zod_schema.contains("export type TypeScriptTestPayment"));
 }
 
@@ -266,7 +266,8 @@ fn test_typescript_and_zod_both_enabled() {
 
     // Zod schema should be available and contain TypeScript-style type annotations
     assert!(
-        zod_schema.contains("export const TypeScriptTestUser$Schema: ZodType<TypeScriptTestUser>")
+        zod_schema
+            .contains("export const TypeScriptTestUser$Schema: z.ZodType<TypeScriptTestUser>")
     );
     assert!(!zod_schema.contains("export type TypeScriptTestUser"));
 }
@@ -278,7 +279,7 @@ fn test_typescript_disabled_zod_enabled() {
 
     // Zod schema should be available but in JavaScript style (no type annotations)
     assert!(zod_schema.contains("export const TypeScriptTestUser$Schema = z.strictObject({"));
-    assert!(!zod_schema.contains(": ZodType<TypeScriptTestUser>"));
+    assert!(!zod_schema.contains(": z.ZodType<TypeScriptTestUser>"));
 
     // TypeScript definition should NOT be available
     // (We can't test the compilation failure directly, but the method shouldn't exist)
