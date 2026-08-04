@@ -453,11 +453,12 @@ fn test_description_escapes_quotes() {
 }
 
 /// A doc example on a generic item is Rust the expansion has to compile, and a parameter names no
-/// type to compile it at, so every parameter the item declares is instantiated at `String` — the
-/// convention a generic brand's example already follows.
+/// type to compile it at, so every parameter the item declares is instantiated at the filling
+/// `default_types` declares for it — here `String`, which is also what an undeclared parameter
+/// falls back to, so this item is annotated exactly as it was before the filling was read.
 #[cfg(feature = "zod")]
 #[test]
-fn a_generic_struct_renders_its_example_at_the_string_instantiation() {
+fn a_generic_struct_renders_its_example_at_its_declared_filling() {
     /// A generic type carrying an example block.
     ///
     /// ```rust example
@@ -476,10 +477,10 @@ fn a_generic_struct_renders_its_example_at_the_string_instantiation() {
 }
 
 /// The arity is whatever the item declares, so a two-parameter item takes two arguments and not
-/// one.
+/// one, each read off the entry that names it.
 #[cfg(feature = "zod")]
 #[test]
-fn a_generic_enum_renders_its_example_at_the_string_instantiation() {
+fn a_generic_enum_renders_its_example_at_its_declared_fillings() {
     /// A generic enum carrying an example block.
     ///
     /// ```rust example
@@ -494,6 +495,111 @@ fn a_generic_enum_renders_its_example_at_the_string_instantiation() {
     assert_eq!(
         Tagged::<String, String>::schema_example(),
         serde_json::json!({ "Held": { "held": "x", "tag": "t" } })
+    );
+}
+
+/// `default_types` is the one argument that names a concrete type per parameter, so the example is
+/// annotated at what the author already declared. A parameter bounded by a trait `String` does not
+/// satisfy then compiles, and the value the example builds is the one the filling admits rather
+/// than one an annotation picked over it contradicts.
+#[cfg(feature = "zod")]
+#[test]
+fn a_bounded_parameter_renders_its_example_at_its_declared_filling() {
+    /// A generic type whose parameter carries a bound `String` does not satisfy.
+    ///
+    /// ```rust example
+    /// Counted { count: 7u32 }
+    /// ```
+    #[model_schema(default_types(CountType = u32))]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub struct Counted<CountType: Copy> {
+        pub count: CountType,
+    }
+
+    assert_eq!(
+        Counted::<u32>::schema_example(),
+        serde_json::json!({ "count": 7_u32 })
+    );
+}
+
+/// Every enum shape reads the filling the same way, the seam that annotates the value being the one
+/// the struct path reaches too — so a parameter filled at something other than `String` renders the
+/// value that filling builds here as well.
+#[cfg(feature = "zod")]
+#[test]
+fn a_generic_enum_renders_its_example_at_a_filling_that_is_not_a_string() {
+    /// A generic enum carrying an example block.
+    ///
+    /// ```rust example
+    /// Measured::Held { held: 7u32 }
+    /// ```
+    #[model_schema(default_types(HeldType = u32))]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub enum Measured<HeldType> {
+        Held { held: HeldType },
+    }
+
+    assert_eq!(
+        Measured::<u32>::schema_example(),
+        serde_json::json!({ "Held": { "held": 7_u32 } })
+    );
+}
+
+/// A parameter no entry names keeps the `String` fallback: the convention holds wherever nothing was
+/// declared to replace it. Only a build without `jsonschema` reaches it — with that feature on, a
+/// filling is required for every parameter before an example is ever built.
+#[cfg(all(feature = "zod", not(feature = "jsonschema")))]
+#[test]
+fn an_unfilled_parameter_keeps_the_string_instantiation() {
+    /// A generic type declaring no filling.
+    ///
+    /// ```rust example
+    /// Unfilled { value: "x".to_owned() }
+    /// ```
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub struct Unfilled<ValueType> {
+        pub value: ValueType,
+    }
+
+    assert_eq!(
+        Unfilled::<String>::schema_example(),
+        serde_json::json!({ "value": "x" })
+    );
+}
+
+/// A filling written as `String` is exactly what an unfilled parameter falls back to, so the two
+/// items write the same schema down to the byte once their names are read as one — reading the
+/// declaration leaves every item the convention already got right untouched. Names of equal length
+/// so nothing but the name itself differs.
+#[cfg(all(feature = "zod", not(feature = "jsonschema")))]
+#[test]
+fn a_string_filling_and_no_filling_write_the_same_schema() {
+    /// A generic type declaring its filling.
+    ///
+    /// ```rust example
+    /// Written { value: "x".to_owned() }
+    /// ```
+    #[model_schema(default_types(ValueType = String))]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub struct Written<ValueType> {
+        pub value: ValueType,
+    }
+
+    /// A generic type declaring its filling.
+    ///
+    /// ```rust example
+    /// Omitted { value: "x".to_owned() }
+    /// ```
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub struct Omitted<ValueType> {
+        pub value: ValueType,
+    }
+
+    assert_eq!(
+        Written::<String>::zod_schema().replace("Written", "Item"),
+        Omitted::<String>::zod_schema().replace("Omitted", "Item")
     );
 }
 

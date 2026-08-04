@@ -2523,15 +2523,20 @@ fn the_cfg_probe_sees_an_emitted_cfg_attribute() {
 fn struct_schema_example_carries_no_cfg_attribute() {
     let name: syn::Ident = syn::parse_quote!(Report);
     let generics = syn::Generics::default();
-    let tokens =
-        super::item_schema_example_method(Some(&"Report { id: 1 }".to_owned()), &name, &generics)
-            .unwrap();
+    let tokens = super::item_schema_example_method(
+        Some(&"Report { id: 1 }".to_owned()),
+        &name,
+        &generics,
+        &super::ModelSchemaArgs::default(),
+    )
+    .unwrap();
     assert_no_cfg_attribute(&tokens, "item_schema_example_method");
 }
 
 /// The type the example is bound at carries one argument per declared parameter, the way a brand's
 /// already does — a bare ident on a generic item is `E0107` before the example is ever read. A
 /// lifetime and a const are not parameters a filling is chosen for, so neither reaches the list.
+/// With nothing declared, every argument is the `String` fallback.
 #[cfg(feature = "zod")]
 #[test]
 fn struct_schema_example_instantiates_every_type_parameter() {
@@ -2546,11 +2551,71 @@ fn struct_schema_example_instantiates_every_type_parameter() {
         ),
         (syn::parse_quote!(<'a>), "let value : Report ="),
     ] {
-        let rendered = super::item_schema_example_method(Some(&example), &name, &generics)
+        let rendered = super::item_schema_example_method(
+            Some(&example),
+            &name,
+            &generics,
+            &super::ModelSchemaArgs::default(),
+        )
+        .unwrap()
+        .to_string();
+        assert!(rendered.contains(expected), "Got: {rendered}");
+    }
+}
+
+/// Each argument is read off the `default_types` entry naming that parameter, so an item is
+/// annotated at the concrete types its author declared and in the order the parameters were
+/// written. A parameter no entry names keeps the `String` fallback, which is why a partly declared
+/// item mixes the two.
+#[cfg(feature = "zod")]
+#[test]
+fn struct_schema_example_instantiates_each_parameter_at_its_declared_filling() {
+    let name: syn::Ident = syn::parse_quote!(Report);
+    let example = "Report { id: 1 }".to_owned();
+    let generics: syn::Generics = syn::parse_quote!(<A, B>);
+    let count: (syn::Ident, syn::Type) = (syn::parse_quote!(A), syn::parse_quote!(u32));
+    let held: (syn::Ident, syn::Type) = (syn::parse_quote!(B), syn::parse_quote!(Vec<u8>));
+    for (default_types, expected) in [
+        (vec![count.clone()], "let value : Report < u32 , String > ="),
+        (
+            vec![held.clone()],
+            "let value : Report < String , Vec < u8 > > =",
+        ),
+        (
+            vec![held, count],
+            "let value : Report < u32 , Vec < u8 > > =",
+        ),
+    ] {
+        let args = super::ModelSchemaArgs {
+            default_types,
+            ..Default::default()
+        };
+        let rendered = super::item_schema_example_method(Some(&example), &name, &generics, &args)
             .unwrap()
             .to_string();
         assert!(rendered.contains(expected), "Got: {rendered}");
     }
+}
+
+/// A filling written as `String` is exactly what an unfilled parameter falls back to, so an item
+/// declaring one and an item declaring none are annotated with the same tokens — reading the
+/// declaration leaves every item the old convention already got right byte for byte as it was.
+#[cfg(feature = "zod")]
+#[test]
+fn a_string_filling_annotates_the_example_as_no_filling_does() {
+    let name: syn::Ident = syn::parse_quote!(Report);
+    let example = "Report { id: 1 }".to_owned();
+    let generics: syn::Generics = syn::parse_quote!(<A>);
+    let filled = super::ModelSchemaArgs {
+        default_types: vec![(syn::parse_quote!(A), syn::parse_quote!(String))],
+        ..Default::default()
+    };
+    let render = |args: &super::ModelSchemaArgs| {
+        super::item_schema_example_method(Some(&example), &name, &generics, args)
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(render(&filled), render(&super::ModelSchemaArgs::default()));
 }
 
 #[cfg(feature = "jsonschema")]
@@ -2591,7 +2656,12 @@ fn branded_schema_example_carries_no_cfg_attribute() {
         vec!["A".to_owned()],
         vec!["A".to_owned(), "B".to_owned()],
     ] {
-        let tokens = super::build_branded_schema_example(Some(&example), &name, &generic_params);
+        let tokens = super::build_branded_schema_example(
+            Some(&example),
+            &name,
+            &generic_params,
+            &super::ModelSchemaArgs::default(),
+        );
         assert_no_cfg_attribute(&tokens, "build_branded_schema_example");
     }
 }
@@ -2611,10 +2681,39 @@ fn branded_schema_example_instantiates_every_parameter() {
             "let value : DocumentId < String , String > =",
         ),
     ] {
-        let rendered =
-            super::build_branded_schema_example(Some(&example), &name, &generic_params).to_string();
+        let rendered = super::build_branded_schema_example(
+            Some(&example),
+            &name,
+            &generic_params,
+            &super::ModelSchemaArgs::default(),
+        )
+        .to_string();
         assert!(rendered.contains(expected), "Got: {rendered}");
     }
+}
+
+/// A brand reads its declaration through the same seam a declared struct does, so its example is
+/// annotated at the fillings its author wrote rather than at the fallback.
+#[cfg(feature = "zod")]
+#[test]
+fn branded_schema_example_instantiates_each_parameter_at_its_declared_filling() {
+    let name: syn::Ident = syn::parse_quote!(DocumentId);
+    let example = "DocumentId(\"abc\".to_string())".to_owned();
+    let args = super::ModelSchemaArgs {
+        default_types: vec![(syn::parse_quote!(A), syn::parse_quote!(u32))],
+        ..Default::default()
+    };
+    let rendered = super::build_branded_schema_example(
+        Some(&example),
+        &name,
+        &["A".to_owned(), "B".to_owned()],
+        &args,
+    )
+    .to_string();
+    assert!(
+        rendered.contains("let value : DocumentId < u32 , String > ="),
+        "Got: {rendered}"
+    );
 }
 
 #[cfg(feature = "typescript")]
