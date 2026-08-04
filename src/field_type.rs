@@ -239,6 +239,52 @@ impl FieldDef {
         arrayed
     }
 
+    /// The shape this field renders when the values a bound could be spelled against are its
+    /// members rather than the field itself.
+    ///
+    /// A map writes its keys and its values, a tuple writes each of its elements, and every surface
+    /// builds those from the inner field defs — which carry no meta, the field's own sitting on the
+    /// outer def none of them reads. A length, a pattern or a range names one value, and
+    /// `model_schema_prop` has no way to say which member it meant, so a bound written here reaches
+    /// nothing on any surface; the caller turns that into a guard error naming the field.
+    pub const fn composite_shape_name(&self) -> Option<&'static str> {
+        match &self.field_type {
+            FieldDefType::Map(_, _) => Some("a map"),
+            FieldDefType::Tuple(_) => Some("a tuple"),
+            #[cfg(feature = "object_id")]
+            FieldDefType::ObjectId => None,
+            #[cfg(feature = "chrono")]
+            FieldDefType::NaiveDate
+            | FieldDefType::NaiveTime
+            | FieldDefType::NaiveDateTime
+            | FieldDefType::DateTime => None,
+            FieldDefType::SiblingType(_, _)
+            | FieldDefType::Unknown
+            | FieldDefType::StringLiteral(_)
+            | FieldDefType::Boolean
+            | FieldDefType::String
+            | FieldDefType::U8
+            | FieldDefType::U16
+            | FieldDefType::U32
+            | FieldDefType::U64
+            | FieldDefType::I8
+            | FieldDefType::I16
+            | FieldDefType::I32
+            | FieldDefType::I64
+            | FieldDefType::Usize
+            | FieldDefType::Isize
+            | FieldDefType::F32
+            | FieldDefType::F64 => None,
+        }
+    }
+
+    /// Whether a length, a pattern or a range written on this field reaches no surface at all —
+    /// the one question both the refusal and the docs are written from, so neither can come to
+    /// answer it differently from the other.
+    pub const fn constraints_reach_nothing(&self) -> bool {
+        self.fixed_shape_name().is_some() || self.composite_shape_name().is_some()
+    }
+
     #[cfg(feature = "zod")]
     /// Checks if this field contains a reference to the given type name.
     ///
@@ -376,7 +422,8 @@ impl FieldDef {
     /// caller turns that into a guard error naming the field instead of dropping it.
     ///
     /// Only the field's own rendering is asked about. A map or a tuple holding one of these
-    /// describes its members separately, and a bound on the field around them was never theirs.
+    /// describes its members separately, and a bound on the field around them is
+    /// [`Self::composite_shape_name`]'s to answer for.
     pub const fn fixed_shape_name(&self) -> Option<&'static str> {
         match &self.field_type {
             #[cfg(feature = "object_id")]
