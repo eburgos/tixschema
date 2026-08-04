@@ -31,6 +31,11 @@ const KNOWN_KEYS: &[&str] = &[
 ///
 /// ## String constraints
 ///
+/// Each applies to a field that renders a plain string — `String`, `str`, `PathBuf`, `Path`, and
+/// those under any number of `Option`, sequence and transparent wrappers. A type whose schema this
+/// crate writes whole (`ObjectId`, the chrono types) renders no bound and reading one is a compile
+/// error rather than a silent drop.
+///
 /// - `pattern = "regex"` — validates the string matches the regex pattern. Must be a regex all
 ///   three engines read the same way; see [`crate::utils::portable_pattern`] for what that rules
 ///   out and what it rewrites.
@@ -62,7 +67,9 @@ const KNOWN_KEYS: &[&str] = &[
 ///
 /// ## Type overrides
 ///
-/// - `as = Type` — override the TypeScript/Zod type emitted for this field.
+/// - `as = Type` — name the type emitted for this field. The target must be the field's own type
+///   or the value under its wrappers (`as = String` on a `Vec<String>`); any other target is a
+///   compile error. Cannot be written beside `preprocess`.
 /// - `literal = "value"` — emit as a string literal type instead of `string`.
 /// - `ts_optional` — for an `Option<T>` field, emit `field?: T` instead of `field: T | undefined` (TypeScript only; a non-`Option` field is a compile error).
 ///
@@ -93,7 +100,9 @@ const KNOWN_KEYS: &[&str] = &[
 #[derive(Clone, Debug, Default)]
 pub struct ModelSchemaPropMeta {
     pub as_number: bool, // DateTime<Tz>: epoch-number + codegen coercer instead of the native Date default
-    pub as_type: Option<String>, // e.g., "String" from as = String
+    /// The type named by `as`, kept as written so the guard that answers for it can build the field
+    /// the target would render and compare that against the field's own.
+    pub as_type: Option<Type>, // e.g., `String` from as = String
     /// The parser's refusal of the attribute — a key it does not read, or a value it cannot read —
     /// spanned on the tokens that earned it.
     pub attr_rejection: Option<syn::Error>,
@@ -137,8 +146,7 @@ pub fn parse_model_schema_prop_attributes(attrs: &[Attribute]) -> ModelSchemaPro
 /// Reads one `key` or `key = value` of a `model_schema_prop` attribute into `meta`.
 fn parse_prop_key(nested: &ParseNestedMeta, meta: &mut ModelSchemaPropMeta) -> syn::Result<()> {
     if nested.path.is_ident("as") {
-        let ty: Type = nested.value()?.parse()?;
-        meta.as_type = Some(quote::quote!(#ty).to_string());
+        meta.as_type = Some(nested.value()?.parse::<Type>()?);
     } else if nested.path.is_ident("literal") {
         let lit: LitStr = nested.value()?.parse()?;
         meta.literal = Some(lit.value());

@@ -388,6 +388,92 @@ fn untagged_member_reaching_a_map_key_with_no_members_is_refused() {
     }
 }
 
+/// A member's `model_schema_prop` reaches the surfaces exactly as the same field written in a
+/// tagged variant does — the constraint was previously refused by rustc as an attribute that does
+/// not exist, the untagged walk never having read or stripped it.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn untagged_member_carries_its_constraint_to_the_surfaces() {
+    let mut item: syn::ItemEnum = syn::parse_quote! {
+        enum Choice {
+            Named {
+                #[model_schema_prop(minLength = 2, pattern = "^[a-z]+$")]
+                name: String,
+            },
+        }
+    };
+    let (_, zod_parts, _, errors) = collect_untagged_members(&mut item);
+    assert!(errors.is_empty(), "got: {errors:?}");
+    assert!(
+        zod_parts[0].contains("z.string().min(2).check(z.regex(/^[a-z]+$/))"),
+        "got: {}",
+        zod_parts[0]
+    );
+}
+
+/// The attribute is stripped off the member the way [`super::process_field`] strips it off a struct
+/// field: it is this crate's own and inert to every derive, so a copy left on the emitted item is
+/// one rustc reports as an attribute that does not exist.
+#[cfg(feature = "serde")]
+#[test]
+fn untagged_member_prop_attribute_is_stripped_from_the_emitted_item() {
+    let mut item: syn::ItemEnum = syn::parse_quote! {
+        enum Choice {
+            Named {
+                #[model_schema_prop(minLength = 2)]
+                #[serde(rename = "label")]
+                name: String,
+            },
+        }
+    };
+    collect_untagged_members(&mut item);
+    let attrs = &item.variants[0].fields.iter().next().unwrap().attrs;
+    assert!(
+        !attrs
+            .iter()
+            .any(|attr| attr.path().is_ident("model_schema_prop")),
+        "got: {}",
+        quote::quote!(#(#attrs)*)
+    );
+    assert!(
+        attrs.iter().any(|attr| attr.path().is_ident("serde")),
+        "the serde attribute must survive the strip"
+    );
+}
+
+/// The whole `model_schema_prop` guard chain reaches this position too, so a member's misspelled
+/// key is named where it was written instead of emitting an unconstrained member.
+#[cfg(feature = "serde")]
+#[test]
+fn untagged_member_prop_guards_apply() {
+    for (member, needle) in [
+        (
+            quote::quote! { #[model_schema_prop(patern = "^[a-z]+$")] name: String },
+            "patern",
+        ),
+        (
+            quote::quote! { #[model_schema_prop(ts_optional)] name: String },
+            "requires an Option<T> field",
+        ),
+        (
+            quote::quote! { #[model_schema_prop(as = String)] name: u64 },
+            "as = String",
+        ),
+    ] {
+        let errors = untagged_guard_errors(syn::parse_quote! {
+            enum Choice {
+                Named { #member },
+            }
+        });
+        assert_eq!(errors.len(), 1, "for {member}: {errors:?}");
+        assert!(
+            errors[0].contains(needle),
+            "{needle} missing for {member}: {}",
+            errors[0]
+        );
+    }
+}
+
 /// The guard turns away only what the registry proves has no members: a member keyed by a plain
 /// enum, or by a `String`, keeps the variant it had.
 #[cfg(all(
@@ -1272,6 +1358,181 @@ fn a_refused_key_and_an_unparseable_pattern_are_both_reported() {
         "got: {}",
         errors[1]
     );
+}
+
+/// The types whose schema this crate writes whole read no bound off the meta, on any surface, so a
+/// bound written on one is refused where it is written instead of accepted and dropped.
+#[cfg(feature = "chrono")]
+#[test]
+fn a_bound_on_a_chrono_field_is_refused() {
+    for (constraint, key) in [
+        (quote::quote! { minLength = 30 }, "minLength"),
+        (quote::quote! { maxLength = 30 }, "maxLength"),
+        (quote::quote! { pattern = "^[0-9-]+$" }, "pattern"),
+        (quote::quote! { minimum = 5 }, "minimum"),
+        (quote::quote! { maximum = 5 }, "maximum"),
+    ] {
+        for field_type in [
+            quote::quote! { chrono::NaiveDate },
+            quote::quote! { Option<chrono::NaiveTime> },
+            quote::quote! { Vec<chrono::NaiveDateTime> },
+            quote::quote! { chrono::DateTime<chrono::Utc> },
+        ] {
+            let errors = field_prop_guard_errors(&syn::parse_quote! {
+                struct Report {
+                    #[model_schema_prop(#constraint)]
+                    when: #field_type,
+                }
+            });
+            assert_eq!(errors.len(), 1, "for {key} on {field_type}: {errors:?}");
+            for needle in ["compile_error", "field `when`", key, "chrono::"] {
+                assert!(
+                    errors[0].contains(needle),
+                    "{needle} missing for {key} on {field_type}: {}",
+                    errors[0]
+                );
+            }
+        }
+    }
+}
+
+/// An `ObjectId` writes an object, not the string a length or a pattern measures, so it answers as
+/// the chrono types do.
+#[cfg(feature = "object_id")]
+#[test]
+fn a_bound_on_an_object_id_field_is_refused() {
+    let errors = field_prop_guard_errors(&syn::parse_quote! {
+        struct Report {
+            #[model_schema_prop(minLength = 30, pattern = "^[a-f]+$")]
+            id: ObjectId,
+        }
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    for needle in [
+        "compile_error",
+        "field `id`",
+        "minLength",
+        "pattern",
+        "ObjectId",
+    ] {
+        assert!(
+            errors[0].contains(needle),
+            "{needle} missing: {}",
+            errors[0]
+        );
+    }
+}
+
+/// A chrono or `ObjectId` field carrying no bound must not acquire one of these errors, and neither
+/// must the keys that name the type rather than constrain the value.
+#[cfg(all(feature = "chrono", feature = "object_id"))]
+#[test]
+fn a_fixed_shape_field_without_a_bound_is_left_alone() {
+    for field in [
+        quote::quote! { when: chrono::NaiveDate },
+        quote::quote! { #[model_schema_prop(as_number)] when: chrono::DateTime<chrono::Utc> },
+        quote::quote! { #[model_schema_prop(preprocess = ["trim"])] when: chrono::NaiveDate },
+        quote::quote! { id: ObjectId },
+    ] {
+        let errors = field_prop_guard_errors(&syn::parse_quote! {
+            struct Report {
+                #field
+            }
+        });
+        assert!(errors.is_empty(), "for {field}: {errors:?}");
+    }
+}
+
+/// `as` names the type the field already renders or it names nothing the expansion can honor: the
+/// surfaces are written from the declared type, and no second reading of the wire exists here.
+#[test]
+fn an_as_naming_another_type_is_refused() {
+    let errors = field_prop_guard_errors(&syn::parse_quote! {
+        struct Report {
+            #[model_schema_prop(as = String)]
+            id: u64,
+        }
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    for needle in ["compile_error", "field `id`", "as = String", "u64"] {
+        assert!(
+            errors[0].contains(needle),
+            "{needle} missing: {}",
+            errors[0]
+        );
+    }
+}
+
+/// The target may name the field itself or the value under its wrappers — the two readings the
+/// shipped uses of the key are written in — and neither is an override of anything.
+#[test]
+fn an_as_naming_the_rendered_type_is_accepted() {
+    for field in [
+        quote::quote! { #[model_schema_prop(as = String)] name: String },
+        quote::quote! { #[model_schema_prop(as = String)] name: Option<String> },
+        quote::quote! { #[model_schema_prop(as = String)] name: Vec<String> },
+        quote::quote! { #[model_schema_prop(as = Vec<String>)] name: Vec<String> },
+        quote::quote! { #[model_schema_prop(as = Inner)] name: Option<Inner> },
+        quote::quote! { #[model_schema_prop(as = String)] name: PathBuf },
+    ] {
+        let errors = field_prop_guard_errors(&syn::parse_quote! {
+            struct Report {
+                #field
+            }
+        });
+        assert!(errors.is_empty(), "for {field}: {errors:?}");
+    }
+}
+
+/// The three misuses that aborted expansion with `custom attribute panicked`, spanned on the field
+/// that carries them and carrying the message their validator already spelled.
+#[test]
+fn the_field_prop_misuses_leave_by_the_guard_channel() {
+    for (field, needle) in [
+        (
+            quote::quote! { #[model_schema_prop(ts_optional)] name: String },
+            "requires an Option<T> field",
+        ),
+        (
+            quote::quote! { #[model_schema_prop(as_number)] name: u32 },
+            "requires a chrono DateTime<Tz> field",
+        ),
+        (
+            quote::quote! { #[model_schema_prop(as = String, preprocess = ["trim"])] name: String },
+            "cannot be written on the same field",
+        ),
+    ] {
+        let errors = field_prop_guard_errors(&syn::parse_quote! {
+            struct Report {
+                #field
+            }
+        });
+        assert_eq!(errors.len(), 1, "for {field}: {errors:?}");
+        for expected in ["compile_error", "field `name`", needle] {
+            assert!(
+                errors[0].contains(expected),
+                "{expected} missing for {field}: {}",
+                errors[0]
+            );
+        }
+    }
+}
+
+/// The valid spellings of the same three keys stay valid.
+#[test]
+fn the_field_prop_flags_on_the_shapes_they_fit_are_accepted() {
+    for field in [
+        quote::quote! { #[model_schema_prop(ts_optional)] name: Option<String> },
+        quote::quote! { #[model_schema_prop(preprocess = ["trim"])] name: String },
+        quote::quote! { #[model_schema_prop(as = String, minLength = 1)] name: String },
+    ] {
+        let errors = field_prop_guard_errors(&syn::parse_quote! {
+            struct Report {
+                #field
+            }
+        });
+        assert!(errors.is_empty(), "for {field}: {errors:?}");
+    }
 }
 
 #[cfg(feature = "serde")]

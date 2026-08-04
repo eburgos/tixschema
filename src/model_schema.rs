@@ -4596,8 +4596,14 @@ fn field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
 ///
 /// This path builds its field defs directly rather than through [`process_field`], so it runs the
 /// field guards itself. A member renders exactly as a struct field of the same written type does —
-/// a named `Option` in the absent form, a map from its key's members — so each guard it escapes
-/// would be a rendering this position alone is allowed to write.
+/// a named `Option` in the absent form, a map from its key's members, the constraint its
+/// `model_schema_prop` carries — so each guard it escapes would be a rendering this position alone
+/// is allowed to write.
+///
+/// The `model_schema_prop` attribute is read off each member and then stripped, as
+/// [`process_field`] strips it: it is this crate's own and inert to every derive, so a copy left on
+/// the emitted item is one rustc reports as an attribute that does not exist, pointing at the
+/// user's line with a diagnostic naming the wrong macro.
 #[cfg(feature = "serde")]
 fn collect_untagged_members(item_enum: &mut syn::ItemEnum) -> UntaggedMemberData {
     let enum_type_name = item_enum.ident.to_string();
@@ -4617,27 +4623,30 @@ fn collect_untagged_members(item_enum: &mut syn::ItemEnum) -> UntaggedMemberData
                 .as_ref()
                 .map(ToString::to_string)
                 .unwrap_or_default();
+            let prop_meta = parse_model_schema_prop_attributes(&field.attrs);
+            field
+                .attrs
+                .retain(|attr| !attr.path().is_ident("model_schema_prop"));
+
             let mut field_def = get_field_def(&field_name, &field.ty, "");
-            if let Err(err) = check_os_string_field(field, &field_def, &field_label(&field_name)) {
-                guard_errors.push(err.to_compile_error());
-            }
-            #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-            if let Err(err) = check_map_key(field, &field_def, &field_label(&field_name)) {
-                guard_errors.push(err.to_compile_error());
-            }
             let serde_field_meta = parse_serde_field_attributes(&field.attrs);
-            if let Some(rejection) = serde_field_meta.cfg_attr_rejection.as_ref() {
-                guard_errors.push(cfg_attr_guard_error(rejection, &field_label(&field_name)));
-            } else if let Err(err) = check_optional_field_serialization(
+            let serde_guard_errors = field_guard_errors(
                 field,
+                &field_name,
                 field_def.is_optional(),
                 &serde_field_meta,
-            ) {
-                guard_errors.push(err.to_compile_error());
-            } else {
-                // No guard violated by this field.
-            }
+                None,
+            );
+            guard_errors.extend(collect_field_guard_errors(
+                field,
+                &field_def,
+                &field_name,
+                &prop_meta,
+                serde_guard_errors,
+            ));
+
             field_def.resolve_self_references(&enum_type_name);
+            apply_model_schema_prop_meta(&mut field_def, prop_meta, &field_name);
             field_defs.push(field_def);
         }
 
@@ -6956,13 +6965,11 @@ fn field_guard_errors(
 }
 
 /// Every guard error the field violates: the two the written type earns — the `OsString` guard and
-/// the map-key guard, neither of which any attribute can hide — then what the `model_schema_prop`
-/// parser refused, then the unparseable `pattern`, then the serde-side guards when any fired.
+/// the map-key guard, neither of which any attribute can hide — then everything the
+/// `model_schema_prop` attribute earned, then the serde-side guards when any fired.
 ///
-/// Both `model_schema_prop` guards stand under every feature subset: an unread key and an
-/// unparseable `pattern` alike reach the Rust validator, the Zod literal and the JSON schema, and
-/// no toggle makes either one mean anything. The map-key guard stands under every subset that
-/// emits a schema at all, which is the same set the registry it reads is populated under.
+/// The map-key guard stands under every subset that emits a schema at all, which is the same set
+/// the registry it reads is populated under.
 fn collect_field_guard_errors(
     field: &Field,
     field_def: &FieldDef,
@@ -6984,20 +6991,183 @@ fn collect_field_guard_errors(
         .map(|err| err.to_compile_error())
         .into_iter()
         .chain(map_key_error)
-        .chain(
-            prop_meta
-                .attr_rejection
-                .as_ref()
-                .map(|rejection| attr_guard_error(rejection, &label)),
-        )
+        .chain(model_schema_prop_guard_errors(
+            field, field_def, &label, prop_meta,
+        ))
+        .chain(serde_guard_errors)
+        .collect()
+}
+
+/// Every guard the field's `model_schema_prop` attribute earns: what the parser refused, then an
+/// unparseable `pattern`, then a bound written where the type renders none, an `as` naming a type
+/// the field is not written as, and the three misuses the flag validators answer for.
+///
+/// All of them stand under every feature subset. The attribute is read in one place and acted on
+/// nowhere else, so a key that stops at any of these reaches no emitter under any toggle — the
+/// field would be emitted as though the key had been left off, which is the loss each of these
+/// exists to report instead of taking.
+fn model_schema_prop_guard_errors(
+    field: &Field,
+    field_def: &FieldDef,
+    label: &str,
+    prop_meta: &ModelSchemaPropMeta,
+) -> Vec<proc_macro2::TokenStream> {
+    let refusals = [
+        check_fixed_shape_constraints(field, field_def, prop_meta, label).err(),
+        check_as_type_override(field, field_def, prop_meta, label).err(),
+        check_as_preprocess_conflict(field, prop_meta, label).err(),
+        flag_guard_error(
+            field,
+            label,
+            validate_ts_optional_flag(field_def.is_optional(), prop_meta.ts_optional),
+        ),
+        flag_guard_error(
+            field,
+            label,
+            validate_as_number_flag(&field_def.field_type, prop_meta.as_number),
+        ),
+    ];
+
+    prop_meta
+        .attr_rejection
+        .as_ref()
+        .map(|rejection| attr_guard_error(rejection, label))
+        .into_iter()
         .chain(
             prop_meta
                 .pattern_rejection
                 .as_ref()
-                .map(|rejection| pattern_guard_error(rejection, &label)),
+                .map(|rejection| pattern_guard_error(rejection, label)),
         )
-        .chain(serde_guard_errors)
+        .chain(
+            refusals
+                .into_iter()
+                .flatten()
+                .map(|err| err.to_compile_error()),
+        )
         .collect()
+}
+
+/// Turns a flag validator's refusal into a spanned error at the field that carries the flag.
+///
+/// The validator keeps its message: it is the one place the misuse is spelled, and a caller that
+/// re-spells it maintains the same sentence twice.
+fn flag_guard_error(field: &Field, label: &str, result: Result<(), String>) -> Option<syn::Error> {
+    result
+        .err()
+        .map(|message| syn::Error::new_spanned(field, format!("model_schema: {label}: {message}")))
+}
+
+/// The bound keys a `model_schema_prop` meta carries, named as they were written.
+///
+/// A guard that answers for where a bound may sit names the ones it found, so the author is pointed
+/// at the keys to remove rather than at the attribute as a whole.
+fn written_constraint_keys(prop_meta: &ModelSchemaPropMeta) -> Vec<&'static str> {
+    [
+        ("minLength", prop_meta.min_length.is_some()),
+        ("maxLength", prop_meta.max_length.is_some()),
+        ("pattern", prop_meta.pattern.is_some()),
+        ("minimum", prop_meta.minimum.is_some()),
+        ("maximum", prop_meta.maximum.is_some()),
+    ]
+    .into_iter()
+    .filter_map(|(key, written)| written.then_some(key))
+    .collect()
+}
+
+/// Rejects a length, pattern or range written on a field whose schema this crate writes whole.
+///
+/// The types [`FieldDef::fixed_shape_name`] answers for render a shape fixed in this crate rather
+/// than the plain string or number a bound is spelled against, and every surface writes that shape
+/// without ever reading the meta — so the bound is accepted at expansion and reaches nothing, which
+/// leaves the author holding a contract that says the value is checked when nothing checks it.
+fn check_fixed_shape_constraints(
+    field: &Field,
+    field_def: &FieldDef,
+    prop_meta: &ModelSchemaPropMeta,
+    label: &str,
+) -> Result<(), syn::Error> {
+    let Some(name) = field_def.fixed_shape_name() else {
+        return Ok(());
+    };
+    let keys = written_constraint_keys(prop_meta);
+    if keys.is_empty() {
+        return Ok(());
+    }
+    Err(syn::Error::new_spanned(
+        field,
+        format!(
+            "model_schema: {label}: `{}` cannot apply to `{name}` — this crate writes that type's \
+             schema whole, not as the plain string or number a bound is spelled against, and no \
+             surface reads a bound beside it: the constraint would reach neither Zod, nor the JSON \
+             schema, nor the generated validator. Drop it, or carry the value in a `String` field \
+             the bound can measure.",
+            keys.join("`, `")
+        ),
+    ))
+}
+
+/// Rejects an `as = Type` naming anything but the type the field already renders.
+///
+/// Every surface is written from the field's declared type because that is the type serde reads and
+/// writes, and the expansion has no second source for the wire: a `serialize_with` names a function
+/// whose output type a proc macro cannot see. So a target that renders differently asks the schemas
+/// to describe a payload nothing produces, while one that renders the same is already what every
+/// surface emits — the only reading of the key the expansion can stand behind.
+///
+/// The target may name the field itself or the value under its wrappers, an `Option<T>` and a
+/// `Vec<T>` both rendering the `T` the parser collapsed them onto.
+fn check_as_type_override(
+    field: &Field,
+    field_def: &FieldDef,
+    prop_meta: &ModelSchemaPropMeta,
+    label: &str,
+) -> Result<(), syn::Error> {
+    let Some(as_type) = prop_meta.as_type.as_ref() else {
+        return Ok(());
+    };
+    let target = get_field_def(&field_def.name, as_type, "");
+    if *field_def == target || field_def.value_under_wrappers() == target {
+        return Ok(());
+    }
+    let written = quote!(#as_type).to_string();
+    let field_type = &field.ty;
+    let declared = quote!(#field_type).to_string();
+    Err(syn::Error::new_spanned(
+        field,
+        format!(
+            "model_schema: {label}: `as = {written}` names a type the field does not render — it is \
+             written as `{declared}`. The difference cannot be honored: every surface is written \
+             from the declared type, which is the one serde reads and writes, and a \
+             `serialize_with` names a function whose output the expansion cannot see, so emitting \
+             `{written}` here would describe a payload serde never writes. Declare the field as the \
+             type the wire carries, or drop the `as`."
+        ),
+    ))
+}
+
+/// Rejects `as` and `preprocess` written on the same field.
+///
+/// `as` names the type the surfaces render and `preprocess` wraps the schema that rendering
+/// produced; this crate defines no order between them, so a field carrying both says nothing
+/// either surface can act on.
+fn check_as_preprocess_conflict(
+    field: &Field,
+    prop_meta: &ModelSchemaPropMeta,
+    label: &str,
+) -> Result<(), syn::Error> {
+    if prop_meta.as_type.is_none() || prop_meta.preprocess.is_empty() {
+        return Ok(());
+    }
+    Err(syn::Error::new_spanned(
+        field,
+        format!(
+            "model_schema: {label}: `as` and `preprocess` cannot be written on the same field — \
+             `as` names the type the surfaces render and `preprocess` wraps the schema that \
+             rendering produced, and this crate defines no order between the two. Write one or the \
+             other."
+        ),
+    ))
 }
 
 /// Rejects a field that reaches an `OsString`/`OsStr`, at any depth.
@@ -7057,12 +7227,6 @@ fn process_field(
 
     // Parse model_schema_prop attributes before filtering them out
     let model_schema_prop_meta = parse_model_schema_prop_attributes(&field.attrs);
-
-    // Validate: cannot use both `as` and `preprocess` on the same field
-    assert!(
-        model_schema_prop_meta.as_type.is_none() || model_schema_prop_meta.preprocess.is_empty(),
-        "Cannot use both `as` and `preprocess` on the same field in model_schema_prop"
-    );
 
     // Filter out model_schema_prop attributes, and optionally inject serde deserialize_with
     for attr in &field.attrs {
@@ -7124,48 +7288,7 @@ fn process_field(
         serde_guard_errors,
     );
 
-    field_def.model_schema_prop_meta = (model_schema_prop_meta.as_type.is_some()
-        || model_schema_prop_meta.literal.is_some()
-        || model_schema_prop_meta.min_length.is_some()
-        || model_schema_prop_meta.max_length.is_some()
-        || model_schema_prop_meta.pattern.is_some()
-        || model_schema_prop_meta.minimum.is_some()
-        || model_schema_prop_meta.maximum.is_some()
-        || model_schema_prop_meta.ts_optional
-        || model_schema_prop_meta.as_number
-        || !model_schema_prop_meta.preprocess.is_empty())
-    .then_some(model_schema_prop_meta);
-
-    let ts_optional_flag = field_def
-        .model_schema_prop_meta
-        .as_ref()
-        .is_some_and(|m| m.ts_optional);
-    // A failed assert here surfaces as a compile error at macro-expansion time.
-    assert!(
-        validate_ts_optional_flag(field_def.is_optional(), ts_optional_flag).is_ok(),
-        "#[model_schema_prop(ts_optional)] requires an Option<T> field on field `{final_name}`"
-    );
-
-    let as_number_flag = field_def
-        .model_schema_prop_meta
-        .as_ref()
-        .is_some_and(|m| m.as_number);
-    assert!(
-        validate_as_number_flag(&field_def.field_type, as_number_flag).is_ok(),
-        "#[model_schema_prop(as_number)] requires a chrono DateTime<Tz> field on field `{final_name}`"
-    );
-
-    // Apply type overrides based on model_schema_prop attributes
-    if let Some(meta) = &field_def.model_schema_prop_meta
-        && let Some(literal) = &meta.literal
-    {
-        // If literal is specified, override the field type to StringLiteral
-        field_def.field_type = FieldDefType::StringLiteral(literal.clone());
-    }
-    // TODO: Handle `as` parameter for type overrides in future implementation
-
-    // Update field docs to include length/range constraint information
-    apply_constraint_docs(&mut field_def, &final_name);
+    apply_model_schema_prop_meta(&mut field_def, model_schema_prop_meta, &final_name);
 
     (field_def, validation_fn, validate_body, guard_errors)
 }
@@ -7292,6 +7415,42 @@ fn generate_field_validation(
         Some(validation_code.validate_body),
         None,
     )
+}
+
+/// Hands the field the `model_schema_prop` metadata the surfaces read it back off, and applies the
+/// one key that names the type rather than constrains it.
+///
+/// A meta carrying nothing is not attached at all: the surfaces ask whether the field has one
+/// before reading it, so an empty meta and no meta would have to render the same, and only one of
+/// the two can be checked. `literal` is applied here rather than in a renderer because all three
+/// surfaces render the literal type, not the written one.
+///
+/// Every path that builds a field def runs this, so a member of an untagged variant carries its
+/// attribute exactly as the same field written in a tagged one does.
+fn apply_model_schema_prop_meta(
+    field_def: &mut FieldDef,
+    prop_meta: ModelSchemaPropMeta,
+    final_name: &str,
+) {
+    field_def.model_schema_prop_meta = (prop_meta.as_type.is_some()
+        || prop_meta.literal.is_some()
+        || prop_meta.min_length.is_some()
+        || prop_meta.max_length.is_some()
+        || prop_meta.pattern.is_some()
+        || prop_meta.minimum.is_some()
+        || prop_meta.maximum.is_some()
+        || prop_meta.ts_optional
+        || prop_meta.as_number
+        || !prop_meta.preprocess.is_empty())
+    .then_some(prop_meta);
+
+    if let Some(meta) = &field_def.model_schema_prop_meta
+        && let Some(literal) = &meta.literal
+    {
+        field_def.field_type = FieldDefType::StringLiteral(literal.clone());
+    }
+
+    apply_constraint_docs(field_def, final_name);
 }
 
 /// Appends length/range constraint information to a field's generated docs.

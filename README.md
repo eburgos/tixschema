@@ -551,6 +551,8 @@ z.union([z.strictObject({ x: z.string(), }), z.strictObject({ y: z.number().int(
 
 Untagged enums compose with `#[serde(flatten)]`: a flattened variant carrying `Vec<DateValue>` renders `sampleValues: z.array(DateValue$Schema)` (TypeScript `Array<DateValue>`), and the JSON-schema `items` for that field is the `DateValue` `anyOf`.
 
+A member of an untagged variant carries `#[model_schema_prop(...)]` exactly as the same field written in a tagged variant does: the constraint reaches the Zod schema and the JSON Schema, and every guard the attribute earns is reported at the member. The one difference is the Rust side -- an untagged enum generates no per-field validators, so a constrained member has no `validate()` contribution and no deserialization check.
+
 **Unsupported variants:** unit variants and multi-field tuple variants in an untagged enum produce a compile-time error.
 
 ### Nested Types
@@ -968,6 +970,12 @@ Generated JSON Schema for `username`: `{ "type": "string", "minLength": 3, "maxL
 
 The TypeScript type is unchanged -- still just `string`.
 
+A type whose schema this crate writes whole carries none of the five constraints, and writing one on
+such a field is a compile error naming the keys and the type: `ObjectId` writes a `{"$oid": "..."}`
+object rather than a string, and the chrono types (`NaiveDate`, `NaiveTime`, `NaiveDateTime`,
+`DateTime<Tz>`) write their own ISO spellings, which no surface reads a length, a pattern or a range
+beside. Carry the value in a `String` field if it needs one.
+
 A `PathBuf` field carries the same three constraints, as does the `Path` borrow behind a wrapper (`Box<Path>`, `Cow<'_, Path>`, `Arc<Path>`, `Rc<Path>`): serde writes a path as a JSON string, which is what the three surfaces render a constrained string for. The checks measure that string -- the path's `to_string_lossy` rendering, which is the exact wire value for every path serde can write, a path that is not UTF-8 being one serde refuses to serialize at all.
 
 ### Numeric Constraints (minimum, maximum)
@@ -1111,9 +1119,11 @@ Both approaches produce identical TypeScript and Zod output. The single-value en
 - **Pattern matching** -- match on `DocumentLiteralValue::Document` instead of checking string equality
 - **Naming convention**: Use the `<Something>LiteralValue` naming pattern (e.g., `DocumentLiteralValue`)
 
-### Type Overrides (`as`)
+### Type Names (`as`)
 
-Use `as` to override the TypeScript/Zod type for a field, keeping the Rust type unchanged:
+Use `as` to name the type a field renders. The target must be the type the field already renders --
+either the field's own type, or the value under its wrappers, so `as = String` is written on a
+`String`, an `Option<String>` and a `Vec<String>` alike:
 
 ```rust
 #[model_schema()]
@@ -1122,9 +1132,17 @@ pub struct ApiConfig {
     pub id: String,
     #[model_schema_prop(as = String)]
     pub metric_type: String,
+    #[model_schema_prop(as = String, minLength = 1)]
+    pub tags: Vec<String>,
     pub enabled: bool,
 }
 ```
+
+Naming any other type is a compile error. The key cannot override the emitted type: all three
+surfaces are written from the field's declared type because that is the type serde reads and writes,
+and a `serialize_with` names a function whose output the expansion cannot see -- so a target that
+rendered differently would describe a payload serde never produces. `as` also cannot be written
+beside `preprocess`; the two have no defined order.
 
 ### Zod Preprocessing
 
@@ -1148,7 +1166,7 @@ pub struct Event {
 
 By default an `Option<T>` field renders as a required key carrying `| undefined` (`field: T | undefined`). Add the bare `ts_optional` flag to render it as an optional key instead (`field?: T`).
 
-This is a TypeScript-only knob -- the Zod schema and JSON Schema are unchanged (the field is already optional in both). The flag is only valid on `Option<T>` fields; applying it to a non-`Option` field is a compile error. It composes with `as = Type`.
+This is a TypeScript-only knob -- the Zod schema and JSON Schema are unchanged (the field is already optional in both). The flag is only valid on `Option<T>` fields; applying it to a non-`Option` field is a compile error. It composes with `as = Type`, which names the type the field already renders.
 
 ```rust
 #[model_schema()]
