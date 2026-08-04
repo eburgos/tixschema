@@ -6,6 +6,7 @@
 //! and the `Json` suffix stripped off a declared ident. Both are covered here, alongside the
 //! un-suffixed un-renamed items whose output this must leave exactly where it was.
 
+#[cfg(any(feature = "typescript", feature = "zod"))]
 #[cfg(test)]
 #[path = "item_description_tests/tests.rs"]
 mod tests;

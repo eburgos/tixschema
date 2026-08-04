@@ -1,18 +1,21 @@
 use serde::{Deserialize, Serialize};
 use tixschema::model_schema;
 
+#[cfg(feature = "typescript")]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct PlainStruct {
     pub label: String,
 }
 
+#[cfg(feature = "typescript")]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SuffixedStructJson {
     pub label: String,
 }
 
+#[cfg(feature = "typescript")]
 #[model_schema(name = "RenamedStruct")]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct StructUnderRustName {
@@ -20,24 +23,29 @@ pub struct StructUnderRustName {
 }
 
 /// A documented struct.
+#[cfg(feature = "typescript")]
 #[model_schema(name = "RenamedDocStruct")]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct DocStructUnderRustName {
     pub label: String,
 }
 
+#[cfg(feature = "typescript")]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct PlainTuple(pub String, pub u32);
 
+#[cfg(feature = "typescript")]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SuffixedTupleJson(pub String, pub u32);
 
+#[cfg(feature = "typescript")]
 #[model_schema(name = "RenamedTuple")]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TupleUnderRustName(pub String, pub u32);
 
+#[cfg(any(feature = "typescript", feature = "zod"))]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 pub enum PlainSlot {
@@ -45,6 +53,7 @@ pub enum PlainSlot {
     Secondary,
 }
 
+#[cfg(any(feature = "typescript", feature = "zod"))]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 pub enum SuffixedSlotJson {
@@ -52,6 +61,7 @@ pub enum SuffixedSlotJson {
     Secondary,
 }
 
+#[cfg(any(feature = "typescript", feature = "zod"))]
 #[model_schema(name = "RenamedSlot")]
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 pub enum SlotUnderRustName {
@@ -59,6 +69,7 @@ pub enum SlotUnderRustName {
     Secondary,
 }
 
+#[cfg(feature = "typescript")]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug)]
 pub enum PlainShape {
@@ -66,6 +77,7 @@ pub enum PlainShape {
     Unit,
 }
 
+#[cfg(feature = "typescript")]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug)]
 pub enum SuffixedShapeJson {
@@ -73,6 +85,7 @@ pub enum SuffixedShapeJson {
     Unit,
 }
 
+#[cfg(feature = "typescript")]
 #[model_schema(name = "RenamedShape")]
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ShapeUnderRustName {
@@ -80,6 +93,7 @@ pub enum ShapeUnderRustName {
     Unit,
 }
 
+#[cfg(feature = "typescript")]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "kind", content = "payload")]
@@ -88,6 +102,7 @@ pub enum PlainAdjacent {
     Unit,
 }
 
+#[cfg(feature = "typescript")]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "kind", content = "payload")]
@@ -96,6 +111,7 @@ pub enum SuffixedAdjacentJson {
     Unit,
 }
 
+#[cfg(feature = "typescript")]
 #[model_schema(name = "RenamedAdjacent")]
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "kind", content = "payload")]
@@ -104,6 +120,7 @@ pub enum AdjacentUnderRustName {
     Unit,
 }
 
+#[cfg(feature = "typescript")]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(untagged)]
@@ -112,6 +129,7 @@ pub enum PlainEither {
     Label(String),
 }
 
+#[cfg(feature = "typescript")]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(untagged)]
@@ -120,6 +138,7 @@ pub enum SuffixedEitherJson {
     Label(String),
 }
 
+#[cfg(feature = "typescript")]
 #[model_schema(name = "RenamedEither")]
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(untagged)]
@@ -128,16 +147,19 @@ pub enum EitherUnderRustName {
     Label(String),
 }
 
+#[cfg(feature = "zod")]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(transparent)]
 pub struct PlainBrand(pub String);
 
+#[cfg(feature = "zod")]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(transparent)]
 pub struct SuffixedBrandJson(pub String);
 
+#[cfg(feature = "zod")]
 #[model_schema(name = "RenamedBrand")]
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(transparent)]
