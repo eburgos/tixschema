@@ -84,7 +84,7 @@ use crate::features::model_schema_prop::{ModelSchemaPropMeta, parse_model_schema
 use crate::features::jsonschema::{
     MergedSource, SchemaParameter,
     generate_plain_enum_json_schema_method as generate_plain_enum_json_schema_method_impl,
-    generate_struct_json_schema_method as generate_struct_json_schema_method_impl,
+    generate_struct_json_schema_method as generate_struct_json_schema_method_impl, in_flight_type,
     json_schema_methods,
 };
 #[cfg(feature = "jsonschema")]
@@ -1921,16 +1921,19 @@ fn refused_item_schema_module(ident: &syn::Ident) -> proc_macro2::TokenStream {
     let refusal = format!("`{ident}`: refused by `#[model_schema()]`, so it describes nothing");
 
     #[cfg(feature = "jsonschema")]
-    let json_schema_methods = quote! {
-        pub fn json_schema() -> serde_json::Value {
-            panic!(#refusal)
-        }
+    let json_schema_methods = {
+        let in_flight_type = in_flight_type();
+        quote! {
+            pub fn json_schema() -> serde_json::Value {
+                panic!(#refusal)
+            }
 
-        pub fn json_schema_within(
-            _in_flight: &mut Vec<&'static str>,
-            _hoisted_defs: &mut serde_json::Map<String, serde_json::Value>,
-        ) -> serde_json::Value {
-            panic!(#refusal)
+            pub fn json_schema_within(
+                _in_flight: &mut #in_flight_type,
+                _hoisted_defs: &mut serde_json::Map<String, serde_json::Value>,
+            ) -> serde_json::Value {
+                panic!(#refusal)
+            }
         }
     };
     #[cfg(not(feature = "jsonschema"))]
@@ -11119,20 +11122,31 @@ fn flatten_merged_sources(flattened_fields: &[FieldDef]) -> Vec<MergedSource> {
 /// An `Option` around it travels too. What it wraps says which members the value contributes, and
 /// the `Option` says whether it contributes them at all — the merge owes the object both answers,
 /// and nothing below this point can still see the wrapper.
+///
+/// A parameter contributes the document its filling describes as, read through the one binding
+/// every other position holding that parameter reads it through — the merge expands whatever it is
+/// handed, so an object filling's members join the base exactly as a named source's do. Whether a
+/// filling is an object at all is the merge's to answer and not the declaration's: which type fills
+/// a parameter is the reference site's to name, so the declaration cannot know it, and the merge is
+/// where it finally is known.
 #[cfg(feature = "jsonschema")]
 fn flatten_merged_source(fld: &FieldDef) -> MergedSource {
     if let FieldDefType::SiblingType(name, arguments) = &fld.field_type {
-        MergedSource {
+        return MergedSource {
             label: name.clone(),
             optional: fld.is_optional(),
             value: sibling_json_schema_value(name, arguments, fld.type_span),
-        }
+        };
+    }
+    let value = if let FieldDefType::TypeParam(parameter) = &fld.field_type {
+        json_argument_value(parameter)
     } else {
-        MergedSource {
-            label: fld.name.clone(),
-            optional: fld.is_optional(),
-            value: quote! { serde_json::json!({ "type": "object" }) },
-        }
+        quote! { serde_json::json!({ "type": "object" }) }
+    };
+    MergedSource {
+        label: fld.name.clone(),
+        optional: fld.is_optional(),
+        value,
     }
 }
 

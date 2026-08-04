@@ -8579,3 +8579,41 @@ fn a_word_boundary_pattern_keeps_its_regex() {
          return Err (format ! (\"'{}' does not match pattern '{}'\" , \"field\" , \"\\\\b\")) ; } } Ok (()) } "
     );
 }
+
+/// A flattened source that is one of the item's own parameters contributes the document its
+/// filling describes as, read through the one binding every other position holding that parameter
+/// reads it through — not the placeholder that stands for a value the expansion cannot name, which
+/// carries no member and multiplies nothing into the object being written.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_flattened_type_parameter_is_merged_at_the_document_its_filling_binds() {
+    let ty: syn::Type = syn::parse_str("HeldType").unwrap();
+    let mut held = super::get_field_def("held", &ty, "");
+    held.erase_type_parameters(&["HeldType".to_owned()]);
+
+    let source = super::flatten_merged_source(&held);
+
+    assert_eq!(source.label, "held");
+    assert_eq!(
+        source.value.to_string(),
+        "_arg_held_type . clone ()",
+        "the placeholder still stands where the filling belongs"
+    );
+}
+
+/// A flatten source the expansion can name neither as a sibling nor as a parameter has no document
+/// to reach for, and keeps the placeholder it has always contributed.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_flatten_source_with_no_name_of_its_own_keeps_the_placeholder() {
+    let ty: syn::Type = syn::parse_str("serde_json::Value").unwrap();
+    let held = super::get_field_def("held", &ty, "");
+
+    let source = super::flatten_merged_source(&held);
+
+    assert_eq!(source.label, "held");
+    assert_eq!(
+        source.value.to_string(),
+        "serde_json :: json ! ({ \"type\" : \"object\" })"
+    );
+}

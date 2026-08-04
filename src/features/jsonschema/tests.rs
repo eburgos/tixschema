@@ -205,3 +205,54 @@ fn test_plain_enum_publishes_the_guarded_method_too() {
         "{method}"
     );
 }
+
+/// A pointer resolves to one body, so the name a frame puts in flight travels with the filling
+/// that body is being written at — which is what a re-entry has to read to tell the cycle a
+/// reference describes from the one it cannot.
+#[test]
+fn test_the_in_flight_recording_carries_the_filling_beside_the_name() {
+    let parameters = vec![SchemaParameter {
+        binding: proc_macro2::Ident::new("_arg_value_type", proc_macro2::Span::call_site()),
+        default: quote::quote! { serde_json::json!({ "type": "string" }) },
+    }];
+    let methods = json_schema_methods("Node", &quote::quote! { body }, &parameters).to_string();
+
+    assert!(
+        methods.contains("in_flight : & mut Vec < (& 'static str , Vec < serde_json :: Value >) >"),
+        "{methods}"
+    );
+    assert!(
+        methods.contains(
+            "let filling : Vec < serde_json :: Value > = vec ! [_arg_value_type . clone ()]"
+        ),
+        "{methods}"
+    );
+    assert!(
+        methods.contains("in_flight . push ((\"Node\" , filling))"),
+        "{methods}"
+    );
+}
+
+/// The two ends a re-entered name can take: the same filling is the cycle the pointer describes,
+/// and any other is a body the document has no second place to hold.
+#[test]
+fn test_a_re_entered_name_is_read_against_the_filling_in_flight() {
+    let methods = json_schema_methods("Node", &quote::quote! { body }, &[]).to_string();
+
+    assert!(
+        methods.contains("in_flight . iter () . find (| (named , _) | * named == \"Node\")"),
+        "{methods}"
+    );
+    assert!(
+        methods.contains("if * in_flight_filling != filling"),
+        "{methods}"
+    );
+    assert!(
+        methods.contains("a document holds one definition per name"),
+        "the refusal does not state the limitation: {methods}"
+    );
+    assert!(
+        methods.contains("key the definitions by name and filling"),
+        "the refusal does not state the way past it: {methods}"
+    );
+}

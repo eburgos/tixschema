@@ -74,6 +74,11 @@ fn defs_pointer(def_name: &str) -> String {
 /// while still in flight describes as a `$ref` into `$defs`, and the frame that put it in flight
 /// hoists its body to the root that pointer resolves against.
 ///
+/// What travels beside each name is the filling its body is being written at, because a pointer
+/// resolves to that body and nothing else. A name re-entered at the same filling is the cycle the
+/// `$ref` describes; one re-entered at another is a body the document has no second place to hold,
+/// and is refused rather than pointed at the wrong one.
+///
 /// An item declaring type parameters publishes each of those two at a filling as well: JSON Schema
 /// has no parameters, so a document exists only once each of them names a type, and which types
 /// those are is the reference site's to say. So `json_schema_with` and `json_schema_within_with`
@@ -85,8 +90,9 @@ pub fn json_schema_methods(
     body: &proc_macro2::TokenStream,
     parameters: &[SchemaParameter],
 ) -> proc_macro2::TokenStream {
-    let described = guarded_description(def_name, body);
+    let in_flight_type = in_flight_type();
     if parameters.is_empty() {
+        let described = guarded_description(def_name, body, &quote::quote! { Vec::new() });
         let rooted = rooted_document(
             &quote::quote! { Self::json_schema_within(&mut in_flight, &mut hoisted_defs) },
         );
@@ -96,13 +102,14 @@ pub fn json_schema_methods(
             }
 
             pub fn json_schema_within(
-                in_flight: &mut Vec<&'static str>,
+                in_flight: &mut #in_flight_type,
                 hoisted_defs: &mut serde_json::Map<String, serde_json::Value>,
             ) -> serde_json::Value {
                 #described
             }
         };
     }
+    let described = guarded_description(def_name, body, &bound_filling(parameters));
     let rooted = rooted_document(
         &quote::quote! { Self::json_schema_within_with(&mut in_flight, &mut hoisted_defs, args) },
     );
@@ -118,14 +125,14 @@ pub fn json_schema_methods(
         }
 
         pub fn json_schema_within(
-            in_flight: &mut Vec<&'static str>,
+            in_flight: &mut #in_flight_type,
             hoisted_defs: &mut serde_json::Map<String, serde_json::Value>,
         ) -> serde_json::Value {
             Self::json_schema_within_with(in_flight, hoisted_defs, #declared)
         }
 
         pub fn json_schema_within_with(
-            in_flight: &mut Vec<&'static str>,
+            in_flight: &mut #in_flight_type,
             hoisted_defs: &mut serde_json::Map<String, serde_json::Value>,
             args: &[serde_json::Value],
         ) -> serde_json::Value {
@@ -135,21 +142,49 @@ pub fn json_schema_methods(
     }
 }
 
+/// The names whose descriptions are still being written, as the type every `within` form carries
+/// them in.
+///
+/// Each name travels with the documents its parameters were filled with, that being what says
+/// which body the definition the name is deferred to will hold. A name declaring no parameter
+/// carries an empty list, and compares equal to itself the way it always did.
+pub fn in_flight_type() -> proc_macro2::TokenStream {
+    quote::quote! { Vec<(&'static str, Vec<serde_json::Value>)> }
+}
+
+/// The filling this frame is writing its body at, read back off the locals the arguments were
+/// bound to — so what is compared is one document per declared parameter, whatever the caller
+/// passed and however short its list was.
+fn bound_filling(parameters: &[SchemaParameter]) -> proc_macro2::TokenStream {
+    let bound = parameters.iter().map(|parameter| &parameter.binding);
+    quote::quote! { vec![#(#bound.clone()),*] }
+}
+
 /// The description guarded against re-entering a name still being written, as the tokens the
 /// `within` form's body is.
+///
+/// `filling` is the documents this frame's parameters were filled with, which is what the guard
+/// reads the re-entry against: the same filling is the cycle the pointer describes, a different one
+/// the body the document cannot hold.
 fn guarded_description(
     def_name: &str,
     body: &proc_macro2::TokenStream,
+    filling: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
     let pointer = defs_pointer(def_name);
+    let refusal = refilled_cycle_refusal(def_name);
     quote::quote! {
-        if in_flight.contains(&#def_name) {
+        let filling: Vec<serde_json::Value> = #filling;
+        if let Some((_, in_flight_filling)) =
+            in_flight.iter().find(|(named, _)| *named == #def_name)
+        {
+            #refusal
             // Reserved rather than written: the frame that put this name in flight is still
             // writing the body, and fills the entry in once it has one.
             hoisted_defs.entry(#def_name).or_insert(serde_json::Value::Null);
             return serde_json::json!({ "$ref": #pointer });
         }
-        in_flight.push(#def_name);
+        in_flight.push((#def_name, filling));
         let described = #body;
         in_flight.pop();
         if hoisted_defs.contains_key(#def_name) {
@@ -160,11 +195,40 @@ fn guarded_description(
     }
 }
 
+/// How a reference coming back around to a name at another filling refuses, as the tokens the
+/// guard raises it with.
+///
+/// A pointer resolves to one body, and the document holds one definition per name — so the
+/// reference has nowhere to put the body its own arguments describe, and writing the pointer anyway
+/// would stand the other filling's members where this one's belong. Both fillings are named because
+/// which of them is the mistake is the author's to say, and the way past is named beside them: write
+/// the reference at the filling already being written, or give each filling a definition of its own
+/// by keying `$defs` by name and filling rather than by name.
+fn refilled_cycle_refusal(def_name: &str) -> proc_macro2::TokenStream {
+    let message = format!(
+        "`{def_name}`: a reference closes a cycle at a filling the document is not being written \
+         at — in flight at {{}}, and this reference names {{}}; a document holds one definition per \
+         name, so a cycle cannot change filling partway through it; write the reference at the \
+         filling already in flight, or key the definitions by name and filling so each filling gets \
+         a definition of its own."
+    );
+    quote::quote! {
+        if *in_flight_filling != filling {
+            panic!(
+                #message,
+                serde_json::Value::Array(in_flight_filling.clone()),
+                serde_json::Value::Array(filling),
+            );
+        }
+    }
+}
+
 /// A document standing on its own: `within` run against a fresh document, with whatever it hoisted
 /// joined to the root.
 fn rooted_document(described: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    let in_flight_type = in_flight_type();
     quote::quote! {
-        let mut in_flight: Vec<&'static str> = Vec::new();
+        let mut in_flight: #in_flight_type = Vec::new();
         let mut hoisted_defs = serde_json::Map::new();
         let described = #described;
         if hoisted_defs.is_empty() {
