@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(feature = "object_id")]
+use crate::features::object_id::OBJECT_ID_HEX_PATTERN;
+
 /// The pattern shapes the shipped tests write, none of which the two grammars spell differently.
 /// Every one of them has to come back byte for byte: the guard is there to stop a pattern only one
 /// grammar reads, not to touch the ones both already read the same way.
@@ -21,7 +24,7 @@ const PORTABLE_PATTERNS: [&str; 9] = [
 /// The list is the inventory of what `regex::Regex::new` accepts and a JavaScript regex literal
 /// either fails to parse or reads as something else, so it doubles as the record of what was
 /// checked against both grammars.
-const UNPORTABLE_PATTERNS: [(&str, &str); 32] = [
+const UNPORTABLE_PATTERNS: [(&str, &str); 34] = [
     ("(?i)abc", "inline flag directive"),
     ("abc(?i)def", "inline flag directive"),
     ("(?i:abc)", "case-insensitive flag on a `(?i:...)` group"),
@@ -52,8 +55,12 @@ const UNPORTABLE_PATTERNS: [(&str, &str); 32] = [
     ("[a[b]]", "class nested inside another class"),
     (r"\x{41}", "braced code point escape"),
     ("[]]", "unescaped `]` opening a character class"),
-    ("[^]]", "unescaped `]` opening a character class"),
+    // Negated, so the class is refused for being negated before its members are read at all — the
+    // `]` rule still answers for the two spellings above it.
+    ("[^]]", "negated character class"),
     ("[]-a]", "unescaped `]` opening a character class"),
+    ("[^a]", "negated character class"),
+    (r"[^\w]", "negated character class"),
 ];
 
 /// The haystacks a rewritten pattern is held to: whatever the original matched among them, the
@@ -270,6 +277,111 @@ const EQUALISED_PATTERNS: [(&str, &str); 10] = [
     (r"^[\w-]$", "^[0-9A-Za-z_-]$"),
     (r"^\d{3}\.\d{3}-\d{2}$", r"^[0-9]{3}\.[0-9]{3}-[0-9]{2}$"),
 ];
+
+#[cfg(feature = "serde")]
+/// Patterns a regex engine is avoidable work for, in every shape `clippy::trivial_regex` proves
+/// one is — a bare literal, and a literal run under a leading `^`, a trailing `$`, or both.
+const TRIVIAL_PATTERNS: [&str; 10] = [
+    "^/",
+    "^abc",
+    r"^foo\.bar",
+    "^\u{e9}",
+    "abc$",
+    "/$",
+    "^abc$",
+    "^/$",
+    "^$",
+    "abc",
+];
+
+#[cfg(feature = "serde")]
+/// Patterns that keep their regex. The first eight are the shapes the shipped tests and the
+/// reports write; the rest are the near misses — a literal with one non-literal part in it, and
+/// the constructs whose trivial reading the lint offers no call for and this crate therefore
+/// declines to make one up for.
+const NON_TRIVIAL_PATTERNS: [&str; 16] = [
+    "^[a-z]+$",
+    "^/[a-z]+$",
+    "^[0-9a-fA-F]{24}$",
+    "^[a-z0-9_]+$",
+    r"^\s*$",
+    "(?<word>[a-z]+)",
+    r"^[0-9]{3}\.[0-9]{3}-[0-9]{2}$",
+    "^[a-z]+",
+    "^a[0-9]",
+    "[0-9]a$",
+    "^a[0-9]b$",
+    "",
+    "^",
+    "$",
+    r"\b",
+    "a|b",
+];
+
+/// The negated classes the verdict was decided over: a single member, the ranges an author reaches
+/// for to bound one to ASCII, an escape, and the `\d` the guard writes out to `0-9` on its way in.
+/// The last is the one that shows rewriting cannot help — its members come out ASCII and the
+/// complement is still taken two different ways.
+const NEGATED_CLASS_PATTERNS: [&str; 6] = [
+    "^[^a]$",
+    "^[^0-9]$",
+    r"^[^\n]$",
+    "^[^a-z]$",
+    r"^[^\x00-\x7F]$",
+    r"^[^\d]$",
+];
+
+/// Every regex this crate writes into a generated schema itself, rather than carrying over from an
+/// author's `pattern`.
+///
+/// An author's pattern reaches the three surfaces through the guard, which equalises what it can
+/// and refuses the rest. One the crate writes reaches them directly, so without this list there
+/// are two contracts and only one of them is enforced.
+#[cfg(feature = "object_id")]
+const CRATE_EMITTED_PATTERNS: [&str; 1] = [OBJECT_ID_HEX_PATTERN];
+
+#[cfg(feature = "serde")]
+/// The haystacks a classified pattern is held to, in the two senses that matter: every character
+/// the equalised classes are compared over, and the strings the rewrite tests use, which carry the
+/// delimiters and the near-miss prefixes a `^/` sort of pattern turns on.
+fn trivial_haystacks() -> Vec<String> {
+    CROSS_ENGINE_HAYSTACKS
+        .iter()
+        .chain(REWRITE_HAYSTACKS.iter())
+        .map(|haystack| (*haystack).to_owned())
+        .chain(
+            [
+                "/",
+                "/var",
+                "var/",
+                "/var/log",
+                "abc",
+                "xabc",
+                "abcx",
+                "xabcx",
+                "foo.bar",
+                "fooxbar",
+                "\u{e9}t\u{e9}",
+                "t\u{e9}",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .collect()
+}
+
+#[cfg(feature = "serde")]
+/// What a classified pattern says about one haystack — the verdict the emitted call reaches,
+/// reached here instead so it can be held against the regex the call replaced.
+fn accepts(trivial: &TrivialPattern, haystack: &str) -> bool {
+    match trivial {
+        TrivialPattern::Contains(needle) => haystack.contains(needle),
+        TrivialPattern::EndsWith(needle) => haystack.ends_with(needle),
+        TrivialPattern::Equals(needle) => haystack == needle,
+        TrivialPattern::IsEmpty => haystack.is_empty(),
+        TrivialPattern::StartsWith(needle) => haystack.starts_with(needle),
+    }
+}
 
 #[cfg(feature = "zod")]
 #[test]
@@ -702,6 +814,48 @@ fn test_the_emitted_pattern_picks_out_the_same_haystacks_in_both_engines() {
     }
 }
 
+/// Every regex this crate writes into a generated schema itself, rather than carrying over from an
+/// author's `pattern`.
+///
+/// Held to the guard the crate holds authors to, and held to it the strict way: admitted *and*
+/// handed back unchanged. A pattern the guard rewrites is one that was not written in the spelling
+/// both engines read the same way, and the crate is in a position to write it that way to begin
+/// with — so for these the rewrite is not a fix, it is the failure. That makes this the check a
+/// future emitted pattern has to pass before it can ship.
+#[test]
+#[cfg(feature = "object_id")]
+fn test_every_pattern_the_crate_emits_is_a_fixed_point_of_the_guard() {
+    for pattern in CRATE_EMITTED_PATTERNS {
+        assert_eq!(
+            portable(pattern).as_deref(),
+            Ok(pattern),
+            "the crate emits {pattern}, which the guard does not admit unchanged"
+        );
+    }
+}
+
+/// The `$oid` hex, run over the haystacks that tell the engines apart, on the same recorded-
+/// JavaScript discipline as the table above: twenty-four ARABIC-INDIC digits are what a `\d` in
+/// that class admits in the `regex` crate and a flagless literal refuses, so they are the case the
+/// spelling turns on. The real `ObjectId` and the uppercase hex are there to say the value set the
+/// constant is *for* did not move.
+#[test]
+#[cfg(feature = "object_id")]
+fn test_the_emitted_object_id_hex_agrees_with_javascript_over_every_hex_shaped_haystack() {
+    let emitted = regex::Regex::new(OBJECT_ID_HEX_PATTERN).unwrap();
+    for (haystack, javascript) in [
+        ("507f1f77bcf86cd799439011".to_owned(), true),
+        ("\u{661}".repeat(24), false),
+        ("507F1F77BCF86CD799439011".to_owned(), false),
+    ] {
+        assert_eq!(
+            emitted.is_match(&haystack),
+            javascript,
+            "the emitted `$oid` pattern parts ways with JavaScript over {haystack:?}"
+        );
+    }
+}
+
 /// The constructs with no equalising spelling at all, and why: a flagless JavaScript literal
 /// matches one UTF-16 code unit where the `regex` crate matches one character, so anything that
 /// can match a character outside the Basic Multilingual Plane parts ways over every one of them.
@@ -715,6 +869,54 @@ fn test_portable_pattern_refuses_what_no_spelling_equalises() {
             "{pattern} is not refused for a value-set divergence: {rejection}"
         );
     }
+}
+
+/// A negated class is the last construct that was admitted while covering different characters in
+/// the two engines, and it is refused the same way `\D`, `\W` and `\S` already are — which are the
+/// same class negated, so admitting the bracketed spelling was refusing a construct under one name
+/// and taking it under another.
+#[test]
+fn test_portable_pattern_refuses_a_negated_class_whatever_its_members() {
+    for pattern in NEGATED_CLASS_PATTERNS {
+        let rejection = portable(pattern).unwrap_err();
+        for needle in ["negated character class", "cover different characters"] {
+            assert!(
+                rejection.contains(needle),
+                "{needle} missing for {pattern}: {rejection}"
+            );
+        }
+    }
+}
+
+/// Held against the engines rather than restated, as the dot's verdict was: no spelling of a
+/// negated class agrees with JavaScript, so refusing every one of them is the verdict rather than
+/// an admission table of the ones that survive.
+///
+/// Each candidate below fills in the `regex` crate where a flagless literal cannot fill at all — a
+/// lone astral character is one character here and the two code units it is written from there, so
+/// no one-character class holds it. The one spelling whose `regex` reading does leave every astral
+/// character out has to name them by astral bounds, and that literal reads those bounds as
+/// surrogate halves in descending order: `new RegExp("^[^\u{10000}-\u{10FFFF}]$")` throws `Range
+/// out of order in character class` under node v26.2.0, so it is not a spelling that can be
+/// admitted either.
+#[test]
+fn test_no_spelling_of_a_negated_class_agrees_across_the_engines() {
+    for candidate in NEGATED_CLASS_PATTERNS.into_iter().chain(["^[^\u{1f601}]$"]) {
+        let rust = regex::Regex::new(candidate).unwrap();
+        assert!(
+            rust.is_match("\u{1f600}"),
+            "{candidate} was expected to match an astral character in the `regex` crate"
+        );
+    }
+    let astral_bounded = regex::Regex::new("^[^\u{10000}-\u{10ffff}]$").unwrap();
+    assert!(
+        !astral_bounded.is_match("\u{1f600}"),
+        "the astral-bounded class was expected to be the one whose `regex` reading excludes them"
+    );
+    assert!(
+        astral_bounded.is_match("\u{661}"),
+        "the astral-bounded class was expected to keep every character below the astral range"
+    );
 }
 
 /// Held against the engines rather than restated: for the dot, no candidate spelling agrees with
@@ -819,5 +1021,72 @@ fn test_portable_pattern_quotes_the_regex_crate_on_a_pattern_it_refuses() {
         "panic",
     ] {
         assert!(rejection.contains(needle), "{needle} missing: {rejection}");
+    }
+}
+
+#[cfg(feature = "serde")]
+/// Every shape the lint proves a regex is avoidable work for is classified as the call the lint
+/// names for it, with the needle the pattern's own escapes resolve to.
+#[test]
+fn test_trivial_pattern_names_the_call_the_lint_names() {
+    let expected = [
+        ("^/", TrivialPattern::StartsWith("/".to_owned())),
+        ("^abc", TrivialPattern::StartsWith("abc".to_owned())),
+        (
+            r"^foo\.bar",
+            TrivialPattern::StartsWith("foo.bar".to_owned()),
+        ),
+        ("^\u{e9}", TrivialPattern::StartsWith("\u{e9}".to_owned())),
+        ("abc$", TrivialPattern::EndsWith("abc".to_owned())),
+        ("/$", TrivialPattern::EndsWith("/".to_owned())),
+        ("^abc$", TrivialPattern::Equals("abc".to_owned())),
+        ("^/$", TrivialPattern::Equals("/".to_owned())),
+        ("^$", TrivialPattern::IsEmpty),
+        ("abc", TrivialPattern::Contains("abc".to_owned())),
+    ];
+    assert_eq!(
+        expected.len(),
+        TRIVIAL_PATTERNS.len(),
+        "every classified pattern needs the call it is classified as written down"
+    );
+    for (pattern, call) in expected {
+        assert_eq!(
+            trivial_pattern(pattern),
+            Some(call),
+            "{pattern} was not classified as the call the lint names for it"
+        );
+    }
+}
+
+#[cfg(feature = "serde")]
+/// A pattern of any real shape keeps its regex, and so do the two the lint calls trivial without
+/// naming a call: what a wrong reading would cost is a constraint that admits a different set of
+/// values than it was written to, and there is nothing to gain by guessing at one.
+#[test]
+fn test_trivial_pattern_leaves_every_other_pattern_its_regex() {
+    for pattern in NON_TRIVIAL_PATTERNS {
+        assert!(
+            trivial_pattern(pattern).is_none(),
+            "{pattern} was classified as trivial and is not"
+        );
+    }
+}
+
+#[cfg(feature = "serde")]
+/// The classified call and the regex it replaces accept the same haystacks and reject the same
+/// haystacks — which is the whole of what a `pattern` constraint says.
+#[test]
+fn test_trivial_pattern_accepts_exactly_what_its_regex_accepts() {
+    let haystacks = trivial_haystacks();
+    for pattern in TRIVIAL_PATTERNS {
+        let trivial = trivial_pattern(pattern).unwrap();
+        let regex = regex::Regex::new(pattern).unwrap();
+        for haystack in &haystacks {
+            assert_eq!(
+                accepts(&trivial, haystack),
+                regex.is_match(haystack),
+                "{pattern} and the call it was classified as part ways over {haystack:?}"
+            );
+        }
     }
 }

@@ -644,6 +644,164 @@ fn untagged_member_with_an_enumerable_map_key_is_left_alone() {
     }
 }
 
+/// The refusal every map-key spelling no surface can write earns, read off the untagged walk.
+/// Field position refuses each of these; a member is the same map, so it is refused here too — and
+/// the walk is the only thing that has to say so, the guard failure dropping the schema surface
+/// before any member rendering reaches the author.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn untagged_member_reaching_an_unwritable_map_key_is_refused() {
+    for (member_type, needle) in [
+        (quote::quote! { HashMap<Vec<String>, u32> }, "String"),
+        (quote::quote! { HashMap<[String; 2], u32> }, "String"),
+        (quote::quote! { HashMap<Option<String>, u32> }, "String"),
+        (
+            quote::quote! { HashMap<(String, u32), u32> },
+            "`(_, _)` as a JSON array",
+        ),
+        (
+            quote::quote! { HashMap<HashMap<String, u32>, u32> },
+            "`HashMap<_, _>` as a JSON object",
+        ),
+        (
+            quote::quote! { Vec<HashMap<Option<String>, u32>> },
+            "String",
+        ),
+    ] {
+        let errors = untagged_guard_errors(syn::parse_quote! {
+            enum Untagged {
+                Counts { counts: #member_type },
+            }
+        });
+        assert_eq!(errors.len(), 1, "for {member_type}, got: {errors:?}");
+        assert!(
+            errors[0].contains("compile_error"),
+            "for {member_type}: {}",
+            errors[0]
+        );
+        assert!(
+            errors[0].contains("field `counts`"),
+            "for {member_type}: {}",
+            errors[0]
+        );
+        assert!(
+            errors[0].contains(needle),
+            "for {member_type}: {}",
+            errors[0]
+        );
+    }
+}
+
+/// The JSON-schema values the untagged walk renders its members as.
+#[cfg(all(feature = "serde", feature = "jsonschema"))]
+fn untagged_member_values(mut item: syn::ItemEnum) -> Vec<String> {
+    collect_untagged_members(&mut item, UNTAGGED_MODULE)
+        .2
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// A member holding a map is the map its key classification earns, at the depth it is written —
+/// the renderings field position produces from the same types, reached through the same dispatch.
+#[cfg(all(feature = "serde", feature = "jsonschema"))]
+#[test]
+fn untagged_member_holding_a_map_renders_the_field_position_map() {
+    register_alias_info("Bucket", "Bucket", "bucket_schema", AliasKind::EnumMembers);
+    for map_type in [
+        "HashMap<Bucket, u32>",
+        "HashMap<String, u32>",
+        "Vec<HashMap<String, u32>>",
+        "HashMap<String, HashMap<Bucket, u32>>",
+    ] {
+        let member_type: syn::Type = syn::parse_str(map_type).unwrap();
+        let values = untagged_member_values(syn::parse_quote! {
+            enum Untagged {
+                Counts { m: #member_type },
+            }
+        });
+        assert!(
+            values[0].contains(&inserted_field_value(map_type)),
+            "for {map_type}, got: {}",
+            values[0]
+        );
+    }
+}
+
+/// A tuple member is the fixed-arity array its own field position writes, arity bounds included:
+/// without them a shorter array serde can neither write nor read back still validates.
+#[cfg(all(feature = "serde", feature = "jsonschema"))]
+#[test]
+fn untagged_member_holding_a_tuple_renders_the_arity_bounds() {
+    let values = untagged_member_values(syn::parse_quote! {
+        enum Untagged {
+            Pair { pair: (i64, String) },
+        }
+    });
+    assert!(
+        values[0].contains(r#""minItems" : 2usize , "maxItems" : 2usize"#),
+        "got: {}",
+        values[0]
+    );
+    assert!(
+        values[0].contains(r#""items" : false"#),
+        "got: {}",
+        values[0]
+    );
+}
+
+/// An opaque member keeps the permissive empty schema: no type name reaches it to narrow with,
+/// which is the reason field position leaves it open too.
+#[cfg(all(feature = "serde", feature = "jsonschema"))]
+#[test]
+fn untagged_member_holding_an_opaque_value_stays_permissive() {
+    let values = untagged_member_values(syn::parse_quote! {
+        enum Untagged {
+            Raw { raw: serde_json::Value },
+        }
+    });
+    assert!(
+        values[0].contains("serde_json :: json ! ({ })"),
+        "got: {}",
+        values[0]
+    );
+}
+
+/// A map value the member dispatch cannot render replaces the member's whole rendering with the
+/// diagnostic, as it replaces the insertion in field position: a schema the expansion has already
+/// rejected is not one to hand the author. No guard answers for this shape, so the rendering is
+/// where it has to be said — once, naming the field and the reason, with no rendered map left
+/// beside it.
+#[cfg(all(feature = "serde", feature = "jsonschema"))]
+#[test]
+fn untagged_member_holding_an_unsupported_map_value_emits_only_the_compile_error() {
+    let values = untagged_member_values(syn::parse_quote! {
+        enum Untagged {
+            Rows { rows: HashMap<String, (String, u32)> },
+        }
+    });
+    assert_eq!(
+        values[0].matches("compile_error !").count(),
+        1,
+        "got: {}",
+        values[0]
+    );
+    assert!(values[0].contains("field `rows`"), "got: {}", values[0]);
+    assert!(
+        values[0].contains("a tuple is not supported as a map value"),
+        "got: {}",
+        values[0]
+    );
+    assert!(
+        !values[0].contains("additionalProperties\" :"),
+        "got: {}",
+        values[0]
+    );
+}
+
 /// Collects the internally tagged path's guard failures as rendered `compile_error!` token strings.
 #[cfg(feature = "serde")]
 fn internal_guard_errors(item: &syn::ItemEnum) -> Vec<String> {
@@ -2455,8 +2613,9 @@ fn branded_newtype_over_option_is_rejected() {
     assert!(errors[0].contains("null"), "got: {}", errors[0]);
 }
 
-/// The generic arm renders the type parameter and drops the `Option` wrapper outright, so the
-/// shape is no more representable there than in the concrete case.
+/// An inner naming a type parameter is read exactly as a concrete one is, so the `Option`
+/// collapses onto what it holds there too and the shape is no more representable than in the
+/// concrete case.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn generic_branded_newtype_over_option_is_rejected() {
@@ -3180,7 +3339,7 @@ fn an_object_id_enum_keyed_map_value_binds_the_one_oid_object() {
     let tokens = enum_key_map_value_binding(FieldDefType::ObjectId);
     assert!(
         tokens.contains(
-            r#"let value_schema = serde_json :: json ! ({ "type" : "object" , "properties" : { "$oid" : (serde_json :: json ! ({ "type" : "string" , "pattern" : "^[a-f\\d]{24}$" })) } , "required" : ["$oid"] , "additionalProperties" : false }) ;"#
+            r#"let value_schema = serde_json :: json ! ({ "type" : "object" , "properties" : { "$oid" : (serde_json :: json ! ({ "type" : "string" , "pattern" : "^[a-f0-9]{24}$" })) } , "required" : ["$oid"] , "additionalProperties" : false }) ;"#
         ),
         "got: {tokens}"
     );
@@ -3260,9 +3419,12 @@ fn a_required_map_value_carries_no_nullable_wrap() {
 }
 
 /// The kind an alias registers is its *target's* answer, because a type path resolves through the
-/// alias. A target serde writes as a bare string makes the alias one too, whatever spelling that
-/// target wears. `Vec<Slot>` is the collection, not the enum it holds; a target this expansion has
-/// not seen registered is `Unknown`, which is not a negative.
+/// alias — the same four verdicts a brand carries up from its inner, and for the same reason. A
+/// target serde writes as a bare string makes the alias one too, whatever spelling that target
+/// wears; a target serde stringifies for the author makes the alias key the open object that bare
+/// target keys; a target serde writes as no key at all leaves the alias refused, under its own name.
+/// `Vec<Slot>` is the collection, not the enum it holds; a target this expansion has not seen
+/// registered is `Unknown`, which is not a negative.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn an_alias_registers_the_kind_of_what_it_targets() {
@@ -3274,23 +3436,150 @@ fn an_alias_registers_the_kind_of_what_it_targets() {
         "correlation_id_schema",
         AliasKind::StringWire,
     );
+    register_alias_info("Tick", "Tick", "tick_schema", AliasKind::Stringified);
     for (target, expected) in [
         ("Slot", AliasKind::EnumMembers),
         ("Doc", AliasKind::NoEnumMembers),
         ("String", AliasKind::StringWire),
         ("PathBuf", AliasKind::StringWire),
         ("CorrelationId", AliasKind::StringWire),
-        ("u32", AliasKind::NoEnumMembers),
+        ("u32", AliasKind::Stringified),
+        ("bool", AliasKind::Stringified),
+        ("f64", AliasKind::Stringified),
+        ("Tick", AliasKind::Stringified),
+        ("Wrapper<Slot>", AliasKind::Stringified),
         ("Vec<String>", AliasKind::NoEnumMembers),
         ("Option<String>", AliasKind::NoEnumMembers),
         ("Vec<Slot>", AliasKind::NoEnumMembers),
         ("HashMap<Slot, String>", AliasKind::NoEnumMembers),
-        ("Wrapper<Slot>", AliasKind::NoEnumMembers),
+        ("(String, String)", AliasKind::NoEnumMembers),
         ("Ghost", AliasKind::Unknown),
     ] {
         let ty: syn::Type = syn::parse_str(target).unwrap();
         let kind = super::alias_target_kind(&super::get_field_def("AliasType", &ty, ""));
         assert_eq!(kind, expected, "for alias target {target}");
+    }
+}
+
+/// The alias path and the brand path answer the one map-key question the same way, target for
+/// inner: both spellings wrap a value whose wire form is the whole of what they carry, so a
+/// disagreement between them would be a key that opens an object under one spelling and is refused
+/// under the other. `EnumMembers` is the one verdict only the alias can reach — a type path resolves
+/// to the enum, where a brand publishes no `enum_members()` of its own — so the enum spellings are
+/// held apart rather than in this list.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn an_alias_and_a_brand_answer_alike_for_the_same_target() {
+    register_alias_info("Doc", "Doc", "doc_schema", AliasKind::NoEnumMembers);
+    register_alias_info(
+        "CorrelationId",
+        "CorrelationId",
+        "correlation_id_schema",
+        AliasKind::StringWire,
+    );
+    register_alias_info("Tick", "Tick", "tick_schema", AliasKind::Stringified);
+    for target in [
+        "String",
+        "PathBuf",
+        "CorrelationId",
+        "u32",
+        "bool",
+        "f64",
+        "Tick",
+        "Doc",
+        "Vec<String>",
+        "(String, String)",
+        "HashMap<String, u32>",
+    ] {
+        let ty: syn::Type = syn::parse_str(target).unwrap();
+        let alias = super::alias_target_kind(&super::get_field_def("AliasType", &ty, ""));
+        assert_eq!(alias, brand_kind(target), "for target {target}");
+    }
+}
+
+/// A chrono value is one serde stringifies into a key, so an alias of one keys the open object its
+/// bare target keys — the verdict the brand over the same target already carries.
+#[cfg(all(
+    feature = "chrono",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn an_alias_of_a_chrono_target_is_stringified() {
+    for target in ["NaiveDate", "NaiveTime", "NaiveDateTime", "DateTime<Utc>"] {
+        let ty: syn::Type = syn::parse_str(target).unwrap();
+        let kind = super::alias_target_kind(&super::get_field_def("AliasType", &ty, ""));
+        assert_eq!(kind, AliasKind::Stringified, "for alias target {target}");
+    }
+}
+
+/// An `ObjectId` writes a JSON object, which serde uses as no key at all, so an alias of one stays
+/// refused where the stringifying targets are let through.
+#[cfg(all(
+    feature = "object_id",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn an_alias_of_an_object_id_stays_refused() {
+    let ty: syn::Type = syn::parse_str("ObjectId").unwrap();
+    let kind = super::alias_target_kind(&super::get_field_def("AliasType", &ty, ""));
+    assert_eq!(kind, AliasKind::NoEnumMembers);
+}
+
+/// An alias of an alias of a value serde stringifies is still that value at the type path, so the
+/// chain carries `Stringified` through every link — and so does a chain ending at a stringified
+/// brand.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn an_alias_chain_carries_the_stringified_kind_to_its_end() {
+    register_alias_info("Tick", "Tick", "tick_schema", AliasKind::Stringified);
+    for end in ["u32", "Tick"] {
+        let first_target: syn::Type = syn::parse_str(end).unwrap();
+        let first = super::alias_target_kind(&super::get_field_def("FirstType", &first_target, ""));
+        assert_eq!(first, AliasKind::Stringified, "for a chain ending at {end}");
+        register_alias_info("First", "FirstType", "first_type_schema", first);
+
+        let second_target: syn::Type = syn::parse_str("First").unwrap();
+        let second =
+            super::alias_target_kind(&super::get_field_def("SecondType", &second_target, ""));
+        assert_eq!(
+            second,
+            AliasKind::Stringified,
+            "for a chain ending at {end}"
+        );
+    }
+}
+
+/// A refused target keeps the diagnostic naming the *alias*, not the target's own rejection reason:
+/// the alias is what the author wrote at the key, and it is what they can act on. So a field keyed
+/// by an alias of a tuple reads as a name with no `enum_members()` rather than as an array wire, and
+/// so does one keyed by an alias of the wrapper spellings — a target the key dispatch refuses is
+/// refused however it was spelled, including the `Option` and the sequence around a plain enum,
+/// neither of which the alias can supply members for.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn an_alias_of_a_refused_target_is_refused_under_its_own_name() {
+    register_alias_info("Slot", "Slot", "slot_schema", AliasKind::EnumMembers);
+    for target in ["(String, String)", "Option<Slot>", "Vec<Slot>"] {
+        register_alias_info(
+            "RefusedKey",
+            "RefusedKeyType",
+            "refused_key_type_schema",
+            super::alias_target_kind(&super::get_field_def(
+                "RefusedKeyType",
+                &syn::parse_str(target).unwrap(),
+                "",
+            )),
+        );
+        let error = field_map_key_error(&quote::quote! { HashMap<RefusedKey, u32> });
+        assert!(
+            error.contains("a map key must be a plain"),
+            "for {target}, got: {error}"
+        );
+        assert!(error.contains("RefusedKey"), "for {target}, got: {error}");
+        assert!(
+            !error.contains("serde writes"),
+            "for {target}, got: {error}"
+        );
     }
 }
 
@@ -3722,7 +4011,7 @@ fn a_nested_string_literal_map_value_keeps_its_const() {
 #[cfg(all(feature = "object_id", feature = "jsonschema"))]
 #[test]
 fn a_nested_object_id_map_value_keeps_its_oid_object() {
-    let inner_member = r#"{ "type" : "object" , "additionalProperties" : { "type" : "object" , "properties" : { "$oid" : (serde_json :: json ! ({ "type" : "string" , "pattern" : "^[a-f\\d]{24}$" })) } , "required" : ["$oid"] , "additionalProperties" : false } }"#;
+    let inner_member = r#"{ "type" : "object" , "additionalProperties" : { "type" : "object" , "properties" : { "$oid" : (serde_json :: json ! ({ "type" : "string" , "pattern" : "^[a-f0-9]{24}$" })) } , "required" : ["$oid"] , "additionalProperties" : false } }"#;
     let bare = nested_string_key_map_value_schema(FieldDefType::ObjectId, 0);
     assert!(
         bare.contains(&format!(r#""additionalProperties" : {inner_member}"#)),
@@ -4184,6 +4473,52 @@ fn a_sibling_slot_carries_the_schema_module_reference() {
     }
 }
 
+/// The `json_schema()` body a brand over `inner_ty` carries, read off the same dispatch the
+/// branded expansion runs.
+#[cfg(feature = "jsonschema")]
+fn brand_json_schema_over(inner_ty: &syn::Type) -> String {
+    super::build_branded_json_schema_method(
+        &super::ModelSchemaArgs::default(),
+        &super::branded_json_inner(&[], inner_ty),
+        "Wrapped",
+    )
+    .to_string()
+}
+
+/// A named type resolves to one schema module wherever it is written, and a brand is one of those
+/// places: it carries its inner by the same reference a field carries it by, so what the module
+/// name is derived from cannot differ between the two. A name the registry knows resolves through
+/// the registry in both, and a name it does not know assumes the module that name's own
+/// `#[model_schema()]` would publish — which for a type declared without the attribute is a module
+/// nothing emits, and rustc reports the `E0433` in either position. Nothing the expansion holds can
+/// tell those two apart, so that report is the whole contract, and it has to be one contract.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_named_type_resolves_to_the_same_module_in_field_and_brand_position() {
+    register_alias_info(
+        "Renamed",
+        "RenamedType",
+        "renamed_type_schema",
+        AliasKind::NoEnumMembers,
+    );
+    for (name, module) in [
+        ("Foreign", "foreign_schema"),
+        ("Renamed", "renamed_type_schema"),
+    ] {
+        let inner_ty: syn::Type = syn::parse_str(name).unwrap();
+        let reference =
+            format!("{module} :: Schema :: json_schema_within (in_flight , hoisted_defs)");
+
+        let field =
+            super::build_field_type_schema(&super::get_field_def("id", &inner_ty, ""), "id")
+                .to_string();
+        assert!(field.contains(&reference), "for {name}, got: {field}");
+
+        let brand = brand_json_schema_over(&inner_ty);
+        assert!(brand.contains(&reference), "for {name}, got: {brand}");
+    }
+}
+
 /// The JSON-schema insertion for the sole field of `source`, parsed from text so its spans carry
 /// file locations and `source_text()` can report what they point at.
 #[cfg(feature = "jsonschema")]
@@ -4400,7 +4735,7 @@ fn an_object_id_tuple_element_spells_the_one_oid_object() {
         super::build_tuple_element_json_schema(&parsed)
             .unwrap()
             .to_string(),
-        r#"serde_json :: json ! ({ "type" : "object" , "properties" : { "$oid" : (serde_json :: json ! ({ "type" : "string" , "pattern" : "^[a-f\\d]{24}$" })) } , "required" : ["$oid"] , "additionalProperties" : false })"#
+        r#"serde_json :: json ! ({ "type" : "object" , "properties" : { "$oid" : (serde_json :: json ! ({ "type" : "string" , "pattern" : "^[a-f0-9]{24}$" })) } , "required" : ["$oid"] , "additionalProperties" : false })"#
     );
 }
 
@@ -4623,6 +4958,27 @@ fn emitted_string_module(spelling: &str) -> String {
     )
     .module_items
     .to_string()
+}
+
+/// The validator emitted for a `String` field constrained by `pattern`, as tokens — everything the
+/// schema module holds ahead of the deserializer.
+#[cfg(feature = "serde")]
+fn emitted_pattern_validator(pattern: &str) -> String {
+    let ty: syn::Type = syn::parse_str("String").unwrap();
+    let meta = ModelSchemaPropMeta {
+        pattern: Some(pattern.to_owned()),
+        ..ModelSchemaPropMeta::default()
+    };
+    let module = generate_string_validation_code(
+        "field",
+        &helper_name_stem("field", None),
+        &meta,
+        &constrained_shape(&ty).unwrap(),
+        &ty,
+    )
+    .module_items
+    .to_string();
+    module[..module.find("pub fn deserialize_field").unwrap()].to_owned()
 }
 
 /// Just the deserializer of [`emitted_string_module`], which is everything after the validator.
@@ -5060,5 +5416,42 @@ fn a_wrapped_path_field_deserializes_its_declared_type() {
     assert_eq!(
         emitted_string_deserializer("Box<Path>"),
         emitted_string_deserializer("Box<str>").replace("Box < str >", "Box < Path >")
+    );
+}
+
+/// A `pattern` a regex engine is avoidable work for is emitted as the `str` call
+/// `clippy::trivial_regex` names for it, with a one-character needle as a `char` so the emitted
+/// call also answers `clippy::single_char_pattern`. Both lints are denied by the crates this code
+/// is written into, and neither has an edit available at the `#[model_schema]` attribute the
+/// diagnostic lands on.
+#[cfg(feature = "serde")]
+#[test]
+fn a_trivial_pattern_is_emitted_as_the_call_it_says_the_same_thing_as() {
+    assert_eq!(
+        emitted_pattern_validator("^/"),
+        "pub fn validate_field_value (value : & str) -> Result < () , String > \
+         { if ! value . starts_with ('/') { \
+         return Err (format ! (\"'{}' does not match pattern '{}'\" , \"field\" , \"^/\")) ; } Ok (()) } "
+    );
+    assert_eq!(
+        emitted_pattern_validator("^abc$"),
+        "pub fn validate_field_value (value : & str) -> Result < () , String > \
+         { if value != \"abc\" { \
+         return Err (format ! (\"'{}' does not match pattern '{}'\" , \"field\" , \"^abc$\")) ; } Ok (()) } "
+    );
+}
+
+/// A `pattern` of any real shape keeps the regex it has always been checked by, built once per
+/// process, and the words it is turned away with do not move either way.
+#[cfg(feature = "serde")]
+#[test]
+fn a_pattern_of_any_real_shape_keeps_its_regex() {
+    assert_eq!(
+        emitted_pattern_validator("^[a-z]+$"),
+        "pub fn validate_field_value (value : & str) -> Result < () , String > \
+         { { use std :: sync :: LazyLock ; \
+         static RE : LazyLock < regex :: Regex > = LazyLock :: new (|| { regex :: Regex :: new (\"^[a-z]+$\") . unwrap () }) ; \
+         if ! RE . is_match (value) { \
+         return Err (format ! (\"'{}' does not match pattern '{}'\" , \"field\" , \"^[a-z]+$\")) ; } } Ok (()) } "
     );
 }

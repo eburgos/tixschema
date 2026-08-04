@@ -713,6 +713,19 @@ impl FieldDef {
         })
     }
 
+    /// What this field contributes to an object that writes its members beside its own, on the
+    /// TypeScript surface: the value itself, with no answer for the outermost `Option`.
+    ///
+    /// A merged source has no key of its own, so that `Option` is not the question
+    /// [`Self::typescript_typename`] answers. There, a `None` is a key the object leaves out; here
+    /// it is every one of the source's keys left out at once — the object writes its own members
+    /// merged with the source's or writes its own alone, and a choice between two key sets belongs
+    /// where the merge is assembled rather than on the operand it is assembled from.
+    #[cfg(feature = "typescript")]
+    pub fn typescript_merged_typename(&self) -> String {
+        self.typescript_base()
+    }
+
     /// The TypeScript type for a value in a slot that cannot be dropped — a tuple element, a map
     /// entry, or the content key of a single-element tuple variant, which serde always writes. An
     /// `Option` there is null-flavored (`{base} | null`) rather than undefined-flavored: none of
@@ -888,6 +901,14 @@ impl FieldDef {
         } else {
             array_result
         }
+    }
+
+    /// The same value on the Zod surface, for the same reason: what a merged source validates, with
+    /// the outermost `Option` left to whatever assembles the merge. See
+    /// [`Self::typescript_merged_typename`].
+    #[cfg(feature = "zod")]
+    pub fn zod_merged_schema(&self) -> String {
+        self.zod_base()
     }
 
     /// Builds the Zod schema string for a numeric field, applying any min/max constraints.

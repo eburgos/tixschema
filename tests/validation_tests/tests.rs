@@ -1159,6 +1159,45 @@ fn test_pattern_empty_string_match() {
     );
 }
 
+/// A pattern simple enough that a regex engine is avoidable work — the shape a consumer denying
+/// `clippy::nursery` cannot compile if the validator reaches for `Regex::new` anyway, since the
+/// diagnostic lands on the attribute and there is no edit at that site to silence it.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_pattern_anchored_single_character_prefix() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct PatternRootedPath {
+        #[model_schema_prop(pattern = "^/")]
+        pub mount: String,
+    }
+
+    let accepted = PatternRootedPath {
+        mount: "/var/log".to_owned(),
+    };
+    assert!(
+        accepted.validate().is_ok(),
+        "A value starting with '/' should match pattern '^/'"
+    );
+
+    let rejected = PatternRootedPath {
+        mount: "var/log".to_owned(),
+    };
+    let result = rejected.validate();
+    assert!(
+        result.is_err(),
+        "A value not starting with '/' should not match pattern '^/'"
+    );
+    let errors = result.unwrap_err();
+    assert_eq!(
+        errors[0], "'mount' does not match pattern '^/'",
+        "Rejection should read exactly as the regex path words it: {errors:?}"
+    );
+}
+
 // ==================== Constraints under Option / wrappers / sequences ====================
 
 #[cfg(all(
