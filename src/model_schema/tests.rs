@@ -2124,12 +2124,20 @@ fn branded_json_schema_method_carries_no_cfg_attribute() {
 }
 
 /// Every shape [`super::branded_json_inner`] resolves to, so the dispatch is covered whole.
+///
+/// The `Slot` and `Chrono` shapes build their bodies through [`super::branded_slot_json_schema`]
+/// and [`super::branded_chrono_schema`], which is where a stray `cfg` attribute would land unseen,
+/// so they are walked here beside the two that render inline.
 #[cfg(feature = "jsonschema")]
 fn branded_json_inners() -> Vec<super::BrandedJsonInner> {
+    let composite: syn::Type = syn::parse_quote!(Vec<String>);
     vec![
-        super::BrandedJsonInner::Scalar("string".to_owned()),
+        #[cfg(feature = "chrono")]
+        super::BrandedJsonInner::Chrono("date-time"),
         #[cfg(feature = "object_id")]
         super::BrandedJsonInner::ObjectId,
+        super::BrandedJsonInner::Scalar("string".to_owned()),
+        super::BrandedJsonInner::Slot(Box::new(super::get_field_def("_inner", &composite, ""))),
     ]
 }
 
@@ -2138,9 +2146,34 @@ fn branded_json_inners() -> Vec<super::BrandedJsonInner> {
 fn branded_schema_example_carries_no_cfg_attribute() {
     let name: syn::Ident = syn::parse_quote!(DocumentId);
     let example = "DocumentId(\"abc\".to_string())".to_owned();
-    for is_generic in [false, true] {
-        let tokens = super::build_branded_schema_example(Some(&example), &name, is_generic);
+    for generic_params in [
+        Vec::new(),
+        vec!["A".to_owned()],
+        vec!["A".to_owned(), "B".to_owned()],
+    ] {
+        let tokens = super::build_branded_schema_example(Some(&example), &name, &generic_params);
         assert_no_cfg_attribute(&tokens, "build_branded_schema_example");
+    }
+}
+
+/// The type the example is bound at carries one argument per declared parameter, and none at all
+/// where the brand declares none — so a brand of any arity annotates a type it can be built as.
+#[cfg(feature = "zod")]
+#[test]
+fn branded_schema_example_instantiates_every_parameter() {
+    let name: syn::Ident = syn::parse_quote!(DocumentId);
+    let example = "DocumentId(\"abc\".to_string())".to_owned();
+    for (generic_params, expected) in [
+        (Vec::new(), "let value : DocumentId ="),
+        (vec!["A".to_owned()], "let value : DocumentId < String > ="),
+        (
+            vec!["A".to_owned(), "B".to_owned()],
+            "let value : DocumentId < String , String > =",
+        ),
+    ] {
+        let rendered =
+            super::build_branded_schema_example(Some(&example), &name, &generic_params).to_string();
+        assert!(rendered.contains(expected), "Got: {rendered}");
     }
 }
 

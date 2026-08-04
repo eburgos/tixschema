@@ -2944,32 +2944,29 @@ fn tokens_name_any(tokens: &proc_macro2::TokenStream, names: &[String]) -> bool 
 fn build_branded_schema_example(
     example_code: Option<&String>,
     name: &Ident,
-    is_generic: bool,
+    generic_params: &[String],
 ) -> proc_macro2::TokenStream {
     let Some(code) = example_code else {
         return quote! {};
     };
     let code_tokens: proc_macro2::TokenStream = code.parse().unwrap();
-    if is_generic {
-        // The example is Rust the expansion has to compile, and a parameter names no type to
-        // compile it at, so it is instantiated at `String` (e.g. `DocumentId<String>`) — the one
-        // concrete type every brand's example can be written against.
-        quote! {
-            pub fn schema_example() -> serde_json::Value {
-                let value: #name<String> = {
-                    #code_tokens
-                };
-                serde_json::to_value(&value).unwrap()
-            }
-        }
+    // The example is Rust the expansion has to compile, and a parameter names no type to compile
+    // it at, so every parameter the brand declares is instantiated at `String` (e.g.
+    // `DocumentId<String>`, `PairId<String, String>`) — the one concrete type every brand's
+    // example can be written against. A brand's arity is whatever it declares, so the argument
+    // list is as long as the parameter list rather than one long.
+    let value_ty = if generic_params.is_empty() {
+        quote! { #name }
     } else {
-        quote! {
-            pub fn schema_example() -> serde_json::Value {
-                let value: #name = {
-                    #code_tokens
-                };
-                serde_json::to_value(&value).unwrap()
-            }
+        let args = generic_params.iter().map(|_| quote! { String });
+        quote! { #name<#(#args),*> }
+    };
+    quote! {
+        pub fn schema_example() -> serde_json::Value {
+            let value: #value_ty = {
+                #code_tokens
+            };
+            serde_json::to_value(&value).unwrap()
         }
     }
 }
@@ -3198,7 +3195,7 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
 
     #[cfg(feature = "zod")]
     let schema_example_tokens =
-        build_branded_schema_example(example_code.as_ref(), &name, is_generic);
+        build_branded_schema_example(example_code.as_ref(), &name, &generic_params);
     #[cfg(not(feature = "zod"))]
     let schema_example_tokens = quote! {};
 
