@@ -21,7 +21,9 @@ use super::{
 };
 
 #[cfg(all(feature = "serde", feature = "zod"))]
-use super::{flattened_union_member_guard_error, record_zod_union_members};
+use super::{
+    WireLeaf, flattened_union_member_guard_error, record_wire_leaves, record_zod_union_members,
+};
 
 #[cfg(feature = "typescript")]
 use super::tuple_struct_ts_body;
@@ -2510,9 +2512,35 @@ fn the_cfg_probe_sees_an_emitted_cfg_attribute() {
 #[test]
 fn struct_schema_example_carries_no_cfg_attribute() {
     let name: syn::Ident = syn::parse_quote!(Report);
+    let generics = syn::Generics::default();
     let tokens =
-        super::build_struct_schema_example(Some(&"Report { id: 1 }".to_owned()), &name).unwrap();
-    assert_no_cfg_attribute(&tokens, "build_struct_schema_example");
+        super::item_schema_example_method(Some(&"Report { id: 1 }".to_owned()), &name, &generics)
+            .unwrap();
+    assert_no_cfg_attribute(&tokens, "item_schema_example_method");
+}
+
+/// The type the example is bound at carries one argument per declared parameter, the way a brand's
+/// already does — a bare ident on a generic item is `E0107` before the example is ever read. A
+/// lifetime and a const are not parameters a filling is chosen for, so neither reaches the list.
+#[cfg(feature = "zod")]
+#[test]
+fn struct_schema_example_instantiates_every_type_parameter() {
+    let name: syn::Ident = syn::parse_quote!(Report);
+    let example = "Report { id: 1 }".to_owned();
+    for (generics, expected) in [
+        (syn::Generics::default(), "let value : Report ="),
+        (syn::parse_quote!(<A>), "let value : Report < String > ="),
+        (
+            syn::parse_quote!(<A, B>),
+            "let value : Report < String , String > =",
+        ),
+        (syn::parse_quote!(<'a>), "let value : Report ="),
+    ] {
+        let rendered = super::item_schema_example_method(Some(&example), &name, &generics)
+            .unwrap()
+            .to_string();
+        assert!(rendered.contains(expected), "Got: {rendered}");
+    }
 }
 
 #[cfg(feature = "jsonschema")]
@@ -3140,8 +3168,11 @@ fn a_brand_records_the_value_surface_its_inner_publishes() {
             #[serde(transparent)]
             struct Branded(pub #ty);
         };
-        let shape = super::branded_value_shape(&item.generics, item.fields.iter().next().unwrap());
-        assert_eq!(shape, expected, "for {inner}");
+        let surface = super::Surface::written(&super::branded_inner_value_surface(
+            &item.generics,
+            item.fields.iter().next().unwrap(),
+        ));
+        assert_eq!(surface.shape, expected, "for {inner}");
     }
 }
 
@@ -3162,7 +3193,7 @@ fn a_tuple_struct_records_the_value_surface_its_slots_publish() {
     ] {
         let item: syn::ItemStruct = syn::parse_str(decl).unwrap();
         assert_eq!(
-            super::tuple_struct_value_shape(&item.fields),
+            super::tuple_struct_surface(&item.fields).shape,
             expected,
             "for {decl}"
         );
@@ -3557,6 +3588,73 @@ fn a_default_types_shape_the_parser_cannot_read_is_refused() {
         let rendered = probe.to_string();
         assert!(args_rejection(probe).is_some(), "for {rendered}");
     }
+}
+
+/// A parameter named twice is refused as written, and the refusal names the parameter and both
+/// fillings — a reader shown only that there is a duplicate still has to go and find the other
+/// entry to know what was dropped.
+#[test]
+fn a_parameter_declared_twice_is_refused() {
+    let rejection = args_rejection(quote::quote! {
+        default_types(IdType = String, IdType = f64)
+    })
+    .unwrap();
+    for needle in ["default_types", "IdType", "String", "f64"] {
+        assert!(rejection.contains(needle), "{needle} missing: {rejection}");
+    }
+}
+
+/// The duplicate is refused whatever surrounds it: the second of two identical entries says no
+/// more than the second of two different ones, and a repeat past the first pair is still a repeat.
+#[test]
+fn a_repeated_parameter_is_refused_wherever_it_is_written() {
+    let probes: [proc_macro2::TokenStream; 3] = [
+        quote::quote! { default_types(IdType = String, IdType = String) },
+        quote::quote! { default_types(IdType = String, DateType = f64, IdType = u8) },
+        quote::quote! { default_types(IdType = String, DateType = f64, DateType = f64) },
+    ];
+    for probe in probes {
+        let rendered = probe.to_string();
+        assert!(args_rejection(probe).is_some(), "for {rendered}");
+    }
+}
+
+/// The refusal points at the entry that earned it — the second spelling of the name, not the first,
+/// which on its own declares exactly what the author meant.
+#[test]
+fn a_duplicate_entry_refusal_is_spanned_on_the_second_spelling() {
+    let source = "default_types(IdType = String, DateType = f64, IdType = u8)";
+    let args: proc_macro2::TokenStream = syn::parse_str(source).unwrap();
+    let rejection = super::parse_model_schema_args(args).arg_rejection.unwrap();
+    let span = rejection.span();
+    assert_eq!(span.source_text().as_deref(), Some("IdType"));
+    assert_eq!(span.start().column, source.rfind("IdType").unwrap());
+    assert_ne!(span.start().column, source.find("IdType").unwrap());
+}
+
+/// A list that names each parameter once is read exactly as before, however many entries it
+/// carries and whatever the fillings are — the duplicate check costs a distinct declaration
+/// nothing.
+#[test]
+fn distinct_entries_are_read_unchanged() {
+    let args = super::parse_model_schema_args(quote::quote! {
+        default_types(AType = u32, BType = String, CType = u32, DType = Vec<Option<u8>>)
+    });
+    assert_eq!(args.arg_rejection.as_ref().map(ToString::to_string), None);
+    let read: Vec<(String, String)> = args
+        .default_types
+        .iter()
+        .map(|(name, ty)| (name.to_string(), quote::quote!(#ty).to_string()))
+        .collect();
+    assert_eq!(
+        read,
+        vec![
+            ("AType".to_owned(), "u32".to_owned()),
+            ("BType".to_owned(), "String".to_owned()),
+            ("CType".to_owned(), "u32".to_owned()),
+            ("DType".to_owned(), "Vec < Option < u8 > >".to_owned()),
+        ]
+    );
 }
 
 /// The argument shares the list with the string constraints and the name override, and reading it
@@ -5289,6 +5387,7 @@ fn wrapped_u32_value(wrapper: &str) -> super::FieldDef {
         model_schema_prop_meta: None,
         nullable_levels: Vec::new(),
         name: "items".to_owned(),
+        absent_from_wire: false,
         omits_value: false,
         type_span: proc_macro2::Span::call_site(),
     }
@@ -6613,16 +6712,23 @@ fn recorded_member_trails(mut item: syn::ItemEnum) -> Vec<(String, Option<&'stat
 }
 
 /// Registers a name carrying both answers a `#[model_schema()]` item's own expansion records for
-/// it: what serde writes it as, and what it published as a value.
+/// it: what serde writes it as, and the JSON type keyword its published wire describes as where
+/// that wire is proved to be no object.
 #[cfg(all(feature = "serde", feature = "zod"))]
-fn seed_registered_wire(rust_ident: &str, kind: AliasKind, shape: Option<&'static str>) {
+fn seed_registered_wire(rust_ident: &str, kind: AliasKind, wire: Option<&'static str>) {
     register_alias_info(
         rust_ident,
         rust_ident,
         &ident_schema_module_name(rust_ident),
         kind,
     );
-    record_value_shape(rust_ident, shape);
+    record_wire_leaves(
+        rust_ident,
+        &[WireLeaf {
+            branch: Vec::new(),
+            non_object: wire,
+        }],
+    );
 }
 
 /// A member reached through an `Option` is two choices and not one: serde writes the value's own
@@ -6719,21 +6825,21 @@ fn an_optional_scalar_union_member_is_refused_below_the_option_it_was_written_un
     );
 }
 
-/// A member that names another item is asked of the registry rather than left unanswered: the
-/// named item recorded what serde writes it as and what it published as a value, and between them
-/// they name the JSON type keyword the other surface writes for the same member.
+/// A member that names another item is asked of the registry rather than left unanswered: the named
+/// item recorded the JSON type keyword its own published document carries, which is the word the
+/// other surface writes for the same member.
 ///
-/// `numeric` is not among them on purpose — see the guard's own note — and a name the registry
-/// cannot rule out keeps the emission it has always had.
+/// An object, a union and a name the registry cannot rule out are the three that stay unanswered,
+/// and each keeps the emission it has always had.
 #[cfg(all(feature = "serde", feature = "zod"))]
 #[test]
 fn a_union_member_naming_a_registered_non_object_wire_is_recorded_as_that_wire() {
-    seed_registered_wire("StringBrand", AliasKind::StringWire, None);
+    seed_registered_wire("StringBrand", AliasKind::StringWire, Some("string"));
     seed_registered_wire("SwitchBrand", AliasKind::Stringified, Some("boolean"));
-    seed_registered_wire("PlainEnum", AliasKind::EnumMembers, Some("enumerated"));
-    seed_registered_wire("NamedStruct", AliasKind::NoEnumMembers, Some("object"));
-    seed_registered_wire("TaggedEnum", AliasKind::NoEnumMembers, Some("union"));
-    seed_registered_wire("CountBrand", AliasKind::Stringified, Some("numeric"));
+    seed_registered_wire("PlainEnum", AliasKind::EnumMembers, Some("string"));
+    seed_registered_wire("NamedStruct", AliasKind::NoEnumMembers, None);
+    seed_registered_wire("TaggedEnum", AliasKind::NoEnumMembers, None);
+    seed_registered_wire("CountBrand", AliasKind::Stringified, Some("integer"));
     assert_eq!(
         recorded_member_trails(syn::parse_quote! {
             enum Choice {
@@ -6752,7 +6858,7 @@ fn a_union_member_naming_a_registered_non_object_wire_is_recorded_as_that_wire()
             ("3".to_owned(), Some("boolean")),
             ("4".to_owned(), Some("string")),
             ("5".to_owned(), None),
-            ("6".to_owned(), None),
+            ("6".to_owned(), Some("integer")),
             ("7".to_owned(), None),
         ]
     );
@@ -6765,7 +6871,7 @@ fn a_union_member_naming_a_registered_non_object_wire_is_recorded_as_that_wire()
 #[cfg(all(feature = "serde", feature = "zod"))]
 #[test]
 fn flattening_a_union_with_a_named_string_wire_member_is_refused_naming_the_branch() {
-    seed_registered_wire("Slug", AliasKind::StringWire, None);
+    seed_registered_wire("Slug", AliasKind::StringWire, Some("string"));
     let error = recorded_union_flatten_error(
         "SlugChoice",
         syn::parse_quote! {
@@ -6806,7 +6912,7 @@ fn flattening_a_union_with_a_named_stringified_or_enumerated_member_is_refused()
         "got: {switch}"
     );
 
-    seed_registered_wire("Hue", AliasKind::EnumMembers, Some("enumerated"));
+    seed_registered_wire("Hue", AliasKind::EnumMembers, Some("string"));
     let hue = recorded_union_flatten_error(
         "HueChoice",
         syn::parse_quote! {
@@ -6830,7 +6936,7 @@ fn flattening_a_union_with_a_named_stringified_or_enumerated_member_is_refused()
 #[cfg(all(feature = "serde", feature = "zod"))]
 #[test]
 fn a_union_member_naming_an_object_or_an_unregistered_type_stays_admitted() {
-    seed_registered_wire("Doc", AliasKind::NoEnumMembers, Some("object"));
+    seed_registered_wire("Doc", AliasKind::NoEnumMembers, None);
     assert!(
         recorded_union_flatten_error(
             "NamedChoice",
@@ -6844,6 +6950,249 @@ fn a_union_member_naming_an_object_or_an_unregistered_type_stays_admitted() {
             &syn::parse_quote! { #[serde(flatten)] either: NamedChoice },
         )
         .is_none()
+    );
+}
+
+/// Runs the registration a tuple struct's own expansion runs, so what the registry answers for the
+/// name is what a declaration put there rather than a word written by hand.
+#[cfg(all(feature = "serde", feature = "zod"))]
+fn seed_slot_registration(item: &syn::ItemStruct) {
+    let _: (String, String, syn::Ident) =
+        super::struct_module_idents(&item.ident, None, super::tuple_struct_surface(&item.fields));
+}
+
+/// The same for a branded newtype, whose wire is its inner's.
+#[cfg(all(feature = "serde", feature = "zod"))]
+fn seed_brand_registration(item: &syn::ItemStruct) {
+    let rust_ident = item.ident.to_string();
+    super::register_branded_newtype(
+        item,
+        &rust_ident,
+        &rust_ident,
+        &ident_schema_module_name(&rust_ident),
+    );
+}
+
+/// One `u32` is one wire, and every spelling of it publishes the one JSON type keyword that wire
+/// describes as. A field, the slot of a one-slot tuple struct and a brand all reach the same value,
+/// so a keyword read off one of them and not the others is the same wire named twice — and the
+/// merge that repeats the keyword cannot pick between two producers that disagree.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn every_spelling_of_one_value_publishes_one_json_type_keyword() {
+    for (inner, keyword) in [
+        ("u32", "integer"),
+        ("i64", "integer"),
+        ("usize", "integer"),
+        ("f32", "number"),
+        ("f64", "number"),
+        ("bool", "boolean"),
+        ("String", "string"),
+    ] {
+        let ty: syn::Type = syn::parse_str(inner).unwrap();
+        let written = super::get_field_def("v", &ty, "");
+        let named = format!("\"{keyword}\"");
+        let field = super::build_field_type_schema(&written, "v").to_string();
+        let slot = super::scalar_field_json_schema_item(&written)
+            .unwrap()
+            .to_string();
+        let brand = brand_json_schema_over(&ty);
+        assert!(field.contains(&named), "field {inner}, got: {field}");
+        assert!(slot.contains(&named), "slot {inner}, got: {slot}");
+        assert!(brand.contains(&named), "brand {inner}, got: {brand}");
+    }
+}
+
+/// A member naming a brand over an integer is recorded as the `integer` that brand publishes, and
+/// one naming a brand over a float as the `number` its own publishes. The two are one word to the
+/// shape vocabulary and two documents on the wire, which is the disagreement that left both
+/// unanswered.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_union_member_naming_a_numeric_registration_is_recorded_by_its_own_keyword() {
+    seed_brand_registration(&syn::parse_quote! {
+        #[serde(transparent)]
+        struct WireTicks(u32);
+    });
+    seed_brand_registration(&syn::parse_quote! {
+        #[serde(transparent)]
+        struct WireRatio(f64);
+    });
+    seed_slot_registration(&syn::parse_quote! { struct WireSlotTicks(u32); });
+    assert_eq!(
+        recorded_member_trails(syn::parse_quote! {
+            enum WireNumericChoice {
+                Obj(Holder),
+                Ticks(WireTicks),
+                Ratio(WireRatio),
+                Slot(WireSlotTicks),
+            }
+        }),
+        vec![
+            ("1".to_owned(), None),
+            ("2".to_owned(), Some("integer")),
+            ("3".to_owned(), Some("number")),
+            ("4".to_owned(), Some("integer")),
+        ]
+    );
+}
+
+/// So flattening a union whose member names one is refused where the field was written, naming the
+/// keyword the JSON-schema merge names the same member by.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn flattening_a_union_with_a_named_integer_wire_member_is_refused_naming_the_keyword() {
+    seed_brand_registration(&syn::parse_quote! {
+        #[serde(transparent)]
+        struct FlatWireTicks(u32);
+    });
+    let error = recorded_union_flatten_error(
+        "WireTickChoice",
+        syn::parse_quote! {
+            enum WireTickChoice {
+                Obj(Holder),
+                Ticks(FlatWireTicks),
+            }
+        },
+        &syn::parse_quote! { #[serde(flatten)] either: WireTickChoice },
+    )
+    .unwrap();
+    assert!(
+        error.contains("its branch 2 describes a `integer`"),
+        "got: {error}"
+    );
+}
+
+/// An array-shaped registration and a map-shaped one are one word to the shape vocabulary and
+/// opposite answers to the merge: serde flattens a map and writes an array as an array, which no
+/// object can be merged with. Each is recorded as the keyword its own published document carries.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn an_array_shaped_registration_is_recorded_apart_from_a_map_shaped_one() {
+    seed_slot_registration(&syn::parse_quote! { struct WireBag(Vec<String>); });
+    seed_slot_registration(
+        &syn::parse_quote! { struct WireBucket(std::collections::HashMap<String, String>); },
+    );
+    seed_slot_registration(&syn::parse_quote! { struct WirePair(String, u32); });
+    assert_eq!(
+        recorded_member_trails(syn::parse_quote! {
+            enum WireContainerChoice {
+                Obj(Holder),
+                Bag(WireBag),
+                Bucket(WireBucket),
+                Pair(WirePair),
+            }
+        }),
+        vec![
+            ("1".to_owned(), None),
+            ("2".to_owned(), Some("array")),
+            ("3".to_owned(), None),
+            ("4".to_owned(), Some("array")),
+        ]
+    );
+}
+
+/// So the array-shaped member is refused at the flatten site naming `array`, and the map-shaped one
+/// stays admitted: serde writes a map's keys straight into the object, which is what flattening is.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn flattening_a_union_with_a_named_array_wire_member_is_refused_while_a_map_stays_admitted() {
+    seed_slot_registration(&syn::parse_quote! { struct FlatWireBag(Vec<String>); });
+    seed_slot_registration(
+        &syn::parse_quote! { struct FlatWireBucket(std::collections::HashMap<String, String>); },
+    );
+    let bag = recorded_union_flatten_error(
+        "WireBagChoice",
+        syn::parse_quote! {
+            enum WireBagChoice {
+                Obj(Holder),
+                Bag(FlatWireBag),
+            }
+        },
+        &syn::parse_quote! { #[serde(flatten)] either: WireBagChoice },
+    )
+    .unwrap();
+    assert!(
+        bag.contains("its branch 2 describes a `array`"),
+        "got: {bag}"
+    );
+    assert!(
+        recorded_union_flatten_error(
+            "WireBucketChoice",
+            syn::parse_quote! {
+                enum WireBucketChoice {
+                    Obj(Holder),
+                    Bucket(FlatWireBucket),
+                }
+            },
+            &syn::parse_quote! { #[serde(flatten)] either: WireBucketChoice },
+        )
+        .is_none()
+    );
+}
+
+/// A member naming a registration whose own published surface is nullable carries that surface's
+/// null leaf, at the branch behind the name — the same two positions the member written
+/// `Option<T>` is recorded at, one module further in.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_union_member_naming_a_nullable_registration_carries_its_null_leaf() {
+    seed_slot_registration(&syn::parse_quote! { struct WireMaybeDoc(Option<Holder>); });
+    seed_slot_registration(&syn::parse_quote! { struct WireMaybeCount(Option<u32>); });
+    assert_eq!(
+        recorded_member_trails(syn::parse_quote! {
+            enum WireNullableChoice {
+                Obj(Holder),
+                Maybe(WireMaybeDoc),
+                Count(WireMaybeCount),
+            }
+        }),
+        vec![
+            ("1".to_owned(), None),
+            ("2.1".to_owned(), None),
+            ("2.2".to_owned(), Some("null")),
+            ("3.1".to_owned(), Some("integer")),
+            ("3.2".to_owned(), Some("null")),
+        ]
+    );
+}
+
+/// So flattening a union whose member names one is refused in the words the directly written
+/// `Option` member is refused in: serde writes the absent form and then refuses to read it back,
+/// whether the null sits on the member or one name away.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn flattening_a_union_with_a_named_nullable_member_is_refused_naming_the_trail() {
+    seed_slot_registration(&syn::parse_quote! { struct FlatWireMaybeDoc(Option<Holder>); });
+    let named = recorded_union_flatten_error(
+        "WireNamedNullableChoice",
+        syn::parse_quote! {
+            enum WireNamedNullableChoice {
+                Obj(Holder),
+                Maybe(FlatWireMaybeDoc),
+            }
+        },
+        &syn::parse_quote! { #[serde(flatten)] either: WireNamedNullableChoice },
+    )
+    .unwrap();
+    let written = recorded_union_flatten_error(
+        "WireWrittenNullableChoice",
+        syn::parse_quote! {
+            enum WireWrittenNullableChoice {
+                Obj(Holder),
+                Maybe(Option<Holder>),
+            }
+        },
+        &syn::parse_quote! { #[serde(flatten)] either: WireWrittenNullableChoice },
+    )
+    .unwrap();
+    assert!(
+        named.contains("its branch 2.2 describes a `null`"),
+        "got: {named}"
+    );
+    assert_eq!(
+        named.replace("WireNamedNullableChoice", "CHOICE"),
+        written.replace("WireWrittenNullableChoice", "CHOICE")
     );
 }
 

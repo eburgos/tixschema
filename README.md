@@ -88,7 +88,13 @@ pub struct UserProfile {
 
 `Option<T>` fields validate as `z.union([type, z.undefined()]).prefault(undefined)` in Zod v4 and are left out of the JSON Schema's `required` list. The `.prefault(undefined)` makes the field default to `undefined` when omitted from the input.
 
-What TypeScript writes follows the wire. A field carrying `#[serde(skip_serializing_if = "Option::is_none")]` (or `skip` / `skip_serializing`) has no key at all in the payload serde writes for a `None`, so the member is written with an optional key — `field?: T`, which the absent-key payload satisfies. Every other `Option<T>` field keeps its key and carries `T | undefined`. The `serde` feature is what reads the attribute; without it no attribute is read and every `Option<T>` renders in the second form.
+What TypeScript writes follows the wire. A field carrying `#[serde(skip_serializing_if = "Option::is_none")]` or `#[serde(skip_serializing)]` has no key at all in the payload serde writes for a `None`, so the member is written with an optional key — `field?: T`, which the absent-key payload satisfies. Every other `Option<T>` field keeps its key and carries `T | undefined`.
+
+A bare `#[serde(skip)]` is not that. serde writes the key into no payload *and* throws it away out of every payload that supplies one, so there is nothing on the wire for any surface to describe: TypeScript writes no member, Zod no key, and the JSON Schema neither a `properties` entry nor a `required` one. `#[serde(skip_serializing, skip_deserializing)]` is the same wire spelled out and is answered the same way. Note what this costs on the way in — a `z.strictObject` and an `additionalProperties: false` both *reject* a payload carrying that key, while serde accepts such a payload and discards the value. The schemas describe the payload serde writes, and that key appears in none of them; a member under an optional key would instead claim the key is sometimes written, and would describe a value nothing ever reads.
+
+`#[serde(skip_deserializing)]` on its own drops neither surface's key: serde writes it in every payload, so the member keeps a required key, and the value a payload supplies under it is discarded on the way in.
+
+Which key a field writes is read off the attribute in every build, `serde` feature or not — one declaration describes one wire under every toggle. What the feature buys is the renaming, the tagging and the guards.
 
 ```rust
 #[model_schema()]
@@ -219,7 +225,9 @@ All of them are covered under [Compilation Errors](#compilation-errors), with th
 
 Every other key is neither open nor enumerable, and none of them is refused: serde stringifies each one into a key for you. The JSON schema describes such a map as an object and says nothing about its members — `{"type": "object", "additionalProperties": true}` — while TypeScript and Zod keep the key's own type, so a `HashMap<u32, String>` is `Partial<Record<number, string>>` and `z.record(z.number().int(), z.string())`. serde writes the object with the key's string form for its keys: `7` becomes `"7"`, `true` becomes `"true"`, a chrono `NaiveDate` its ISO rendering. A brand over one of those writes the same object and describes as the same one, under the brand's name. Only the narrowing is missing, not the object. The rule the refusals apply is refuse-what-serde-refuses, never refuse-what-is-not-a-`String`.
 
-A key written as one of the enclosing item's own type parameters is the open case, read off that same rule. The expansion cannot see which type the instantiation will supply, but serde has already settled what any of them may write: an instantiation whose key writes as a string keys the map, and one whose key does not fails the whole map at serialization with `key must be a string` — so string keys hold for every instantiation that serializes at all. The two validating surfaces say exactly that and nothing more, `{"type": "object", "additionalProperties": V}` and `z.record(z.string(), V)`, the pair a `String` key earns; the value side stays described, being no parameter's business. TypeScript keeps the parameter in the key position the way it keeps a parameter anywhere — see [Type Parameters](#type-parameters).
+A key written as one of the enclosing item's own type parameters is the open case, read off that same rule. The expansion cannot see which type the instantiation will supply, but serde has already settled what any of them may write: an instantiation whose key writes as a string keys the map, and one whose key does not fails the whole map at serialization with `key must be a string` — so string keys hold for every instantiation that serializes at all. All three surfaces say exactly that and nothing more: `{"type": "object", "additionalProperties": V}`, `z.record(z.string(), V)`, and `Partial<Record<string, V>>` — the trio a `String` key earns. The value side stays described, being no parameter's business, so `HashMap<KeyType, ValueType>` on `Holder<KeyType, ValueType>` is `Partial<Record<string, ValueType>>`.
+
+The key position is the one place TypeScript stops rendering a parameter as itself — see [Type Parameters](#type-parameters) for what it does everywhere else — and the declaration is what forces it. `Record<K, T>` is declared `K extends keyof any`, so a declaration handing it a parameter it binds without bounding does not type-check at all, and the consumer pasting the emitted `.ts` gets the error before writing a value. Bounding the parameter would move the failure rather than fix it: the bound propagates to every name written over the item, including the erased fillings a binding annotated for the opaque value supplies. What the member gives up is naming the parameter in its key; what it gains is the guarantee serde already makes about every filling that reaches the wire.
 
 ### Pointers and Borrowed Values
 
@@ -778,7 +786,7 @@ export type DocumentRecord = {
 
 A struct, a tuple struct, an enum, an alias and a branded newtype can each name their own type parameters, and every surface reads such a name under one rule.
 
-**TypeScript binds the parameter for real.** It is a type surface, and the declaration it emits carries the parameter list: `export type Wrapper<T> = { id: T }` is a generic type, and a use site fills `T` in.
+**TypeScript binds the parameter for real.** It is a type surface, and the declaration it emits carries the parameter list: `export type Wrapper<T> = { id: T }` is a generic type, and a use site fills `T` in. The one position where it does not is a map's key, which states `string` on all three surfaces — see [Collections and Maps](#collections-and-maps).
 
 **JSON Schema describes it as the open schema** -- `{}`. A parameter names no type until the item is instantiated, and one JSON schema is written for every instantiation, so the parameter admits any value while the shape around it -- an array, a map's keys, a tuple's arity -- stays described.
 
@@ -1512,18 +1520,17 @@ pub struct Event {
 
 ### Optional TypeScript Keys (`ts_optional`)
 
-An `Option<T>` field whose serde attributes drop the key for a `None` already renders as an optional key ([Optional Fields](#optional-fields)). The bare `ts_optional` flag asks for that same spelling (`field?: T` rather than `field: T | undefined`) on the author's word, for a field whose key nothing else says may be absent — an `Option<T>` written where no serde attribute is read at all.
+The bare `ts_optional` flag asks for the optional key (`field?: T` rather than `field: T | undefined`) on the author's word, for a field whose key nothing else says may be absent.
 
-This is a TypeScript-only knob -- the Zod schema and JSON Schema are unchanged (the field is already optional in both). The flag is only valid on `Option<T>` fields; applying it to a non-`Option` field is a compile error. It composes with `as = Type`, which names the type the field already renders.
+**Read the condition before reaching for it.** An `Option<T>` field whose serde attributes drop the key for a `None` already renders as an optional key, off the wire and in every build ([Optional Fields](#optional-fields)) — on such a field the flag changes nothing, because the attribute has already said it. What is left over is an `Option<T>` carrying no key-dropping attribute at all, and with the `serde` feature on that field does not compile: serde writes its `None` as a `null`, the generated schema admits only the absent key, and the guard refuses the declaration and names the attribute to add. So the flag decides the key in exactly one place — a build with the `serde` feature **off**, where no attribute is read and no such guard runs:
 
 ```rust
 #[model_schema()]
-#[derive(Serialize, Deserialize)]
 pub struct Profile {
     pub name: String,
     #[model_schema_prop(ts_optional)]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nickname: Option<String>,
+    pub nick_handle: Option<String>,
 }
 ```
 
@@ -1533,10 +1540,13 @@ Generated TypeScript:
 export type Profile = {
   name: string;
   nickname?: string;
+  nick_handle: string | undefined;
 };
 ```
 
-Without `ts_optional` and without an attribute that drops the key, `nickname` would render as `nickname: string | undefined`.
+`nick_handle` is the same field without the flag, so the flag is the whole of the difference between those two lines.
+
+This is a TypeScript-only knob -- the Zod schema and JSON Schema are unchanged (the field is already optional in both, flagged or not). The flag is only valid on `Option<T>` fields; applying it to a non-`Option` field is a compile error. It composes with `as = Type`, which names the type the field already renders. On a field the flag has no say over — one already carrying an omission attribute, or a positional slot, which has no key to make optional — writing it is accepted and inert.
 
 ## Compiler-Validated Examples
 

@@ -9,7 +9,7 @@ use syn::spanned::Spanned as _;
 use syn::Attribute;
 
 use crate::features::model_schema_prop::ModelSchemaPropMeta;
-use crate::utils::{lookup_alias_info, safe_type_name};
+use crate::utils::{lookup_alias_info, safe_type_name, written_type};
 
 #[cfg(feature = "zod")]
 use crate::utils::{ZodUnionMember, escape_js_regex_literal, zod_factory_argument};
@@ -186,6 +186,13 @@ pub enum FieldDefType {
 ///   that may be absent, `field: T | undefined` for one that is always written — and what takes
 ///   the field out of the JSON surface's `required`. Read in every build: the attribute stating
 ///   it is on the field whatever the features say, and one declaration describes one wire.
+/// - `absent_from_wire`: whether the serde attributes on a *named* field take its key out of both
+///   directions at once — nothing serde writes carries it and nothing serde reads keeps what a
+///   payload put under it. A bare `skip` says so, and so do `skip_serializing` and
+///   `skip_deserializing` written side by side, which is the same wire spelled out. A field
+///   carrying it is one no surface describes at all: the surfaces describe the payload serde
+///   writes, and there is no such key in any of them. Read in every build, for the same reason
+///   `omits_value` is.
 /// - `type_span`: where the type this field carries was written — the name segment of a path, the
 ///   whole type otherwise, and the innermost name under a wrapper, so `Vec<Inner>` points at
 ///   `Inner`. The JSON schema is the one surface that emits a Rust path built from a type name, so
@@ -201,6 +208,7 @@ pub enum FieldDefType {
 /// - Feature "zod" enables `zod_type()` method
 #[derive(Clone, Debug)]
 pub struct FieldDef {
+    pub absent_from_wire: bool,
     pub array_depth: u8,
     pub array_lengths: Vec<(u8, usize)>,
     pub docs: String,
@@ -257,6 +265,7 @@ impl FieldDef {
             .model_schema_prop_meta
             .clone_from(&self.model_schema_prop_meta);
         arrayed.omits_value = self.omits_value;
+        arrayed.absent_from_wire = self.absent_from_wire;
         arrayed
     }
 
@@ -523,6 +532,11 @@ impl FieldDef {
     /// writes simply has no key there. That second one asks nothing about `Option`-ness on purpose
     /// — a `Vec` behind a `Vec::is_empty` predicate has no `None` anywhere in it and its key still
     /// goes missing, so a rule keyed on `Option` would describe a payload serde does not write.
+    ///
+    /// The two overlap on every field that carries both, which leaves the flag deciding this only
+    /// where no such attribute was written — a field the `serde` feature's `Option`-null guard
+    /// refuses, so the flag's own answer is one a build with that feature off is the only place to
+    /// read.
     fn key_may_be_absent(&self) -> bool {
         self.omits_value
             || (self.is_optional()
@@ -794,7 +808,7 @@ impl FieldDef {
             FieldDefType::Map(k, v) => {
                 format!(
                     "Partial<Record<{}, {}>>",
-                    k.typescript_typename(),
+                    k.typescript_map_key_typename(),
                     v.typescript_slot_typename()
                 )
             }
@@ -837,6 +851,29 @@ impl FieldDef {
             };
             format!("Array<{item}>")
         })
+    }
+
+    /// The key a `Partial<Record<…>>` is written with: the key's own type, except where the key is
+    /// one of the enclosing item's type parameters, which states `string` — the same answer
+    /// [`Self::zod_map_key_type`] gives, for the same reason.
+    ///
+    /// This is the one place the type surface stops rendering a parameter as itself, and the
+    /// declaration is what forces it. `Record<K, T>` is declared `K extends keyof any`, so a
+    /// declaration that hands it a parameter it binds without bounding does not type-check at all —
+    /// the consumer pasting the emitted `.ts` gets the error before writing a value. Bounding the
+    /// parameter instead moves the failure rather than fixing it: the bound propagates to every
+    /// name written over the item, and `unknown` — what a binding annotated for the erased value
+    /// fills the parameter with — does not satisfy it either.
+    ///
+    /// What the member gives up is naming the parameter. What it gains is the guarantee serde
+    /// already makes: an instantiation either writes this map's keys as strings or refuses the
+    /// whole map at serialization, so no filling of the parameter ever reaches the wire as
+    /// anything else. The value beside the key still names whatever parameter it was written with.
+    fn typescript_map_key_typename(&self) -> String {
+        if self.parameter_shape_name().is_some() {
+            return "string".to_owned();
+        }
+        self.typescript_typename()
     }
 
     /// What this field contributes to an object that writes its members beside its own, on the
@@ -1319,6 +1356,7 @@ fn get_field_def_from_type_path(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            absent_from_wire: false,
             omits_value: false,
             #[cfg(feature = "jsonschema")]
             type_span: type_path.span(),
@@ -1334,6 +1372,7 @@ fn get_field_def_from_type_path(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            absent_from_wire: false,
             omits_value: false,
             // The name segment, not the whole path: it is what a generated module is named after,
             // so a reference the module cannot resolve is blamed on the name it was built from.
@@ -1352,6 +1391,7 @@ fn get_field_def_from_type_path(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            absent_from_wire: false,
             omits_value: false,
             #[cfg(feature = "jsonschema")]
             type_span: segment.ident.span(),
@@ -1402,37 +1442,15 @@ fn get_field_def_from_generic_type(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            absent_from_wire: false,
             omits_value: false,
             #[cfg(feature = "jsonschema")]
             type_span: type_ident.span(),
         }
-    }
-    // A collapse keeps the field and drops only the wrapper. The docs were written where the field
-    // was, not around what it holds, so they cross onto the element the field's own name crosses
-    // onto — the element was parsed with none of its own to lose.
-    else if arg_types.len() == 1 && ident == "Option" {
-        let mut result = arg_types[0].clone();
-        result.name = safe_name;
-        field_docs.clone_into(&mut result.docs);
-        result.mark_nullable_at(result.array_depth);
-        result
-    } else if arg_types.len() == 1 && ident == "Vec" {
-        let mut result = arg_types[0].clone();
-        result.name = safe_name;
-        field_docs.clone_into(&mut result.docs);
-        result.array_depth = result.array_depth.saturating_add(1);
-        result
-    }
-    // A wrapper that is not on the wire adds nothing for the field to carry: the inner field stands
-    // in whole, under the wrapped field's own name and its own docs, which belong to where the
-    // field was written rather than to what it was written under. Everything a wrapper could sit
-    // around or inside — the optionality an `Option` lifts, the levels a sequence counts — is
-    // already on that field and rides along untouched.
-    else if arg_types.len() == 1 && is_transparent_wrapper(ident) {
-        let mut result = arg_types[0].clone();
-        result.name = safe_name;
-        field_docs.clone_into(&mut result.docs);
-        result
+    } else if let [element] = arg_types.as_slice()
+        && let Some(collapsed) = collapsed_wrapper_def(ident, element, &safe_name, field_docs)
+    {
+        collapsed
     } else if arg_types.len() == 2 && (ident == "HashMap" || ident == "BTreeMap") {
         log::trace!(
             "Creating HashMap Map type - key: {:?}, value: {:?}",
@@ -1450,6 +1468,7 @@ fn get_field_def_from_generic_type(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            absent_from_wire: false,
             omits_value: false,
             #[cfg(feature = "jsonschema")]
             type_span: type_ident.span(),
@@ -1464,6 +1483,7 @@ fn get_field_def_from_generic_type(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            absent_from_wire: false,
             omits_value: false,
             #[cfg(feature = "jsonschema")]
             type_span: type_ident.span(),
@@ -1478,11 +1498,41 @@ fn get_field_def_from_generic_type(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            absent_from_wire: false,
             omits_value: false,
             #[cfg(feature = "jsonschema")]
             type_span: type_ident.span(),
         }
     }
+}
+
+/// The def a single-argument wrapper collapses onto, for the wrappers that collapse.
+///
+/// A collapse keeps the field and drops only the wrapper. The docs were written where the field
+/// was, not around what it holds, so they cross onto the element the field's own name crosses onto
+/// — the element was parsed with none of its own to lose. Everything a wrapper could sit around or
+/// inside is already on that element and rides along untouched: `Option` lifts its optionality onto
+/// the outermost level, a sequence counts one more level, and a wrapper that is not on the wire at
+/// all adds nothing for the field to carry and hands the element over whole.
+///
+/// `None` for every other name, which is a wrapper this does not answer for rather than one that
+/// collapses to nothing — the caller goes on to its own arms.
+fn collapsed_wrapper_def(
+    ident: &str,
+    element: &FieldDef,
+    safe_name: &str,
+    field_docs: &str,
+) -> Option<FieldDef> {
+    let mut result = element.clone();
+    match ident {
+        "Option" => result.mark_nullable_at(result.array_depth),
+        "Vec" => result.array_depth = result.array_depth.saturating_add(1),
+        _ if is_transparent_wrapper(ident) => {}
+        _ => return None,
+    }
+    safe_name.clone_into(&mut result.name);
+    field_docs.clone_into(&mut result.docs);
+    Some(result)
 }
 
 /// The element count a fixed-size array was written with, when the expansion can read it.
@@ -1503,17 +1553,24 @@ fn literal_array_length(len: &syn::Expr) -> Option<usize> {
 }
 
 /// Debug logging: Set `RUST_LOG=trace` to see HashMap/SiblingType creation.
+///
+/// The arms below classify by the shape they are handed, so what they are handed is the type as
+/// written: a `macro_rules!` substitution arrives grouped, and the grouping is read off before any
+/// arm looks. Everything reached from here comes back through this function, so a substitution
+/// nested inside a written shape — `Vec<$t>`, `&$t`, `($a, $b)` — is read through on its own way
+/// down.
 pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
     let safe_name = safe_type_name(name);
-    if let Type::Path(type_path) = ty {
+    let written = written_type(ty);
+    if let Type::Path(type_path) = written {
         get_field_def_from_type_path(type_path, safe_name, field_docs)
-    } else if let Type::Reference(type_ref) = ty {
+    } else if let Type::Reference(type_ref) = written {
         // let lifetime = type_ref
         //     .lifetime
         //     .as_ref()
         //     .map_or("".to_string(), |l| format!("'{}", l.ident));
         get_field_def(name, type_ref.elem.as_ref(), field_docs)
-    } else if let Type::Array(type_array) = ty {
+    } else if let Type::Array(type_array) = written {
         let mut def = get_field_def(name, &type_array.elem, field_docs);
         // The array this spelling adds is the level the element's own depth counts up to, and the
         // length is that level's — not the field's, which may sit under further wrappers.
@@ -1523,11 +1580,11 @@ pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
             def.mark_fixed_length_at(level, length);
         }
         def
-    } else if let Type::Slice(type_slice) = ty {
+    } else if let Type::Slice(type_slice) = written {
         let mut def = get_field_def(name, &type_slice.elem, field_docs);
         def.array_depth = def.array_depth.saturating_add(1);
         def
-    } else if let Type::Tuple(type_tuple) = ty {
+    } else if let Type::Tuple(type_tuple) = written {
         let elements: Vec<FieldDef> = type_tuple
             .elems
             .iter()
@@ -1542,9 +1599,10 @@ pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            absent_from_wire: false,
             omits_value: false,
             #[cfg(feature = "jsonschema")]
-            type_span: ty.span(),
+            type_span: written.span(),
         }
     } else {
         // Fallback for BareFn, ImplTrait, etc.
@@ -1556,9 +1614,10 @@ pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            absent_from_wire: false,
             omits_value: false,
             #[cfg(feature = "jsonschema")]
-            type_span: ty.span(),
+            type_span: written.span(),
         }
     }
 }

@@ -19,6 +19,7 @@ fn field(field_type: FieldDefType) -> FieldDef {
         model_schema_prop_meta: None,
         nullable_levels: Vec::new(),
         name: "items".to_owned(),
+        absent_from_wire: false,
         omits_value: false,
         #[cfg(feature = "jsonschema")]
         type_span: proc_macro2::Span::call_site(),
@@ -464,5 +465,87 @@ fn test_a_covered_wrapper_records_its_element_option_where_the_vec_spelling_does
         );
         #[cfg(feature = "zod")]
         assert_eq!(parsed.zod_type(), expected.zod_type(), "for: {wrapper}");
+    }
+}
+
+/// The tokens a `macro_rules!` `$t:ty` substitution reaches an expansion as: the type's own tokens
+/// inside an invisible group, which is what keeps the substitution one unit whatever the expansion
+/// writes around it. Built here rather than expanded, so the depth can be chosen — a metavariable
+/// passed on through a second `macro_rules!` arrives grouped again.
+fn substituted(spelling: &str, depth: usize) -> proc_macro2::TokenStream {
+    let mut tokens: proc_macro2::TokenStream = spelling.parse().unwrap();
+    for _ in 0..depth {
+        tokens = proc_macro2::TokenTree::Group(proc_macro2::Group::new(
+            proc_macro2::Delimiter::None,
+            tokens,
+        ))
+        .into();
+    }
+    tokens
+}
+
+/// What `parsed` and `expected` have to agree on for the two spellings to describe one field: the
+/// span is deliberately left out, being the one thing about a substitution that legitimately
+/// differs.
+fn assert_reads_alike(parsed: &FieldDef, expected: &FieldDef, at: &str) {
+    assert_eq!(parsed.field_type, expected.field_type, "{at}");
+    assert_eq!(parsed.array_depth, expected.array_depth, "{at}");
+    assert_eq!(parsed.array_lengths, expected.array_lengths, "{at}");
+    assert_eq!(parsed.nullable_levels, expected.nullable_levels, "{at}");
+}
+
+/// A substituted type is the type it names. The grouping describes nothing about the value, so it
+/// reaches no classification: every spelling reads as its written twin, however many expansions
+/// passed it on.
+#[test]
+fn test_a_substituted_type_reads_as_the_written_one() {
+    for spelling in [
+        "String",
+        "u32",
+        "Vec<String>",
+        "Option<u32>",
+        "HashMap<String, u32>",
+        "(String, u32)",
+        "[u8; 4]",
+        "&str",
+    ] {
+        let written: syn::Type = syn::parse_str(spelling).unwrap();
+        let expected = super::get_field_def("items", &written, "");
+        for depth in 1_usize..=3 {
+            let ty: syn::Type = syn::parse2(substituted(spelling, depth)).unwrap();
+            let parsed = super::get_field_def("items", &ty, "");
+            assert_reads_alike(
+                &parsed,
+                &expected,
+                &format!("for {spelling} at depth {depth}"),
+            );
+        }
+    }
+}
+
+/// A substitution written inside a shape the author spelled out is read through on the way down:
+/// the shape is theirs, the grouping is not, and the field is the one they would have written by
+/// hand.
+#[test]
+fn test_a_substitution_inside_a_written_shape_is_read_through() {
+    let grouped = proc_macro2::Group::new(
+        proc_macro2::Delimiter::None,
+        "String".parse::<proc_macro2::TokenStream>().unwrap(),
+    );
+    for (written, tokens) in [
+        ("Vec<String>", quote::quote! { Vec<#grouped> }),
+        ("Option<String>", quote::quote! { Option<#grouped> }),
+        (
+            "HashMap<String, String>",
+            quote::quote! { HashMap<String, #grouped> },
+        ),
+        ("(String, u32)", quote::quote! { (#grouped, u32) }),
+        ("[String; 2]", quote::quote! { [#grouped; 2] }),
+        ("&String", quote::quote! { &#grouped }),
+    ] {
+        let expected = super::get_field_def("items", &syn::parse_str(written).unwrap(), "");
+        let ty: syn::Type = syn::parse2(tokens).unwrap();
+        let parsed = super::get_field_def("items", &ty, "");
+        assert_reads_alike(&parsed, &expected, &format!("for {written}"));
     }
 }
