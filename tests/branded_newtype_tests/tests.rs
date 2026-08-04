@@ -1779,9 +1779,10 @@ mod branded_sibling_inner_tests {
     ///
     /// That absence is the same one an unresolved user type leaves — a type this crate never
     /// expands, whose schema the author supplies — so refusing on it would refuse the second for
-    /// the sake of the first, and would make a diagnostic out of declaration order: moving a
-    /// declaration would turn a compiling program into a refused one without changing what it
-    /// means. The `Display` assertion still bounds the Rust surface either way.
+    /// the sake of the first. The consult is kept for the registration that follows instead, and
+    /// here that registration proves a string and settles it silently: what the author reads is the
+    /// same verdict wherever the two items are written. The `Display` assertion still bounds the
+    /// Rust surface either way.
     #[test]
     fn a_constrained_brand_over_a_forward_declared_sibling_keeps_its_emission() {
         assert_eq!(
