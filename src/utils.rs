@@ -188,6 +188,16 @@ pub struct WireLeaf {
 
 #[cfg(all(feature = "serde", any(feature = "zod", feature = "typescript")))]
 impl WireLeaf {
+    /// The leaf's position, spelled the way the JSON-schema merge spells the same one.
+    #[cfg(feature = "zod")]
+    pub fn branch_path(&self) -> String {
+        self.branch
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<String>>()
+            .join(".")
+    }
+
     /// Whether this leaf is the absence the name itself offers: the `null` of a choice the
     /// registration publishes at its own top level, one position in from the name and no deeper.
     ///
@@ -201,9 +211,29 @@ impl WireLeaf {
     }
 }
 
+/// What an object flattening an externally tagged enum joins for one of that enum's variants, on
+/// each surface that writes a merge of its own.
+///
+/// The two spellings are recorded together, from one reading of the rendered variant, because they
+/// answer one question — what serde writes for this variant into the object being merged — and a
+/// surface that answered it on its own would be free to drift from the other.
+#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod")))]
+#[derive(Clone)]
+pub struct FlattenVariant {
+    #[cfg(feature = "typescript")]
+    pub typescript: String,
+    #[cfg(feature = "zod")]
+    pub zod: String,
+}
+
 #[derive(Clone)]
 pub struct AliasInfo {
     pub export_name: String,
+    /// What an externally tagged enum's variants are spelled as where an object flattens the enum
+    /// itself, one per variant in the order the union writes them, and empty for every other item.
+    /// Filled by [`record_flatten_variants`] once that enum's own expansion has rendered them.
+    #[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod")))]
+    pub flatten_variants: Vec<FlattenVariant>,
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     pub kind: AliasKind,
     #[cfg(feature = "jsonschema")]
@@ -229,11 +259,6 @@ pub struct AliasInfo {
     /// two documents, and an array and a map one shape and opposite answers.
     #[cfg(all(feature = "serde", any(feature = "zod", feature = "typescript")))]
     pub wire: Vec<WireLeaf>,
-    /// What an externally tagged enum's variants are spelled as where an object flattens the enum
-    /// itself, one per variant in the order the union writes them, and empty for every other item.
-    /// Filled by [`record_zod_flatten_variants`] once that enum's own expansion has rendered them.
-    #[cfg(all(feature = "serde", feature = "zod"))]
-    pub zod_flatten_variants: Vec<String>,
     /// What an untagged enum's members are spelled as on the Zod surface, and empty for every other
     /// item. Filled by [`record_zod_union_members`] once the enum's own expansion has rendered
     /// them.
@@ -598,6 +623,8 @@ pub fn register_alias_info(
             rust_ident.to_owned(),
             AliasInfo {
                 export_name: export_name.to_owned(),
+                #[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod")))]
+                flatten_variants: Vec::new(),
                 kind,
                 #[cfg(feature = "jsonschema")]
                 module_name: module_name.to_owned(),
@@ -606,8 +633,6 @@ pub fn register_alias_info(
                 value_shape: None,
                 #[cfg(all(feature = "serde", any(feature = "zod", feature = "typescript")))]
                 wire: Vec::new(),
-                #[cfg(all(feature = "serde", feature = "zod"))]
-                zod_flatten_variants: Vec::new(),
                 #[cfg(feature = "zod")]
                 zod_union_members: Vec::new(),
             },
@@ -703,14 +728,15 @@ pub fn record_zod_union_members(rust_ident: &str, members: &[ZodUnionMember]) {
 /// where the union publishes a bare string no object joins. So the flatten-edge spelling is recorded
 /// beside the union's rather than read back off it.
 ///
-/// Recorded for every externally tagged enum and read only where the same enum's leaves prove the
-/// merge would otherwise write a branch no payload satisfies, which is the bound the leaves are
-/// already spliced under one position further in.
-#[cfg(all(feature = "serde", feature = "zod"))]
-pub fn record_zod_flatten_variants(rust_ident: &str, variants: &[String]) {
+/// Recorded for every externally tagged enum, and read by each surface under the bound that
+/// surface's own merge has: Zod joins one operand per variant wherever the enum is flattened
+/// directly, TypeScript only where a variant is proved to be no object, an intersection distributing
+/// over a union of objects on its own.
+#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod")))]
+pub fn record_flatten_variants(rust_ident: &str, variants: &[FlattenVariant]) {
     ALIAS_INFO.with(|map| {
         if let Some(info) = map.borrow_mut().get_mut(rust_ident) {
-            info.zod_flatten_variants = variants.to_vec();
+            info.flatten_variants = variants.to_vec();
         }
     });
 }

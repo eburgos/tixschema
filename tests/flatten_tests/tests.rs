@@ -578,7 +578,7 @@ enum LaterMemberMaybeEither {
 /// variant's name tags, and writes a unit variant as that name alone — a bare string — so the choice
 /// this member stands for holds a leaf no object can be merged with, one level in from where the
 /// member stands.
-#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[cfg(any(feature = "jsonschema", feature = "zod", feature = "typescript"))]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 enum MemberExtBare {
@@ -630,7 +630,7 @@ enum LaterMemberExtBareEither {
 /// a unit variant as its name holding `null` into the object being written rather than as the bare
 /// string it is standing alone, and reads that payload back as the variant. One declaration, both
 /// directions, so the merges owe it one branch per variant.
-#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[cfg(any(feature = "jsonschema", feature = "zod", feature = "typescript"))]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct ExtBareDirectHolder {
@@ -641,7 +641,7 @@ struct ExtBareDirectHolder {
 
 /// And a tagged enum whose every variant carries data, which serde writes as the object its name
 /// tags in every case — admitted where it always was, on every surface.
-#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[cfg(any(feature = "jsonschema", feature = "zod", feature = "typescript"))]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 enum MemberExtObjects {
@@ -667,10 +667,12 @@ struct FlatOverMemberExtObjUntagged {
     own: String,
 }
 
-/// And that enum flattened directly. No branch of it proves anything the name did not — the operand
-/// a merge joins is the name's own binding whichever variant matched — so it stays the one operand
-/// it always was.
-#[cfg(any(feature = "jsonschema", feature = "zod"))]
+/// And that enum flattened directly, where the two merged surfaces part. TypeScript distributes an
+/// intersection over a union on its own and every branch here is an object, so the name is already
+/// the whole answer and stays the one operand it always was. A Zod intersection recognizes exactly
+/// the keys its operands name and a `z.union` names none, so joining the object to the name admits
+/// nothing at all and the object is multiplied over the variants there.
+#[cfg(any(feature = "jsonschema", feature = "zod", feature = "typescript"))]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct ExtObjDirectHolder {
@@ -888,6 +890,44 @@ struct NamedMaybeHolder {
     maybe: MaybeOptBase,
     own: String,
 }
+
+/// The same two spellings over a value that is no object. A registration whose published surface is
+/// a nullable scalar writes one of its two values and refuses the other: serde writes nothing for
+/// the `None` and reads the object's own keys back as it, and refuses the `Some` outright. So one
+/// declaration carries a branch that round-trips and a branch no payload satisfies, which is the
+/// declaration the guard refuses where it was written — and only a build without the Zod surface
+/// gets as far as either merge.
+#[cfg(not(feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct MaybeCount(Option<i64>);
+
+#[cfg(not(feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct MaybeCountHolder {
+    #[serde(flatten)]
+    count: MaybeCount,
+    own: String,
+}
+
+/// The same registration declared *below* the object that flattens it. The recording holds what has
+/// already expanded, so this one proves nothing about its wire and the guard keeps the
+/// declaration-order fallback — while the JSON-schema merge, which reads the document back at run
+/// time, refuses it wherever it is declared.
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct LaterMaybeCountHolder {
+    #[serde(flatten)]
+    count: LaterMaybeCount,
+    own: String,
+}
+
+#[cfg(any(feature = "jsonschema", feature = "zod"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct LaterMaybeCount(Option<i64>);
 
 /// And a name whose published surface is not nullable, which offers no absence and stays the one
 /// operand it always was.
@@ -2390,6 +2430,71 @@ fn test_a_named_non_nullable_flatten_document_is_byte_identical() {
     );
 }
 
+/// A nullable scalar writes one of its two values and refuses the other, which is what makes the
+/// declaration one no spelling of the merge can describe: serde writes the object's own keys alone
+/// for the `None` and reads them back as it, and refuses the `Some` where it stands.
+#[test]
+#[cfg(not(feature = "zod"))]
+fn test_flattening_a_nullable_scalar_writes_the_absence_and_refuses_the_value() {
+    assert_eq!(
+        serde_json::to_value(MaybeCountHolder {
+            count: MaybeCount(None),
+            own: "o".to_owned(),
+        })
+        .unwrap(),
+        serde_json::json!({ "own": "o" })
+    );
+    let refusal = serde_json::to_value(MaybeCountHolder {
+        count: MaybeCount(Some(3)),
+        own: "o".to_owned(),
+    })
+    .unwrap_err()
+    .to_string();
+    assert!(
+        refusal.contains("can only flatten structs and maps"),
+        "Got: {refusal}"
+    );
+}
+
+/// So the JSON-schema merge refuses the whole declaration at the branch the value sits at, rather
+/// than writing the absence branch alone.
+#[test]
+#[cfg(all(feature = "jsonschema", not(feature = "zod")))]
+#[should_panic(
+    expected = "`MaybeCountHolder`: `#[serde(flatten)]` of `MaybeCount` writes a union member that is not an object — its branch 1 describes a `integer`"
+)]
+fn test_flattening_a_nullable_scalar_is_refused_by_the_merge() {
+    assert!(MaybeCountHolder::json_schema().is_object());
+}
+
+/// And in those same words wherever the registration was declared, which is the one reading of the
+/// declaration that survives the Zod surface refusing it at expansion.
+#[test]
+#[cfg(feature = "jsonschema")]
+#[should_panic(
+    expected = "`LaterMaybeCountHolder`: `#[serde(flatten)]` of `LaterMaybeCount` writes a union member that is not an object — its branch 1 describes a `integer`"
+)]
+fn test_flattening_a_later_nullable_scalar_is_refused_by_the_merge() {
+    assert!(LaterMaybeCountHolder::json_schema().is_object());
+}
+
+/// A registration written below the object has recorded nothing when the object expands, so it
+/// proves neither the absence it publishes nor the value that is no object, and the merge writes the
+/// one operand the name is — the same fallback a name this crate never expands takes.
+#[test]
+#[cfg(feature = "zod")]
+fn test_the_later_nullable_scalar_keeps_the_declaration_order_fallback() {
+    let zod = LaterMaybeCountHolder::zod_schema();
+    assert!(
+        zod.contains(".and(z.lazy(() => LaterMaybeCount$Schema))"),
+        "expected the name as the one operand it is, got: {zod}"
+    );
+    assert!(
+        !zod.contains("z.union(["),
+        "the name is spelled as a choice in: {zod}"
+    );
+}
+
 /// The absence is a question about the `Option` and nothing else, so a base written without one is
 /// spelled exactly as it was before there was a second branch to spell — byte for byte, on both
 /// surfaces.
@@ -3040,19 +3145,95 @@ fn test_the_direct_tagged_flatten_schema_multiplies_the_object_over_the_variants
     );
 }
 
-/// The multiplication is a question about the branches a name proves no object, so a direct flatten
-/// of a tagged enum every variant of which carries data is spelled exactly as it was before there
-/// was a second branch to spell — one intersection on Zod, and the document its own distribution
-/// already wrote.
+/// And TypeScript spells the same two key sets, because it cannot reach them by distributing: the
+/// bare string a unit variant publishes standing alone intersects the object to `never`, and the
+/// payload serde writes for that variant belongs to no branch of the result.
+///
+/// Read off tsc 7.0.2 under `--strict`, the emitted declarations compiled as written: this type
+/// accepts `{ own: "o", Bare: null }` and `{ own: "o", Wrapped: { b: true } }`, and rejects
+/// `{ own: "o" }`, `{ own: "o", Bare: "Bare" }` and `{ Bare: null }`. Named as the enum's own union,
+/// the first of those was `TS2353: 'Bare' does not exist in type '{ own: string; } & { Wrapped:
+/// FlatSecond; }'`.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_the_direct_tagged_flatten_type_spells_the_key_set_serde_writes() {
+    let ts = ExtBareDirectHolder::ts_definition();
+    assert!(
+        ts.contains(
+            "} & ({\n  /**\n   * Bare\n   * \n   */\n  \"Bare\": null;\n} | {\n  /**\n   * Wrapped\n   * \n   */\n  \"Wrapped\": FlatSecond;\n});"
+        ),
+        "expected one key set per variant, got: {ts}"
+    );
+    assert!(
+        !ts.contains("& MemberExtBare"),
+        "the union is named as an operand in: {ts}"
+    );
+}
+
+/// The same enum every variant of which carries data. serde writes each as the object its name tags
+/// and reads both back, so the declaration is one all four surfaces admit.
+#[test]
+#[cfg(any(feature = "jsonschema", feature = "zod", feature = "typescript"))]
+fn test_a_directly_flattened_all_object_tagged_enum_round_trips_every_variant() {
+    let forms = [
+        (
+            MemberExtObjects::One(FlatFirst { a: "x".to_owned() }),
+            serde_json::json!({ "One": { "a": "x" }, "own": "o" }),
+        ),
+        (
+            MemberExtObjects::Two(FlatSecond { b: true }),
+            serde_json::json!({ "Two": { "b": true }, "own": "o" }),
+        ),
+    ];
+    for (ext, expected) in forms {
+        let holder = ExtObjDirectHolder {
+            ext,
+            own: "o".to_owned(),
+        };
+        let written = serde_json::to_value(&holder).unwrap();
+        assert_eq!(written, expected);
+        let back: ExtObjDirectHolder = serde_json::from_value(written).unwrap();
+        assert_eq!(back, holder);
+    }
+}
+
+/// So Zod multiplies the object over those variants too. Nothing about them has to be proved: an
+/// intersection recognizes exactly the keys its operands name and a `z.union` names none, so the
+/// object joined to the union as one operand describes a payload set no value inhabits.
+///
+/// Read off zod 4.4.3, the emitted spelling transcribed: named as one operand, this schema rejected
+/// both payloads serde writes — `{"own":"o","One":{"a":"x"}}` and `{"own":"o","Two":{"b":true}}`.
+/// Multiplied out, both are accepted, and the schema still rejects `{"own":"o"}`,
+/// `{"One":{"a":"x"}}`, `{"own":"o","One":{"a":"x"},"Two":{"b":true}}` and any payload carrying a
+/// key neither the object nor the matched variant names.
 #[test]
 #[cfg(feature = "zod")]
-fn test_an_all_object_tagged_direct_flatten_schema_is_byte_identical() {
-    #[cfg(feature = "typescript")]
-    const EXPECTED: &str = "const ExtObjDirectHolder$RawSchema = z.strictObject({\n  own: z.string(),\n}).and(z.lazy(() => MemberExtObjects$Schema));\n\nexport const ExtObjDirectHolder$Schema: ZodType<ExtObjDirectHolder> = ExtObjDirectHolder$RawSchema;";
-    #[cfg(not(feature = "typescript"))]
-    const EXPECTED: &str = "export const ExtObjDirectHolder$Schema = z.strictObject({\n  own: z.string(),\n}).and(z.lazy(() => MemberExtObjects$Schema));";
+fn test_the_all_object_tagged_direct_flatten_schema_multiplies_the_object_over_the_variants() {
+    let zod = ExtObjDirectHolder::zod_schema();
+    assert!(
+        zod.contains(
+            "z.union([\n  ExtObjDirectHolder$OwnSchema.and(z.lazy(() => z.strictObject({\n  \"One\": FlatFirst$Schema,\n}))),\n  ExtObjDirectHolder$OwnSchema.and(z.lazy(() => z.strictObject({\n  \"Two\": FlatSecond$Schema,\n}))),\n])"
+        ),
+        "expected one operand per variant, got: {zod}"
+    );
+    assert!(
+        !zod.contains("MemberExtObjects$Schema"),
+        "the union is named as an operand in: {zod}"
+    );
+}
 
-    assert_eq!(ExtObjDirectHolder::zod_schema(), EXPECTED);
+/// TypeScript distributes an intersection over a union of objects on its own, so the same enum stays
+/// the one operand it always was there — byte for byte, and payload for payload what the
+/// multiplication describes.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_an_all_object_tagged_direct_flatten_type_is_byte_identical() {
+    let ts = ExtObjDirectHolder::ts_definition();
+    let declared = &ts[ts.find("export type").unwrap()..];
+    assert_eq!(
+        declared,
+        "export type ExtObjDirectHolder = {\n  /**\n   * own\n   * \n   */\n  own: string;\n} & MemberExtObjects;"
+    );
 }
 
 #[test]

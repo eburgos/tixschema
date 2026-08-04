@@ -14,6 +14,9 @@ use crate::utils::{lookup_alias_info, safe_type_name, written_type};
 #[cfg(feature = "zod")]
 use crate::utils::{ZodUnionMember, escape_js_regex_literal, zod_factory_argument};
 
+#[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod")))]
+use crate::utils::FlattenVariant;
+
 #[cfg(feature = "chrono")]
 use crate::features::chrono;
 #[cfg(feature = "object_id")]
@@ -532,6 +535,27 @@ impl FieldDef {
             | FieldDefType::F32
             | FieldDefType::F64 => None,
         }
+    }
+
+    /// What an object flattening this field joins for each variant of the externally tagged enum it
+    /// names, as that enum recorded them, and nothing for a field that names no such enum.
+    ///
+    /// Answered under the same bound [`Self::zod_union_members`] is answered under, and for the same
+    /// reason: what is spliced in the name's place has to be the whole of what the operand
+    /// validates.
+    #[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod")))]
+    pub fn flatten_variants(&self) -> Vec<FlattenVariant> {
+        let wrapped = self
+            .model_schema_prop_meta
+            .as_ref()
+            .is_some_and(|meta| !meta.preprocess.is_empty());
+        if self.array_depth > 0 || wrapped {
+            return Vec::new();
+        }
+        let FieldDefType::SiblingType(name, _) = &self.field_type else {
+            return Vec::new();
+        };
+        lookup_alias_info(name).map_or_else(Vec::new, |info| info.flatten_variants)
     }
 
     #[cfg(feature = "chrono")]
@@ -1136,27 +1160,6 @@ impl FieldDef {
         } else {
             array_result
         }
-    }
-
-    /// What an object flattening this field joins for each variant of the externally tagged enum it
-    /// names, as that enum recorded them, and nothing for a field that names no such enum.
-    ///
-    /// Answered under the same bound [`Self::zod_union_members`] is answered under, and for the same
-    /// reason: what is spliced in the name's place has to be the whole of what the operand
-    /// validates.
-    #[cfg(all(feature = "serde", feature = "zod"))]
-    pub fn zod_flatten_variants(&self) -> Vec<String> {
-        let wrapped = self
-            .model_schema_prop_meta
-            .as_ref()
-            .is_some_and(|meta| !meta.preprocess.is_empty());
-        if self.array_depth > 0 || wrapped {
-            return Vec::new();
-        }
-        let FieldDefType::SiblingType(name, _) = &self.field_type else {
-            return Vec::new();
-        };
-        lookup_alias_info(name).map_or_else(Vec::new, |info| info.zod_flatten_variants)
     }
 
     /// The key schema a `z.record(…)` is written with: the key's own, except where the key is one
