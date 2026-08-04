@@ -18,7 +18,8 @@ use super::{
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use super::{
     AliasKind, PublishedShape, alias_map_key_guard_error, branded_guard_errors, check_map_key,
-    ident_schema_module_name, record_value_shape, register_alias_info,
+    deferred_shape_question, deferred_shape_refusals, ident_schema_module_name,
+    record_shape_question, record_value_shape, register_alias_info,
 };
 
 #[cfg(all(feature = "serde", feature = "zod"))]
@@ -406,7 +407,7 @@ fn positional_option_field_is_exempt() {
 /// Collects the untagged-path guard failures as rendered `compile_error!` token streams.
 #[cfg(feature = "serde")]
 fn untagged_guard_error_tokens(item: &mut syn::ItemEnum) -> Vec<proc_macro2::TokenStream> {
-    collect_untagged_members(item, UNTAGGED_MODULE).4
+    collect_untagged_members(item, UNTAGGED_MODULE).5
 }
 
 /// Collects the untagged-path guard failures as rendered `compile_error!` token strings.
@@ -586,7 +587,8 @@ fn untagged_member_carries_its_constraint_to_the_surfaces() {
             },
         }
     };
-    let (_, zod_parts, _, _, errors, _, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
+    let (_, _, zod_parts, _, _, errors, _, _) =
+        collect_untagged_members(&mut item, UNTAGGED_MODULE);
     assert!(errors.is_empty(), "got: {errors:?}");
     assert!(
         zod_parts[0].contains("z.string().min(2).check(z.regex(/^[a-z]+$/))"),
@@ -608,7 +610,7 @@ fn untagged_member_constraint_generates_the_validator_and_hangs_it_on_the_member
             },
         }
     };
-    let (_, _, _, _, errors, validation_fns, _) =
+    let (_, _, _, _, _, errors, validation_fns, _) =
         collect_untagged_members(&mut item, UNTAGGED_MODULE);
     assert!(errors.is_empty(), "got: {errors:?}");
     assert_eq!(validation_fns.len(), 1, "got: {validation_fns:?}");
@@ -643,7 +645,7 @@ fn untagged_member_constraint_generates_nothing_without_a_schema_module() {
             },
         }
     };
-    let (_, _, _, _, errors, validation_fns, _) = collect_untagged_members(&mut item, None);
+    let (_, _, _, _, _, errors, validation_fns, _) = collect_untagged_members(&mut item, None);
     assert!(errors.is_empty(), "got: {errors:?}");
     assert!(validation_fns.is_empty(), "got: {validation_fns:?}");
     let attrs = &item.variants[0].fields.iter().next().unwrap().attrs;
@@ -810,7 +812,7 @@ fn untagged_member_reaching_an_unwritable_map_key_is_refused() {
 #[cfg(all(feature = "serde", feature = "jsonschema"))]
 fn untagged_member_values(mut item: syn::ItemEnum) -> Vec<String> {
     collect_untagged_members(&mut item, UNTAGGED_MODULE)
-        .3
+        .4
         .iter()
         .map(ToString::to_string)
         .collect()
@@ -1741,7 +1743,7 @@ fn a_refused_map_key_leaves_no_hook_naming_the_dropped_module() {
             },
         }
     };
-    let errors = collect_untagged_members(&mut item, UNTAGGED_MODULE).4;
+    let errors = collect_untagged_members(&mut item, UNTAGGED_MODULE).5;
     assert_eq!(errors.len(), 1, "got: {errors:?}");
     assert!(
         errors[0].to_string().contains("a map key must be a plain"),
@@ -3279,14 +3281,18 @@ fn string_constraints_over_a_named_inner_the_registry_calls_a_string_pass() {
     assert!(errors.is_empty(), "got: {errors:?}");
 }
 
-/// A name the registry has no answer for keeps the emission it has always had.
+/// A name the registry has no answer for keeps the emission it has always had, at the consult
+/// itself.
 ///
-/// The two names that reach this are the same absence: one written above the item that registers
-/// it, and one this crate never expands at all — an unresolved user type whose schema the author
-/// supplies. Refusing on absence would refuse the second for the sake of the first, and would make
-/// a diagnostic out of declaration order: moving a declaration would turn a compiling program into
-/// a refused one without changing what it means. The `Display` assertion still bounds the Rust
-/// surface either way.
+/// The two names that reach this are the same absence here: one written above the item that
+/// registers it, and one this crate never expands at all — an unresolved user type whose schema the
+/// author supplies. Refusing on absence would refuse the second for the sake of the first, and the
+/// argument alone tells them apart no better, a publisher being free to write a string whatever its
+/// parameter is handed. The `Display` assertion still bounds the Rust surface either way.
+///
+/// What the guard does *not* do is forget the question: the first of the two is answered by the
+/// registration that follows, which is what takes the verdict off declaration order without
+/// touching this admission. See the deferred tests below.
 ///
 /// Both of them name a type the declaration has already fixed, which is what the admission rests
 /// on; a name written over one of the brand's own parameters has not, and is refused below.
@@ -3504,6 +3510,169 @@ fn a_recorded_position_is_read_off_the_arguments_the_reference_writes() {
 
     let unwritten = brand_over_named_inner_errors("PublishesItsSecond<String>");
     assert!(unwritten.is_empty(), "got: {unwritten:?}");
+}
+
+/// The question a constrained brand leaves where the registry has no record, spelled as the brand's
+/// own expansion would leave it.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn ask_about(brand: &syn::ItemStruct) -> bool {
+    deferred_shape_question(brand, &pattern_args()).is_some_and(|question| {
+        record_shape_question(question);
+        true
+    })
+}
+
+/// A brand written over the given inner, under a name that is the same in both declaration orders
+/// so the two refusals can be read against each other.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn brand_over(inner: &str) -> syn::ItemStruct {
+    let ty: syn::Type = syn::parse_str(inner).unwrap();
+    syn::parse_quote! {
+        #[serde(transparent)]
+        struct Branded(pub #ty);
+    }
+}
+
+/// What the expansion registering a name emits for the questions asked about it, as rendered
+/// `compile_error!` token strings.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn deferred_refusals_for(rust_ident: &str) -> Vec<String> {
+    let name = syn::Ident::new(rust_ident, proc_macro2::Span::call_site());
+    deferred_shape_refusals(Some(&name))
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// A consult the registry could not answer is kept, and the expansion that finally registers the
+/// name answers it — filling the position that registration published with the argument shape the
+/// brand resolved when it asked.
+///
+/// The brand is admitted at its own expansion whatever the argument, because a name declared below
+/// it and a name this crate never expands are one absence there. What closes the half is that the
+/// absence is temporary: the registry is a compile-local recording the later expansion also writes
+/// to, so the answer arrives one declaration later rather than never.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_question_left_where_the_registry_was_silent_is_answered_by_the_later_registration() {
+    let brand = brand_over("AnsweredLater<u32>");
+    assert!(
+        branded_errors_with(&brand, &pattern_args()).is_empty(),
+        "the brand's own expansion has nothing to refuse it on"
+    );
+    assert!(ask_about(&brand));
+    assert!(
+        deferred_refusals_for("AnsweredLater").is_empty(),
+        "nothing has registered under the name yet"
+    );
+
+    seed_published_shape("AnsweredLater", PublishedShape::Parameter(0));
+    let errors = deferred_refusals_for("AnsweredLater");
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(errors[0].contains("compile_error"), "got: {}", errors[0]);
+    assert!(errors[0].contains("`Branded`"), "got: {}", errors[0]);
+    assert!(errors[0].contains("`AnsweredLater`"), "got: {}", errors[0]);
+    assert!(errors[0].contains("numeric"), "got: {}", errors[0]);
+}
+
+/// Both orders of the one pair refuse in one wording, so an author moving either declaration past
+/// the other reads the same sentence — only the span moves, to the tokens the answering expansion
+/// holds.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn both_orders_of_the_same_pair_refuse_in_one_wording() {
+    assert!(ask_about(&brand_over("WordingBelow<u32>")));
+    seed_published_shape("WordingBelow", PublishedShape::Parameter(0));
+    let below = deferred_refusals_for("WordingBelow");
+    assert_eq!(below.len(), 1, "got: {below:?}");
+
+    seed_published_shape("WordingAbove", PublishedShape::Parameter(0));
+    let above = brand_over_named_inner_errors("WordingAbove<u32>");
+    assert_eq!(above.len(), 1, "got: {above:?}");
+
+    assert_eq!(
+        below[0].replace("WordingBelow", "Inner"),
+        above[0].replace("WordingAbove", "Inner")
+    );
+}
+
+/// A registration proving the argument is a string settles its question silently, so the pair that
+/// works keeps working — and keeps working in the order the registry could not answer.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_question_a_string_argument_answers_settles_silently() {
+    assert!(ask_about(&brand_over("SettlesSilently<String>")));
+    seed_published_shape("SettlesSilently", PublishedShape::Parameter(0));
+    let errors = deferred_refusals_for("SettlesSilently");
+    assert!(errors.is_empty(), "got: {errors:?}");
+}
+
+/// A name nothing ever registers leaves its question unanswered, which is the foreign-type
+/// admission the guard makes on purpose — an unresolved user type whose schema the author supplies.
+///
+/// Read off the registry rather than off the question, so the absence that never ends is told from
+/// the one that does by the registration itself rather than by anything the brand could have known.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_question_no_registration_reaches_stays_unanswered() {
+    assert!(ask_about(&brand_over("NeverRegisters<u32>")));
+    let errors = deferred_refusals_for("NeverRegisters");
+    assert!(errors.is_empty(), "got: {errors:?}");
+}
+
+/// A brand the registry could answer leaves no question, so the pair the other order already
+/// refuses is refused once rather than twice.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_brand_the_registry_answers_leaves_no_question() {
+    seed_published_shape("AlreadyAnswering", PublishedShape::Parameter(0));
+    for inner in ["AlreadyAnswering<u32>", "AlreadyAnswering<String>"] {
+        assert!(
+            deferred_shape_question(&brand_over(inner), &pattern_args()).is_none(),
+            "for {inner}"
+        );
+    }
+}
+
+/// Nothing is asked where nothing would be appended: a brand carrying no string checks, and an
+/// inner whose own spelling fixes a shape the registry is never consulted about.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_brand_with_nothing_to_append_asks_nothing() {
+    assert!(
+        deferred_shape_question(
+            &brand_over("Unasked<u32>"),
+            &super::ModelSchemaArgs::default()
+        )
+        .is_none()
+    );
+    for inner in ["Vec<Unasked>", "BTreeSet<Unasked>", "String", "u32"] {
+        assert!(
+            deferred_shape_question(&brand_over(inner), &pattern_args()).is_none(),
+            "for {inner}"
+        );
+    }
+}
+
+/// A registration publishing a flat shape answers whatever the reference wrote, and one publishing
+/// a position the reference left unwritten answers nothing — the same two readings the consult
+/// itself makes of one record.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_deferred_answer_reads_the_record_the_consult_would_have_read() {
+    assert!(ask_about(&brand_over("FlatlyNumeric")));
+    seed_value_shape("FlatlyNumeric", Some("numeric"));
+    let flat = deferred_refusals_for("FlatlyNumeric");
+    assert_eq!(flat.len(), 1, "got: {flat:?}");
+    assert!(flat[0].contains("numeric"), "got: {}", flat[0]);
+
+    assert!(ask_about(&brand_over("FlatlyString")));
+    seed_value_shape("FlatlyString", None);
+    assert!(deferred_refusals_for("FlatlyString").is_empty());
+
+    assert!(ask_about(&brand_over("PublishesUnwritten<String>")));
+    seed_published_shape("PublishesUnwritten", PublishedShape::Parameter(1));
+    assert!(deferred_refusals_for("PublishesUnwritten").is_empty());
 }
 
 /// What a tuple struct records: serde writes one slot as that slot's value alone, so the schema is
@@ -7803,7 +7972,8 @@ fn a_scalar_union_member_is_recorded_as_the_type_serde_writes_it_as() {
             Many(Vec<Holder>),
         }
     };
-    let (_, _, merge_parts, _, errors, _, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
+    let (_, _, _, merge_parts, _, errors, _, _) =
+        collect_untagged_members(&mut item, UNTAGGED_MODULE);
     assert!(errors.is_empty(), "got: {errors:?}");
     let recorded: Vec<(String, Option<&str>)> = merge_parts
         .iter()
@@ -7918,7 +8088,8 @@ fn recorded_union_flatten_error(
     mut item: syn::ItemEnum,
     field: &syn::Field,
 ) -> Option<String> {
-    let (_, _, merge_parts, _, errors, _, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
+    let (_, _, _, merge_parts, _, errors, _, _) =
+        collect_untagged_members(&mut item, UNTAGGED_MODULE);
     assert!(errors.is_empty(), "got: {errors:?}");
     register_alias_info(
         rust_ident,
@@ -7934,7 +8105,8 @@ fn recorded_union_flatten_error(
 /// write, in declaration order.
 #[cfg(all(feature = "serde", feature = "zod"))]
 fn recorded_member_trails(mut item: syn::ItemEnum) -> Vec<(String, Option<&'static str>)> {
-    let (_, _, merge_parts, _, errors, _, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
+    let (_, _, _, merge_parts, _, errors, _, _) =
+        collect_untagged_members(&mut item, UNTAGGED_MODULE);
     assert!(errors.is_empty(), "got: {errors:?}");
     merge_parts
         .iter()
@@ -8751,5 +8923,43 @@ fn a_word_boundary_pattern_keeps_its_regex() {
          static RE : LazyLock < regex :: Regex > = LazyLock :: new (|| { regex :: Regex :: new (\"\\\\b\") . unwrap () }) ; \
          if ! RE . is_match (value) { \
          return Err (format ! (\"'{}' does not match pattern '{}'\" , \"field\" , \"\\\\b\")) ; } } Ok (()) } "
+    );
+}
+
+/// A flattened source that is one of the item's own parameters contributes the document its
+/// filling describes as, read through the one binding every other position holding that parameter
+/// reads it through — not the placeholder that stands for a value the expansion cannot name, which
+/// carries no member and multiplies nothing into the object being written.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_flattened_type_parameter_is_merged_at_the_document_its_filling_binds() {
+    let ty: syn::Type = syn::parse_str("HeldType").unwrap();
+    let mut held = super::get_field_def("held", &ty, "");
+    held.erase_type_parameters(&["HeldType".to_owned()]);
+
+    let source = super::flatten_merged_source(&held);
+
+    assert_eq!(source.label, "held");
+    assert_eq!(
+        source.value.to_string(),
+        "_arg_held_type . clone ()",
+        "the placeholder still stands where the filling belongs"
+    );
+}
+
+/// A flatten source the expansion can name neither as a sibling nor as a parameter has no document
+/// to reach for, and keeps the placeholder it has always contributed.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_flatten_source_with_no_name_of_its_own_keeps_the_placeholder() {
+    let ty: syn::Type = syn::parse_str("serde_json::Value").unwrap();
+    let held = super::get_field_def("held", &ty, "");
+
+    let source = super::flatten_merged_source(&held);
+
+    assert_eq!(source.label, "held");
+    assert_eq!(
+        source.value.to_string(),
+        "serde_json :: json ! ({ \"type\" : \"object\" })"
     );
 }
