@@ -2818,6 +2818,22 @@ fn a_sibling_string_keyed_map_value_emits_the_sibling_schema() {
     }
 }
 
+/// A sibling's type arguments do not reach its schema, which lives on the wrapper itself, so a
+/// generic value is the same schema-module reference a bare one is. Pinned on this key path as it
+/// is on the enum-key one: the two share a dispatcher, and a narrowing that reintroduces the
+/// divergence has to fail on the key path it is written for.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_generic_sibling_string_keyed_map_value_emits_the_sibling_schema() {
+    let tokens = map_field_schema("HashMap<String, Wrapper<String>>").to_string();
+    assert!(
+        tokens.contains(
+            r#""additionalProperties" : wrapper_schema :: Schema :: json_schema_within (in_flight , hoisted_defs)"#
+        ),
+        "got: {tokens}"
+    );
+}
+
 /// A map is a `Map` wherever it is written, never a sibling named after the container: the parser
 /// claims both 2-argument map idents ahead of the sibling fallback, and the wrappers a map can be
 /// written under either collapse onto it or hold it as a value. The sibling dispatch therefore
