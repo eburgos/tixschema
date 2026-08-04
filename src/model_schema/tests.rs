@@ -1959,6 +1959,11 @@ fn each_string_constraint_alone_rejects_a_numeric_inner() {
 }
 
 /// The shapes whose surfaces read the string constraints as something other than a string check.
+///
+/// Every sequence spelling stands beside the `Vec` it writes the same array as. A wrapper name is
+/// what the parser leaves for all but `Vec` and `[T; N]`, and reading it as a name rather than as
+/// the array it writes is what let a set through: the JSON schema then dropped `minLength` outside
+/// a string, while Zod read `.min` as a bound on how many items the array holds.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn string_constraints_over_a_non_string_inner_are_rejected() {
@@ -1969,6 +1974,11 @@ fn string_constraints_over_a_non_string_inner_are_rejected() {
         ("bool", "boolean"),
         ("Vec<String>", "container"),
         ("[u8; 4]", "container"),
+        ("BTreeSet<String>", "container"),
+        ("BinaryHeap<String>", "container"),
+        ("HashSet<String>", "container"),
+        ("LinkedList<String>", "container"),
+        ("VecDeque<String>", "container"),
         ("HashMap<String, String>", "container"),
         ("(String, String)", "container"),
         ("serde_json::Value", "opaque"),
@@ -1990,11 +2000,19 @@ fn string_constraints_over_a_non_string_inner_are_rejected() {
 
 /// The inners that carry the constraints faithfully. A `SiblingType` — another brand, an
 /// unresolved user type, or a bare generic parameter — is admitted because expansion cannot know
-/// its shape; the constrained path's `Display` assertion is what covers it.
+/// its shape; the constrained path's `Display` assertion is what covers it. A name carrying one
+/// argument that is not a sequence wrapper is such a name too, and stays admitted.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn string_constraints_over_a_string_shaped_inner_pass() {
-    for inner in ["String", "PathBuf", "ObjectId", "SomeOtherBrand", "T"] {
+    for inner in [
+        "String",
+        "PathBuf",
+        "ObjectId",
+        "SomeOtherBrand",
+        "T",
+        "SomeWrapper<String>",
+    ] {
         let ty: syn::Type = syn::parse_str(inner).unwrap();
         let errors = branded_errors_with(
             &syn::parse_quote! {
@@ -2008,11 +2026,19 @@ fn string_constraints_over_a_string_shaped_inner_pass() {
 }
 
 /// The guard reads the constraints, not the inner type: an unconstrained brand over any of the
-/// rejected shapes is the shipped `no_display` contract and stays accepted.
+/// rejected shapes is the shipped `no_display` contract and stays accepted — a sequence wrapper
+/// included, which describes the array it writes on every surface and needs no refusal.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn an_unconstrained_brand_over_a_non_string_inner_passes() {
-    for inner in ["u64", "bool", "Vec<String>", "serde_json::Value"] {
+    for inner in [
+        "u64",
+        "bool",
+        "Vec<String>",
+        "BTreeSet<String>",
+        "VecDeque<String>",
+        "serde_json::Value",
+    ] {
         let ty: syn::Type = syn::parse_str(inner).unwrap();
         let errors = branded_errors(&syn::parse_quote! {
             #[serde(transparent)]

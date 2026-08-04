@@ -221,6 +221,10 @@ enum BrandedComposite {
 /// The JSON schema shape a branded newtype's inner field describes.
 #[cfg(feature = "jsonschema")]
 enum BrandedJsonInner {
+    /// The string a chrono type writes, named by the `"format"` keyword that says which instant it
+    /// spells — the one field position carries for the same type.
+    #[cfg(feature = "chrono")]
+    Chrono(&'static str),
     /// The `$oid` object an `ObjectId` writes, whose hex member carries the brand's string
     /// constraints.
     #[cfg(feature = "object_id")]
@@ -231,6 +235,25 @@ enum BrandedJsonInner {
     /// wherever else it is written. Boxed so the whole field def does not set the size of an enum
     /// whose other shapes are a type name and a unit.
     Slot(Box<FieldDef>),
+}
+
+/// Whether the schema a brand narrows already states a `pattern` of its own.
+///
+/// One JSON Schema string carries one `pattern` keyword, so where the inner type states the one
+/// every payload it writes already satisfies, the brand's cannot be written over it — the type's
+/// own would be gone, and the surface would admit strings the value can never hold. The brand's
+/// narrows from inside an `allOf` beside it instead, where a payload has to match both. That is
+/// what the Zod side already does: the type's own check runs, and the brand's runs after it.
+///
+/// The `$oid` object's hex member is the one base that states a pattern, so without the type that
+/// writes it there is no such base to narrow — which is what the gate on `Stated` says.
+#[cfg(feature = "jsonschema")]
+#[derive(Clone, Copy)]
+enum BasePattern {
+    /// The base states none, so the brand's is the schema's own `pattern` keyword.
+    Absent,
+    #[cfg(feature = "object_id")]
+    Stated,
 }
 
 /// What a field bottoms out in, under the wrappers it was written beneath.
@@ -1210,6 +1233,8 @@ fn branded_option_inner_error(
 /// A `SiblingType` inner — another brand, an unresolved user type, or a bare generic parameter —
 /// is admitted, because expansion cannot know its shape. That is why the constrained path asserts
 /// `Display` separately: the guard bounds the schema surfaces, the assertion bounds the Rust one.
+/// A sequence wrapper is the one `SiblingType` spelling that says its shape outright, and is
+/// refused as the array it is.
 ///
 /// Resolved through the same `get_field_def` call the renderers make, so the guard and the
 /// contract cannot disagree about what a shape is.
@@ -1246,9 +1271,16 @@ fn branded_constraint_inner_error(
 /// An `ObjectId` answers `None` on that reading rather than on its schema's shape: it writes the
 /// `$oid` object, whose single hex member is both what `Display` renders and where every surface
 /// puts the checks.
+///
+/// A sequence is asked for through the two spellings it reaches here as — the array levels the
+/// parser collapses a `Vec` or a `[T; N]` onto, and the wrapper name it keeps for a `BTreeSet` and
+/// its siblings — because both write the same JSON array, and every renderer already reads them as
+/// one. Reading only the first would let the second escape with the constraints reinterpreted: the
+/// JSON schema drops `minLength` outside a string, while Zod's `.min` on an array is a bound on
+/// how many items it holds rather than on how long any string is.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-const fn non_string_inner_shape(inner: &FieldDef) -> Option<&'static str> {
-    if inner.is_array() {
+fn non_string_inner_shape(inner: &FieldDef) -> Option<&'static str> {
+    if inner.is_array() || sequence_wrapper_element(inner).is_some() {
         return Some("container");
     }
     match &inner.field_type {
@@ -2054,12 +2086,16 @@ fn branded_checked_value(
 
 /// Builds the schema a branded newtype's constraints are written into: `base_inserts` first — what
 /// the inner type describes as before the brand narrows it — then one insert per constraint the
-/// brand declares. A keyword the base already states is written over rather than beside it, one
-/// string carrying one `pattern`.
+/// brand declares.
+///
+/// A length keyword is the brand's alone, so it is written beside the base. A `pattern` is only the
+/// brand's where the base states none; `base_pattern` is what says which, and where the base states
+/// one the brand's is layered rather than written over it.
 #[cfg(feature = "jsonschema")]
 fn branded_schema_obj_over(
     args: &ModelSchemaArgs,
     base_inserts: &proc_macro2::TokenStream,
+    base_pattern: BasePattern,
 ) -> proc_macro2::TokenStream {
     let mut constraint_inserts: Vec<proc_macro2::TokenStream> = Vec::new();
 
@@ -2074,8 +2110,14 @@ fn branded_schema_obj_over(
         });
     }
     if let Some(pattern) = &args.pattern {
-        constraint_inserts.push(quote! {
-            schema_obj.insert("pattern".to_string(), serde_json::Value::String(#pattern.to_string()));
+        constraint_inserts.push(match base_pattern {
+            BasePattern::Absent => quote! {
+                schema_obj.insert("pattern".to_string(), serde_json::Value::String(#pattern.to_string()));
+            },
+            #[cfg(feature = "object_id")]
+            BasePattern::Stated => quote! {
+                schema_obj.insert("allOf".to_string(), serde_json::json!([{ "pattern": #pattern }]));
+            },
         });
     }
 
@@ -2101,12 +2143,31 @@ fn branded_constrained_schema_obj(
         &quote! {
             schema_obj.insert("type".to_string(), serde_json::Value::String(#type_name.to_string()));
         },
+        BasePattern::Absent,
+    )
+}
+
+/// The string a chrono-typed inner writes, carrying the `"format"` keyword [`chrono_json_schema_format`]
+/// gives that type — the one field position carries for it — and narrowed by the brand's own
+/// constraints, which sit beside `type` and `format` the way they sit beside `type` alone.
+#[cfg(all(feature = "jsonschema", feature = "chrono"))]
+fn branded_chrono_schema(args: &ModelSchemaArgs, format: &str) -> proc_macro2::TokenStream {
+    branded_schema_obj_over(
+        args,
+        &quote! {
+            schema_obj.insert("type".to_string(), serde_json::Value::String("string".to_string()));
+            schema_obj.insert("format".to_string(), serde_json::Value::String(#format.to_string()));
+        },
+        BasePattern::Absent,
     )
 }
 
 /// The `$oid` member an `ObjectId` brand carries: the hex string the type always holds, narrowed by
 /// the brand's own constraints, so a brand that declares none still describes the hex the type it
 /// wraps describes wherever else it is written.
+///
+/// The hex is the base's own `pattern`, which is why the brand's is layered beside it rather than
+/// written over it — see [`BasePattern`].
 #[cfg(all(feature = "jsonschema", feature = "object_id"))]
 fn branded_object_id_hex_schema(args: &ModelSchemaArgs) -> proc_macro2::TokenStream {
     branded_schema_obj_over(
@@ -2115,6 +2176,7 @@ fn branded_object_id_hex_schema(args: &ModelSchemaArgs) -> proc_macro2::TokenStr
             schema_obj.insert("type".to_string(), serde_json::Value::String("string".to_string()));
             schema_obj.insert("pattern".to_string(), serde_json::Value::String(#OBJECT_ID_HEX_PATTERN.to_string()));
         },
+        BasePattern::Stated,
     )
 }
 
@@ -2123,19 +2185,52 @@ fn branded_object_id_hex_schema(args: &ModelSchemaArgs) -> proc_macro2::TokenStr
 /// it is written. An inner the dispatch cannot render replaces the body with the single diagnostic
 /// naming the brand, as an unrenderable slot does in every other position.
 ///
-/// The brand's own constraints are not written beside it. [`branded_constraint_inner_error`]
-/// refuses them over an array, a map, a tuple, and an opaque inner, so there is nothing to write —
-/// except through the one spelling that guard reads as a name rather than as the array it writes,
-/// a sequence wrapper, where they were being written onto a `"type": "string"` describing no value
-/// the type can hold.
+/// The brand's own constraints are layered around that description rather than written into it.
+/// [`branded_constraint_inner_error`] refuses them over an array, a sequence wrapper, a map, a
+/// tuple, and an opaque inner, so the one inner reaching here with any is a named type — whose
+/// description is an expression this expansion cannot read, and may be a reference into the
+/// document's definitions, which carries no keyword beside it. An `allOf` narrows either without
+/// touching it, and is what the Zod value already writes: the named schema, then the brand's own
+/// checks after it.
 #[cfg(feature = "jsonschema")]
-fn branded_slot_json_schema(inner: &FieldDef, def_name: &str) -> proc_macro2::TokenStream {
+fn branded_slot_json_schema(
+    args: &ModelSchemaArgs,
+    inner: &FieldDef,
+    def_name: &str,
+) -> proc_macro2::TokenStream {
     match build_tuple_element_json_schema(inner) {
-        Ok(value) => value,
+        Ok(value) => branded_layered_over(args, &value),
         Err(rejection) => {
             let message = map_member_rejection_message(&format!("`{def_name}`"), &rejection);
             quote! { compile_error!(#message) }
         }
+    }
+}
+
+/// `described` narrowed by the brand's own constraints from inside an `allOf`, or `described` alone
+/// when the brand declares none.
+#[cfg(feature = "jsonschema")]
+fn branded_layered_over(
+    args: &ModelSchemaArgs,
+    described: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let mut narrowing: Vec<proc_macro2::TokenStream> = Vec::new();
+    if let Some(min_len) = args.min_length {
+        let len = min_len as u64;
+        narrowing.push(quote! { "minLength": #len });
+    }
+    if let Some(max_len) = args.max_length {
+        let len = max_len as u64;
+        narrowing.push(quote! { "maxLength": #len });
+    }
+    if let Some(pattern) = &args.pattern {
+        narrowing.push(quote! { "pattern": #pattern });
+    }
+    if narrowing.is_empty() {
+        return described.clone();
+    }
+    quote! {
+        serde_json::json!({ "allOf": [#described, { #(#narrowing),* }] })
     }
 }
 
@@ -2147,12 +2242,14 @@ fn build_branded_json_schema_method(
     def_name: &str,
 ) -> proc_macro2::TokenStream {
     let body = match json_inner {
+        #[cfg(feature = "chrono")]
+        BrandedJsonInner::Chrono(format) => branded_chrono_schema(args, format),
         BrandedJsonInner::Scalar(type_name) => branded_constrained_schema_obj(args, type_name),
         #[cfg(feature = "object_id")]
         BrandedJsonInner::ObjectId => {
             object_id_json_schema_value(&branded_object_id_hex_schema(args))
         }
-        BrandedJsonInner::Slot(inner) => branded_slot_json_schema(inner, def_name),
+        BrandedJsonInner::Slot(inner) => branded_slot_json_schema(args, inner, def_name),
     };
     json_schema_methods(def_name, &body)
 }
@@ -2195,10 +2292,15 @@ fn branded_ts_type_and_generics(
 
 /// Resolves the JSON schema shape for a branded newtype's inner field.
 ///
-/// For generic newtypes this is always `"string"` (mirrors the Zod logic). An `ObjectId` and a
-/// composite are read off their own `FieldDef`, because neither writes a value one `"type"`
-/// keyword describes; every remaining non-generic inner maps from the resolved TypeScript type
-/// name.
+/// For generic newtypes this is always `"string"` (mirrors the Zod logic). An `ObjectId`, a
+/// composite and a named type are read off their own `FieldDef`, because none of them writes a
+/// value one `"type"` keyword describes; a chrono type writes a string one keyword names but not
+/// the only one it carries. Every remaining non-generic inner maps from the resolved TypeScript
+/// type name.
+///
+/// The composite question is asked before the other two, so an inner written under array levels
+/// answers for the array around whatever it holds — which is what `#[serde(transparent)]` puts on
+/// the wire — rather than for the item.
 #[cfg(feature = "jsonschema")]
 fn branded_json_inner(is_generic: bool, inner_ty: &syn::Type) -> BrandedJsonInner {
     if is_generic {
@@ -2210,6 +2312,16 @@ fn branded_json_inner(is_generic: bool, inner_ty: &syn::Type) -> BrandedJsonInne
         return BrandedJsonInner::ObjectId;
     }
     if branded_inner_composite(&inner).is_some() {
+        return BrandedJsonInner::Slot(Box::new(inner));
+    }
+    #[cfg(feature = "chrono")]
+    if let Some(format) = chrono_json_schema_format(&inner.field_type) {
+        return BrandedJsonInner::Chrono(format);
+    }
+    // A name is not a shape, so it is not described here at all: it is deferred to the type it
+    // names, through the reference every other position defers it through — which is what makes a
+    // forward declaration and a cycle behave for a brand as they behave for a field.
+    if matches!(inner.field_type, FieldDefType::SiblingType(..)) {
         return BrandedJsonInner::Slot(Box::new(inner));
     }
     BrandedJsonInner::Scalar(match inner.typescript_typename().as_str() {
@@ -2327,6 +2439,12 @@ fn branded_zod_inner(args: &ModelSchemaArgs, is_generic: bool, inner_ty: &syn::T
 ///
 /// Each name is the class bare, as `ZodObject` is: every one of them defaults its type parameters,
 /// so the annotation widens the raw schema rather than restating its element types.
+///
+/// A named inner has no class of its own to name — the type it names publishes one, and this
+/// expansion cannot resolve it — so the annotation is the type of the very binding the value is
+/// composed from, read back off that same rendering. A check the brand adds returns the schema it
+/// was called on, so the binding's type is the base schema's type whether or not the brand
+/// constrains it.
 #[cfg(all(feature = "zod", feature = "typescript"))]
 fn branded_zod_type_name(is_generic: bool, inner_ty: &syn::Type) -> String {
     if is_generic {
@@ -2344,6 +2462,11 @@ fn branded_zod_type_name(is_generic: bool, inner_ty: &syn::Type) -> String {
             BrandedComposite::Opaque => "ZodUnknown".to_owned(),
             BrandedComposite::Tuple => "ZodTuple".to_owned(),
         };
+    }
+    if let FieldDefType::SiblingType(_, args) = &inner.field_type
+        && args.is_empty()
+    {
+        return format!("typeof {}", inner.zod_type());
     }
     match inner.typescript_typename().as_str() {
         "number" => "ZodNumber".to_owned(),
@@ -4568,16 +4691,13 @@ fn field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
         #[cfg(feature = "object_id")]
         FieldDefType::ObjectId => object_id_json_schema_value(&object_id_hex_json_schema()),
         #[cfg(feature = "chrono")]
-        FieldDefType::NaiveDate => {
-            quote! { serde_json::json!({ "type": "string", "format": "date" }) }
-        }
-        #[cfg(feature = "chrono")]
-        FieldDefType::NaiveTime => {
-            quote! { serde_json::json!({ "type": "string", "format": "time" }) }
-        }
-        #[cfg(feature = "chrono")]
-        FieldDefType::NaiveDateTime | FieldDefType::DateTime => {
-            quote! { serde_json::json!({ "type": "string", "format": "date-time" }) }
+        FieldDefType::NaiveDate
+        | FieldDefType::NaiveTime
+        | FieldDefType::NaiveDateTime
+        | FieldDefType::DateTime => {
+            // The arm has matched exactly the types the mapping answers for.
+            let item = chrono_json_schema_item(&fld.field_type).unwrap();
+            quote! { serde_json::json!(#item) }
         }
         // Map / Tuple / Unknown inner shapes are out of scope for v1 untagged members;
         // emit a permissive empty schema rather than silently mis-typing.
@@ -5221,6 +5341,55 @@ fn fixed_length_json_schema_bounds(fld: &FieldDef, level: u8) -> proc_macro2::To
     )
 }
 
+/// Which instant a chrono type's string spells, as the JSON-schema `"format"` keyword that names
+/// it, and `None` for every type that writes no such string.
+///
+/// Written once so no position can name the same instant a different way: the field, the slot and
+/// the branded path all read this one mapping, where each of them used to spell the keyword itself
+/// — and the branded path, reaching the string through the TypeScript name every chrono type
+/// shares with `String`, spelled nothing at all.
+///
+/// Named exhaustively rather than caught by a wildcard: a new variant must be classified, not
+/// silently answered for.
+#[cfg(all(feature = "jsonschema", feature = "chrono"))]
+const fn chrono_json_schema_format(field_type: &FieldDefType) -> Option<&'static str> {
+    match *field_type {
+        FieldDefType::NaiveDate => Some("date"),
+        FieldDefType::NaiveTime => Some("time"),
+        FieldDefType::NaiveDateTime | FieldDefType::DateTime => Some("date-time"),
+        FieldDefType::Boolean
+        | FieldDefType::F32
+        | FieldDefType::F64
+        | FieldDefType::I8
+        | FieldDefType::I16
+        | FieldDefType::I32
+        | FieldDefType::I64
+        | FieldDefType::Isize
+        | FieldDefType::Map(..)
+        | FieldDefType::SiblingType(..)
+        | FieldDefType::String
+        | FieldDefType::StringLiteral(_)
+        | FieldDefType::Tuple(..)
+        | FieldDefType::U8
+        | FieldDefType::U16
+        | FieldDefType::U32
+        | FieldDefType::U64
+        | FieldDefType::Unknown
+        | FieldDefType::Usize => None,
+        #[cfg(feature = "object_id")]
+        FieldDefType::ObjectId => None,
+    }
+}
+
+/// The JSON schema literal a chrono type describes as — the string it writes, carrying the
+/// `"format"` keyword that says which instant it spells — and `None` for every type that writes no
+/// such string.
+#[cfg(all(feature = "jsonschema", feature = "chrono"))]
+fn chrono_json_schema_item(field_type: &FieldDefType) -> Option<proc_macro2::TokenStream> {
+    let format = chrono_json_schema_format(field_type)?;
+    Some(quote! { { "type": "string", "format": #format } })
+}
+
 /// The JSON schema literal for a type that renders inline as a scalar — the object body itself,
 /// which a caller writing inside a `serde_json::json!` inlines and one needing a standalone
 /// `serde_json::Value` wraps — or `None` for the composite types (sibling references, maps,
@@ -5248,17 +5417,10 @@ fn scalar_field_json_schema_item(fld: &FieldDef) -> Option<proc_macro2::TokenStr
         FieldDefType::F32 | FieldDefType::F64 => quote! { { "type": "number" } },
         FieldDefType::Boolean => quote! { { "type": "boolean" } },
         #[cfg(feature = "chrono")]
-        FieldDefType::NaiveDate => {
-            quote! { { "type": "string", "format": "date" } }
-        }
-        #[cfg(feature = "chrono")]
-        FieldDefType::NaiveTime => {
-            quote! { { "type": "string", "format": "time" } }
-        }
-        #[cfg(feature = "chrono")]
-        FieldDefType::NaiveDateTime | FieldDefType::DateTime => {
-            quote! { { "type": "string", "format": "date-time" } }
-        }
+        FieldDefType::NaiveDate
+        | FieldDefType::NaiveTime
+        | FieldDefType::NaiveDateTime
+        | FieldDefType::DateTime => chrono_json_schema_item(&fld.field_type)?,
         #[cfg(feature = "object_id")]
         FieldDefType::ObjectId => object_id_json_schema_item(&object_id_hex_json_schema()),
         FieldDefType::Unknown
@@ -6297,16 +6459,13 @@ fn build_field_type_schema(fld: &FieldDef, field_name_str: &str) -> proc_macro2:
         #[cfg(feature = "object_id")]
         FieldDefType::ObjectId => build_object_id_field_schema(fld, field_name_str),
         #[cfg(feature = "chrono")]
-        FieldDefType::NaiveDate => build_string_format_field_schema(fld, field_name_str, "date"),
-        #[cfg(feature = "chrono")]
-        FieldDefType::NaiveTime => build_string_format_field_schema(fld, field_name_str, "time"),
-        #[cfg(feature = "chrono")]
-        FieldDefType::NaiveDateTime => {
-            build_string_format_field_schema(fld, field_name_str, "date-time")
-        }
-        #[cfg(feature = "chrono")]
-        FieldDefType::DateTime => {
-            build_string_format_field_schema(fld, field_name_str, "date-time")
+        FieldDefType::NaiveDate
+        | FieldDefType::NaiveTime
+        | FieldDefType::NaiveDateTime
+        | FieldDefType::DateTime => {
+            // The arm has matched exactly the types the mapping answers for.
+            let format = chrono_json_schema_format(&fld.field_type).unwrap();
+            build_string_format_field_schema(fld, field_name_str, format)
         }
         FieldDefType::SiblingType(name, lst) => {
             build_sibling_type_field_schema(fld, field_name_str, name, lst)
