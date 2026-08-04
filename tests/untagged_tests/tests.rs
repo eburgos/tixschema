@@ -291,7 +291,7 @@ fn test_named_union_typescript() {
 fn test_compliant_union_typescript() {
     let ts = CompliantUnion::ts_definition();
     assert!(
-        ts.contains("number | { id: string; note: string | undefined };"),
+        ts.contains("number | { id: string; note?: string };"),
         "Got:\n{ts}"
     );
 }

@@ -95,7 +95,7 @@ export type User = {
  * age
  * 
 **/
-  age: number | undefined;
+  age?: number;
   /**
  * firstName
  * 
@@ -283,7 +283,7 @@ export type Event = {  /**
  * reason
  * 
 **/
-  reason: string | undefined;
+  reason?: string;
   /**
  * userId
  * 
@@ -454,7 +454,7 @@ export type Document = {
  * parent_id
  * 
 **/
-  parent_id: ObjectId | undefined;
+  parent_id?: ObjectId;
   /**
  * tags
  * 

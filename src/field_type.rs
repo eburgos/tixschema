@@ -155,9 +155,10 @@ pub enum FieldDefType {
 ///   records level 0 and `Option<Vec<T>>` records level 1 — two different values on the wire
 ///   (`[null]` against `null`) that a single flag could not tell apart. `is_optional` asks it for
 ///   the outermost level, the only one whose `None` is not written inside an array and so the only
-///   one whose flavor depends on where the field sits: `| undefined` /
-///   `z.union([type, z.undefined()])` in struct-field position, `| null` / `z.nullable(type)` in a
-///   tuple element or map value, neither of which can be dropped the way an object key can.
+///   one whose flavor depends on where the field sits: a dropped or `| undefined`-valued key /
+///   `z.union([type, z.undefined()])` in struct-field position — `omits_none` deciding which of the
+///   two the key gets — and `| null` / `z.nullable(type)` in a tuple element or map value, neither
+///   of which can be dropped the way an object key can.
 /// - name: Safe field name (uses serde rename if feature enabled)
 /// - docs: Doc comments from Rust - included in generated TS as `JSDoc`
 /// - `field_type`: The core type classification (see `FieldDefType`)
@@ -175,6 +176,13 @@ pub enum FieldDefType {
 /// - `model_schema_prop_meta`: Optional metadata from #[`model_schema_prop`] attribute
 ///   - Used for overrides like literals, minLength, etc.
 ///   - See Phase 5 in `notes/20250707_field_features.md` for minLength details
+/// - `omits_none`: whether the serde attributes on a *named* field leave a `None` out of the
+///   serialized output entirely rather than writing it. Set only where the attribute was read —
+///   an unnamed field has no key to drop, and without the `serde` feature no attribute is read at
+///   all — so a field carrying it is one whose key serde may never write. Together with
+///   `is_optional` it is what the object surfaces ask before choosing between the two spellings of
+///   an optional member: the key-optional `field?: T` for a key that may be absent, `field: T |
+///   undefined` for one that is always written.
 /// - `type_span`: where the type this field carries was written — the name segment of a path, the
 ///   whole type otherwise, and the innermost name under a wrapper, so `Vec<Inner>` points at
 ///   `Inner`. The JSON schema is the one surface that emits a Rust path built from a type name, so
@@ -197,6 +205,7 @@ pub struct FieldDef {
     pub model_schema_prop_meta: Option<ModelSchemaPropMeta>,
     pub name: String,
     pub nullable_levels: Vec<u8>,
+    pub omits_none: bool,
     #[cfg(feature = "jsonschema")]
     pub type_span: Span,
 }
@@ -244,6 +253,7 @@ impl FieldDef {
         arrayed
             .model_schema_prop_meta
             .clone_from(&self.model_schema_prop_meta);
+        arrayed.omits_none = self.omits_none;
         arrayed
     }
 
@@ -498,14 +508,6 @@ impl FieldDef {
             .is_some_and(|m| m.as_number)
     }
 
-    fn has_ts_optional(&self) -> bool {
-        self.is_optional()
-            && self
-                .model_schema_prop_meta
-                .as_ref()
-                .is_some_and(|m| m.ts_optional)
-    }
-
     /// Whether the field describes an array at all — the question every surface asked of the
     /// boolean this depth replaced. Asked only where a schema is generated.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -529,6 +531,23 @@ impl FieldDef {
         self.is_nullable_at(self.array_depth)
     }
 
+    /// Whether the object key this field writes may be absent, which is the question the two
+    /// spellings of an optional member answer differently — `field?: T` admits the payload with no
+    /// such key, `field: T | undefined` demands the key and lets its value be `undefined`.
+    ///
+    /// Two things say it, and either alone is enough. `ts_optional` says it for the TypeScript
+    /// surface on the author's word. A serde attribute that omits a `None` says it off the wire:
+    /// the payload serde writes for that field simply has no key, which is the same fact the JSON
+    /// surface spends when it leaves the field out of `required`.
+    fn key_may_be_absent(&self) -> bool {
+        self.is_optional()
+            && (self.omits_none
+                || self
+                    .model_schema_prop_meta
+                    .as_ref()
+                    .is_some_and(|m| m.ts_optional))
+    }
+
     fn mark_fixed_length_at(&mut self, level: u8, length: usize) {
         if !self.array_lengths.iter().any(|&(at, _)| at == level) {
             self.array_lengths.push((level, length));
@@ -539,6 +558,12 @@ impl FieldDef {
         if !self.nullable_levels.contains(&level) {
             self.nullable_levels.push(level);
         }
+    }
+
+    /// The `?` a member written with an absent-able key carries, and nothing for one whose key is
+    /// always written.
+    pub fn optional_key_marker(&self) -> &'static str {
+        if self.key_may_be_absent() { "?" } else { "" }
     }
 
     /// The name of the first `OsString`/`OsStr` this field reaches, at any depth.
@@ -645,10 +670,6 @@ impl FieldDef {
             | FieldDefType::NaiveDateTime
             | FieldDefType::DateTime => {}
         }
-    }
-
-    pub fn ts_optional_key_marker(&self) -> &'static str {
-        if self.has_ts_optional() { "?" } else { "" }
     }
 
     /// Builds the TypeScript type before the outermost optional wrap: the type match plus one
@@ -787,8 +808,10 @@ impl FieldDef {
     /// 2. Wrap in Array<...> once per `array_depth` level, adding `| null` inside the wrap at each
     ///    level written as an `Option` — the array is always written, so the `None` is an item
     /// 3. If `is_optional`, which is that question asked of the outermost level: struct-field
-    ///    position adds `| undefined`; tuple-element and map-value positions add `| null` (neither
-    ///    can be omitted like an object key, so a `None` there serializes as `null`)
+    ///    position adds `| undefined`, or nothing at all where the key itself may be absent and
+    ///    [`Self::optional_key_marker`] writes the `?` that says so; tuple-element and map-value
+    ///    positions add `| null` (neither can be omitted like an object key, so a `None` there
+    ///    serializes as `null`)
     ///
     /// Feature notes:
     /// - "`object_id"`: Uses special `ObjectId` type
@@ -801,8 +824,10 @@ impl FieldDef {
     pub fn typescript_typename(&self) -> String {
         let pre_result = self.typescript_base();
         if self.is_optional() {
-            // `ts_optional` renders the key as `field?: T`, so the `| undefined` is redundant.
-            if self.has_ts_optional() {
+            // An absent-able key renders as `field?: T`, so the `| undefined` is redundant — and
+            // under `exactOptionalPropertyTypes` it would claim an explicit `undefined` the key's
+            // omission is exactly what serde writes instead.
+            if self.key_may_be_absent() {
                 pre_result
             } else {
                 format!("{pre_result} | undefined")
@@ -1178,6 +1203,7 @@ fn get_field_def_from_type_path(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            omits_none: false,
             #[cfg(feature = "jsonschema")]
             type_span: type_path.span(),
         };
@@ -1192,6 +1218,7 @@ fn get_field_def_from_type_path(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            omits_none: false,
             // The name segment, not the whole path: it is what a generated module is named after,
             // so a reference the module cannot resolve is blamed on the name it was built from.
             #[cfg(feature = "jsonschema")]
@@ -1209,6 +1236,7 @@ fn get_field_def_from_type_path(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            omits_none: false,
             #[cfg(feature = "jsonschema")]
             type_span: segment.ident.span(),
         },
@@ -1258,6 +1286,7 @@ fn get_field_def_from_generic_type(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            omits_none: false,
             #[cfg(feature = "jsonschema")]
             type_span: type_ident.span(),
         }
@@ -1305,6 +1334,7 @@ fn get_field_def_from_generic_type(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            omits_none: false,
             #[cfg(feature = "jsonschema")]
             type_span: type_ident.span(),
         }
@@ -1318,6 +1348,7 @@ fn get_field_def_from_generic_type(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            omits_none: false,
             #[cfg(feature = "jsonschema")]
             type_span: type_ident.span(),
         }
@@ -1331,6 +1362,7 @@ fn get_field_def_from_generic_type(
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            omits_none: false,
             #[cfg(feature = "jsonschema")]
             type_span: type_ident.span(),
         }
@@ -1394,6 +1426,7 @@ pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            omits_none: false,
             #[cfg(feature = "jsonschema")]
             type_span: ty.span(),
         }
@@ -1407,6 +1440,7 @@ pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
             docs: field_docs.to_owned(),
             model_schema_prop_meta: None,
             nullable_levels: Vec::new(),
+            omits_none: false,
             #[cfg(feature = "jsonschema")]
             type_span: ty.span(),
         }

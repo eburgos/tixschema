@@ -4856,6 +4856,7 @@ fn wrapped_u32_value(wrapper: &str) -> super::FieldDef {
         model_schema_prop_meta: None,
         nullable_levels: Vec::new(),
         name: "items".to_owned(),
+        omits_none: false,
         type_span: proc_macro2::Span::call_site(),
     }
 }

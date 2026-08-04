@@ -5335,7 +5335,7 @@ fn render_untagged_named(
             format!(
                 "{}{}: {}",
                 fld.name,
-                fld.ts_optional_key_marker(),
+                fld.optional_key_marker(),
                 fld.typescript_typename()
             )
         })
@@ -5661,6 +5661,7 @@ fn collect_untagged_members(
             }
 
             let mut field_def = get_field_def(&field_name, &field.ty, "");
+            apply_serde_key_omission(&mut field_def, field, &serde_field_meta);
             guard_errors.extend(untagged_member_guard_errors(
                 field,
                 &field_def,
@@ -6156,7 +6157,7 @@ fn write_named_variant_fields(
             "  /**\n{}\n**/\n  {}{}: {};",
             fld.docs,
             fld.name,
-            fld.ts_optional_key_marker(),
+            fld.optional_key_marker(),
             fld.typescript_typename()
         );
 
@@ -7633,7 +7634,7 @@ fn write_field_type_and_schema(
         "  /**\n{}\n**/\n  {}{}: {};",
         fld.docs,
         fld.name,
-        fld.ts_optional_key_marker(),
+        fld.optional_key_marker(),
         fld.typescript_typename()
     );
 
@@ -8280,11 +8281,22 @@ fn validate_ts_optional_flag(field_optional: bool, flag_set: bool) -> Result<(),
     Ok(())
 }
 
+/// Hands the field def the one serde fact the object surfaces spend: whether a `None` leaves the
+/// key out of the serialized object rather than writing it.
+///
+/// Only a named field has a key to leave out. A positional one is written by its place in a tuple,
+/// where nothing can be dropped and a `None` reaches the wire as a `null`, so the omission the
+/// attribute names never happens there and the slot spellings stand as written.
+#[cfg(feature = "serde")]
+const fn apply_serde_key_omission(field_def: &mut FieldDef, field: &Field, meta: &SerdeFieldMeta) {
+    field_def.omits_none = field.ident.is_some() && meta.omits_none;
+}
+
 /// Rejects a named `Option` field whose serde attributes let a `None` reach the wire as `null`.
 ///
-/// The generated contract renders such a field in the absent form — `T | undefined` and a
-/// `z.union([T, z.undefined()]).prefault(undefined)` inside a `z.strictObject` — which admits a
-/// missing key but never `null`. `is_optional` is the same signal that drives that rendering,
+/// The generated contract renders such a field in the absent form — `T` under an absent-able key
+/// and a `z.union([T, z.undefined()]).prefault(undefined)` inside a `z.strictObject` — which admits
+/// a missing key but never `null`. `is_optional` is the same signal that drives that rendering,
 /// which keeps the guard and the contract from ever disagreeing. Positional fields are exempt: a
 /// tuple slot cannot be omitted, so there `None` correctly renders as nullable.
 ///
@@ -8674,6 +8686,9 @@ fn process_field(
     // (e.g. `Vec<Self>`) are treated exactly like `Vec<EnclosingType>`. Resolved before the guards
     // read the field so each one asks its question of the type the surfaces will render.
     field_def.resolve_self_references(type_name);
+
+    #[cfg(feature = "serde")]
+    apply_serde_key_omission(&mut field_def, field, &serde_field_meta);
 
     #[cfg(feature = "serde")]
     let serde_guard_errors = field_guard_errors(
