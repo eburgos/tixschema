@@ -1053,14 +1053,14 @@ export const UserId$SchemaFactory = <IdType extends ZodType>(
   return schema;
 };
 
-export const UserId$SchemaDefault: $ZodBranded<ZodString, "UserId"> = UserId$SchemaFactory(z.string());
+export const UserId$SchemaDefault: z.core.$ZodBranded<z.ZodString, "UserId"> = UserId$SchemaFactory(z.string());
 
 export type CorrelationId = string & $brand<"CorrelationId">;
 const CorrelationId$RawSchema = z.string().brand<"CorrelationId">().meta({
   description: "CorrelationId",
 });
 
-export const CorrelationId$Schema: $ZodBranded<ZodString, "CorrelationId"> = CorrelationId$RawSchema;
+export const CorrelationId$Schema: z.core.$ZodBranded<z.ZodString, "CorrelationId"> = CorrelationId$RawSchema;
 ```
 
 Generated TypeScript (without `zod` feature):
@@ -1225,7 +1225,7 @@ const SlugId$RawSchema = z.string().min(3).max(50).check(z.regex(/^[a-z0-9_]+$/)
   description: "SlugId",
 });
 
-export const SlugId$Schema: $ZodBranded<ZodString, "SlugId"> = SlugId$RawSchema;
+export const SlugId$Schema: z.core.$ZodBranded<z.ZodString, "SlugId"> = SlugId$RawSchema;
 ```
 
 Serde deserialization validates automatically:
@@ -1370,7 +1370,7 @@ export const DocumentId$SchemaFactory = <IdType extends ZodType>(
   return schema;
 };
 
-export const DocumentId$SchemaDefault: $ZodBranded<ZodString, "DocumentId"> = DocumentId$SchemaFactory(z.string());
+export const DocumentId$SchemaDefault: z.core.$ZodBranded<z.ZodString, "DocumentId"> = DocumentId$SchemaFactory(z.string());
 ```
 
 ## Field Validation (`model_schema_prop`)
