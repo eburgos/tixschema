@@ -1098,6 +1098,20 @@ mod jsonschema {
         assert_eq!(properties["name"], serde_json::json!({ "type": "string" }));
     }
 
+    /// A `char` default renders the one-character string serde writes for it — the document
+    /// `is_undescribable_primitive` refused before `char` gained a `FieldDefType` arm, naming a
+    /// `char_schema` module nothing publishes instead.
+    #[test]
+    fn a_char_default_describes_the_one_character_string() {
+        use super::Initialed;
+
+        let schema = Initialed::<char>::json_schema();
+        assert_eq!(
+            schema["properties"]["initial"],
+            serde_json::json!({ "type": "string", "minLength": 1_i32, "maxLength": 1_i32 })
+        );
+    }
+
     #[test]
     fn the_shape_around_a_parameter_is_still_described() {
         let schema = Pair::<String, u32>::json_schema();
@@ -1369,6 +1383,17 @@ pub struct Wrapper<IdType> {
     pub children: Vec<IdType>,
     pub id: IdType,
     pub name: String,
+}
+
+/// A `char` filling for a parameter's declared default — refused before `char` gained a
+/// `FieldDefType` arm of its own: the dispatch had no arm for it and named a `char_schema` module
+/// nothing publishes. The fixture compiling is part of the assertion; the document it renders is
+/// the rest.
+#[cfg(feature = "jsonschema")]
+#[model_schema(default_types(InitialType = char))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Initialed<InitialType> {
+    pub initial: InitialType,
 }
 
 #[model_schema(default_types(KeyType = String, ValueType = u32))]

@@ -1,18 +1,33 @@
 #[cfg(all(
     test,
-    any(feature = "typescript", feature = "jsonschema", feature = "zod")
+    any(
+        feature = "typescript",
+        feature = "jsonschema",
+        feature = "zod",
+        feature = "serde"
+    )
 ))]
 use serde::{Deserialize, Serialize};
 #[cfg(all(test, feature = "jsonschema"))]
 use serde_json::Value;
 #[cfg(all(
     test,
-    any(feature = "typescript", feature = "jsonschema", feature = "zod")
+    any(
+        feature = "typescript",
+        feature = "jsonschema",
+        feature = "zod",
+        feature = "serde"
+    )
 ))]
 use std::collections::HashMap;
 #[cfg(all(
     test,
-    any(feature = "typescript", feature = "jsonschema", feature = "zod")
+    any(
+        feature = "typescript",
+        feature = "jsonschema",
+        feature = "zod",
+        feature = "serde"
+    )
 ))]
 use tixschema::model_schema;
 
@@ -98,6 +113,29 @@ struct PrimitiveTypesShowcase {
     tiny_unsigned: u8,
 }
 
+/// `char` in every position it can be written: a field, an array element, an optional field, a map
+/// value, and a tuple slot. Gated on the union of every consuming test's own gate, including the
+/// serde-only round-trip, so every feature combination sees the fixture either used or absent.
+#[cfg(all(
+    test,
+    any(
+        feature = "typescript",
+        feature = "jsonschema",
+        feature = "zod",
+        feature = "serde"
+    )
+))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct CharTypesShowcase {
+    array_of_char: Vec<char>,
+    initial: char,
+    map_to_char: HashMap<String, char>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    opt_char: Option<char>,
+    pair: (char, char),
+}
+
 #[cfg(any(feature = "typescript", feature = "jsonschema", feature = "zod"))]
 #[test]
 fn test_primitive_structs_constructible() {
@@ -154,6 +192,121 @@ fn test_primitive_structs_constructible() {
         tiny_unsigned: 0,
     };
     assert!(showcase.array_f64.is_empty());
+}
+
+#[cfg(any(feature = "typescript", feature = "jsonschema", feature = "zod"))]
+#[test]
+fn test_char_struct_constructible() {
+    let showcase = CharTypesShowcase {
+        array_of_char: vec!['a', 'b'],
+        initial: 'x',
+        map_to_char: HashMap::from([("k".to_owned(), 'v')]),
+        opt_char: Some('o'),
+        pair: ('p', 'q'),
+    };
+    assert_eq!(showcase.initial, 'x');
+}
+
+/// serde writes a `char` as the one-character string it renders through `Display`, and reads only
+/// that back — the wire every surface's rendering is fixed from.
+#[cfg(feature = "serde")]
+#[test]
+fn test_char_serde_roundtrip() {
+    let showcase = CharTypesShowcase {
+        array_of_char: vec!['a', 'b'],
+        initial: 'x',
+        map_to_char: HashMap::from([("k".to_owned(), 'v')]),
+        opt_char: Some('o'),
+        pair: ('p', 'q'),
+    };
+    let json = serde_json::to_value(&showcase).unwrap();
+    assert_eq!(json["initial"], serde_json::json!("x"));
+    assert_eq!(json["array_of_char"], serde_json::json!(["a", "b"]));
+    assert_eq!(json["map_to_char"]["k"], serde_json::json!("v"));
+    assert_eq!(json["opt_char"], serde_json::json!("o"));
+    assert_eq!(json["pair"], serde_json::json!(["p", "q"]));
+
+    let round_tripped: CharTypesShowcase = serde_json::from_value(json).unwrap();
+    assert_eq!(round_tripped, showcase);
+}
+
+#[cfg(all(feature = "typescript", feature = "zod"))]
+#[test]
+fn test_char_types_typescript_and_zod() {
+    let ts_definition = CharTypesShowcase::ts_definition();
+    assert!(
+        ts_definition.contains("initial: string;"),
+        "Got: {ts_definition}"
+    );
+    assert!(
+        ts_definition.contains("array_of_char: Array<string>;"),
+        "Got: {ts_definition}"
+    );
+    assert!(
+        ts_definition.contains("map_to_char: Partial<Record<string, string>>;"),
+        "Got: {ts_definition}"
+    );
+    assert_ts_omitted_fields_contain(&ts_definition, &["opt_char"], "string");
+    assert!(
+        ts_definition.contains("pair: [string, string];"),
+        "Got: {ts_definition}"
+    );
+
+    let zod_schema = CharTypesShowcase::zod_schema();
+    assert!(
+        zod_schema.contains("initial: z.string().length(1)"),
+        "Got: {zod_schema}"
+    );
+    assert!(
+        zod_schema.contains("array_of_char: z.array(z.string().length(1))"),
+        "Got: {zod_schema}"
+    );
+    assert!(
+        zod_schema.contains("map_to_char: z.record(z.string(), z.string().length(1))"),
+        "Got: {zod_schema}"
+    );
+    assert!(
+        zod_schema.contains("opt_char: z.union([z.string().length(1), z.undefined()])"),
+        "Got: {zod_schema}"
+    );
+    assert!(
+        zod_schema.contains("pair: z.tuple([z.string().length(1), z.string().length(1)])"),
+        "Got: {zod_schema}"
+    );
+}
+
+#[cfg(feature = "jsonschema")]
+#[test]
+fn test_char_types_json_schema() {
+    let schema = CharTypesShowcase::json_schema();
+    let properties = schema["properties"].as_object().unwrap();
+
+    let one_character_string =
+        serde_json::json!({ "type": "string", "minLength": 1_i32, "maxLength": 1_i32 });
+    assert_eq!(properties["initial"], one_character_string);
+    assert_eq!(
+        properties["array_of_char"],
+        serde_json::json!({ "type": "array", "items": one_character_string })
+    );
+    assert_eq!(
+        properties["map_to_char"],
+        serde_json::json!({ "type": "object", "additionalProperties": one_character_string })
+    );
+    assert_eq!(properties["opt_char"], one_character_string);
+    assert_eq!(
+        properties["pair"],
+        serde_json::json!({
+            "type": "array",
+            "prefixItems": [one_character_string, one_character_string],
+            "items": false,
+            "minItems": 2_u64,
+            "maxItems": 2_u64
+        })
+    );
+
+    let required = schema["required"].as_array().unwrap();
+    assert!(required.contains(&Value::String("initial".to_owned())));
+    assert!(!required.contains(&Value::String("opt_char".to_owned())));
 }
 
 #[cfg(feature = "jsonschema")]

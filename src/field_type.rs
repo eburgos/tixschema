@@ -77,6 +77,10 @@ pub enum VariantKind {
 pub enum FieldDefType {
     /// Boolean primitive - maps to boolean.
     Boolean,
+    /// `char` primitive - serde writes it as a one-character string and reads only that back, so
+    /// it is described as one: TypeScript `string`, Zod `z.string().length(1)`, JSON Schema
+    /// `{"type": "string", "minLength": 1, "maxLength": 1}`.
+    Char,
     #[cfg(feature = "chrono")]
     /// Chrono `DateTime<Tz>` type - requires "`chrono`" feature.
     /// Maps to `string` in TS (ISO 8601 format: "2025-11-29T14:30:00Z").
@@ -275,6 +279,7 @@ impl FieldDef {
             | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
             | FieldDefType::Boolean
+            | FieldDefType::Char
             | FieldDefType::String
             | FieldDefType::U8
             | FieldDefType::U16
@@ -354,6 +359,7 @@ impl FieldDef {
             | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
             | FieldDefType::Boolean
+            | FieldDefType::Char
             | FieldDefType::String
             | FieldDefType::U8
             | FieldDefType::U16
@@ -415,6 +421,7 @@ impl FieldDef {
             | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
             | FieldDefType::Boolean
+            | FieldDefType::Char
             | FieldDefType::String
             | FieldDefType::U8
             | FieldDefType::U16
@@ -524,6 +531,7 @@ impl FieldDef {
             | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
             | FieldDefType::Boolean
+            | FieldDefType::Char
             | FieldDefType::String
             | FieldDefType::U8
             | FieldDefType::U16
@@ -656,6 +664,7 @@ impl FieldDef {
             | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
             | FieldDefType::Boolean
+            | FieldDefType::Char
             | FieldDefType::String
             | FieldDefType::U8
             | FieldDefType::U16
@@ -711,6 +720,7 @@ impl FieldDef {
             | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
             | FieldDefType::Boolean
+            | FieldDefType::Char
             | FieldDefType::String
             | FieldDefType::U8
             | FieldDefType::U16
@@ -764,6 +774,7 @@ impl FieldDef {
             | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
             | FieldDefType::Boolean
+            | FieldDefType::Char
             | FieldDefType::String
             | FieldDefType::U8
             | FieldDefType::U16
@@ -825,6 +836,7 @@ impl FieldDef {
             | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
             | FieldDefType::Boolean
+            | FieldDefType::Char
             | FieldDefType::String
             | FieldDefType::U8
             | FieldDefType::U16
@@ -901,6 +913,7 @@ impl FieldDef {
             | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
             | FieldDefType::Boolean
+            | FieldDefType::Char
             | FieldDefType::String
             | FieldDefType::U8
             | FieldDefType::U16
@@ -1005,7 +1018,7 @@ impl FieldDef {
                 )
             }
             FieldDefType::Boolean => "boolean".to_owned(),
-            FieldDefType::String => "string".to_owned(),
+            FieldDefType::Char | FieldDefType::String => "string".to_owned(),
             FieldDefType::StringLiteral(literal) => format!("\"{literal}\""),
             FieldDefType::U8
             | FieldDefType::U16
@@ -1203,6 +1216,10 @@ impl FieldDef {
                 format!("z.record({}, {})", k.zod_map_key_type(), v.zod_slot_type())
             }
             FieldDefType::Boolean => "z.boolean()".to_owned(),
+            // serde writes a `char` as a one-character string and reads only that back, so the
+            // length is fixed rather than read from `model_schema_prop` — a `char` field carries
+            // none of those constraints.
+            FieldDefType::Char => "z.string().length(1)".to_owned(),
             FieldDefType::String => self.zod_string_type(),
             FieldDefType::StringLiteral(literal) => format!("z.literal(\"{literal}\")"),
             FieldDefType::U8
@@ -1833,6 +1850,7 @@ fn get_field_def_type_or_sibling(t_name: &str) -> FieldDefType {
     }
     match t_name {
         "bool" => FieldDefType::Boolean,
+        "char" => FieldDefType::Char,
         // `str` and `Path` are the borrowed forms of `String` and `PathBuf`, and each writes the
         // same JSON string its owned form does. Both are reachable only behind a wrapper or a
         // reference, and the parser reads through either to land here. `OsString`/`OsStr` are
@@ -1890,19 +1908,21 @@ fn get_field_def_type_or_sibling(t_name: &str) -> FieldDefType {
 /// The dispatch above is total by construction: a name it does not recognise is taken for a sibling
 /// — another `model_schema` item, named before or after this one — and rendered as a reference to
 /// the module that item publishes. That is the right reading of `Foo`, which may well be declared
-/// below, and it is gibberish for `char`: no module named `char_schema` will ever exist, so the
-/// reference resolves to nothing and the author reads an `E0433` about a module they never wrote.
+/// below, and it is gibberish for a reserved primitive name the dispatch has no arm for: no module
+/// of that name will ever exist, so the reference resolves to nothing and the author reads an
+/// `E0433` about a module they never wrote.
 ///
 /// The two cannot be told apart by tokens, so only what is *provably* not a sibling is named here:
-/// the primitive names the language reserves, minus the ones the dispatch does answer for. A
-/// caller refusing on this answer refuses exactly the spellings that cannot become siblings later.
+/// the primitive names the language reserves, minus the ones the dispatch does answer for — `char`
+/// among them since it gained [`FieldDefType::Char`]. A caller refusing on this answer refuses
+/// exactly the spellings that cannot become siblings later.
 ///
-/// `f16` and `f128` are listed with `char`, `i128` and `u128` although the language does not yet
-/// stabilise them: they are reserved primitive names either way, and a build that gains them
-/// should reach a refusal naming the limitation rather than the phantom module.
+/// `f16` and `f128` are listed with `i128` and `u128` although the language does not yet stabilise
+/// them: they are reserved primitive names either way, and a build that gains them should reach a
+/// refusal naming the limitation rather than the phantom module.
 #[cfg(feature = "jsonschema")]
 pub fn is_undescribable_primitive(name: &str) -> bool {
-    matches!(name, "char" | "i128" | "u128" | "f16" | "f128")
+    matches!(name, "i128" | "u128" | "f16" | "f128")
 }
 
 /// Parses serde attributes from struct/enum attributes (requires "serde" feature).
