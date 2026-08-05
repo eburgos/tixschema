@@ -34,7 +34,7 @@ fn test_simple_enum_example() {
             "Plain enum with example should have $RawSchema. Got:\n{zod}"
         );
         assert!(
-            zod.contains("export const DataType$Schema: z.ZodType<DataType> = DataType$RawSchema;"),
+            zod.contains("export const DataType$Schema: ZodType<DataType> = DataType$RawSchema;"),
             "Plain enum with example should have $Schema referencing $RawSchema. Got:\n{zod}"
         );
     }
@@ -230,8 +230,8 @@ fn test_typescript_zod_format() {
 
     let zod = Test::zod_schema();
 
-    // Should have TypeScript-style format with z.ZodType
-    assert!(zod.contains("z.ZodType<"));
+    // Should have TypeScript-style format with ZodType
+    assert!(zod.contains("ZodType<"));
     assert!(zod.contains("$RawSchema"));
     assert!(zod.contains("example:"));
 }
@@ -251,8 +251,8 @@ fn test_javascript_zod_format() {
 
     let zod = Test::zod_schema();
 
-    // Should have JavaScript-style format without z.ZodType
-    assert!(!zod.contains("z.ZodType<"));
+    // Should have JavaScript-style format without ZodType
+    assert!(!zod.contains("ZodType<"));
     assert!(zod.contains("example:"));
 }
 
@@ -656,7 +656,7 @@ fn a_plain_const_still_carries_its_example_on_the_exported_binding() {
     #[cfg(feature = "typescript")]
     assert!(
         zod.contains(
-            "export const Kept$Schema: z.ZodType<Kept> = Kept$RawSchema.meta({\n  example: \
+            "export const Kept$Schema: ZodType<Kept> = Kept$RawSchema.meta({\n  example: \
              {\"value\":\"x\"}\n});"
         ),
         "Got: {zod}"

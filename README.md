@@ -57,7 +57,7 @@ export type User = {
   is_active: boolean;
 };
 
-export const User$Schema: z.ZodType<User> = z.strictObject({
+export const User$Schema: ZodType<User> = z.strictObject({
   id: z.string(),
   name: z.string(),
   email: z.string(),
@@ -340,7 +340,7 @@ export type FixedValue = {
 Generated Zod:
 
 ```typescript
-export const FixedValue$Schema: z.ZodType<FixedValue> = z.discriminatedUnion("type", [
+export const FixedValue$Schema: ZodType<FixedValue> = z.discriminatedUnion("type", [
   z.strictObject({
     type: z.literal("Empty"),
   }),
@@ -416,7 +416,7 @@ export type External = "Bare" | {
 Generated Zod:
 
 ```typescript
-export const External$Schema: z.ZodType<External> = z.union([
+export const External$Schema: ZodType<External> = z.union([
   z.literal("Bare"),
   z.strictObject({
     "Fields": z.strictObject({ a: z.string(), b: z.boolean() }),
@@ -479,7 +479,7 @@ export type Internal = {
 Generated Zod -- a flattened member is an intersection, which has no shape of its own to read the discriminator out of, so a union holding one is a plain `z.union` rather than a `z.discriminatedUnion`:
 
 ```typescript
-export const Internal$Schema: z.ZodType<Internal> = z.union([
+export const Internal$Schema: ZodType<Internal> = z.union([
   z.strictObject({ type: z.literal("Bare") }),
   z.strictObject({ type: z.literal("Fields"), a: z.string(), b: z.boolean() }),
   z.strictObject({ type: z.literal("Wrapped") }).and(z.lazy(() => TagPayload$Schema)),
@@ -532,7 +532,7 @@ export type DataElementSampleValueEntry = {
 Generated Zod:
 
 ```typescript
-export const DataElementSampleValueEntry$Schema: z.ZodType<DataElementSampleValueEntry> =
+export const DataElementSampleValueEntry$Schema: ZodType<DataElementSampleValueEntry> =
   z.strictObject({
     dataElementId: z.string(),
   }).and(z.lazy(() => DataElementSampleValueVariant$Schema));
@@ -581,7 +581,7 @@ Generated Zod:
 
 ```typescript
 const DateValue$RawSchema = z.union([z.number().int(), DateString$Schema]);
-export const DateValue$Schema: z.ZodType<DateValue> = DateValue$RawSchema;
+export const DateValue$Schema: ZodType<DateValue> = DateValue$RawSchema;
 ```
 
 Generated JSON Schema:
@@ -699,7 +699,7 @@ const TreeNode$RawSchema = z.strictObject({
   get children() { return z.array(TreeNode$Schema); },
 });
 
-export const TreeNode$Schema: z.ZodType<TreeNode> = TreeNode$RawSchema;
+export const TreeNode$Schema: ZodType<TreeNode> = TreeNode$RawSchema;
 ```
 
 Recursive enums are also supported. Only the variants that contain a self-reference use getter syntax; non-recursive variants use normal property syntax:
@@ -723,7 +723,7 @@ pub enum DynamicValue {
 Generated Zod:
 
 ```typescript
-export const DynamicValue$Schema: z.ZodType<DynamicValue> = z.discriminatedUnion("type", [
+export const DynamicValue$Schema: ZodType<DynamicValue> = z.discriminatedUnion("type", [
   z.strictObject({
     type: z.literal("string"),
     value: z.string(),
@@ -818,7 +818,7 @@ export type Wrapper<IdType> = {
   name: string;
 };
 
-const buildWrapper$Schema = <IdType extends z.ZodType>(
+const buildWrapper$Schema = <IdType extends ZodType>(
   idType: IdType,
 ) =>
   z.strictObject({
@@ -827,18 +827,18 @@ const buildWrapper$Schema = <IdType extends z.ZodType>(
   name: z.string(),
 });
 
-type Wrapper$SchemaOf<IdType extends z.ZodType> = ReturnType<
+type Wrapper$SchemaOf<IdType extends ZodType> = ReturnType<
   typeof buildWrapper$Schema<IdType>
 >;
 
 interface Wrapper$SchemaFactoryCache {
-  get<IdType extends z.ZodType>(key: IdType): Wrapper$SchemaOf<IdType> | undefined;
-  set<IdType extends z.ZodType>(key: IdType, value: Wrapper$SchemaOf<IdType>): this;
+  get<IdType extends ZodType>(key: IdType): Wrapper$SchemaOf<IdType> | undefined;
+  set<IdType extends ZodType>(key: IdType, value: Wrapper$SchemaOf<IdType>): this;
 }
 
 const Wrapper$SchemaFactoryCache = createSchemaCache<Wrapper$SchemaFactoryCache>();
 
-export const Wrapper$SchemaFactory = <IdType extends z.ZodType>(
+export const Wrapper$SchemaFactory = <IdType extends ZodType>(
   idType: IdType,
 ): Wrapper$SchemaOf<IdType> => {
   const hit = Wrapper$SchemaFactoryCache.get(idType);
@@ -849,10 +849,10 @@ export const Wrapper$SchemaFactory = <IdType extends z.ZodType>(
   return schema;
 };
 
-export const Wrapper$SchemaDefault: z.ZodType<Wrapper<string>> = Wrapper$SchemaFactory(z.string());
+export const Wrapper$SchemaDefault: ZodType<Wrapper<string>> = Wrapper$SchemaFactory(z.string());
 ```
 
-Every parameter is a real TypeScript type parameter, never a bare `z.ZodType` annotation: `z.ZodType` defaults its own parameters, so an argument annotated with it would infer every field it validates as `unknown` and the caller would learn nothing from the schema handed back. Arguments are required -- a default would let a call site say nothing about a filling and still be handed a schema, which is exactly the silent mis-validation the factory exists to prevent.
+Every parameter is a real TypeScript type parameter, never a bare `ZodType` annotation: `ZodType` defaults its own parameters, so an argument annotated with it would infer every field it validates as `unknown` and the caller would learn nothing from the schema handed back. Arguments are required -- a default would let a call site say nothing about a filling and still be handed a schema, which is exactly the silent mis-validation the factory exists to prevent.
 
 Each factory memoizes on the *identity* of the arguments it was handed, one cache level per parameter. Two calls with the same argument objects return the identical schema, and no two argument lists collide -- a change in the first argument and a change in the last each key a different level:
 
@@ -868,7 +868,7 @@ That is why `$SchemaDefault` is written as a call through the factory rather tha
 That reference is deferred, exactly like a flattened base's is: `DocumentId$SchemaDefault` is a module-scope `const`, a generated module concatenates one type's output after another in whatever order the consuming project's entity list produces, and one macro invocation sees one type -- so nothing here can know whether `DocumentId`'s `const` is written above `EcmDocument`'s in the emitted module or below it.
 
 ```typescript
-export const EcmDocument$SchemaDefault: z.ZodType<EcmDocument<DocumentId<string>, number>> =
+export const EcmDocument$SchemaDefault: ZodType<EcmDocument<DocumentId<string>, number>> =
   EcmDocument$SchemaFactory(z.lazy(() => DocumentId$SchemaDefault), z.number());
 ```
 
@@ -895,7 +895,7 @@ export type Node<IdType> = {
   id: IdType;
 };
 
-const buildNode$Schema = <IdType extends z.ZodType>(
+const buildNode$Schema = <IdType extends ZodType>(
   idType: IdType,
 ) =>
   z.strictObject({
@@ -979,7 +979,7 @@ pub type Wrapper<T> = Vec<T>;
 ```typescript
 export type WrapperType<T> = Array<T>;
 
-const buildWrapperType$Schema = <T extends z.ZodType>(
+const buildWrapperType$Schema = <T extends ZodType>(
   t: T,
 ) =>
   z.array(t);
@@ -1024,25 +1024,25 @@ Generated TypeScript (with `zod` feature):
 
 ```typescript
 export type UserId<IdType> = IdType & $brand<"UserId">;
-const buildUserId$Schema = <IdType extends z.ZodType>(
+const buildUserId$Schema = <IdType extends ZodType>(
   idType: IdType,
 ) =>
   idType.meta({
   description: "UserId",
 }).brand<"UserId">();
 
-type UserId$SchemaOf<IdType extends z.ZodType> = ReturnType<
+type UserId$SchemaOf<IdType extends ZodType> = ReturnType<
   typeof buildUserId$Schema<IdType>
 >;
 
 interface UserId$SchemaFactoryCache {
-  get<IdType extends z.ZodType>(key: IdType): UserId$SchemaOf<IdType> | undefined;
-  set<IdType extends z.ZodType>(key: IdType, value: UserId$SchemaOf<IdType>): this;
+  get<IdType extends ZodType>(key: IdType): UserId$SchemaOf<IdType> | undefined;
+  set<IdType extends ZodType>(key: IdType, value: UserId$SchemaOf<IdType>): this;
 }
 
 const UserId$SchemaFactoryCache = createSchemaCache<UserId$SchemaFactoryCache>();
 
-export const UserId$SchemaFactory = <IdType extends z.ZodType>(
+export const UserId$SchemaFactory = <IdType extends ZodType>(
   idType: IdType,
 ): UserId$SchemaOf<IdType> => {
   const hit = UserId$SchemaFactoryCache.get(idType);
@@ -1053,14 +1053,14 @@ export const UserId$SchemaFactory = <IdType extends z.ZodType>(
   return schema;
 };
 
-export const UserId$SchemaDefault: z.core.$ZodBranded<z.ZodString, "UserId"> = UserId$SchemaFactory(z.string());
+export const UserId$SchemaDefault: $ZodBranded<ZodString, "UserId"> = UserId$SchemaFactory(z.string());
 
 export type CorrelationId = string & $brand<"CorrelationId">;
 const CorrelationId$RawSchema = z.string().brand<"CorrelationId">().meta({
   description: "CorrelationId",
 });
 
-export const CorrelationId$Schema: z.core.$ZodBranded<z.ZodString, "CorrelationId"> = CorrelationId$RawSchema;
+export const CorrelationId$Schema: $ZodBranded<ZodString, "CorrelationId"> = CorrelationId$RawSchema;
 ```
 
 Generated TypeScript (without `zod` feature):
@@ -1167,11 +1167,11 @@ pub struct GenericCount<IdType>(pub IdType);
 ```
 
 ```typescript
-const buildDocumentId$Schema = <IdType extends z.ZodType>(idType: IdType) =>
+const buildDocumentId$Schema = <IdType extends ZodType>(idType: IdType) =>
   idType.brand<"DocumentId">();
 
 // The factory itself carries no check — a non-default filling is not held to it.
-export const DocumentId$SchemaFactory = <IdType extends z.ZodType>(idType: IdType) => { /* ... */ };
+export const DocumentId$SchemaFactory = <IdType extends ZodType>(idType: IdType) => { /* ... */ };
 
 // $SchemaDefault composes the factory with the constrained default argument.
 export const DocumentId$SchemaDefault = DocumentId$SchemaFactory(
@@ -1227,7 +1227,7 @@ const SlugId$RawSchema = z.string().min(3).max(50).check(z.regex(/^[a-z0-9_]+$/)
   description: "SlugId",
 });
 
-export const SlugId$Schema: z.core.$ZodBranded<z.ZodString, "SlugId"> = SlugId$RawSchema;
+export const SlugId$Schema: $ZodBranded<ZodString, "SlugId"> = SlugId$RawSchema;
 ```
 
 Serde deserialization validates automatically:
@@ -1342,7 +1342,7 @@ pub struct DocumentId<IdType>(pub IdType);
 Generated Zod:
 
 ```typescript
-const buildDocumentId$Schema = <IdType extends z.ZodType>(
+const buildDocumentId$Schema = <IdType extends ZodType>(
   idType: IdType,
 ) =>
   idType.meta({
@@ -1350,18 +1350,18 @@ const buildDocumentId$Schema = <IdType extends z.ZodType>(
   example: "64de3d95ff45b119e5b53a7e",
 }).brand<"DocumentId">();
 
-type DocumentId$SchemaOf<IdType extends z.ZodType> = ReturnType<
+type DocumentId$SchemaOf<IdType extends ZodType> = ReturnType<
   typeof buildDocumentId$Schema<IdType>
 >;
 
 interface DocumentId$SchemaFactoryCache {
-  get<IdType extends z.ZodType>(key: IdType): DocumentId$SchemaOf<IdType> | undefined;
-  set<IdType extends z.ZodType>(key: IdType, value: DocumentId$SchemaOf<IdType>): this;
+  get<IdType extends ZodType>(key: IdType): DocumentId$SchemaOf<IdType> | undefined;
+  set<IdType extends ZodType>(key: IdType, value: DocumentId$SchemaOf<IdType>): this;
 }
 
 const DocumentId$SchemaFactoryCache = createSchemaCache<DocumentId$SchemaFactoryCache>();
 
-export const DocumentId$SchemaFactory = <IdType extends z.ZodType>(
+export const DocumentId$SchemaFactory = <IdType extends ZodType>(
   idType: IdType,
 ): DocumentId$SchemaOf<IdType> => {
   const hit = DocumentId$SchemaFactoryCache.get(idType);
@@ -1372,7 +1372,7 @@ export const DocumentId$SchemaFactory = <IdType extends z.ZodType>(
   return schema;
 };
 
-export const DocumentId$SchemaDefault: z.core.$ZodBranded<z.ZodString, "DocumentId"> = DocumentId$SchemaFactory(z.string());
+export const DocumentId$SchemaDefault: $ZodBranded<ZodString, "DocumentId"> = DocumentId$SchemaFactory(z.string());
 ```
 
 ## Field Validation (`model_schema_prop`)
@@ -1727,7 +1727,7 @@ pub struct User {
 Generated Zod:
 
 ```typescript
-export const User$Schema: z.ZodType<User> = z.strictObject({
+export const User$Schema: ZodType<User> = z.strictObject({
   name: z.string(),
   email: z.string(),
   age: z.number().int(),
@@ -1914,7 +1914,7 @@ export type Event = {
 Generated Zod:
 
 ```typescript
-export const Event$Schema: z.ZodType<Event> = z.strictObject({
+export const Event$Schema: ZodType<Event> = z.strictObject({
   name: z.string(),
   date: z.iso.date(),
   time: z.preprocess((arg) => { if (typeof arg === "number") { const s = Math.floor(arg / 1000); const hh = String(Math.floor(s / 3600)).padStart(2, "0"); const mm = String(Math.floor((s % 3600) / 60)).padStart(2, "0"); const ss = String(s % 60).padStart(2, "0"); return `${hh}:${mm}:${ss}`; } return arg; }, z.iso.time()),

@@ -481,7 +481,7 @@ fn test_plain_enum_special_chars_zod_has_raw_and_schema() {
         "Should contain $RawSchema. Got:\n{zod}"
     );
     assert!(
-        zod.contains("export const MimeType$Schema: z.ZodType<MimeType> = MimeType$RawSchema;"),
+        zod.contains("export const MimeType$Schema: ZodType<MimeType> = MimeType$RawSchema;"),
         "Should contain exported $Schema referencing $RawSchema. Got:\n{zod}"
     );
     assert!(
@@ -517,7 +517,7 @@ fn test_distribution_mime_type_zod_schema() {
         "Should contain $RawSchema. Got:\n{zod}"
     );
     assert!(
-        zod.contains("export const DistributionValidMimeType$Schema: z.ZodType<DistributionValidMimeType> = DistributionValidMimeType$RawSchema;"),
+        zod.contains("export const DistributionValidMimeType$Schema: ZodType<DistributionValidMimeType> = DistributionValidMimeType$RawSchema;"),
         "Should contain exported $Schema referencing $RawSchema. Got:\n{zod}"
     );
     assert!(
