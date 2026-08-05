@@ -561,6 +561,40 @@ mod zod {
         assert!(too_short.is_err(), "Should reject a too-short id via serde");
     }
 
+    /// `validate()` itself — not only the `deserialize_with` hook — at the declared default:
+    /// `ConstrainedId<String>` is `default_types(IdType = String)`'s own filling, and the generated
+    /// `validate()` runs the same `minLength`/`maxLength`/`pattern` checks `ConstrainedId$SchemaDefault`
+    /// enforces on the Zod side.
+    #[cfg(all(feature = "typescript", feature = "serde"))]
+    #[test]
+    fn the_declared_defaults_validate_method_runs_the_same_checks_the_default_schema_enforces() {
+        let valid = ConstrainedId("64de3d95ff45b119e5b53a7e".to_owned());
+        valid.validate().unwrap();
+
+        let short = ConstrainedId("short".to_owned());
+        let errors = short.validate().unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("too short") && e.contains("minimum length is 24")),
+            "Got: {errors:?}"
+        );
+    }
+
+    /// The whole point of pinning `validate()` to the declared default: a hand-written inherent impl
+    /// for a *different* instantiation compiles alongside the generated one, with no
+    /// duplicate-definition error — and it is the hand-written body that runs, not the generated
+    /// one, since the two are written against different concrete types.
+    #[cfg(all(feature = "typescript", feature = "serde"))]
+    #[test]
+    fn a_hand_written_impl_for_another_instantiation_compiles_and_runs_beside_the_generated_one() {
+        ConstrainedId(1_u32).validate().unwrap();
+        assert_eq!(
+            ConstrainedId(0_u32).validate().unwrap_err(),
+            vec!["id must not be zero".to_owned()]
+        );
+    }
+
     /// The fold fires for a *constrained* generic brand exactly as it does for `Tagged`: the
     /// recorded comparison key is the plain rendering, not the `.min`/`.max`/`.check` chain
     /// `$SchemaDefault` emits, so the two forms agree and the bounds are carried in by reference
@@ -1423,6 +1457,37 @@ pub struct LifetimeStruct<'label> {
     pub label: Cow<'label, str>,
 }
 
+/// A constrained field beside a type parameter that is *not* itself constrained, combined with a
+/// lifetime — the combination `default_instantiation`'s lifetime-passthrough branch exists for.
+/// The declared-default `validate()` sits on `impl<'label> AnnotatedConstrained<'label, String>`,
+/// carrying the lifetime through unchanged while substituting only the type parameter, which is
+/// what lets the hand-written `impl AnnotatedConstrained<'label, u32>` below coexist with it.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[model_schema(default_types(LabelType = String))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnnotatedConstrained<'label, LabelType> {
+    pub label: LabelType,
+    pub source: Cow<'label, str>,
+    #[model_schema_prop(minLength = 1)]
+    pub tag: String,
+}
+
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+impl AnnotatedConstrained<'_, u32> {
+    pub fn validate(&self) -> Result<(), Vec<String>> {
+        if self.label == 0 {
+            return Err(vec!["label must not be zero".to_owned()]);
+        }
+        Ok(())
+    }
+}
+
 /// A parameter bounded in the `where` clause rather than beside itself, filled at a type that
 /// satisfies the bound. Every declared filling is checked against the bounds its parameter carries,
 /// so the fixture compiling is the whole of the assertion that a satisfying one is let through.
@@ -1721,6 +1786,22 @@ pub struct OverriddenDefault<HolderType> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ConstrainedId<IdType>(pub IdType);
+
+/// The door the declared-default `validate()` leaves open: `ConstrainedId<String>` (the declared
+/// default) gets the generated `validate()`, so a *second* inherent impl at a different
+/// instantiation is not a duplicate-definition error — it would be, were the generated one written
+/// as a blanket `impl<IdType> ConstrainedId<IdType>`. `u32` satisfies the `Display` bound the
+/// generic brand's declaration carries, so nothing about this instantiation is special beyond not
+/// being the default.
+#[cfg(all(feature = "zod", feature = "typescript", feature = "serde"))]
+impl ConstrainedId<u32> {
+    pub fn validate(&self) -> Result<(), Vec<String>> {
+        if self.0 == 0 {
+            return Err(vec!["id must not be zero".to_owned()]);
+        }
+        Ok(())
+    }
+}
 
 /// A declared default naming a *constrained* generic brand at exactly the arguments that brand
 /// calls its own. The emitted `$SchemaDefault` text carries a `.min`/`.max`/`.check` chain the
@@ -2122,4 +2203,41 @@ fn a_lifetime_struct_still_holds_its_field_to_its_bound() {
         empty.validate().unwrap_err(),
         vec!["'label' is too short: minimum length is 1, got 0"]
     );
+}
+
+/// The declared-default `validate()` for a type combining a lifetime with a type parameter still
+/// enforces the constrained field's bound, and the hand-written `impl
+/// AnnotatedConstrained<'label, u32>` beside `AnnotatedConstrained`'s own declaration compiles and
+/// runs without colliding with the generated `impl<'label> AnnotatedConstrained<'label, String>` —
+/// proof that `default_instantiation` carries the lifetime through the substitution correctly
+/// rather than dropping it or mishandling the mixed parameter list.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn a_lifetime_beside_a_type_parameter_still_pins_validate_to_the_declared_default() {
+    let valid = AnnotatedConstrained {
+        label: "anything".to_owned(),
+        source: Cow::Borrowed("s"),
+        tag: "t".to_owned(),
+    };
+    valid.validate().unwrap();
+
+    let untagged = AnnotatedConstrained {
+        label: "anything".to_owned(),
+        source: Cow::Borrowed("s"),
+        tag: String::new(),
+    };
+    assert_eq!(
+        untagged.validate().unwrap_err(),
+        vec!["'tag' is too short: minimum length is 1, got 0"]
+    );
+
+    let other_instantiation = AnnotatedConstrained {
+        label: 7_u32,
+        source: Cow::Borrowed("s"),
+        tag: String::new(),
+    };
+    other_instantiation.validate().unwrap();
 }

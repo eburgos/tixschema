@@ -259,6 +259,7 @@ type StructFieldData = (
 /// Borrowed pieces needed to assemble the final token stream for a branded newtype.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 struct BrandedNewtypeOutput<'parts> {
+    default_types: &'parts [(syn::Ident, syn::Type)],
     delegate_impl_items: &'parts [proc_macro2::TokenStream],
     display_tokens: &'parts proc_macro2::TokenStream,
     generics: &'parts syn::Generics,
@@ -268,6 +269,9 @@ struct BrandedNewtypeOutput<'parts> {
     name: &'parts Ident,
     schema_example_tokens: &'parts proc_macro2::TokenStream,
     schema_impl_items: &'parts [proc_macro2::TokenStream],
+    /// The type's raw, unsplit `validate()` — [`assemble_branded_output`] runs it through
+    /// [`branded_validate_split`] itself, since doing that here rather than at every call site is
+    /// the whole point of bundling these fields into one struct.
     validate_method: &'parts proc_macro2::TokenStream,
     validation_tokens: &'parts proc_macro2::TokenStream,
 }
@@ -738,6 +742,24 @@ enum BrandedAnnotation<'defaults> {
 enum DefaultZodRendering {
     Deferred(String),
     Eager(String),
+}
+
+/// The parts [`assemble_schema_output`] joins, bundled into a struct because the standalone
+/// default-only `validate()` impl (see [`place_validate_method`]) would otherwise be an eighth
+/// positional argument past `clippy::too_many_arguments`' cap.
+#[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
+struct SchemaOutputParts<'parts, T> {
+    default_types: &'parts [(syn::Ident, syn::Type)],
+    delegate_impl_items: &'parts [proc_macro2::TokenStream],
+    generics: &'parts syn::Generics,
+    item: &'parts T,
+    module_ident: &'parts Ident,
+    name: &'parts syn::Ident,
+    schema_impl_items: &'parts [proc_macro2::TokenStream],
+    /// The type's raw `validate()`, split into its default-only `impl` by
+    /// [`assemble_schema_output`] itself — see [`place_validate_method`].
+    validate_method: &'parts Option<proc_macro2::TokenStream>,
+    validation_fns: &'parts [proc_macro2::TokenStream],
 }
 
 #[cfg(feature = "zod")]
@@ -1520,7 +1542,6 @@ fn build_struct_delegate_items(
     rust_ident: &str,
     parameters: &[String],
     schema_example_method: Option<&proc_macro2::TokenStream>,
-    validate_method: Option<proc_macro2::TokenStream>,
 ) -> Vec<proc_macro2::TokenStream> {
     // A `schema_example()` method is emitted iff an example was extracted.
     #[cfg(feature = "zod")]
@@ -1571,31 +1592,35 @@ fn build_struct_delegate_items(
 
     #[cfg(feature = "zod")]
     items.extend(schema_example_method.cloned());
-    items.extend(validate_method);
     items
 }
 
 /// Assembles the final macro output for a struct or enum: the item itself, its schema module
-/// (with the per-field validation functions), and the type's delegate impl.
+/// (with the per-field validation functions), the type's delegate impl, and its standalone
+/// default-only `validate()` impl when it has one.
 ///
 /// The delegate impl carries the item's own generics through `split_for_impl`, the way
 /// [`assemble_branded_output`] already does: the block is written for the type as declared, so it
 /// has to repeat every parameter the declaration binds — a lifetime and a const included, neither
 /// of which reaches a schema — or it names a type that does not exist.
 #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
-fn assemble_schema_output<T>(
-    item: &T,
-    generics: &syn::Generics,
-    module_ident: &Ident,
-    name: &syn::Ident,
-    schema_impl_items: &[proc_macro2::TokenStream],
-    validation_fns: &[proc_macro2::TokenStream],
-    delegate_impl_items: &[proc_macro2::TokenStream],
-) -> TokenStream
+fn assemble_schema_output<T>(parts: &SchemaOutputParts<T>) -> TokenStream
 where
     T: quote::ToTokens,
 {
-    let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
+    let (impl_generics, type_generics, where_clause) = parts.generics.split_for_impl();
+    let item = parts.item;
+    let module_ident = parts.module_ident;
+    let name = parts.name;
+    let schema_impl_items = parts.schema_impl_items;
+    let validation_fns = parts.validation_fns;
+    let delegate_impl_items = parts.delegate_impl_items;
+    let (validate_method, default_validate_impl) = place_validate_method(
+        parts.validate_method.clone(),
+        name,
+        parts.generics,
+        parts.default_types,
+    );
 
     let output = quote! {
         #item
@@ -1615,7 +1640,10 @@ where
 
         impl #impl_generics #name #type_generics #where_clause {
             #(#delegate_impl_items)*
+            #validate_method
         }
+
+        #default_validate_impl
     };
 
     log::trace!("{output}");
@@ -3170,6 +3198,126 @@ fn declared_default_constraint_message(name: &Ident, parameter: &str, default_ty
     )
 }
 
+/// `parameter`'s declared default as a `syn::Type`, for substituting a concrete Rust type rather
+/// than spelling one for a diagnostic. Falls back to `String` for an entry the declaration left
+/// out — the same fallback [`declared_default_type_name`] and [`declared_default_field`] resolve
+/// to, so all three readers of an absent entry agree.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn declared_default_syn_type(
+    parameter: &str,
+    default_types: &[(syn::Ident, syn::Type)],
+) -> syn::Type {
+    default_types
+        .iter()
+        .find(|(declared, _)| declared == parameter)
+        .map_or_else(|| syn::parse_quote!(String), |(_, ty)| ty.clone())
+}
+
+/// The `impl` header and self-type a type's *declared-default* `validate()` is written against:
+/// every type parameter is replaced by [`declared_default_syn_type`], while a lifetime or const
+/// parameter carries through unchanged — `default_types` only ever fills a type parameter, so
+/// there is nothing declared for the other two to substitute.
+///
+/// Substituting types (rather than reusing the item's own generics, the way its schema delegates
+/// do) is what lets a downstream author write their own `impl Name<Other> { fn validate(&self) }`
+/// alongside the one this crate emits: Rust inherent impls do not specialize, so a blanket
+/// `impl<T> Name<T> { fn validate(&self) }` would collide with it, but a concrete `impl
+/// Name<String> { .. }` does not.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn default_instantiation(
+    name: &Ident,
+    generics: &syn::Generics,
+    default_types: &[(syn::Ident, syn::Type)],
+) -> (syn::Generics, proc_macro2::TokenStream) {
+    let mut impl_generics = syn::Generics::default();
+    let mut arguments: Vec<proc_macro2::TokenStream> = Vec::new();
+    for param in &generics.params {
+        match param {
+            syn::GenericParam::Type(type_param) => {
+                let default =
+                    declared_default_syn_type(&type_param.ident.to_string(), default_types);
+                arguments.push(quote! { #default });
+            }
+            syn::GenericParam::Lifetime(lifetime_param) => {
+                impl_generics
+                    .params
+                    .push(syn::GenericParam::Lifetime(lifetime_param.clone()));
+                let lifetime = &lifetime_param.lifetime;
+                arguments.push(quote! { #lifetime });
+            }
+            syn::GenericParam::Const(const_param) => {
+                impl_generics
+                    .params
+                    .push(syn::GenericParam::Const(const_param.clone()));
+                let ident = &const_param.ident;
+                arguments.push(quote! { #ident });
+            }
+        }
+    }
+    let self_ty = if arguments.is_empty() {
+        quote! { #name }
+    } else {
+        quote! { #name<#(#arguments),*> }
+    };
+    (impl_generics, self_ty)
+}
+
+/// Splits a generated `validate()` away from a type's other delegate methods when the type has
+/// parameters: the checks a `validate()` runs belong to the declared default (see
+/// [`default_instantiation`]), not to every instantiation, so a generic type's `validate()` moves
+/// into its own `impl Name<DeclaredDefault> { .. }` block rather than sitting on the same
+/// `impl<T> Name<T>` the schema delegates (`ts_definition`, `zod_schema`, …) still share — those
+/// do not depend on the constraints, so they are unaffected.
+///
+/// Returns `(for_the_generic_impl, standalone_default_impl)`. A non-generic type is untouched:
+/// `validate()` comes back on the first element and the second is empty, so its emission stays
+/// exactly what it was before this function existed.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn place_validate_method(
+    validate_method: Option<proc_macro2::TokenStream>,
+    name: &Ident,
+    generics: &syn::Generics,
+    default_types: &[(syn::Ident, syn::Type)],
+) -> (Option<proc_macro2::TokenStream>, proc_macro2::TokenStream) {
+    let Some(method) = validate_method else {
+        return (None, quote! {});
+    };
+    if type_parameters_in_scope(generics).is_empty() {
+        return (Some(method), quote! {});
+    }
+    let (default_generics, self_ty) = default_instantiation(name, generics, default_types);
+    let (impl_generics, _, _) = default_generics.split_for_impl();
+    (
+        None,
+        quote! {
+            impl #impl_generics #self_ty {
+                #method
+            }
+        },
+    )
+}
+
+/// A branded newtype's `validate()`, split the same way [`assemble_schema_output`] splits a
+/// struct's or enum's: the piece that stays on the brand's own `impl` block (empty once the type is
+/// generic — see [`place_validate_method`]), and the standalone default-only `impl` block to append
+/// after it. Takes the raw (possibly empty) `TokenStream` `inject_branded_serde_attrs` returns
+/// rather than an `Option`, since that is what the brand path already has on hand.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn branded_validate_split(
+    raw_validate_method: proc_macro2::TokenStream,
+    name: &Ident,
+    generics: &syn::Generics,
+    default_types: &[(syn::Ident, syn::Type)],
+) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
+    let (for_branded_impl, default_validate_impl) = place_validate_method(
+        (!raw_validate_method.is_empty()).then_some(raw_validate_method),
+        name,
+        generics,
+        default_types,
+    );
+    (for_branded_impl.unwrap_or_default(), default_validate_impl)
+}
+
 /// The consult a constrained brand leaves unanswered, for the expansion that registers the name to
 /// answer, or `None` for every brand the registry could answer at its own expansion.
 ///
@@ -4099,20 +4247,21 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
         &rust_ident,
         &type_parameters_in_scope(&item_struct.generics),
         schema_example_method.as_ref(),
-        validate_method,
     );
 
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     {
-        assemble_schema_output(
-            &item_struct,
-            &item_struct.generics,
-            &module_ident,
-            &name,
-            &schema_impl_items,
-            &collected.2,
-            &delegate_impl_items,
-        )
+        assemble_schema_output(&SchemaOutputParts {
+            default_types: &args.default_types,
+            delegate_impl_items: &delegate_impl_items,
+            generics: &item_struct.generics,
+            item: &item_struct,
+            module_ident: &module_ident,
+            name: &name,
+            schema_impl_items: &schema_impl_items,
+            validate_method: &validate_method,
+            validation_fns: &collected.2,
+        })
     }
 
     #[cfg(not(any(feature = "zod", feature = "typescript", feature = "jsonschema")))]
@@ -4461,18 +4610,19 @@ fn process_tuple_struct(
         &name.to_string(),
         &type_parameters_in_scope(&item_struct.generics),
         schema_example_method.as_ref(),
-        None,
     );
 
-    assemble_schema_output(
-        &item_struct,
-        &item_struct.generics,
-        &module_ident,
-        &name,
-        &schema_impl_items,
-        &[],
-        &delegate_impl_items,
-    )
+    assemble_schema_output(&SchemaOutputParts {
+        default_types: &args.default_types,
+        delegate_impl_items: &delegate_impl_items,
+        generics: &item_struct.generics,
+        item: &item_struct,
+        module_ident: &module_ident,
+        name: &name,
+        schema_impl_items: &schema_impl_items,
+        validate_method: &None,
+        validation_fns: &[],
+    })
 }
 
 /// Builds the `validate_value`/`deserialize_value` functions for a constrained branded newtype.
@@ -5529,7 +5679,14 @@ fn assemble_branded_output(parts: &BrandedNewtypeOutput) -> TokenStream {
     let name = parts.name;
     let delegate_impl_items = parts.delegate_impl_items;
     let schema_example_tokens = parts.schema_example_tokens;
-    let validate_method = parts.validate_method;
+    // A generic brand's `validate()` moves to its own default-only `impl` — see
+    // `branded_validate_split`'s doc comment.
+    let (validate_method, default_validate_impl) = branded_validate_split(
+        parts.validate_method.clone(),
+        name,
+        parts.generics_for_ty,
+        parts.default_types,
+    );
 
     let output = quote! {
         #item_struct
@@ -5554,6 +5711,8 @@ fn assemble_branded_output(parts: &BrandedNewtypeOutput) -> TokenStream {
             #schema_example_tokens
             #validate_method
         }
+
+        #default_validate_impl
     };
 
     log::trace!("{output}");
@@ -5652,7 +5811,6 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
 
     register_brand_with_questions(&item_struct, args, &rust_ident, &item_name, &module_name);
 
-    // Extract docs and example
     #[cfg(feature = "zod")]
     let docs_vec = get_struct_docs(&item_struct);
 
@@ -5666,7 +5824,6 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
 
     // Get generic type parameters from the struct
     let generic_params = type_parameters_in_scope(&item_struct.generics);
-    let is_generic = !generic_params.is_empty();
 
     // Get inner field type info
     let inner_field = item_struct.fields.iter().next().unwrap();
@@ -5703,7 +5860,7 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
 
     // --- Generate validation code for constrained branded newtypes ---
     #[cfg(feature = "serde")]
-    let branded_validation = build_branded_validation(args, is_generic, inner_ty);
+    let branded_validation = build_branded_validation(args, !generic_params.is_empty(), inner_ty);
 
     // --- Build schema module impl items ---
     #[cfg(feature = "jsonschema")]
@@ -5741,7 +5898,7 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
     // `generics` is for the impl block (Display bounds added when constrained); `generics_for_ty`
     // is the unmodified clone used for the type alias.
     let generics_for_ty = item_struct.generics.clone();
-    let generics = branded_impl_generics(&item_struct, is_generic, args);
+    let generics = branded_impl_generics(&item_struct, !generic_params.is_empty(), args);
 
     // --- Generate Display impl for branded newtypes (unless the brand opted out) ---
     let display_tokens =
@@ -5752,7 +5909,7 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
     let (output_struct, validation_tokens, validate_method) = inject_branded_serde_attrs(
         item_struct,
         branded_validation.as_ref(),
-        is_generic,
+        !generic_params.is_empty(),
         &generic_params,
         &module_name,
         &module_ident,
@@ -5765,6 +5922,7 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
     let validate_method = quote! {};
 
     assemble_branded_output(&BrandedNewtypeOutput {
+        default_types: &args.default_types,
         delegate_impl_items: &delegate_impl_items,
         display_tokens: &display_tokens,
         generics: &generics,
@@ -6739,20 +6897,21 @@ fn process_discriminated_enum(
         &name.to_string(),
         &type_parameters_in_scope(&item_enum.generics),
         schema_example_method.as_ref(),
-        build_enum_validate_method(&variants.3, &module_ident),
     );
 
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     {
-        assemble_schema_output(
-            &item_enum,
-            &item_enum.generics,
-            &module_ident,
+        assemble_schema_output(&SchemaOutputParts {
+            default_types: &args.default_types,
+            delegate_impl_items: &delegate_impl_items,
+            generics: &item_enum.generics,
+            item: &item_enum,
+            module_ident: &module_ident,
             name,
-            &schema_impl_items,
-            &variants.1,
-            &delegate_impl_items,
-        )
+            schema_impl_items: &schema_impl_items,
+            validate_method: &build_enum_validate_method(&variants.3, &module_ident),
+            validation_fns: &variants.1,
+        })
     }
 
     #[cfg(not(any(feature = "zod", feature = "typescript", feature = "jsonschema")))]
@@ -7272,20 +7431,21 @@ fn process_externally_tagged_enum(
         &name.to_string(),
         &type_parameters_in_scope(&item_enum.generics),
         schema_example_method.as_ref(),
-        build_enum_validate_method(&variants.3, &module_ident),
     );
 
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     {
-        assemble_schema_output(
-            &item_enum,
-            &item_enum.generics,
-            &module_ident,
+        assemble_schema_output(&SchemaOutputParts {
+            default_types: &args.default_types,
+            delegate_impl_items: &delegate_impl_items,
+            generics: &item_enum.generics,
+            item: &item_enum,
+            module_ident: &module_ident,
             name,
-            &schema_impl_items,
-            &variants.1,
-            &delegate_impl_items,
-        )
+            schema_impl_items: &schema_impl_items,
+            validate_method: &build_enum_validate_method(&variants.3, &module_ident),
+            validation_fns: &variants.1,
+        })
     }
 
     #[cfg(not(any(feature = "zod", feature = "typescript", feature = "jsonschema")))]
@@ -7616,7 +7776,6 @@ fn process_internally_tagged_enum(
         return output;
     }
 
-    let self_type_name = item_enum.ident.to_string();
     let variants = collect_discriminated_variants(&mut item_enum, rename_all, enum_module_name_opt);
     if let Some(output) = guard_failure_output(&item_enum, Some(&item_enum.ident), &variants.2) {
         return output;
@@ -7625,7 +7784,7 @@ fn process_internally_tagged_enum(
     let members: Vec<(String, String, proc_macro2::TokenStream, bool)> = variants
         .0
         .iter()
-        .map(|variant| render_internal_variant(variant, tag_name, &self_type_name))
+        .map(|variant| render_internal_variant(variant, tag_name, &item_enum.ident.to_string()))
         .collect();
 
     let (main_schema_code, type_code, schema_code) = join_internal_union(&members, tag_name);
@@ -7687,20 +7846,21 @@ fn process_internally_tagged_enum(
         &name.to_string(),
         &type_parameters_in_scope(&item_enum.generics),
         schema_example_method.as_ref(),
-        build_enum_validate_method(&variants.3, &module_ident),
     );
 
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     {
-        assemble_schema_output(
-            &item_enum,
-            &item_enum.generics,
-            &module_ident,
+        assemble_schema_output(&SchemaOutputParts {
+            default_types: &args.default_types,
+            delegate_impl_items: &delegate_impl_items,
+            generics: &item_enum.generics,
+            item: &item_enum,
+            module_ident: &module_ident,
             name,
-            &schema_impl_items,
-            &variants.1,
-            &delegate_impl_items,
-        )
+            schema_impl_items: &schema_impl_items,
+            validate_method: &build_enum_validate_method(&variants.3, &module_ident),
+            validation_fns: &variants.1,
+        })
     }
 
     #[cfg(not(any(feature = "zod", feature = "typescript", feature = "jsonschema")))]
@@ -8772,26 +8932,29 @@ fn process_untagged_enum(
     // `collect_untagged_members`), so this is the one surface that answers with the constraint
     // rather than with `data did not match any variant`.
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
+    let validate_method = build_enum_validate_method(&validate_arms, &module_ident);
+    #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     let delegate_impl_items = build_struct_delegate_items(
         &module_ident,
         item_name,
         &name.to_string(),
         &type_parameters_in_scope(&item_enum.generics),
         schema_example_method.as_ref(),
-        build_enum_validate_method(&validate_arms, &module_ident),
     );
 
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     {
-        assemble_schema_output(
-            &item_enum,
-            &item_enum.generics,
-            &module_ident,
+        assemble_schema_output(&SchemaOutputParts {
+            default_types: &args.default_types,
+            delegate_impl_items: &delegate_impl_items,
+            generics: &item_enum.generics,
+            item: &item_enum,
+            module_ident: &module_ident,
             name,
-            &schema_impl_items,
-            &enum_validation_fns,
-            &delegate_impl_items,
-        )
+            schema_impl_items: &schema_impl_items,
+            validate_method: &validate_method,
+            validation_fns: &enum_validation_fns,
+        })
     }
 
     #[cfg(not(any(feature = "zod", feature = "typescript", feature = "jsonschema")))]
