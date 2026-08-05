@@ -12641,6 +12641,17 @@ fn declared_default_field(parameter: &str, default_types: &[(syn::Ident, syn::Ty
 /// pinned to — which is also what carries in whatever checks and brand the sibling's own default
 /// declared, rather than reconstructing a plain instantiation beside them. See
 /// [`record_zod_default_arguments`].
+///
+/// The fold's own gate (`array_depth == 0 && !is_optional()`, a *direct* sibling reference) scopes
+/// the fold correctly — a default wrapped in a `Vec` or `Option` has no bare sibling binding to
+/// fold onto — but it is not the deferral boundary: `Tagged$SchemaFactory` inside
+/// `z.array(Tagged$SchemaFactory(z.string()))` is exactly as much a module-scope `const` read as
+/// it is bare, only reached one level down. So a declared default that misses the direct-sibling
+/// gate falls through to [`FieldDef::names_a_sibling_binding`], which asks the same question the
+/// gate cannot: does the rendered tree name a sibling *anywhere*, wrapped or not. Where it does,
+/// the whole rendered expression is what `z.lazy` wraps — not the factory call alone — since the
+/// `$SchemaDefault` const carries its own explicit annotation, so nothing needs to infer through
+/// the wrapper.
 #[cfg(feature = "zod")]
 fn default_zod_rendering(field: &FieldDef) -> DefaultZodRendering {
     if field.array_depth == 0
@@ -12658,6 +12669,9 @@ fn default_zod_rendering(field: &FieldDef) -> DefaultZodRendering {
                 ));
             }
         }
+        return DefaultZodRendering::Deferred(field.zod_type());
+    }
+    if field.names_a_sibling_binding() {
         return DefaultZodRendering::Deferred(field.zod_type());
     }
     DefaultZodRendering::Eager(field.zod_type())

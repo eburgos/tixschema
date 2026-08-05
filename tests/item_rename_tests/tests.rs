@@ -389,9 +389,12 @@ fn every_schema_a_forward_item_reference_names_is_defined_by_the_emission() {
     ]
     .join("\n\n");
     for (written, referenced) in [
-        ("gauge: LaterRenamedGauge$Schema", "LaterRenamedGauge"),
         (
-            "grades: z.array(LaterRenamedGrade$Schema)",
+            "get gauge() { return LaterRenamedGauge$Schema; },",
+            "LaterRenamedGauge",
+        ),
+        (
+            "get grades() { return z.array(LaterRenamedGrade$Schema); },",
             "LaterRenamedGrade",
         ),
     ] {

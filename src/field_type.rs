@@ -648,6 +648,62 @@ impl FieldDef {
         }
     }
 
+    /// Whether this field's rendering reads any other item's own module-scope Zod binding — a
+    /// factory call or a bare `$Schema` const — at any depth, wrapped in a `Vec`/`Option`/`Map`/
+    /// `Tuple` or named directly. [`default_zod_rendering`](crate::model_schema) asks this once its
+    /// own direct-sibling fold gate declines, since that gate answers a narrower question (can this
+    /// argument fold onto a bare `$SchemaDefault`) than deferral needs (does the rendered tree name
+    /// a sibling's binding at all) — `Tagged$SchemaFactory` inside
+    /// `z.array(Tagged$SchemaFactory(z.string()))` is exactly as much a module-scope `const` read as
+    /// a bare `Tagged$SchemaFactory(z.string())` is.
+    ///
+    /// Unlike [`Self::reaches_a_type_declared_later`], registration is never consulted: a declared
+    /// default is rendered once, standing alone rather than beside the fields of the item that
+    /// declares it, so nothing here can say whether the sibling it names has registered by the time
+    /// this runs — deferring unconditionally is the same answer [`deferred_zod_operand`]'s other
+    /// callers already give for a flattened base and the fold above. The recursion shape matches
+    /// [`Self::contains_type_reference`]: sibling generics, map values, tuple elements. A sequence
+    /// wrapper's own name is not itself a sibling — it renders as the array its elements describe,
+    /// never a binding of its own — so it is excluded exactly as
+    /// [`Self::reaches_a_type_declared_later`] excludes it, while its element is still walked. A map
+    /// key is left unwalked entirely: `HashMap<String, T>` is the only key this crate accepts, and
+    /// `String` can never itself be a sibling reference.
+    #[cfg(feature = "zod")]
+    pub fn names_a_sibling_binding(&self) -> bool {
+        match &self.field_type {
+            FieldDefType::SiblingType(name, generics) => {
+                !is_sequence_wrapper(name) || generics.iter().any(Self::names_a_sibling_binding)
+            }
+            FieldDefType::Map(_, value) => value.names_a_sibling_binding(),
+            FieldDefType::Tuple(elements) => elements.iter().any(Self::names_a_sibling_binding),
+            FieldDefType::TypeParam(_)
+            | FieldDefType::Unknown
+            | FieldDefType::StringLiteral(_)
+            | FieldDefType::Boolean
+            | FieldDefType::Char
+            | FieldDefType::String
+            | FieldDefType::U8
+            | FieldDefType::U16
+            | FieldDefType::U32
+            | FieldDefType::U64
+            | FieldDefType::I8
+            | FieldDefType::I16
+            | FieldDefType::I32
+            | FieldDefType::I64
+            | FieldDefType::Usize
+            | FieldDefType::Isize
+            | FieldDefType::F32
+            | FieldDefType::F64 => false,
+            #[cfg(feature = "object_id")]
+            FieldDefType::ObjectId => false,
+            #[cfg(feature = "chrono")]
+            FieldDefType::NaiveDate
+            | FieldDefType::NaiveTime
+            | FieldDefType::NaiveDateTime
+            | FieldDefType::DateTime => false,
+        }
+    }
+
     /// The defs written inside this one, which is every position a type parameter can be reached
     /// at below the top: a `SiblingType`'s generic arguments, a `Map`'s key and value, a `Tuple`'s
     /// elements. Every other variant names a type outright and holds no def.
@@ -798,21 +854,29 @@ impl FieldDef {
         }
     }
 
-    /// Whether this field reaches a generic type the registry does not hold yet — a
-    /// `#[model_schema]` item declared below the one being expanded.
+    /// Whether this field reaches a type the registry does not hold yet — a `#[model_schema]` item
+    /// declared below the one being expanded, whether or not that item declares a parameter of its
+    /// own.
     ///
-    /// Such a reference is written as a call to the factory that item goes on to publish, which is
-    /// the only binding that can take the arguments written here. Spliced in as it stands, the call
-    /// runs while the containing builder's own body is being evaluated — and where the item below
-    /// points back at this one, that call re-enters this factory before it has reached its cache,
-    /// and the pair recurses until the stack ends.
+    /// A generic reference is written as a call to the factory that item goes on to publish, the
+    /// only binding that can take the arguments written here; a zero-argument reference is written
+    /// as a bare read of that item's own `$Schema` const. Both are spliced in as they stand into
+    /// the containing object literal, and each carries a different danger for it. A factory call
+    /// only runs when the enclosing factory is itself later called, well after every module has
+    /// loaded — but where the item below points back at this one, that call re-enters this factory
+    /// before it has reached its cache, and the pair recurses until the stack ends. A bare `$Schema`
+    /// read carries no such call to defer re-entering, but the object literal reading it eagerly
+    /// *is* that other item's own top-level const initializer — so the danger is reading a name a
+    /// module below has not declared yet, the same temporal-dead-zone hazard `deferred_zod_operand`
+    /// exists to solve for a flattened base and a declared default.
     ///
-    /// Deferring exactly these references is enough to end that, and it needs no cycle to be found.
+    /// Deferring exactly these references is enough to end both, and it needs no cycle to be found.
     /// Every cycle contains at least one of them: if every reference in a cycle named something
     /// already registered, declaration positions would strictly decrease all the way round, which
     /// no cycle can do. What is left once they are deferred is a graph whose every remaining
     /// reference names something declared earlier, so it cannot cycle and every chain of eager
-    /// calls ends.
+    /// calls ends — and a lone forward reference belonging to no cycle at all is ended the same way,
+    /// since nothing here needs one to exist.
     ///
     /// The same partial-answer regime the export name and the map-key registry already run under:
     /// a name the registry does not hold is a name expanded later, and one it does hold was
@@ -821,9 +885,7 @@ impl FieldDef {
     pub fn reaches_a_type_declared_later(&self) -> bool {
         match &self.field_type {
             FieldDefType::SiblingType(name, generics) => {
-                (!generics.is_empty()
-                    && !is_sequence_wrapper(name)
-                    && lookup_alias_info(name).is_none())
+                (!is_sequence_wrapper(name) && lookup_alias_info(name).is_none())
                     || generics.iter().any(Self::reaches_a_type_declared_later)
             }
             FieldDefType::Map(key, value) => {

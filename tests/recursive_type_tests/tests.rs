@@ -465,6 +465,23 @@ pub struct Person {
     pub name: String,
 }
 
+/// Two non-generic structs cycling through a `Vec` — `Chapter` names `Section` before `Section`
+/// is declared, and `Section` names `Chapter` back afterward. Legal Rust, no `Box` needed, since
+/// the cycle runs through a collection on both sides; this is the zero-argument counterpart of
+/// `CycleLeader`/`CycleFollower` in `generic_types_tests`.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Chapter {
+    pub sections: Vec<Section>,
+}
+
+/// Declared BELOW `Chapter`, which names it first — the forward half of the cycle.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Section {
+    pub back_refs: Vec<Chapter>,
+}
+
 /// Recursive enum with `HashMap` of self.
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -669,4 +686,26 @@ fn test_recursive_boxed_option_struct() {
         zod.contains("label: z.string()"),
         "Non-recursive label field should use normal property syntax. Got: {zod}"
     );
+}
+
+/// Test 10: A non-generic forward reference — a bare, zero-argument sibling declared BELOW the
+/// type naming it — has to defer exactly as a generic forward reference already does, or the
+/// module the pair is written into throws at import in every concatenation order: whichever half
+/// of the cycle lands first names a `const` the other half has not published yet.
+#[test]
+fn test_non_generic_forward_reference_defers_through_a_getter() {
+    let chapter_zod = Chapter::zod_schema();
+    assert!(
+        chapter_zod.contains("get sections() { return z.array(Section$Schema); },"),
+        "The forward reference to Section should defer through a getter. Got: {chapter_zod}"
+    );
+
+    // The backward half — Section naming Chapter, already registered by the time Section is
+    // expanded — stays eager exactly as every non-cyclic sibling reference already does.
+    let section_zod = Section::zod_schema();
+    assert!(
+        section_zod.contains("back_refs: z.array(Chapter$Schema),"),
+        "The backward reference to Chapter should stay eager. Got: {section_zod}"
+    );
+    assert!(!section_zod.contains("get "), "Got: {section_zod}");
 }
