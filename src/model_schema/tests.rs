@@ -1278,10 +1278,6 @@ fn field_map_key_error(field_type: &proc_macro2::TokenStream) -> String {
 /// The registry proves a struct-keyed map has no members to name, and it proves it whatever surface
 /// is being generated: the key is read off the field every one of them renders from, so the same
 /// source cannot be a schema under one feature set and a refusal under another.
-///
-/// Every depth the key can be written at is covered, those being the positions the surfaces reach
-/// it through: a field's own map, a map nested under either key flavor, a tuple slot, a sequence
-/// wrapper, and a sibling's generic argument.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn a_map_key_proved_to_lack_enum_members_is_refused_wherever_it_is_written() {
@@ -1358,9 +1354,6 @@ fn a_sequence_wrapped_map_key_is_refused_wherever_it_is_written() {
 /// sequence-wrapped one does, and for the same reason: serde raises `key must be a string` and
 /// refuses the whole map, so there is no object for any surface to describe. The key is named by the
 /// shape it was written as, and what serde writes for it is named beside it.
-///
-/// Every depth is covered, the position a map sits in not being what decides whether its key can be
-/// written.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn assert_unwritable_map_key(field_type: &proc_macro2::TokenStream, key_name: &str) {
     let error = field_map_key_error(field_type);
@@ -1663,12 +1656,6 @@ fn enum_fields(item: &syn::ItemEnum) -> impl Iterator<Item = &syn::Field> {
 
 /// A refused pattern leaves the item without the `deserialize_with` naming the module the refusal
 /// drops.
-///
-/// A pattern is recorded as written whether or not a guard refused it, so the constraint is still
-/// a string constraint by the time the hook is generated: the item was emitted carrying
-/// `#[serde(deserialize_with = "probe_caret_schema::deserialize_anything")]` beside the
-/// `compile_error!`, while the module holding that function was replaced by the absorbing one —
-/// an `E0425` pointing at the attribute rather than at anything the author wrote.
 #[cfg(feature = "serde")]
 #[test]
 fn a_refused_pattern_leaves_no_hook_naming_the_dropped_module() {
@@ -1847,10 +1834,6 @@ fn a_container_short_of_its_wire_arity_still_falls_through_as_a_sibling() {
 /// Runs the field walk the way [`super::process_field`] does and renders the guard failures its
 /// `model_schema_prop` attributes earn, so a refused key and an unparseable `pattern` are read off
 /// the same channel that carries them to the emitted item.
-///
-/// `parameters` names what the enclosing item declares, which is what decides whether a name the
-/// field is written with is a reference to another type or one of the item's own parameters — the
-/// same list [`super::process_field`] hands the walk.
 fn field_prop_guard_errors_in_scope(item: &syn::ItemStruct, parameters: &[String]) -> Vec<String> {
     let field = item.fields.iter().next().unwrap();
     let name = field
@@ -3325,10 +3308,6 @@ fn string_constraints_over_a_non_string_inner_are_rejected() {
 /// unresolved user type — is admitted because expansion cannot know its shape; the constrained
 /// path's `Display` assertion is what covers it. A name carrying one argument that is not a
 /// sequence wrapper is such a name too, and stays admitted.
-///
-/// `U` is written where the brand declares no such parameter, so it is one of those unresolved
-/// names rather than a parameter: that is the whole of the line the classifier draws, and the
-/// brand's own `T` is on the other side of it in the test below.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn string_constraints_over_a_string_shaped_inner_pass() {
@@ -3388,10 +3367,6 @@ fn brand_over_named_inner_errors(inner: &str) -> Vec<String> {
 /// A named inner is where the checks actually land — the brand emits `Inner$Schema.min(3)` — so a
 /// name the registry says publishes something other than a string takes the refusal the same shape
 /// spelled directly takes, and names both the brand and the inner.
-///
-/// Spelled directly, `serde_json::Value` is refused through the opaque arm; one module out it was
-/// admitted, and `Blob$Schema.min(3)` over `const Blob$Schema = z.unknown().brand<"Blob">()` is a
-/// `TypeError` at load, before a payload is read.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn string_constraints_over_a_named_inner_the_registry_answers_for_are_rejected() {
@@ -3427,19 +3402,6 @@ fn string_constraints_over_a_named_inner_the_registry_calls_a_string_pass() {
 
 /// A name the registry has no answer for keeps the emission it has always had, at the consult
 /// itself.
-///
-/// The two names that reach this are the same absence here: one written above the item that
-/// registers it, and one this crate never expands at all — an unresolved user type whose schema the
-/// author supplies. Refusing on absence would refuse the second for the sake of the first, and the
-/// argument alone tells them apart no better, a publisher being free to write a string whatever its
-/// parameter is handed. The `Display` assertion still bounds the Rust surface either way.
-///
-/// What the guard does *not* do is forget the question: the first of the two is answered by the
-/// registration that follows, which is what takes the verdict off declaration order without
-/// touching this admission. See the deferred tests below.
-///
-/// Both of them name a type the declaration has already fixed, which is what the admission rests
-/// on; a name written over one of the brand's own parameters has not, and is refused below.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn string_constraints_over_a_name_the_registry_cannot_answer_for_pass() {
@@ -3464,17 +3426,6 @@ fn string_constraints_over_a_name_the_registry_cannot_answer_for_pass() {
 
 /// A name written over one of the brand's own type parameters is refused, wherever the parameter
 /// sits inside it.
-///
-/// The registry's silence is not consent here. The brand composes the named type's schema from the
-/// argument the caller supplies, so the checks land on whatever that argument turns out to be: Zod
-/// appends them to a shape the call site decides, the one JSON document written for every
-/// instantiation still holds the `{}` a parameter describes as, and `validate()` measures the
-/// inner's `Display` — a numeric filling rejected for its digit count rather than for its value.
-/// The same two items written in the other order already refuse through the registry, so admitting
-/// this one puts the diagnostic back on declaration order the long way round.
-///
-/// The refusal names the brand, the inner and the parameter, so the author reads which declaration
-/// to fix and which name in it.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn string_constraints_over_a_name_written_over_the_brands_own_parameter_are_rejected() {
@@ -3511,12 +3462,6 @@ fn string_constraints_over_a_name_written_over_the_brands_own_parameter_are_reje
 
 /// A name the registry calls a string publisher is refused too, once one of the brand's own
 /// parameters is written into it.
-///
-/// That registration answers for the declaration, and the declaration here is one whose value the
-/// filling supplies: `Later<T>` publishes a string for a `Later<String>` and something else for
-/// every other filling, so the checks still land on whatever the call site handed over. The
-/// registry's own arm cannot tell this case from an unregistered one — a string publisher records
-/// no shape, exactly as an absence records none — which is why it is the parameter that decides.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn string_constraints_over_a_registered_name_carrying_the_brands_parameter_are_rejected() {
@@ -3613,10 +3558,6 @@ fn brand_surface(item: &syn::ItemStruct) -> super::Surface {
 /// A recorded position is filled with the argument the reference writes, so one declaration answers
 /// per instantiation: the checks compose onto that argument's schema, and the guard names the shape
 /// the argument resolves to rather than the opaque one the declaration alone could say.
-///
-/// The same answer whichever way the two declarations are written — the record is the same record —
-/// which is what takes the guard's verdict off declaration order for every reference that reaches
-/// it at all.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn string_constraints_over_a_parameter_publisher_read_the_argument_written_for_it() {
@@ -3691,11 +3632,6 @@ fn deferred_refusals_for(rust_ident: &str) -> Vec<String> {
 /// A consult the registry could not answer is kept, and the expansion that finally registers the
 /// name answers it — filling the position that registration published with the argument shape the
 /// brand resolved when it asked.
-///
-/// The brand is admitted at its own expansion whatever the argument, because a name declared below
-/// it and a name this crate never expands are one absence there. What closes the half is that the
-/// absence is temporary: the registry is a compile-local recording the later expansion also writes
-/// to, so the answer arrives one declaration later rather than never.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn a_question_left_where_the_registry_was_silent_is_answered_by_the_later_registration() {
@@ -8817,11 +8753,6 @@ fn a_direct_flatten_of_a_plain_enum_is_left_to_the_guard_written_for_it() {
 /// A registration publishing a choice reaches the same refusal, named by the branch its value sits
 /// at rather than at no position at all — the wording the JSON-schema merge, which reads that same
 /// choice back as a union, already refuses the declaration in.
-///
-/// The absence beside it is not what is refused: serde writes the object's own keys alone for it and
-/// reads them back as the absent value, which is the branch the merge already writes. What no
-/// spelling describes is the value, and one declaration cannot carry a branch that round-trips and a
-/// branch no payload satisfies.
 #[cfg(all(feature = "serde", feature = "zod"))]
 #[test]
 fn a_direct_flatten_of_a_nullable_scalar_registration_is_refused_at_its_value_branch() {
@@ -9270,13 +9201,6 @@ fn the_empty_string_pattern_keeps_the_call_it_was_already_emitted_as() {
 
 /// `\b` is trivial to `clippy::trivial_regex` and names no `str` call, so it keeps the regex — and
 /// the lint keeps firing on it in the consumer, which is the one case left standing here.
-///
-/// The verdict is from a probe, not an assumption: `#[model_schema_prop(pattern = r"\b")]` run
-/// through `cargo clippy --all-targets -- -D warnings` in a crate denying `clippy::nursery`
-/// reported `error: trivial regex ... the regex is unlikely to be useful as it is`, against the
-/// `#[model_schema()]` attribute. It is left standing because `\b` turns a value away — the empty
-/// string holds no word boundary — so there is a check here to keep, and answering the lint would
-/// mean dropping it.
 #[cfg(feature = "serde")]
 #[test]
 fn a_word_boundary_pattern_keeps_its_regex() {

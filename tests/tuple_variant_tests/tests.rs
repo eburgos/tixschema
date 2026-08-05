@@ -416,7 +416,6 @@ fn test_multi_tuple_variant_zod() {
 
     let zod = MultiTupleZod::zod_schema();
 
-    // Verify z.tuple() is used
     assert!(zod.contains("z.tuple("), "Missing z.tuple");
     assert!(
         zod.contains("z.tuple([z.string(), z.number().int()])"),
@@ -444,15 +443,12 @@ fn test_plain_enum_string_union() {
 
     let ts = DataType::ts_definition();
 
-    // Should be a string union, not discriminated union
     assert!(ts.contains("\"Alphanumeric\""), "Missing Alphanumeric");
     assert!(ts.contains("\"Image\""), "Missing Image");
     assert!(ts.contains("\"Decimal\""), "Missing Decimal");
     assert!(ts.contains("\"Integer\""), "Missing Integer");
     assert!(ts.contains("\"Boolean\""), "Missing Boolean");
 
-    // Should NOT have type/value fields (it's a plain string union)
-    // The format should be: type DataType = "Alphanumeric" | "Image" | ...
     assert!(
         !ts.contains("type:") || ts.contains("export type"),
         "Should not have type discriminator field"
@@ -473,7 +469,6 @@ fn test_plain_enum_zod() {
 
     let zod = PlainEnumZod::zod_schema();
 
-    // Should use z.enum, not z.discriminatedUnion
     assert!(zod.contains("z.enum("), "Should use z.enum for plain enums");
     assert!(
         !zod.contains("z.discriminatedUnion"),
@@ -494,7 +489,6 @@ fn test_mixed_variants_typescript() {
         Named { field_a: String, field_b: bool },
         // Multi tuple
         Pair(String, i64),
-        // Single tuple
         Text(String),
     }
 
@@ -618,11 +612,9 @@ fn test_custom_content_field() {
 
     let ts = CustomContent::ts_definition();
 
-    // Should use "kind" instead of "type"
     assert!(ts.contains("kind: \"Text\""), "Should use 'kind' as tag");
     assert!(ts.contains("kind: \"Number\""), "Should use 'kind' as tag");
 
-    // Should use "data" instead of "value"
     assert!(
         ts.contains("data: string"),
         "Should use 'data' as content field"
@@ -647,13 +639,11 @@ fn test_custom_content_field_zod() {
 
     let zod = CustomContentZod::zod_schema();
 
-    // Should use "kind" in discriminatedUnion
     assert!(
         zod.contains("z.discriminatedUnion(\"kind\""),
         "Should use 'kind' as discriminator"
     );
 
-    // Should use "data" as field name
     assert!(
         zod.contains("data: z.string()"),
         "Should use 'data' as content field"
@@ -671,7 +661,6 @@ fn test_tuple_with_vec() {
     #[derive(Serialize, Deserialize, Debug, Clone)]
     pub enum TupleWithVec {
         Data(Vec<String>),
-        // This was the original problem case: Image(String, Vec<u8>)
         Image(String, Vec<u8>),
     }
 
@@ -784,7 +773,6 @@ fn test_optional_in_tuple() {
 fn test_tuple_with_custom_type() {
     let ts = Outer::ts_definition();
 
-    // Should reference the inner type
     assert!(
         ts.contains("\"Wrapped\": Inner"),
         "Wrapped should reference Inner type. Got: {ts}"
@@ -821,7 +809,6 @@ fn test_serde_serialization_compatibility() {
         Text(String),
     }
 
-    // Test serialization produces expected format
     let text = SerdeCompat::Text("hello".to_owned());
     let text_json = serde_json::to_value(&text).unwrap();
     assert_eq!(text_json["type"], "Text");
@@ -856,8 +843,6 @@ fn test_fixed_value_original_issue() {
 
     let ts = FixedValue::ts_definition();
 
-    // Verify NO empty field names (the original bug)
-    // Empty field names would look like "  : string;" (space before colon, no field name)
     assert!(
         !ts.contains("\n  : "),
         "Should not have empty field name (found line starting with colon)"
@@ -909,7 +894,6 @@ fn test_fixed_value_ext_comprehensive() {
 
     let ts = FixedValueExt::ts_definition();
 
-    // Single tuple variants
     assert!(
         ts.contains("\"Alphanumeric\": string"),
         "Missing Alphanumeric. Got: {ts}"
@@ -1016,7 +1000,6 @@ fn test_jsdoc_comments() {
 
     let ts = JsDoc::ts_definition();
 
-    // Should have JSDoc comments
     assert!(ts.contains("/**"), "Should have JSDoc comments");
     assert!(ts.contains("*/"), "Should have JSDoc end");
 

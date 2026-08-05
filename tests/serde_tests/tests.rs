@@ -10,10 +10,6 @@ enum Color {
     Red,
 }
 
-// ========================================================================
-// Discriminated Union with Serde
-// ========================================================================
-
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -30,12 +26,6 @@ enum Event {
     },
 }
 
-// ========================================================================
-// Different rename_all Conventions
-// Note: Currently only camelCase and lowercase are fully implemented
-// lowercase converts field names to lowercase while keeping underscores
-// ========================================================================
-
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "lowercase")]
@@ -43,10 +33,6 @@ struct Lowercase {
     field_one: String,
     field_two: String,
 }
-
-// ========================================================================
-// Serde with Optional Fields
-// ========================================================================
 
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -60,10 +46,6 @@ struct OptionalFields {
     required_field: String,
 }
 
-// ========================================================================
-// Option Fields That Satisfy the None-Serialization Guard
-// ========================================================================
-
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct CompliantOptionals {
@@ -75,10 +57,6 @@ struct CompliantOptionals {
     tag: Option<String>,
 }
 
-// ========================================================================
-// Enum Serde Tests
-// ========================================================================
-
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "lowercase")]
@@ -87,10 +65,6 @@ enum Status {
     Inactive,
     Pending,
 }
-
-// ========================================================================
-// Basic Serde Rename Tests
-// ========================================================================
 
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -104,10 +78,6 @@ struct UserWithSerde {
     last_name: String,
     user_id: String,
 }
-
-// ========================================================================
-// Wire Names That No Identifier Can Hold
-// ========================================================================
 
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -213,7 +183,6 @@ fn test_serde_rename_all_camel_case_json_schema() {
 
     let properties = schema["properties"].as_object().unwrap();
 
-    // Check that serde rename attributes are applied
     assert!(properties.contains_key("userId")); // user_id -> userId
     assert!(properties.contains_key("firstName")); // first_name -> firstName
     assert!(properties.contains_key("lastName")); // last_name -> lastName
@@ -221,7 +190,6 @@ fn test_serde_rename_all_camel_case_json_schema() {
     assert!(properties.contains_key("createdAt")); // created_at -> createdAt
     assert!(properties.contains_key("isVerified")); // is_verified -> isVerified
 
-    // Check that original field names are NOT present
     assert!(!properties.contains_key("user_id"));
     assert!(!properties.contains_key("first_name"));
     assert!(!properties.contains_key("last_name"));
@@ -229,7 +197,6 @@ fn test_serde_rename_all_camel_case_json_schema() {
     assert!(!properties.contains_key("created_at"));
     assert!(!properties.contains_key("is_verified"));
 
-    // Verify field types
     assert_eq!(properties["userId"]["type"], "string");
     assert_eq!(properties["firstName"]["type"], "string");
     assert_eq!(properties["lastName"]["type"], "string");
@@ -243,7 +210,6 @@ fn test_serde_rename_all_camel_case_json_schema() {
 fn test_serde_rename_all_camel_case_typescript() {
     let ts_definition = UserWithSerde::ts_definition();
 
-    // Check that field names are converted in TypeScript
     assert!(ts_definition.contains("userId: string;"));
     assert!(ts_definition.contains("firstName: string;"));
     assert!(ts_definition.contains("lastName: string;"));
@@ -347,12 +313,10 @@ fn test_enum_field_rename() {
 fn test_discriminated_union_with_serde_typescript() {
     let ts = Event::ts_definition();
 
-    // Check discriminator field with camelCase applied to variant names
     assert!(ts.contains("type: \"userCreated\""));
     assert!(ts.contains("type: \"userDeleted\""));
     assert!(ts.contains("type: \"userUpdated\""));
 
-    // Check renamed fields
     assert!(ts.contains("userId: string;"));
     assert!(ts.contains("userName: string;"));
     assert!(ts.contains("newEmail: string;"));

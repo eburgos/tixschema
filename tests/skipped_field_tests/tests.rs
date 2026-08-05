@@ -265,9 +265,6 @@ fn the_json_schema_drops_the_variant_member_too() {
         tagged["oneOf"][0]["properties"]["internal"].is_null(),
         "Got: {tagged}"
     );
-    // The discriminator's own name is the `serde` feature's business, so what is read here is the
-    // membership rather than the whole list: the dropped member is out of `required` and the one
-    // beside it is in.
     let required = tagged["oneOf"][0]["required"].as_array().unwrap().clone();
     assert!(
         !required.contains(&serde_json::json!("internal")),

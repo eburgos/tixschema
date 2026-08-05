@@ -52,7 +52,6 @@ enum ActionTaggedWithNothingIgnored {
     Upload { value: String },
 }
 
-// Test single-value enum used as a field in a discriminated union.
 #[cfg(all(test, any(feature = "typescript", feature = "zod", feature = "serde")))]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -100,7 +99,6 @@ pub enum CalculatedExpressionOperator {
     Subtract,
 }
 
-// Exact reproduction of user's DistributionValidMimeType enum.
 #[cfg(all(test, feature = "serde", any(feature = "typescript", feature = "zod")))]
 #[model_schema()]
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone)]
@@ -121,7 +119,6 @@ enum DocumentLiteralValue {
     Document,
 }
 
-// Test plain enum with serde rename containing special characters (slashes, dots).
 #[cfg(all(test, feature = "serde", any(feature = "typescript", feature = "zod")))]
 #[model_schema()]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,7 +135,6 @@ pub enum MimeType {
     test,
     any(feature = "typescript", feature = "jsonschema", feature = "zod")
 ))]
-// Test discriminated union (tagged enum).
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -253,14 +249,12 @@ fn test_plain_enum_json_schema() {
 fn test_plain_enum_ts_definition_serde_style() {
     let ts_definition = UserStatus::ts_definition();
 
-    // Check TypeScript union type
     assert!(ts_definition.contains("export type UserStatus"));
     assert!(ts_definition.contains("\"active\""));
     assert!(ts_definition.contains("\"inactive\""));
     assert!(ts_definition.contains("\"pending\""));
     assert!(ts_definition.contains("\"suspended\""));
 
-    // Check Zod schema - now in separate method
     let zod_schema = UserStatus::zod_schema();
     assert!(zod_schema.contains("export const UserStatus$Schema"));
     assert!(zod_schema.contains("z.enum([\"active\", \"inactive\", \"pending\", \"suspended\"])"));
@@ -271,14 +265,12 @@ fn test_plain_enum_ts_definition_serde_style() {
 fn test_plain_enum_ts_definition_not_serde_style() {
     let ts_definition = UserStatus::ts_definition();
 
-    // Check TypeScript union type
     assert!(ts_definition.contains("export type UserStatus"));
     assert!(ts_definition.contains("\"Active\""));
     assert!(ts_definition.contains("\"Inactive\""));
     assert!(ts_definition.contains("\"Pending\""));
     assert!(ts_definition.contains("\"Suspended\""));
 
-    // Check Zod schema - now in separate method
     let zod_schema = UserStatus::zod_schema();
     assert!(zod_schema.contains("export const UserStatus$Schema"));
     assert!(zod_schema.contains("z.enum([\"Active\", \"Inactive\", \"Pending\", \"Suspended\"])"));
@@ -309,7 +301,6 @@ fn test_discriminated_union_json_schema() {
     let one_of = schema["oneOf"].as_array().unwrap();
     assert_eq!(one_of.len(), 3);
 
-    // Check that each variant has the discriminator field
     for variant in one_of {
         let properties = variant["properties"].as_object().unwrap();
         assert!(properties.contains_key("type"));
@@ -345,19 +336,16 @@ fn test_payment_method_variants_json_schema() {
 fn test_discriminated_union_ts_definition() {
     let ts_definition = PaymentMethod::ts_definition();
 
-    // Check that it contains discriminated union syntax
     assert!(ts_definition.contains("export type PaymentMethod = "));
     assert!(ts_definition.contains("type: \"creditCard\""));
     assert!(ts_definition.contains("type: \"bankTransfer\""));
     assert!(ts_definition.contains("type: \"payPal\""));
 
-    // Check field names are converted to camelCase
     assert!(ts_definition.contains("cardNumber: string;"));
     assert!(ts_definition.contains("expiryDate: string;"));
     assert!(ts_definition.contains("accountNumber: string;"));
     assert!(ts_definition.contains("routingNumber: string;"));
 
-    // Check Zod discriminated union - now in separate method
     let zod_schema = PaymentMethod::zod_schema();
     assert!(zod_schema.contains("z.discriminatedUnion(\"type\""));
 }
@@ -426,7 +414,6 @@ fn test_tag_written_after_an_ignored_key_reaches_the_json_schema() {
 fn test_enum_with_docs() {
     let ts_definition = CalculatedExpressionOperator::ts_definition();
 
-    // Just make sure it compiles for now
     assert!(ts_definition.contains("export type CalculatedExpressionOperator"));
 }
 
@@ -435,7 +422,6 @@ fn test_enum_with_docs() {
 fn test_single_value_enum_ts_definition() {
     let ts_definition = DocumentLiteralValue::ts_definition();
 
-    // A single-value enum should generate a literal union type
     assert!(ts_definition.contains("export type DocumentLiteralValue"));
     assert!(ts_definition.contains("\"document\""));
 }
@@ -445,7 +431,6 @@ fn test_single_value_enum_ts_definition() {
 fn test_single_value_enum_zod_schema() {
     let zod_schema = DocumentLiteralValue::zod_schema();
 
-    // Should generate z.enum(["document"]) which is equivalent to z.literal("document")
     assert!(zod_schema.contains("export const DocumentLiteralValue$Schema"));
     assert!(zod_schema.contains("z.enum([\"document\"])"));
 }
@@ -455,9 +440,7 @@ fn test_single_value_enum_zod_schema() {
 fn test_single_value_enum_in_tagged_union_ts() {
     let ts_definition = ActionWithLiteralEnum::ts_definition();
 
-    // The generate variant should have value typed as DocumentLiteralValue
     assert!(ts_definition.contains("value: DocumentLiteralValue;"));
-    // The upload variant should have value typed as string
     assert!(ts_definition.contains("value: string;"));
 }
 
@@ -466,9 +449,7 @@ fn test_single_value_enum_in_tagged_union_ts() {
 fn test_single_value_enum_in_tagged_union_zod() {
     let zod_schema = ActionWithLiteralEnum::zod_schema();
 
-    // The generate variant should reference DocumentLiteralValue$Schema
     assert!(zod_schema.contains("DocumentLiteralValue$Schema"));
-    // The upload variant should use z.string()
     assert!(zod_schema.contains("z.string()"));
 }
 

@@ -100,12 +100,6 @@ const CROSS_ENGINE_HAYSTACKS: [&str; 20] = [
 
 /// What a flagless JavaScript regex literal makes of each spelling the guard can hand one, over
 /// [`CROSS_ENGINE_HAYSTACKS`] in order.
-///
-/// Read off `new RegExp(source).test(haystack)` under node v26.2.0 (V8 14.6). The JavaScript side
-/// is recorded rather than executed because the crate's tests must not need a JavaScript runtime
-/// to run; what is asserted against it — the `regex` crate's verdict on the very string the guard
-/// emits — is executed. Both the authored spellings and the spellings they translate to are here,
-/// so the table shows the divergence and its closure side by side.
 const JAVASCRIPT_VERDICTS: [(&str, [bool; 20]); 22] = [
     (
         r"^\d$",
@@ -328,11 +322,6 @@ const UNCONSTRAINING_PATTERNS: [&str; 12] = [
 
 /// Patterns that turn some value away, kept beside [`UNCONSTRAINING_PATTERNS`] as the near misses
 /// that decide where the line sits.
-///
-/// `^$` and `^a*$` pin both ends of the value to one position, which is a constraint however
-/// little sits between them. `\b` and `\B` ask the value for a word boundary, or for the absence
-/// of one at every position, and the empty string has neither. `a+` and `(?:ab)+` demand the run
-/// they repeat at least once.
 const CONSTRAINING_PATTERNS: [&str; 8] = [
     "^$", "^a*$", r"\b", r"\B", "a+", "(?:ab)+", "^[a-z]+$", r"^\s*$",
 ];
@@ -879,12 +868,6 @@ fn test_the_emitted_pattern_picks_out_the_same_haystacks_in_both_engines() {
 
 /// Every regex this crate writes into a generated schema itself, rather than carrying over from an
 /// author's `pattern`.
-///
-/// Held to the guard the crate holds authors to, and held to it the strict way: admitted *and*
-/// handed back unchanged. A pattern the guard rewrites is one that was not written in the spelling
-/// both engines read the same way, and the crate is in a position to write it that way to begin
-/// with — so for these the rewrite is not a fix, it is the failure. That makes this the check a
-/// future emitted pattern has to pass before it can ship.
 #[test]
 #[cfg(feature = "object_id")]
 fn test_every_pattern_the_crate_emits_is_a_fixed_point_of_the_guard() {
@@ -954,14 +937,6 @@ fn test_portable_pattern_refuses_a_negated_class_whatever_its_members() {
 /// Held against the engines rather than restated, as the dot's verdict was: no spelling of a
 /// negated class agrees with JavaScript, so refusing every one of them is the verdict rather than
 /// an admission table of the ones that survive.
-///
-/// Each candidate below fills in the `regex` crate where a flagless literal cannot fill at all — a
-/// lone astral character is one character here and the two code units it is written from there, so
-/// no one-character class holds it. The one spelling whose `regex` reading does leave every astral
-/// character out has to name them by astral bounds, and that literal reads those bounds as
-/// surrogate halves in descending order: `new RegExp("^[^\u{10000}-\u{10FFFF}]$")` throws `Range
-/// out of order in character class` under node v26.2.0, so it is not a spelling that can be
-/// admitted either.
 #[test]
 fn test_no_spelling_of_a_negated_class_agrees_across_the_engines() {
     for candidate in NEGATED_CLASS_PATTERNS.into_iter().chain(["^[^\u{1f601}]$"]) {
@@ -1046,11 +1021,6 @@ fn test_portable_pattern_names_the_construct_javascript_cannot_carry() {
 
 /// Renaming a group is a change of spelling and not of meaning: what the pattern matched before
 /// it, it matches after — read off `regex::Regex` itself rather than restated here.
-///
-/// Equalising a perl class is the other kind of rewrite and deliberately does narrow what the
-/// `regex` crate accepts, down to the set JavaScript was going to enforce anyway. The haystacks
-/// here are ASCII, where the two engines already agree, so a `\d` sitting beside a renamed group
-/// still has to come through matching exactly what it matched.
 #[test]
 fn test_portable_pattern_rewrite_keeps_what_the_pattern_matched() {
     for pattern in [
@@ -1203,13 +1173,6 @@ fn test_a_pattern_admitting_every_value_is_refused() {
 }
 
 /// A pattern that turns some value away keeps its place, `\b` included.
-///
-/// `\b` is the one shape `clippy::trivial_regex` flags that this guard deliberately does not
-/// answer for. A probe run before this guard existed put `#[model_schema_prop(pattern = r"\b")]`
-/// through `cargo clippy --all-targets -- -D warnings` in a crate denying `clippy::nursery`, and
-/// the lint fired — `error: trivial regex ... the regex is unlikely to be useful as it is`, landing
-/// on the `#[model_schema()]` attribute. It fires anyway, and refusing `\b` here would be refusing
-/// a real constraint: the empty string holds no word boundary, so the pattern turns a value away.
 #[test]
 fn test_a_pattern_turning_some_value_away_clears_the_guard() {
     for pattern in CONSTRAINING_PATTERNS {

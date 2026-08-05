@@ -50,18 +50,14 @@ struct Address {
         feature = "serde"
     )
 ))]
-// Test the specific edge case that was originally failing
 #[model_schema()]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 struct OriginalBugReproduction {
-    // This was the original failing case
     problematic_map: HashMap<String, Vec<u64>>,
 
-    // Nested cases
     string_to_optional_vec_u64: HashMap<String, Option<Vec<u64>>>,
 
-    // Additional cases that might have similar issues
     string_to_vec_bool: HashMap<String, Vec<bool>>,
     string_to_vec_f64: HashMap<String, Vec<f64>>,
     string_to_vec_i64: HashMap<String, Vec<i64>>,
@@ -71,25 +67,20 @@ struct OriginalBugReproduction {
 // A named map value is rendered as the schema module its own `#[model_schema()]` expansion emits,
 // so an alias standing in a map value has to carry the attribute like any other referenced type.
 #[cfg(all(test, any(feature = "typescript", feature = "zod", feature = "serde")))]
-// Inner value type for the optional deeply nested map.
 #[model_schema()]
 type OptionalNestedValue = Vec<Option<HashMap<String, Option<Vec<i64>>>>>;
 
 #[cfg(all(test, any(feature = "typescript", feature = "zod", feature = "serde")))]
-// Inner value type for the quadruple nested map.
 #[model_schema()]
 type QuadrupleNestedValue = Vec<HashMap<String, Vec<HashMap<String, u64>>>>;
 
 #[cfg(all(test, any(feature = "typescript", feature = "zod", feature = "serde")))]
-// Now let's try the really complex case
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct ReallyComplexTest {
-    // Another challenging case with optional nested structures
     #[serde(skip_serializing_if = "Option::is_none")]
     optional_nested: Option<HashMap<String, OptionalNestedValue>>,
 
-    // The quadruple nested case that was causing issues
     quadruple_nested: HashMap<String, QuadrupleNestedValue>,
 }
 
@@ -102,12 +93,10 @@ struct ReallyComplexTest {
         feature = "serde"
     )
 ))]
-// Let's start with just one complex case to debug
 #[model_schema()]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
 struct SimpleComplexTest {
-    // Start with just triple-nested to see what fails
     nested_map_of_arrays: HashMap<String, Vec<HashMap<String, u64>>>,
 }
 
@@ -231,14 +220,11 @@ fn test_nested_struct_json_schema() {
 
     let properties = user_schema["properties"].as_object().unwrap();
 
-    // Single nested object should reference the nested type
     assert!(properties.contains_key("address"));
 
-    // Array of nested objects should be an array with items referencing the nested type
     assert!(properties.contains_key("backup_addresses"));
     assert_eq!(properties["backup_addresses"]["type"], "array");
 
-    // Verify Address schema exists and is correct
     assert_eq!(address_schema["type"], "object");
     let address_properties = address_schema["properties"].as_object().unwrap();
     assert!(address_properties.contains_key("street"));
@@ -252,17 +238,14 @@ fn test_nested_struct_ts_definition() {
     let user_definition = UserWithAddress::ts_definition();
     let address_definition = Address::ts_definition();
 
-    // Check that nested types are referenced properly (without Json suffix)
     assert!(user_definition.contains("address: Address;"));
     assert!(user_definition.contains("backup_addresses: Array<Address>;"));
 
-    // Verify Address definition exists (without Json suffix in export type)
     assert!(address_definition.contains("export type Address = {"));
     assert!(address_definition.contains("street: string;"));
     assert!(address_definition.contains("city: string;"));
     assert!(address_definition.contains("zip_code: string;"));
 
-    // Check Zod schema references (without Json suffix) - now in separate method
     let user_zod_schema = UserWithAddress::zod_schema();
     assert!(user_zod_schema.contains("address: Address$Schema"));
     assert!(user_zod_schema.contains("backup_addresses: z.array(Address$Schema)"));
@@ -275,7 +258,6 @@ fn test_original_bug_reproduction_json_schema() {
 
     let properties = schema["properties"].as_object().unwrap();
 
-    // The original problematic case
     assert_eq!(properties["problematic_map"]["type"], "object");
     assert_eq!(
         properties["problematic_map"]["additionalProperties"]["type"],
@@ -286,7 +268,6 @@ fn test_original_bug_reproduction_json_schema() {
         "integer"
     );
 
-    // Similar cases
     assert_eq!(
         properties["string_to_vec_i64"]["additionalProperties"]["type"],
         "array"
@@ -329,7 +310,6 @@ fn test_original_bug_reproduction_json_schema() {
 fn test_original_bug_reproduction_typescript() {
     let ts_definition = OriginalBugReproduction::ts_definition();
 
-    // TypeScript should use Array<T> syntax for the HashMap values
     assert!(ts_definition.contains("problematic_map: Partial<Record<string, Array<number>>>;"));
     assert!(ts_definition.contains("string_to_vec_i64: Partial<Record<string, Array<number>>>;"));
     assert!(ts_definition.contains("string_to_vec_f64: Partial<Record<string, Array<number>>>;"));
@@ -338,7 +318,6 @@ fn test_original_bug_reproduction_typescript() {
         ts_definition.contains("string_to_vec_string: Partial<Record<string, Array<string>>>;")
     );
 
-    // Zod schemas should use z.array(...) for the HashMap values - now in separate method
     let zod_schema = OriginalBugReproduction::zod_schema();
     assert!(
         zod_schema.contains("problematic_map: z.record(z.string(), z.array(z.number().int()))")
@@ -357,8 +336,6 @@ fn test_complex_nested_maps_json_schema() {
     let schema = SimpleComplexTest::json_schema();
     let properties = schema["properties"].as_object().unwrap();
 
-    // Test the triple-nested structure: HashMap<String, Vec<HashMap<String, u64>>>
-    // Expected: object -> array -> object -> integer
     assert_eq!(properties["nested_map_of_arrays"]["type"], "object");
 
     let additional_props = properties["nested_map_of_arrays"]["additionalProperties"]
@@ -378,12 +355,10 @@ fn test_complex_nested_maps_json_schema() {
 fn test_complex_nested_maps_typescript() {
     let ts_definition = SimpleComplexTest::ts_definition();
 
-    // TypeScript should use the correct nested structure
     assert!(ts_definition.contains(
         "nested_map_of_arrays: Partial<Record<string, Array<Partial<Record<string, number>>>>>;"
     ));
 
-    // Zod schema should use the correct nested structure - now in separate method
     let zod_schema = SimpleComplexTest::zod_schema();
     assert!(zod_schema.contains("nested_map_of_arrays: z.record(z.string(), z.array(z.record(z.string(), z.number().int()))),"));
 }
@@ -391,19 +366,15 @@ fn test_complex_nested_maps_typescript() {
 #[test]
 #[cfg(all(feature = "jsonschema", feature = "typescript"))]
 fn test_quadruple_nested_maps_compilation() {
-    // If this compiles without panic, it's a huge success!
     let schema = ReallyComplexTest::json_schema();
     let ts_definition = ReallyComplexTest::ts_definition();
 
-    // Check that the schema contains our fields
     let properties = schema["properties"].as_object().unwrap();
     assert!(properties.contains_key("quadruple_nested"));
     assert!(properties.contains_key("optional_nested"));
 
-    // Basic structure checks
     assert_eq!(properties["quadruple_nested"]["type"], "object");
 
-    // Check TypeScript contains our fields (exact types may be complex)
     assert!(ts_definition.contains("quadruple_nested"));
     assert!(ts_definition.contains("optional_nested"));
 }
@@ -411,19 +382,15 @@ fn test_quadruple_nested_maps_compilation() {
 #[test]
 #[cfg(all(feature = "jsonschema", feature = "typescript", feature = "serde"))]
 fn test_quadruple_nested_maps_compilation_serde() {
-    // If this compiles without panic, it's a huge success!
     let schema = ReallyComplexTest::json_schema();
     let ts_definition = ReallyComplexTest::ts_definition();
 
-    // Check that the schema contains our fields
     let properties = schema["properties"].as_object().unwrap();
     assert!(properties.contains_key("quadruple_nested"));
     assert!(properties.contains_key("optional_nested"));
 
-    // Basic structure checks
     assert_eq!(properties["quadruple_nested"]["type"], "object");
 
-    // Check TypeScript contains our fields (exact types may be complex)
     assert!(ts_definition.contains("quadruple_nested"));
     assert!(ts_definition.contains("optional_nested"));
 }

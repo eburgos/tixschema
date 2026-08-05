@@ -20,7 +20,6 @@ const SEQUENCE_WRAPPERS: [&str; 5] = [
     "VecDeque",
 ];
 
-// Test comprehensive HashMap scenarios with various value types
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct ComprehensiveHashMapTest {
@@ -38,7 +37,6 @@ struct ComprehensiveHashMapTest {
     u64_value: HashMap<String, u64>,
 }
 
-// Test potential edge case with HashMap containing 64-bit integers
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct HashMapWith64Bit {
@@ -401,7 +399,6 @@ struct WrappedMapFields {
     wrapped_raw_keyed_counts: VecDeque<HashMap<u32, u64>>,
 }
 
-// Test struct with collections
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct UserWithCollections {
@@ -924,14 +921,12 @@ fn test_collections_json_schema() {
 
     let properties = schema["properties"].as_object().unwrap();
 
-    // Check array properties
     assert_eq!(properties["tags"]["type"], "array");
     assert_eq!(properties["tags"]["items"]["type"], "string");
 
     assert_eq!(properties["scores"]["type"], "array");
     assert_eq!(properties["scores"]["items"]["type"], "integer");
 
-    // Check map properties
     assert_eq!(properties["metadata"]["type"], "object");
     assert_eq!(
         properties["metadata"]["additionalProperties"]["type"],
@@ -944,13 +939,10 @@ fn test_collections_json_schema() {
 fn test_collections_ts_definition() {
     let ts_definition = UserWithCollections::ts_definition();
 
-    // Check TypeScript array types
     assert!(ts_definition.contains("tags: Array<string>;"));
     assert!(ts_definition.contains("scores: Array<number>;"));
-    // HashMap becomes Partial<Record<...>> in the generated output
     assert!(ts_definition.contains("metadata: Partial<Record<string, string>>;"));
 
-    // Check Zod schema - now in separate method
     let zod_schema = UserWithCollections::zod_schema();
     assert!(zod_schema.contains("tags: z.array(z.string())"));
     assert!(zod_schema.contains("scores: z.array(z.number().int())"));
@@ -963,14 +955,12 @@ fn test_comprehensive_hashmap_json_schema() {
     let schema = ComprehensiveHashMapTest::json_schema();
     let properties = schema["properties"].as_object().unwrap();
 
-    // Test simple primitive values
     assert_hashmap_primitive_type(properties, "string_value", "string");
     assert_hashmap_primitive_type(properties, "u64_value", "integer");
     assert_hashmap_primitive_type(properties, "i64_value", "integer");
     assert_hashmap_primitive_type(properties, "f64_value", "number");
     assert_hashmap_primitive_type(properties, "bool_value", "boolean");
 
-    // Test array values
     assert_hashmap_array_type(properties, "string_array", "string");
     assert_hashmap_array_type(properties, "u64_array", "integer");
     assert_hashmap_array_type(properties, "i64_array", "integer");
@@ -999,21 +989,18 @@ fn test_comprehensive_hashmap_json_schema() {
 fn test_comprehensive_hashmap_typescript_generation() {
     let ts_definition = ComprehensiveHashMapTest::ts_definition();
 
-    // Test TypeScript type generation for simple values
     assert!(ts_definition.contains("string_value: Partial<Record<string, string>>;"));
     assert!(ts_definition.contains("u64_value: Partial<Record<string, number>>;"));
     assert!(ts_definition.contains("i64_value: Partial<Record<string, number>>;"));
     assert!(ts_definition.contains("f64_value: Partial<Record<string, number>>;"));
     assert!(ts_definition.contains("bool_value: Partial<Record<string, boolean>>;"));
 
-    // Test TypeScript type generation for array values
     assert!(ts_definition.contains("string_array: Partial<Record<string, Array<string>>>;"));
     assert!(ts_definition.contains("u64_array: Partial<Record<string, Array<number>>>;"));
     assert!(ts_definition.contains("i64_array: Partial<Record<string, Array<number>>>;"));
     assert!(ts_definition.contains("f64_array: Partial<Record<string, Array<number>>>;"));
     assert!(ts_definition.contains("bool_array: Partial<Record<string, Array<boolean>>>;"));
 
-    // Test Zod schema generation for simple values - now in separate method
     let zod_schema = ComprehensiveHashMapTest::zod_schema();
     assert!(zod_schema.contains("string_value: z.record(z.string(), z.string())"));
     assert!(zod_schema.contains("u64_value: z.record(z.string(), z.number().int())"));
@@ -1021,7 +1008,6 @@ fn test_comprehensive_hashmap_typescript_generation() {
     assert!(zod_schema.contains("f64_value: z.record(z.string(), z.number())"));
     assert!(zod_schema.contains("bool_value: z.record(z.string(), z.boolean())"));
 
-    // Test Zod schema generation for array values
     assert!(zod_schema.contains("string_array: z.record(z.string(), z.array(z.string()))"));
     assert!(zod_schema.contains("u64_array: z.record(z.string(), z.array(z.number().int()))"));
     assert!(zod_schema.contains("i64_array: z.record(z.string(), z.array(z.number().int()))"));
@@ -2575,21 +2561,18 @@ fn test_hashmap_with_64bit_json_schema() {
 
     let properties = schema["properties"].as_object().unwrap();
 
-    // Check HashMap with u64 values
     assert_eq!(properties["u64_map"]["type"], "object");
     assert_eq!(
         properties["u64_map"]["additionalProperties"]["type"],
         "integer"
     );
 
-    // Check HashMap with i64 values
     assert_eq!(properties["i64_map"]["type"], "object");
     assert_eq!(
         properties["i64_map"]["additionalProperties"]["type"],
         "integer"
     );
 
-    // Check HashMap with Vec<u64> values
     assert_eq!(properties["mixed_map"]["type"], "object");
     assert_eq!(
         properties["mixed_map"]["additionalProperties"]["type"],
@@ -2606,12 +2589,10 @@ fn test_hashmap_with_64bit_json_schema() {
 fn test_hashmap_with_64bit_ts_definition() {
     let ts_definition = HashMapWith64Bit::ts_definition();
 
-    // Check TypeScript HashMap types
     assert!(ts_definition.contains("u64_map: Partial<Record<string, number>>;"));
     assert!(ts_definition.contains("i64_map: Partial<Record<string, number>>;"));
     assert!(ts_definition.contains("mixed_map: Partial<Record<string, Array<number>>>;"));
 
-    // Check Zod schema - now in separate method
     let zod_schema = HashMapWith64Bit::zod_schema();
     assert!(zod_schema.contains("u64_map: z.record(z.string(), z.number().int())"));
     assert!(zod_schema.contains("i64_map: z.record(z.string(), z.number().int())"));

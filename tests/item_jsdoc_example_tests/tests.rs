@@ -420,10 +420,6 @@ fn an_example_only_item_and_member_name_themselves() {
 /// The `description` a shape publishes is spelled from the lines its `JSDoc` body is spelled from,
 /// so the fallback fires on the same reading at both. The two shapes that publish one are covered:
 /// a plain enum writes it beside a header of its own, and a brand writes it instead of one.
-///
-/// Only the description is held against the twin's. The Zod surface is where an example is *kept* —
-/// it is published as the schema's own `example`, which is the one thing an example-only shape has
-/// that an undocumented one does not.
 #[cfg(feature = "zod")]
 #[test]
 fn an_example_only_shape_describes_itself_as_its_undocumented_twin_does() {

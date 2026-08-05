@@ -553,10 +553,10 @@ fn test_a_substitution_inside_a_written_shape_is_read_through() {
     }
 }
 
-/// [`FieldDef::reaches_a_type_declared_later`]'s zero-argument arm — see txsch-8r4v: a bare
-/// sibling reference to a `#[model_schema]` item not yet registered (declared below the one being
-/// expanded) has to defer exactly as a generic forward reference already does; a registered name
-/// (declared above) stays the safe, eager baseline the predicate always answered correctly.
+/// [`FieldDef::reaches_a_type_declared_later`]'s zero-argument arm: a bare sibling reference to a
+/// `#[model_schema]` item not yet registered (declared below the one being expanded) has to defer
+/// exactly as a generic forward reference already does; a registered name (declared above) stays
+/// the eager baseline.
 #[cfg(feature = "zod")]
 #[test]
 fn test_reaches_a_type_declared_later_answers_for_a_zero_argument_sibling() {

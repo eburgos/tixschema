@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use tixschema::model_schema;
 
-// Test struct with all chrono types.
 #[model_schema()]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
@@ -17,7 +16,6 @@ struct AllChronoTypes {
     utc_datetime: DateTime<Utc>,
 }
 
-// Test struct with Vec of dates.
 #[model_schema()]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
@@ -26,7 +24,6 @@ struct DateList {
     name: String,
 }
 
-// Test struct with HashMap of DateTime.
 #[model_schema()]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
@@ -78,7 +75,6 @@ struct NestedChronoMaps {
     window_batches: HashMap<String, Vec<HashMap<String, NaiveTime>>>,
 }
 
-// Test struct with NaiveDate field.
 #[model_schema()]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
@@ -102,7 +98,6 @@ pub enum FixedValue {
     Time(NaiveTime),
 }
 
-// Test struct with NaiveDateTime field.
 #[model_schema()]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
@@ -111,7 +106,6 @@ struct LocalEvent {
     title: String,
 }
 
-// Test struct with DateTime<Local> field.
 #[model_schema()]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
@@ -120,7 +114,6 @@ struct LocalTimestamp {
     local_time: DateTime<Local>,
 }
 
-// Test struct with optional DateTime.
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct OptionalTimestamp {
@@ -129,7 +122,6 @@ struct OptionalTimestamp {
     updated_at: Option<DateTime<Utc>>,
 }
 
-// Test struct with NaiveTime field.
 #[model_schema()]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
@@ -138,7 +130,6 @@ struct Schedule {
     task: String,
 }
 
-// Test struct with DateTime<Utc> field.
 #[model_schema()]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
@@ -147,7 +138,6 @@ struct TimestampedRecord {
     id: String,
 }
 
-// Test struct mixing the default Date rendering with the `as_number` opt-out.
 #[model_schema()]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,8 +148,6 @@ struct Sample {
     start_time: NaiveTime,
 }
 
-// Test enum with a TupleSingle DateTime variant honoring the as_number opt-out. A `DateTime` is
-// written as a string, so it needs a content key of its own to sit under.
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "type", content = "value")]
@@ -257,8 +245,6 @@ fn test_chrono_types_constructible() {
     };
     assert!(optional_timestamp.updated_at.is_none());
 }
-
-// ========== TypeScript Type Tests ==========
 
 #[test]
 #[cfg(feature = "typescript")]
@@ -368,8 +354,6 @@ fn test_all_chrono_types_typescript() {
     );
 }
 
-// ========== Zod Schema Tests ==========
-
 #[test]
 #[cfg(feature = "zod")]
 fn test_naive_date_zod() {
@@ -453,8 +437,6 @@ fn test_hashmap_datetime_zod() {
         "HashMap<String, DateTime<Utc>> should use z.record(z.string(), z.coerce.date()). Got: {zod}"
     );
 }
-
-// ========== JSON Schema Tests ==========
 
 #[test]
 #[cfg(feature = "jsonschema")]
@@ -660,18 +642,14 @@ fn test_nested_string_keyed_chrono_map_typescript_and_zod() {
     }
 }
 
-// ========== Enum Tests (Original Use Case) ==========
-
 #[test]
 #[cfg(feature = "typescript")]
 fn test_enum_with_datetime_typescript() {
     let ts = FixedValue::ts_definition();
-    // The enum should compile and generate TypeScript.
     assert!(
         ts.contains("FixedValue"),
         "Should generate FixedValue type. Got: {ts}"
     );
-    // DateTime variant should be present.
     assert!(
         ts.contains("DateTime"),
         "Should contain DateTime variant. Got: {ts}"
@@ -682,18 +660,14 @@ fn test_enum_with_datetime_typescript() {
 #[cfg(feature = "zod")]
 fn test_enum_with_datetime_zod() {
     let zod = FixedValue::zod_schema();
-    // The enum should compile and generate Zod schema.
     assert!(
         zod.contains("FixedValue$Schema"),
         "Should generate FixedValue$Schema. Got: {zod}"
     );
 }
 
-// ========== Compilation Smoke Test ==========
-
 #[test]
 fn test_chrono_compilation_smoke_test() {
-    // This test ensures all chrono types compile without panics.
     let event = EventWithDate {
         name: "Test Event".to_owned(),
         date: NaiveDate::from_ymd_opt(2025, 11, 29).unwrap(),
@@ -709,13 +683,10 @@ fn test_chrono_compilation_smoke_test() {
         created_at: Utc::now(),
     };
 
-    // If we get here without panics, chrono support is working at compile time.
     assert_eq!(event.name, "Test Event");
     assert_eq!(schedule.task, "Meeting");
     assert!(!timestamp.id.is_empty());
 }
-
-// ========== as_number opt-out + native Date default ==========
 
 #[test]
 #[cfg(feature = "typescript")]
@@ -755,7 +726,6 @@ fn test_sample_zod_mixes_coerce_date_and_inline_number() {
         zod.contains("}, z.number()),"),
         "as_number coercer should validate with z.number(). Got: {zod}"
     );
-    // It must not fall back to the ISO datetime renderer or a named fn.
     assert!(
         !zod.contains("created_at: z.iso.datetime"),
         "as_number field must not use z.iso.datetime. Got: {zod}"

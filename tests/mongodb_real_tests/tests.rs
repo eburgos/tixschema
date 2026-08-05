@@ -67,7 +67,6 @@ struct EveryOidPosition {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct OidSlot(ObjectId);
 
-// Basic struct with real ObjectId
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct RealUser {
@@ -82,12 +81,10 @@ struct RealUser {
 fn test_real_objectid_basic_types() {
     let ts_definition = RealUser::ts_definition();
 
-    // TypeScript should use ObjectId type
     assert!(ts_definition.contains("id: ObjectId;"));
     assert!(ts_definition.contains("name: string;"));
     assert!(ts_definition.contains("email?: string;"));
 
-    // Zod schema should use the MongoDB ObjectId structure with regex validation - now in separate method
     let zod_schema = RealUser::zod_schema();
     assert!(zod_schema.contains("id: z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: \"Invalid ObjectId\" }) }),"));
     assert!(zod_schema.contains("name: z.string(),"));
@@ -99,20 +96,17 @@ fn test_real_objectid_basic_types() {
 #[test]
 #[cfg(all(feature = "object_id", feature = "jsonschema", feature = "typescript"))]
 fn test_real_objectid_compilation_smoke_test() {
-    // This test ensures all ObjectId types compile without panics with real MongoDB ObjectIds
     let user_schema = RealUser::json_schema();
     let _document_schema = RealDocument::json_schema();
 
     let _user_ts = RealUser::ts_definition();
     let _document_ts = RealDocument::ts_definition();
 
-    // If we get here without panics, real MongoDB ObjectId support is working
     assert!(!user_schema.is_null());
 }
 
 #[test]
 fn test_real_objectid_complex_serialization() {
-    // Create real ObjectIds
     let doc_id = ObjectId::new();
     let author_id = ObjectId::new();
     let ref1 = ObjectId::new();
@@ -140,13 +134,11 @@ fn test_real_objectid_complex_serialization() {
         },
     };
 
-    // Test serialization
     let serialized = serde_json::to_string_pretty(&document).unwrap();
 
     // println!("=== REAL MONGODB OBJECTID SERIALIZATION ===");
     // println!("{serialized}");
 
-    // Should contain all the ObjectId hex values in $oid format
     assert!(serialized.contains(&doc_id.to_hex()));
     assert!(serialized.contains(&author_id.to_hex()));
     assert!(serialized.contains(&ref1.to_hex()));
@@ -156,10 +148,8 @@ fn test_real_objectid_complex_serialization() {
     assert!(serialized.contains(&nested_oid1.to_hex()));
     assert!(serialized.contains(&nested_oid2.to_hex()));
 
-    // Should use proper MongoDB structure
     assert!(serialized.contains("\"$oid\""));
 
-    // Test round-trip deserialization
     let deserialized: RealDocument = serde_json::from_str(&serialized).unwrap();
     assert_eq!(deserialized.id, doc_id);
     assert_eq!(deserialized.author_id, author_id);
@@ -172,7 +162,6 @@ fn test_real_objectid_complex_serialization() {
 fn test_real_objectid_complex_structures() {
     let ts_definition = RealDocument::ts_definition();
 
-    // TypeScript should handle all ObjectId variations
     assert!(ts_definition.contains("id: ObjectId;"));
     assert!(ts_definition.contains("author_id: ObjectId;"));
     assert!(ts_definition.contains("references: Array<ObjectId>;"));
@@ -180,7 +169,6 @@ fn test_real_objectid_complex_structures() {
     assert!(ts_definition.contains("parent_id?: ObjectId;"));
     assert!(ts_definition.contains("nested_refs: Partial<Record<string, Array<ObjectId>>>;"));
 
-    // Zod schema should handle all ObjectId variations with regex validation - now in separate method
     let zod_schema = RealDocument::zod_schema();
     let regex_pattern = "z.string().regex(/^[a-f0-9]{24}$/, { message: \"Invalid ObjectId\" })";
     assert!(zod_schema.contains(&format!("id: z.object({{ $oid: {regex_pattern} }}),")));
@@ -207,14 +195,12 @@ fn test_real_objectid_json_schema() {
     let schema = RealUser::json_schema();
     let properties = schema["properties"].as_object().unwrap();
 
-    // Check basic ObjectId field
     let id_prop = &properties["id"];
     assert_eq!(id_prop["type"], "object");
     assert_eq!(id_prop["properties"]["$oid"]["type"], "string");
     assert_eq!(id_prop["required"][0], "$oid");
     assert_eq!(id_prop["additionalProperties"], false);
 
-    // Check other fields are unaffected
     assert_eq!(properties["name"]["type"], "string");
 }
 
@@ -224,7 +210,6 @@ fn test_real_objectid_json_schema_structure() {
     let schema = RealDocument::json_schema();
     let properties = schema["properties"].as_object().unwrap();
 
-    // Test nested_refs: HashMap<String, Vec<ObjectId>>
     let nested_refs_prop = &properties["nested_refs"];
     assert_eq!(nested_refs_prop["type"], "object");
     let additional_props = &nested_refs_prop["additionalProperties"];
@@ -235,7 +220,6 @@ fn test_real_objectid_json_schema_structure() {
     assert_eq!(items["required"][0], "$oid");
     assert_eq!(items["additionalProperties"], false);
 
-    // Test metadata: HashMap<String, ObjectId>
     let metadata_prop = &properties["metadata"];
     assert_eq!(metadata_prop["type"], "object");
     let meta_additional_props = &metadata_prop["additionalProperties"];
@@ -453,7 +437,6 @@ fn every_serde_written_oid_payload_satisfies_the_unified_spelling() {
 
 #[test]
 fn test_real_objectid_serialization() {
-    // Create a real ObjectId
     let real_oid = ObjectId::new();
 
     let user = RealUser {
@@ -462,14 +445,11 @@ fn test_real_objectid_serialization() {
         email: Some("test@example.com".to_owned()),
     };
 
-    // Test serialization
     let serialized = serde_json::to_string(&user).unwrap();
 
-    // Should contain the MongoDB $oid structure
     assert!(serialized.contains("\"$oid\""));
     assert!(serialized.contains(&real_oid.to_hex()));
 
-    // Test deserialization
     let deserialized: RealUser = serde_json::from_str(&serialized).unwrap();
     assert_eq!(deserialized.id, real_oid);
     assert_eq!(deserialized.name, "Test User");
@@ -528,21 +508,17 @@ fn a_real_object_id_hex_satisfies_the_zod_literal_and_the_json_schema_pattern_al
 
 #[test]
 fn test_real_objectid_validation_compatibility() {
-    // Test that real ObjectIds produce valid hex strings that match our regex
     let real_oid = ObjectId::new();
     let hex_string = real_oid.to_hex();
 
-    // Should be exactly 24 characters
     assert_eq!(hex_string.len(), 24);
 
-    // Should match our regex pattern: /^[a-f0-9]{24}$/
     let regex = regex::Regex::new("^[a-f0-9]{24}$").unwrap();
     assert!(
         regex.is_match(&hex_string),
         "Real ObjectId hex '{hex_string}' should match our validation regex"
     );
 
-    // Test with multiple ObjectIds to ensure consistency
     for _ in 0_u32..10_u32 {
         let oid = ObjectId::new();
         let hex = oid.to_hex();
