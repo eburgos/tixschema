@@ -831,18 +831,13 @@ type Wrapper$SchemaOf<IdType extends ZodType> = ReturnType<
   typeof buildWrapper$Schema<IdType>
 >;
 
-interface Wrapper$SchemaFactoryCache {
-  get<IdType extends ZodType>(key: IdType): Wrapper$SchemaOf<IdType> | undefined;
-  set<IdType extends ZodType>(key: IdType, value: Wrapper$SchemaOf<IdType>): this;
-}
-
-const Wrapper$SchemaFactoryCache = createSchemaCache<Wrapper$SchemaFactoryCache>();
+const Wrapper$SchemaFactoryCache = new WeakMap<ZodType, ZodType>();
 
 export const Wrapper$SchemaFactory = <IdType extends ZodType>(
   idType: IdType,
 ): Wrapper$SchemaOf<IdType> => {
   const hit = Wrapper$SchemaFactoryCache.get(idType);
-  if (hit) return hit;
+  if (hit) return hit as Wrapper$SchemaOf<IdType>;
 
   const schema = buildWrapper$Schema(idType);
   Wrapper$SchemaFactoryCache.set(idType, schema);
@@ -953,19 +948,13 @@ There is deliberately no fallback. Guessing a filling produces a document that s
 
 #### The module preamble
 
-The factories share one helper, which every generated module carries once above its per-type definitions:
-
-```rust
-use tixschema::typescript_preamble;
-
-const PREAMBLE: &str = typescript_preamble!();
-```
+Each factory declares its own store, so a generated module is the types in it and nothing else -- there is no preamble to emit ahead of them and nothing shared between one type and the next. A type declaring N parameters writes N nested levels, each keyed by one argument, and the levels below the first are built where they are first needed:
 
 ```typescript
-const createSchemaCache = <Cache extends object>(): Cache => new WeakMap() as unknown as Cache;
+const Quintet$SchemaFactoryCache = new WeakMap<ZodType, WeakMap<ZodType, WeakMap<ZodType, WeakMap<ZodType, WeakMap<ZodType, ZodType>>>>>();
 ```
 
-A cache maps an argument to the schema built from *that* argument, so its value type depends on its key type. TypeScript can declare that dependency -- each factory writes it out, one interface per parameter -- but cannot construct a map that satisfies it, since a `WeakMap` fixes both of its own parameters at construction. So the dependency is declared where it does the work and asserted exactly once, in the preamble: that line is the only assertion anywhere in the output. A module holding no generic type needs no preamble; one holding any needs it exactly once.
+Every level is written at its real type, so a `set` is checked against it. What no level can state is that the value under a key was built *from* that key -- a value type depending on its key type is not expressible in TypeScript -- so the factory narrows once on the way out, `hit as Wrapper$SchemaOf<IdType>`. That single narrowing is the whole of what the output leaves unchecked; nothing anywhere in it is `any`, and nothing is laundered through `unknown`.
 
 #### An alias is a factory too
 
@@ -1035,18 +1024,13 @@ type UserId$SchemaOf<IdType extends ZodType> = ReturnType<
   typeof buildUserId$Schema<IdType>
 >;
 
-interface UserId$SchemaFactoryCache {
-  get<IdType extends ZodType>(key: IdType): UserId$SchemaOf<IdType> | undefined;
-  set<IdType extends ZodType>(key: IdType, value: UserId$SchemaOf<IdType>): this;
-}
-
-const UserId$SchemaFactoryCache = createSchemaCache<UserId$SchemaFactoryCache>();
+const UserId$SchemaFactoryCache = new WeakMap<ZodType, ZodType>();
 
 export const UserId$SchemaFactory = <IdType extends ZodType>(
   idType: IdType,
 ): UserId$SchemaOf<IdType> => {
   const hit = UserId$SchemaFactoryCache.get(idType);
-  if (hit) return hit;
+  if (hit) return hit as UserId$SchemaOf<IdType>;
 
   const schema = buildUserId$Schema(idType);
   UserId$SchemaFactoryCache.set(idType, schema);
@@ -1354,18 +1338,13 @@ type DocumentId$SchemaOf<IdType extends ZodType> = ReturnType<
   typeof buildDocumentId$Schema<IdType>
 >;
 
-interface DocumentId$SchemaFactoryCache {
-  get<IdType extends ZodType>(key: IdType): DocumentId$SchemaOf<IdType> | undefined;
-  set<IdType extends ZodType>(key: IdType, value: DocumentId$SchemaOf<IdType>): this;
-}
-
-const DocumentId$SchemaFactoryCache = createSchemaCache<DocumentId$SchemaFactoryCache>();
+const DocumentId$SchemaFactoryCache = new WeakMap<ZodType, ZodType>();
 
 export const DocumentId$SchemaFactory = <IdType extends ZodType>(
   idType: IdType,
 ): DocumentId$SchemaOf<IdType> => {
   const hit = DocumentId$SchemaFactoryCache.get(idType);
-  if (hit) return hit;
+  if (hit) return hit as DocumentId$SchemaOf<IdType>;
 
   const schema = buildDocumentId$Schema(idType);
   DocumentId$SchemaFactoryCache.set(idType, schema);

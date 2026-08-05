@@ -34,9 +34,6 @@ use crate::utils::type_parameters_in_scope;
 #[cfg(feature = "serde")]
 use crate::utils::written_type;
 
-#[cfg(all(feature = "zod", feature = "typescript"))]
-use core::iter::once;
-
 #[cfg(feature = "zod")]
 use crate::utils::{
     escape_js_regex_literal, extract_example_from_docs, publishes_zod_factory,
@@ -157,16 +154,6 @@ const KNOWN_ARGS: &[&str] = &[
 ))]
 const FLATTENED_PLAIN_ENUM_SCOPE: &str = "Only a type the registry has already classified reaches this guard; one it has not keeps its \
      TypeScript and Zod intersection, and is refused by the JSON surface when the merge runs.";
-
-/// The one helper every generated module carries above its per-type definitions, and the only
-/// assertion anything here writes.
-#[cfg(all(feature = "zod", feature = "typescript"))]
-const TYPESCRIPT_PREAMBLE: &str = "const createSchemaCache = <Cache extends object>(): Cache => new WeakMap() as unknown as Cache;";
-
-/// The JavaScript flavour of [`TYPESCRIPT_PREAMBLE`]: a build with no `typescript` writes plain
-/// JavaScript, which declares no types and so has nothing to assert.
-#[cfg(all(feature = "zod", not(feature = "typescript")))]
-const TYPESCRIPT_PREAMBLE: &str = "const createSchemaCache = () => new WeakMap();";
 
 /// The indent every member of an emitted object is written at, and so the indent its `JSDoc` block
 /// is written at.
@@ -10745,20 +10732,6 @@ fn deferred_zod_operand(schema: &str) -> String {
     format!("z.lazy(() => {schema})")
 }
 
-/// The tokens `typescript_preamble!()` expands to — the preamble as a string literal, or the
-/// `compile_error!` for a call that was handed arguments it has none of.
-#[cfg(feature = "zod")]
-pub fn typescript_preamble_tokens(input: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
-    if !input.is_empty() {
-        return syn::Error::new_spanned(
-            input,
-            "tixschema: `typescript_preamble!()` takes no arguments",
-        )
-        .to_compile_error();
-    }
-    quote! { #TYPESCRIPT_PREAMBLE }
-}
-
 /// The suffix the binding an item publishes is named with. A generic type publishes a factory —
 /// one schema per filling, built on demand — where a type that declares no parameter publishes the
 /// one schema it has.
@@ -10835,57 +10808,21 @@ fn zod_factory_arguments(parameters: &[String]) -> String {
     })
 }
 
-/// The cache interface keying on the parameter at `depth`, named for how many parameters it has
-/// already resolved: the root resolves none, and each level below carries the ones above it.
-#[cfg(all(feature = "zod", feature = "typescript"))]
-fn zod_cache_level_name(item_name: &str, depth: usize) -> String {
-    if depth == 0 {
-        format!("{item_name}$SchemaFactoryCache")
-    } else {
-        format!("{item_name}$SchemaFactoryCacheL{depth}")
-    }
-}
-
-/// What a lookup at `depth` hands back: the level below it while parameters remain, and the schema
-/// itself once the last one is resolved.
-#[cfg(all(feature = "zod", feature = "typescript"))]
-fn zod_cache_level_value(item_name: &str, parameters: &[String], depth: usize) -> String {
-    if depth + 1 == parameters.len() {
-        format!("{item_name}$SchemaOf<{}>", parameters.join(", "))
-    } else {
-        format!(
-            "{}<{}>",
-            zod_cache_level_name(item_name, depth + 1),
-            parameters[..=depth].join(", ")
-        )
-    }
-}
-
-/// One cache interface per parameter, each written generic over the key it is about to resolve and
-/// carrying the parameters resolved above it.
+/// The `WeakMap` type a factory's memo is declared at: one level per parameter, keyed by the
+/// argument and holding the level below it, the innermost holding the schema.
 ///
-/// Nesting spelled to the exact depth the type declares rather than looped over: a loop needs a
-/// key type it cannot name and a value it cannot type, which is `unknown` and a cast at every
-/// level. Written out, a lookup comes back already typed and the factory body asserts nothing.
+/// Every level is written at its real type, so `set` is checked against it and nothing declares a
+/// store TypeScript cannot construct. What a level cannot state is that the value under a key was
+/// built *from* that key — a value type depending on its key type is not expressible — so the
+/// factory narrows once on the way out and that assertion is the whole of what is unchecked here.
 #[cfg(all(feature = "zod", feature = "typescript"))]
-fn zod_cache_interfaces(item_name: &str, parameters: &[String]) -> String {
-    let mut written = String::new();
-    for depth in (1..parameters.len()).chain(once(0)) {
-        let key = &parameters[depth];
-        let value = zod_cache_level_value(item_name, parameters, depth);
-        let held = if depth == 0 {
-            String::new()
-        } else {
-            zod_factory_bounds(&parameters[..depth])
-        };
-        let _ = write!(
-            written,
-            "interface {}{held} {{\n  get<{key} extends ZodType>(key: {key}): {value} | \
-             undefined;\n  set<{key} extends ZodType>(key: {key}, value: {value}): this;\n}}\n\n",
-            zod_cache_level_name(item_name, depth)
-        );
-    }
-    written
+fn zod_cache_map_type(parameters: &[String]) -> String {
+    parameters
+        .iter()
+        .skip(1)
+        .fold("WeakMap<ZodType, ZodType>".to_owned(), |below, _| {
+            format!("WeakMap<ZodType, {below}>")
+        })
 }
 
 /// The factory's body: walk down to the map the last argument keys, hand back what is already
@@ -10902,26 +10839,22 @@ fn zod_factory_body(item_name: &str, parameters: &[String]) -> String {
     for depth in 1..parameters.len() {
         let below = format!("by{}", parameters[depth]);
         let key = &arguments[depth - 1];
-        #[cfg(feature = "typescript")]
-        let fresh = format!(
-            "createSchemaCache<{}<{}>>()",
-            zod_cache_level_name(item_name, depth),
-            parameters[..depth].join(", ")
-        );
-        #[cfg(not(feature = "typescript"))]
-        let fresh = "createSchemaCache()".to_owned();
         let _ = write!(
             body,
-            "  let {below} = {holder}.get({key});\n  if (!{below}) {{\n    {below} = \
-             {fresh};\n    {holder}.set({key}, {below});\n  }}\n\n"
+            "  let {below} = {holder}.get({key});\n  if (!{below}) {{\n    {below} = new \
+             WeakMap();\n    {holder}.set({key}, {below});\n  }}\n\n"
         );
         holder = below;
     }
     let last = arguments.last().map_or_else(String::new, Clone::clone);
+    #[cfg(feature = "typescript")]
+    let hit = format!("hit as {item_name}$SchemaOf<{}>", parameters.join(", "));
+    #[cfg(not(feature = "typescript"))]
+    let hit = "hit".to_owned();
     let _ = write!(
         body,
-        "  const hit = {holder}.get({last});\n  if (hit) return hit;\n\n  {};\n  {holder}.set({last}, \
-         schema);\n  return schema;",
+        "  const hit = {holder}.get({last});\n  if (hit) return {hit};\n\n  {};\n  \
+         {holder}.set({last}, schema);\n  return schema;",
         zod_factory_memoized_binding(item_name, parameters)
     );
     body
@@ -11129,14 +11062,13 @@ fn zod_factory_block(
 
     #[cfg(feature = "typescript")]
     let declarations = format!(
-        "type {item_name}$SchemaOf{bounds} = ReturnType<\n  typeof {builder}<{}>\n>;\n\n{}const \
-         {item_name}$SchemaFactoryCache = \
-         createSchemaCache<{item_name}$SchemaFactoryCache>();\n\n",
+        "type {item_name}$SchemaOf{bounds} = ReturnType<\n  typeof {builder}<{}>\n>;\n\nconst \
+         {item_name}$SchemaFactoryCache = new {}();\n\n",
         parameters.join(", "),
-        zod_cache_interfaces(item_name, parameters)
+        zod_cache_map_type(parameters)
     );
     #[cfg(not(feature = "typescript"))]
-    let declarations = format!("const {item_name}$SchemaFactoryCache = createSchemaCache();\n\n");
+    let declarations = format!("const {item_name}$SchemaFactoryCache = new WeakMap();\n\n");
 
     #[cfg(feature = "typescript")]
     let returns = format!(": {item_name}$SchemaOf<{}>", parameters.join(", "));

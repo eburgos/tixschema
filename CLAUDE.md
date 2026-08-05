@@ -414,20 +414,22 @@ read the other's factory behind `z.lazy` rather than at the top of a `const` ini
 module loads regardless of which of the two names the consuming project's entity list writes
 first.
 
-Each factory memoizes on the identity of its arguments, one cache level per parameter, so two
+Each factory memoizes on the identity of its arguments, one `WeakMap` level per parameter, so two
 calls with the same argument objects return the identical schema and no two argument lists
-collide. The levels are written out to the exact depth the type declares rather than looped over:
-a loop needs a key type it cannot name and a value it cannot type, which means `unknown` and a
-cast at every level, while the written-out form comes back already typed.
+collide. The nesting is written out to the exact depth the type declares — `new WeakMap<ZodType,
+WeakMap<ZodType, ZodType>>()` for two parameters — and each level below the first is built where
+it is first needed, `zod_cache_map_type` writing the type and `zod_factory_body` the construction.
 
 Every parameter is a real TypeScript type parameter (`<IdType extends ZodType>`), never a bare
 `ZodType` annotation — `ZodType` defaults its own parameters, so an argument annotated with it
 infers every field as `unknown`.
 
-`typescript_preamble!()` returns the one helper the factories share, `createSchemaCache`, which
-every generated module carries once above its per-type definitions. It holds the only assertion
-anywhere in the output: a cache's value type depends on its key type, which TypeScript can declare
-but cannot construct.
+There is no preamble: a factory declares its own store, so a generated module is the types in it
+and nothing shared between them. Every level is written at its real type, so `set` is checked
+against it; what no level can state is that the value under a key was built *from* that key, a
+value type depending on its key type being inexpressible. The factory narrows once on the way out
+(`hit as X$SchemaOf<IdType>`) and that single `as` is the whole of what the output leaves
+unchecked — nothing in it is `any`, and nothing is laundered through `unknown`.
 
 A generic type may reach itself, directly or through a second type reaching back. JSON Schema
 hoists it into `$defs` once and points a `$ref` at that definition; TypeScript writes the name

@@ -176,18 +176,19 @@ mod zod {
     #[test]
     fn a_five_parameter_factory_memoizes_one_level_per_argument() {
         let zod = ArchiveEntry::<String, f64, String, u32, String>::zod_schema();
-        for level in 1_u8..=4_u8 {
-            assert!(
-                zod.contains(&format!(
-                    "interface ArchiveEntry$SchemaFactoryCacheL{level}<"
-                )),
-                "level {level} missing: {zod}"
-            );
-        }
         assert!(
-            zod.contains("ArchiveEntry$SchemaFactoryCacheL4<IdType, DateType, TagType, SizeType>"),
+            zod.contains(
+                "const ArchiveEntry$SchemaFactoryCache = new WeakMap<ZodType, WeakMap<ZodType, \
+                 WeakMap<ZodType, WeakMap<ZodType, WeakMap<ZodType, ZodType>>>>>();"
+            ),
             "Got: {zod}"
         );
+        for below in ["byDateType", "byTagType", "bySizeType", "byOwnerType"] {
+            assert!(
+                zod.contains(&format!("    {below} = new WeakMap();")),
+                "level {below} missing: {zod}"
+            );
+        }
     }
 
     /// A generic brand is a factory too: the brand is appended to whatever schema the argument

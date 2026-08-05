@@ -681,6 +681,23 @@ mod zod {
 
     /// Two calls with the same arguments reach the one schema: the miss path returns the very
     /// value it stored, and the hit path returns what was stored.
+    #[cfg(feature = "typescript")]
+    #[test]
+    fn a_factory_returns_what_it_stored_rather_than_building_again() {
+        let zod = Wrapper::<String>::zod_schema();
+        assert!(
+            zod.contains(
+                "  const hit = Wrapper$SchemaFactoryCache.get(idType);\n  if (hit) return hit as \
+                 Wrapper$SchemaOf<IdType>;\n\n  const schema = buildWrapper$Schema(idType);\n  \
+                 Wrapper$SchemaFactoryCache.set(idType, schema);\n  return schema;\n};"
+            ),
+            "Got: {zod}"
+        );
+    }
+
+    /// The same body with nothing to narrow to: a `JavaScript` build declares no types, so the
+    /// read is handed back as it stands.
+    #[cfg(not(feature = "typescript"))]
     #[test]
     fn a_factory_returns_what_it_stored_rather_than_building_again() {
         let zod = Wrapper::<String>::zod_schema();
@@ -760,53 +777,42 @@ mod zod {
         assert!(!zod.contains("valueType: ZodType"), "Got: {zod}");
     }
 
-    /// One parameter collapses to a single interface and a single lookup.
+    /// One parameter is one `WeakMap`, declared at the type it is: no helper to import and no
+    /// second declaration to keep in step with it.
     #[cfg(feature = "typescript")]
     #[test]
-    fn one_parameter_writes_one_cache_interface() {
+    fn one_parameter_writes_one_weak_map() {
         let zod = Wrapper::<String>::zod_schema();
         assert!(
-            zod.contains(
-                "interface Wrapper$SchemaFactoryCache {\n  get<IdType extends ZodType>(key: \
-                 IdType): Wrapper$SchemaOf<IdType> | undefined;\n  set<IdType extends \
-                 ZodType>(key: IdType, value: Wrapper$SchemaOf<IdType>): this;\n}"
-            ),
+            zod.contains("const Wrapper$SchemaFactoryCache = new WeakMap<ZodType, ZodType>();"),
             "Got: {zod}"
         );
-        assert!(
-            zod.contains(
-                "const Wrapper$SchemaFactoryCache = createSchemaCache<Wrapper$SchemaFactoryCache>();"
-            ),
-            "Got: {zod}"
-        );
-        assert!(!zod.contains("Wrapper$SchemaFactoryCacheL1"), "Got: {zod}");
+        assert!(!zod.contains("interface "), "Got: {zod}");
+        assert!(!zod.contains("createSchemaCache"), "Got: {zod}");
     }
 
-    /// One level per parameter, each carrying the parameters resolved above it — which is what lets
-    /// a lookup come back already typed and keeps the factory body free of assertions.
+    /// One level per parameter, nested to the exact depth the type declares, and each level below
+    /// the first built where it is first needed rather than declared beside the root.
     #[cfg(feature = "typescript")]
     #[test]
-    fn each_cache_level_carries_the_parameters_resolved_above_it() {
+    fn each_parameter_keys_a_weak_map_level_of_its_own() {
         let zod = Quintet::<u32, u32, u32, u32, u32>::zod_schema();
-        for level in [
-            "interface Quintet$SchemaFactoryCacheL1<AType extends ZodType> {\n  get<BType extends \
-             ZodType>(key: BType): Quintet$SchemaFactoryCacheL2<AType, BType> | undefined;",
-            "interface Quintet$SchemaFactoryCacheL4<AType extends ZodType, BType extends ZodType, \
-             CType extends ZodType, DType extends ZodType> {\n  get<EType extends ZodType>(key: \
-             EType): Quintet$SchemaOf<AType, BType, CType, DType, EType> | undefined;",
-            "interface Quintet$SchemaFactoryCache {\n  get<AType extends ZodType>(key: AType): \
-             Quintet$SchemaFactoryCacheL1<AType> | undefined;",
-            "    byCType = createSchemaCache<Quintet$SchemaFactoryCacheL2<AType, BType>>();",
-        ] {
-            assert!(zod.contains(level), "Missing {level:?} in: {zod}");
-        }
-        assert!(!zod.contains("Quintet$SchemaFactoryCacheL5"), "Got: {zod}");
+        assert!(
+            zod.contains(
+                "const Quintet$SchemaFactoryCache = new WeakMap<ZodType, WeakMap<ZodType, \
+                 WeakMap<ZodType, WeakMap<ZodType, WeakMap<ZodType, ZodType>>>>>();"
+            ),
+            "Got: {zod}"
+        );
+        assert!(zod.contains("    byCType = new WeakMap();"), "Got: {zod}");
+        assert!(!zod.contains("interface "), "Got: {zod}");
     }
 
-    /// The one assertion the output carries lives in the shared preamble, so nothing a type
-    /// publishes for itself needs `as`, `any`, or `unknown` to say what it validates.
+    /// A factory narrows its cache read once and says nothing else it cannot check: no `any`, and
+    /// no laundering through `unknown`. The one `as` is the value type a `WeakMap` cannot make
+    /// depend on its key type.
     #[test]
-    fn a_generic_type_publishes_no_assertion_and_no_opaque_value() {
+    fn a_generic_type_publishes_one_narrowing_and_no_opaque_value() {
         for zod in [
             Wrapper::<String>::zod_schema(),
             Pair::<String, u32>::zod_schema(),
@@ -815,9 +821,16 @@ mod zod {
             Carried::<String>::zod_schema(),
             Adjacent::<String>::zod_schema(),
         ] {
-            assert!(!zod.contains(" as "), "Got: {zod}");
             assert!(!zod.contains("any"), "Got: {zod}");
             assert!(!zod.contains("unknown"), "Got: {zod}");
+            assert_eq!(
+                zod.matches(" as ").count(),
+                usize::from(cfg!(feature = "typescript")),
+                "Got: {zod}"
+            );
+            if cfg!(feature = "typescript") {
+                assert!(zod.contains("if (hit) return hit as "), "Got: {zod}");
+            }
         }
     }
 
@@ -832,7 +845,7 @@ mod zod {
             "Got: {zod}"
         );
         assert!(
-            zod.contains("const Wrapper$SchemaFactoryCache = createSchemaCache();"),
+            zod.contains("const Wrapper$SchemaFactoryCache = new WeakMap();"),
             "Got: {zod}"
         );
         assert!(
@@ -983,23 +996,16 @@ mod zod {
         );
     }
 
-    /// The one helper every factory builds its cache with, and the only assertion in the output.
-    #[cfg(feature = "typescript")]
+    /// Nothing a generated module carries is shared between the types in it: each factory declares
+    /// its own store, so a consumer's generator has no preamble to emit ahead of them.
     #[test]
-    fn the_preamble_carries_the_shared_cache_helper() {
-        assert_eq!(
-            tixschema::typescript_preamble!(),
-            "const createSchemaCache = <Cache extends object>(): Cache => new WeakMap() as unknown as Cache;"
+    fn a_generic_type_carries_its_whole_cache_itself() {
+        let zod = Wrapper::<String>::zod_schema();
+        assert!(
+            zod.contains("const Wrapper$SchemaFactoryCache = new WeakMap"),
+            "Got: {zod}"
         );
-    }
-
-    #[cfg(not(feature = "typescript"))]
-    #[test]
-    fn the_preamble_carries_the_shared_cache_helper() {
-        assert_eq!(
-            tixschema::typescript_preamble!(),
-            "const createSchemaCache = () => new WeakMap();"
-        );
+        assert!(!zod.contains("createSchemaCache"), "Got: {zod}");
     }
 }
 
