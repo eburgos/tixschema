@@ -265,13 +265,13 @@ fn assert_ts_contains_fields(ts_definition: &str, assertions: &[(&str, &str)]) {
     }
 }
 
-/// Holds the members whose key serde drops for a `None` to the spelling that admits the payload
-/// without the key. One spelling under every toggle: the attribute that drops the key is on the
-/// field whether or not the `serde` feature is on.
+/// Holds the members whose key serde drops for a `None` to the `T | undefined` spelling. The
+/// attribute that drops the key decides what reaches the wire, never which of the two TypeScript
+/// spellings is written — only `ts_optional` asks for `field?: T`, and none of these carries it.
 #[cfg(all(feature = "typescript", feature = "zod"))]
 fn assert_ts_contains_omitted_fields(ts_definition: &str, assertions: &[(&str, &str)]) {
     for (field, expected_type) in assertions {
-        let expected = format!("{field}?: {expected_type};");
+        let expected = format!("{field}: {expected_type} | undefined;");
         assert!(
             ts_definition.contains(&expected),
             "missing {expected}, got: {ts_definition}"
@@ -336,7 +336,7 @@ fn test_complex_nested_ts_definition() {
     assert!(company_definition.contains("headquarters: Address;"));
     assert!(company_definition.contains("settings: CompanySettings;"));
 
-    assert!(employee_definition.contains("manager?: string;"));
+    assert!(employee_definition.contains("manager: string | undefined;"));
 
     assert!(retirement_definition.contains("type: \"option401k\""));
     assert!(retirement_definition.contains("type: \"pension\""));
@@ -507,7 +507,7 @@ fn test_complex_discriminated_union() {
     assert!(ts_definition.contains("orderId: string;"));
     assert!(ts_definition.contains("totalAmount: number;"));
     assert!(ts_definition.contains("paymentMethod: string;"));
-    assert!(ts_definition.contains("shippingAddress?: Address;"));
+    assert!(ts_definition.contains("shippingAddress: Address | undefined;"));
     assert!(ts_definition.contains("scheduledStart: string;"));
     assert!(ts_definition.contains("estimatedDuration: number;"));
     assert!(ts_definition.contains("affectedServices: Array<string>;"));
@@ -537,9 +537,10 @@ fn test_documented_struct() {
     assert!(ts_definition.contains("email: string;"));
     assert!(ts_definition.contains("is_active: boolean;"));
     // HashMap becomes Partial<Record<...>>
-    // The key serde drops for a `None`, which every build reads off the attribute on the field.
+    // An `Option` carrying no `ts_optional` writes `T | undefined`, whatever the attribute that
+    // drops its key from the wire says.
     assert!(
-        ts_definition.contains("metadata?: Partial<Record<string, string>>;"),
+        ts_definition.contains("metadata: Partial<Record<string, string>> | undefined;"),
         "Got: {ts_definition}"
     );
 }

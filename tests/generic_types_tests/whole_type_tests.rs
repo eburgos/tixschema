@@ -44,7 +44,10 @@ mod typescript {
         assert!(ts.contains("  stamp: ArchiveStamp<IdType>;"), "Got: {ts}");
         assert!(ts.contains("  createdAt: DateType;"), "Got: {ts}");
         assert!(ts.contains("  tags: Array<TagType>;"), "Got: {ts}");
-        assert!(ts.contains("  byteSize?: SizeType;"), "Got: {ts}");
+        assert!(
+            ts.contains("  byteSize: SizeType | undefined;"),
+            "Got: {ts}"
+        );
         assert!(
             ts.contains("  ownersByRole: Partial<Record<string, OwnerType>>;"),
             "Got: {ts}"

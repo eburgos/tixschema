@@ -228,7 +228,7 @@ fn test_basic_object_id_types() {
 
     assert!(ts_definition.contains("id: ObjectId;"));
     assert!(ts_definition.contains("name: string;"));
-    assert!(ts_definition.contains("email?: string;"));
+    assert!(ts_definition.contains("email: string | undefined;"));
 
     let zod_schema = User::zod_schema();
     assert!(zod_schema.contains("id: z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: \"Invalid ObjectId\" }) }),"));
@@ -247,7 +247,7 @@ fn test_complex_nested_object_id_structures() {
     assert!(ts_definition.contains("author_id: ObjectId;"));
     assert!(ts_definition.contains("references: Array<ObjectId>;"));
     assert!(ts_definition.contains("metadata: Partial<Record<string, ObjectId>>;"));
-    assert!(ts_definition.contains("parent_id?: ObjectId;"));
+    assert!(ts_definition.contains("parent_id: ObjectId | undefined;"));
     assert!(ts_definition.contains("nested_refs: Partial<Record<string, Array<ObjectId>>>;"));
 
     let zod_schema = ComplexDocument::zod_schema();
@@ -445,7 +445,7 @@ fn test_object_id_zod_schema() {
 fn test_optional_object_id() {
     let ts_definition = UserWithOptionalId::ts_definition();
 
-    assert!(ts_definition.contains("id?: ObjectId;"));
+    assert!(ts_definition.contains("id: ObjectId | undefined;"));
     assert!(ts_definition.contains("name: string;"));
     assert!(ts_definition.contains("email: string;"));
 

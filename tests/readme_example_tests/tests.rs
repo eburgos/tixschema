@@ -26,13 +26,13 @@ use tixschema::model_schema;
 
 /// The predicate bullet: the key goes missing when the predicate fires, so the member is described
 /// under an optional key rather than left untouched.
-const PREDICATE_BULLET: &str = "- `#[serde(skip_serializing_if = \"...\")]` -- the key is left out of the payload when the predicate fires, so the member is described under an optional key: `roles?: Array<string>;` in TypeScript, `roles: z.array(z.string()).optional(),` in Zod, and no `required` entry in the JSON Schema";
+const PREDICATE_BULLET: &str = "- `#[serde(skip_serializing_if = \"...\")]` -- the key is left out of the payload when the predicate fires: `roles: z.array(z.string()).optional(),` in Zod and no `required` entry in the JSON Schema. On a field that is not an `Option` the TypeScript member takes the optional key too, `roles?: Array<string>;`, there being no second spelling for it; an `Option` field keeps `T | undefined` unless [`ts_optional`](#ts_optional) asks otherwise";
 
 /// The bare-`skip` bullet, whose claim is an absence on every surface.
 const SKIP_BULLET: &str = "- `#[serde(skip)]` -- the key is written into no payload and read out of none, so no surface describes the member at all: no TypeScript member, no Zod key, and neither a `properties` nor a `required` entry. On a tuple-struct or tuple-variant slot it takes the slot out of the described tuple, which shortens the arity -- and a variant declaring one slot becomes a unit variant, which is what serde writes for it";
 
 /// The write-half bullet, which lands where the predicate bullet does.
-const WRITE_HALF_BULLET: &str = "- `#[serde(skip_serializing)]` -- the write half of `skip`: the key is left out of every payload while a supplied one is still read, so the member is described under an optional key, as `skip_serializing_if` is";
+const WRITE_HALF_BULLET: &str = "- `#[serde(skip_serializing)]` -- the write half of `skip`: the key is left out of every payload while a supplied one is still read, and every surface answers as it does for `skip_serializing_if`";
 
 /// The read-half bullet, the one spelling of the three that keeps a required key.
 const READ_HALF_BULLET: &str = "- `#[serde(skip_deserializing)]` -- the read half: the key is written into every payload while a supplied one is discarded, so the member keeps a required key";
@@ -121,9 +121,9 @@ fn test_the_optional_fields_example_is_declarable_and_shows_what_it_emits() {
             "export type UserWithOptionals = {",
             "  id: string;",
             "  name: string;",
-            "  email?: string;",
-            "  phone?: string;",
-            "  avatar_url?: string;",
+            "  email: string | undefined;",
+            "  phone: string | undefined;",
+            "  avatar_url: string | undefined;",
             "};",
         ],
     );
@@ -284,7 +284,7 @@ fn test_the_object_id_example_is_declarable_and_shows_what_it_emits() {
             "  author_id: ObjectId;",
             "  tags: Array<ObjectId>;",
             "  metadata: Partial<Record<string, ObjectId>>;",
-            "  parent_id?: ObjectId;",
+            "  parent_id: ObjectId | undefined;",
             "  related_docs: Partial<Record<string, Array<ObjectId>>>;",
             "};",
         ],
@@ -332,7 +332,7 @@ fn test_the_chrono_example_is_declarable_and_shows_what_it_emits() {
             "  local_datetime: string;",
             "  created_at: Date;",
             "  epoch_ms: number;",
-            "  updated_at?: Date;",
+            "  updated_at: Date | undefined;",
             "};",
         ],
     );

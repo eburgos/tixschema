@@ -88,7 +88,7 @@ pub struct UserProfile {
 
 `Option<T>` fields validate as `z.union([type, z.undefined()]).prefault(undefined)` in Zod v4 and are left out of the JSON Schema's `required` list. The `.prefault(undefined)` makes the field default to `undefined` when omitted from the input.
 
-What TypeScript writes follows the wire. A field carrying `#[serde(skip_serializing_if = "Option::is_none")]` or `#[serde(skip_serializing)]` has no key at all in the payload serde writes for a `None`, so the member is written with an optional key — `field?: T`, which the absent-key payload satisfies. Every other `Option<T>` field keeps its key and carries `T | undefined`.
+TypeScript writes every `Option<T>` field as `field: T | undefined`. The one thing that writes the other spelling, `field?: T`, is [`#[model_schema_prop(ts_optional)]`](#ts_optional) on the author's word. A serde attribute that drops the key decides what reaches the wire — the JSON Schema's `required` list and the Zod schema both read it — and never which of the two TypeScript spellings is written.
 
 A bare `#[serde(skip)]` is not that. serde writes the key into no payload *and* throws it away out of every payload that supplies one, so there is nothing on the wire for any surface to describe: TypeScript writes no member, Zod no key, and the JSON Schema neither a `properties` entry nor a `required` one. `#[serde(skip_serializing, skip_deserializing)]` is the same wire spelled out and is answered the same way. Note what this costs on the way in — a `z.strictObject` and an `additionalProperties: false` both *reject* a payload carrying that key, while serde accepts such a payload and discards the value. The schemas describe the payload serde writes, and that key appears in none of them; a member under an optional key would instead claim the key is sometimes written, and would describe a value nothing ever reads.
 
@@ -125,9 +125,9 @@ Generated TypeScript:
 export type UserWithOptionals = {
   id: string;
   name: string;
-  email?: string;
-  phone?: string;
-  avatar_url?: string;
+  email: string | undefined;
+  phone: string | undefined;
+  avatar_url: string | undefined;
 };
 ```
 
@@ -1674,7 +1674,7 @@ pub struct Event {
 
 ### Optional TypeScript Keys (`ts_optional`)
 
-The bare `ts_optional` flag asks for the optional key (`field?: T` rather than `field: T | undefined`) on the author's word, for a field whose key nothing else says may be absent.
+The bare `ts_optional` flag asks for the optional key (`field?: T` rather than `field: T | undefined`) on the author's word. It is the only thing that writes that spelling.
 
 **Read the condition before reaching for it.** An `Option<T>` field whose serde attributes drop the key for a `None` already renders as an optional key, off the wire and in every build ([Optional Fields](#optional-fields)) — on such a field the flag changes nothing, because the attribute has already said it. What is left over is an `Option<T>` carrying no key-dropping attribute at all, and with the `serde` feature on that field does not compile: serde writes its `None` as a `null`, the generated schema admits only the absent key, and the guard refuses the declaration and names the attribute to add. So the flag decides the key in exactly one place — a build with the `serde` feature **off**, where no attribute is read and no such guard runs:
 
@@ -1817,7 +1817,7 @@ export type Document = {
   author_id: ObjectId;
   tags: Array<ObjectId>;
   metadata: Partial<Record<string, ObjectId>>;
-  parent_id?: ObjectId;
+  parent_id: ObjectId | undefined;
   related_docs: Partial<Record<string, Array<ObjectId>>>;
 };
 
@@ -1907,7 +1907,7 @@ export type Event = {
   local_datetime: string;
   created_at: Date;
   epoch_ms: number;
-  updated_at?: Date;
+  updated_at: Date | undefined;
 };
 ```
 
@@ -2069,9 +2069,9 @@ Supported Serde attributes:
 - `#[serde(untagged)]` -- untagged enums generate a union (`A | B`) / Zod `z.union([...])` / JSON Schema `anyOf`
 - `#[serde(flatten)]` -- flatten a field into the parent as an intersection type (`A & B`) / Zod `.and(...)`
 - `#[serde(transparent)]` -- transparent wrappers (used for branded newtypes)
-- `#[serde(skip_serializing_if = "...")]` -- the key is left out of the payload when the predicate fires, so the member is described under an optional key: `roles?: Array<string>;` in TypeScript, `roles: z.array(z.string()).optional(),` in Zod, and no `required` entry in the JSON Schema
+- `#[serde(skip_serializing_if = "...")]` -- the key is left out of the payload when the predicate fires: `roles: z.array(z.string()).optional(),` in Zod and no `required` entry in the JSON Schema. On a field that is not an `Option` the TypeScript member takes the optional key too, `roles?: Array<string>;`, there being no second spelling for it; an `Option` field keeps `T | undefined` unless [`ts_optional`](#ts_optional) asks otherwise
 - `#[serde(skip)]` -- the key is written into no payload and read out of none, so no surface describes the member at all: no TypeScript member, no Zod key, and neither a `properties` nor a `required` entry. On a tuple-struct or tuple-variant slot it takes the slot out of the described tuple, which shortens the arity -- and a variant declaring one slot becomes a unit variant, which is what serde writes for it
-- `#[serde(skip_serializing)]` -- the write half of `skip`: the key is left out of every payload while a supplied one is still read, so the member is described under an optional key, as `skip_serializing_if` is
+- `#[serde(skip_serializing)]` -- the write half of `skip`: the key is left out of every payload while a supplied one is still read, and every surface answers as it does for `skip_serializing_if`
 - `#[serde(skip_deserializing)]` -- the read half: the key is written into every payload while a supplied one is discarded, so the member keeps a required key
 
 The three `skip` spellings are three different wires, and [Optional Fields](#optional-fields) reads each one in both directions, positional slots included.
@@ -2088,7 +2088,7 @@ If the `serde` feature is disabled but serde attributes are present, you will se
 
 4. **Array Types**: `Vec<T>` becomes `Array<T>` in TypeScript, one `Array<...>` per level written — `Vec<Vec<T>>` is `Array<Array<T>>`.
 
-5. **Optional Fields**: `Option<T>` becomes `field?: T` in TypeScript where a serde attribute drops the key for a `None` and `field: T | undefined` where it does not, and `z.union([type, z.undefined()]).prefault(undefined)` in Zod v4 either way.
+5. **Optional Fields**: `Option<T>` becomes `field: T | undefined` in TypeScript unless `#[model_schema_prop(ts_optional)]` asks for `field?: T`, and `z.union([type, z.undefined()]).prefault(undefined)` in Zod v4 either way.
 
 6. **Complex Nesting**: The crate supports deeply nested structures including `HashMap<String, Vec<HashMap<String, T>>>` and similar patterns.
 

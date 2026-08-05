@@ -1,18 +1,15 @@
-//! `ts_optional` writes the optional key for the one field nothing else says may be absent.
+//! `ts_optional` is the whole of what decides between the two spellings of an optional member.
 //!
-//! An `Option<T>` whose serde attributes drop its key already renders `field?: T` off the wire, so
-//! on such a field the flag decides nothing — every shape below carries a flagged member beside an
-//! unflagged control of the same type and the same attributes, and the two render the same line.
-//! What is left is the `Option<T>` carrying no key-dropping attribute at all, and that is exactly
-//! the field the `serde` feature's `Option`-null guard refuses, because serde writes its `None` as
-//! `null` while the generated schema admits only the absent key. So the flag has one live shape and
-//! it is a build with the `serde` feature off, where no attribute is read and no such guard runs.
+//! An `Option<T>` renders `field: T | undefined` unless the flag asks for `field?: T`. The serde
+//! attribute that drops the key decides what reaches the wire — the JSON `required` list and the
+//! Zod schema read it — and never which spelling TypeScript is written with, so a flagged member
+//! and an unflagged control carrying the same attributes render two different lines.
 //!
-//! That is what makes this a two-flavour question rather than a TypeScript one, and both halves are
-//! held here so neither can drift into claiming the other's ground.
+//! Both feature flavours are held here: under the `serde` feature, where an attribute is read and
+//! the `Option`-null guard requires one, and without it, where neither happens.
 
 #[cfg(feature = "serde")]
-mod already_decided {
+mod under_the_serde_feature {
     use super::member;
     use serde::{Deserialize, Serialize};
     use tixschema::model_schema;
@@ -52,12 +49,16 @@ mod already_decided {
         id: String,
     }
 
-    /// On every shape the `serde` feature accepts, the flagged member and its control are one line.
+    /// On every shape the `serde` feature accepts, the flag is the whole of the difference between
+    /// the flagged member and its control — the attribute both carry writes neither line.
     #[test]
-    fn the_flag_writes_nothing_the_omission_attribute_has_not_written() {
+    fn the_flag_decides_the_spelling_the_omission_attribute_leaves_open() {
         let predicate = UnderAPredicate::ts_definition();
         assert!(member(&predicate, "a?: string;"), "Got: {predicate}");
-        assert!(member(&predicate, "b?: string;"), "Got: {predicate}");
+        assert!(
+            member(&predicate, "b: string | undefined;"),
+            "Got: {predicate}"
+        );
 
         let skip_serializing = UnderSkipSerializing::ts_definition();
         assert!(
@@ -65,7 +66,7 @@ mod already_decided {
             "Got: {skip_serializing}"
         );
         assert!(
-            member(&skip_serializing, "b?: string;"),
+            member(&skip_serializing, "b: string | undefined;"),
             "Got: {skip_serializing}"
         );
     }
@@ -83,12 +84,12 @@ mod already_decided {
 }
 
 #[cfg(not(feature = "serde"))]
-mod the_flag_decides {
+mod without_the_serde_feature {
     use super::member;
     use tixschema::model_schema;
 
-    /// The shape the flag is for: an `Option<T>` no attribute says anything about. Declarable only
-    /// here — under the `serde` feature the `Option`-null guard refuses both of these fields.
+    /// An `Option<T>` no attribute says anything about. Declarable only here — under the `serde`
+    /// feature the `Option`-null guard refuses both of these fields.
     ///
     /// Declared with its fields alphabetically, as this crate's lints require of Rust source; the
     /// README orders the same three for reading. Only the written order differs, so each member is

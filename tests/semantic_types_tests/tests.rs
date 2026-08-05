@@ -590,7 +590,7 @@ fn test_complex_alias_usage() {
     let ts = ComplexAliasStruct::ts_definition();
 
     assert!(
-        ts.contains("optional_id?: DocumentId;"),
+        ts.contains("optional_id: DocumentId | undefined;"),
         "Should handle Optional<Alias>. Got: {ts}"
     );
     // A `Vec<Vec<T>>` writes an array of arrays, so it types as one: a level per level written.

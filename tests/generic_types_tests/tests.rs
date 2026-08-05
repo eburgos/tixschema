@@ -119,9 +119,9 @@ mod typescript {
             ts.contains("  by_key: Partial<Record<string, ValueType>>;"),
             "Got: {ts}"
         );
-        // serde drops the key for a `None`, which every build reads off the attribute on the
-        // field.
-        assert!(ts.contains("  maybe?: ValueType;"), "Got: {ts}");
+        // An `Option` carrying no `ts_optional` writes `T | undefined`, whatever the attribute
+        // that drops its key from the wire says.
+        assert!(ts.contains("  maybe: ValueType | undefined;"), "Got: {ts}");
         assert!(ts.contains("  tuple: [KeyType, ValueType];"), "Got: {ts}");
     }
 
