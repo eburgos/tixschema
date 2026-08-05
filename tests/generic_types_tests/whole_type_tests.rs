@@ -178,8 +178,9 @@ mod zod {
         let zod = ArchiveEntry::<String, f64, String, u32, String>::zod_schema();
         assert!(
             zod.contains(
-                "const ArchiveEntry$SchemaFactoryCache = new WeakMap<ZodType, WeakMap<ZodType, \
-                 WeakMap<ZodType, WeakMap<ZodType, WeakMap<ZodType, ZodType>>>>>();"
+                "  idType: IdType & { [ArchiveEntry$SchemaMemo]?: WeakMap<DateType, \
+                 WeakMap<TagType, WeakMap<SizeType, WeakMap<OwnerType, \
+                 ArchiveEntry$SchemaOf<IdType, DateType, TagType, SizeType, OwnerType>>>>> },"
             ),
             "Got: {zod}"
         );

@@ -929,7 +929,7 @@ mod constrained_generic_branded_tests {
     #[test]
     fn the_factorys_own_parameter_carries_no_check() {
         let zod = StrictDocumentId::<String>::zod_schema();
-        let builder_end = zod.find("StrictDocumentId$SchemaFactoryCache").unwrap();
+        let builder_end = zod.find("type StrictDocumentId$SchemaOf").unwrap();
         let builder = &zod[..builder_end];
         for check in [".min(", ".max(", ".check("] {
             assert!(
@@ -1083,7 +1083,7 @@ mod constrained_default_names_a_sibling_tests {
     #[test]
     fn the_factorys_own_parameter_carries_no_check() {
         let zod = OuterBrand::<String>::zod_schema();
-        let builder_end = zod.find("OuterBrand$SchemaFactoryCache").unwrap();
+        let builder_end = zod.find("type OuterBrand$SchemaOf").unwrap();
         let builder = &zod[..builder_end];
         for check in [".min(", ".max(", ".check("] {
             assert!(

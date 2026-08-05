@@ -600,7 +600,7 @@ fn a_factory_carries_its_example_on_the_schema_it_memoizes() {
     );
     assert!(!zod.contains("}.meta("), "Got: {zod}");
     assert!(
-        zod.contains("  Held$SchemaFactoryCache.set(valueType, schema);\n  return schema;\n};"),
+        zod.contains("  valueType[Held$SchemaMemo] = schema;\n  return schema;\n};"),
         "Got: {zod}"
     );
 }
