@@ -199,10 +199,8 @@ enum TsOptionalVariant {
     },
 }
 
-/// The member spelling an `Option` field written with a `skip_serializing_if` renders as.
-///
-/// The attribute drops the key from the wire, which the JSON `required` list and the Zod schema
-/// say; the TypeScript spelling is `ts_optional`'s to decide, and none of these fields carries it.
+/// The member an `Option` field written with a `skip_serializing_if` renders as. The attribute
+/// decides the wire, not the spelling, and none of these fields carries `ts_optional`.
 #[cfg(feature = "typescript")]
 fn omitted_member(name: &str, ts_type: &str) -> String {
     format!("{name}: {ts_type} | undefined;")
@@ -532,7 +530,6 @@ fn test_ts_optional_struct_typescript() {
         "did not expect required-key form for `f` in:\n{ts}"
     );
 
-    // `g` carries no `ts_optional`, so it keeps the `T | undefined` spelling.
     let g = omitted_member("g", "Inner");
     assert!(ts.contains(&g), "expected control `{g}` in:\n{ts}");
 

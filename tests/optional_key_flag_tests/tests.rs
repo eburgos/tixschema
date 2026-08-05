@@ -1,12 +1,8 @@
-//! `ts_optional` is the whole of what decides between the two spellings of an optional member.
+//! `ts_optional` is the whole of what decides between `field?: T` and `field: T | undefined`.
 //!
-//! An `Option<T>` renders `field: T | undefined` unless the flag asks for `field?: T`. The serde
-//! attribute that drops the key decides what reaches the wire — the JSON `required` list and the
-//! Zod schema read it — and never which spelling TypeScript is written with, so a flagged member
-//! and an unflagged control carrying the same attributes render two different lines.
-//!
-//! Both feature flavours are held here: under the `serde` feature, where an attribute is read and
-//! the `Option`-null guard requires one, and without it, where neither happens.
+//! Every shape below carries a flagged member beside an unflagged control of the same type and the
+//! same serde attributes, so the flag is the only difference the two lines can come from. Held
+//! under both feature flavours, since only one of them reads an attribute at all.
 
 #[cfg(feature = "serde")]
 mod under_the_serde_feature {
@@ -49,8 +45,6 @@ mod under_the_serde_feature {
         id: String,
     }
 
-    /// On every shape the `serde` feature accepts, the flag is the whole of the difference between
-    /// the flagged member and its control — the attribute both carry writes neither line.
     #[test]
     fn the_flag_decides_the_spelling_the_omission_attribute_leaves_open() {
         let predicate = UnderAPredicate::ts_definition();
