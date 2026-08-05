@@ -53,7 +53,7 @@ mod zod_ts_tests {
     fn test_branded_newtype_zod_schema() {
         let zod = RoleId::<String>::zod_schema();
         assert!(
-            zod.contains("export const RoleId$SchemaFactory = <IdType extends ZodType>("),
+            zod.contains("export function RoleId$SchemaFactory<IdType extends ZodType>("),
             "Got: {zod}"
         );
         assert!(zod.contains("idType.meta({"), "Got: {zod}");
@@ -176,7 +176,7 @@ mod zod_ts_tests {
             "Should have the example inside the described block. Got:\n{zod}"
         );
         assert!(
-            zod.contains("export const DocumentId$SchemaFactory = "),
+            zod.contains("export function DocumentId$SchemaFactory"),
             "Should have the factory after example injection. Got:\n{zod}"
         );
     }
@@ -1567,7 +1567,7 @@ mod branded_generic_inner_tests {
         assert!(zod.contains("  z.array(t).meta({"), "Got:\n{zod}");
         assert!(zod.contains(r#"}).brand<"TagList">();"#), "Got:\n{zod}");
         assert!(
-            zod.contains("export const TagList$SchemaFactory = <T extends ZodType>("),
+            zod.contains("export function TagList$SchemaFactory<T extends ZodType>("),
             "Got:\n{zod}"
         );
         assert_eq!(
@@ -1589,7 +1589,7 @@ mod branded_generic_inner_tests {
         );
         assert!(zod.contains(r#"}).brand<"WeightIndex">();"#), "Got:\n{zod}");
         assert!(
-            zod.contains("export const WeightIndex$SchemaFactory = <T extends ZodType>("),
+            zod.contains("export function WeightIndex$SchemaFactory<T extends ZodType>("),
             "Got:\n{zod}"
         );
         assert_eq!(
@@ -1615,7 +1615,7 @@ mod branded_generic_inner_tests {
         assert!(zod.contains("  t.meta({"), "Got:\n{zod}");
         assert!(zod.contains(r#"}).brand<"BareTag">();"#), "Got:\n{zod}");
         assert!(
-            zod.contains("export const BareTag$SchemaFactory = <T extends ZodType>("),
+            zod.contains("export function BareTag$SchemaFactory<T extends ZodType>("),
             "Got:\n{zod}"
         );
         assert_eq!(
@@ -1706,15 +1706,15 @@ mod branded_generic_inner_tests {
         for (zod, factory) in [
             (
                 tag_seq_schema::Schema::zod_schema(),
-                "export const TagSeqType$SchemaFactory = <T extends ZodType>(",
+                "export function TagSeqType$SchemaFactory<T extends ZodType>(",
             ),
             (
                 weight_seq_schema::Schema::zod_schema(),
-                "export const WeightSeqType$SchemaFactory = <T extends ZodType>(",
+                "export function WeightSeqType$SchemaFactory<T extends ZodType>(",
             ),
             (
                 bare_seq_schema::Schema::zod_schema(),
-                "export const BareSeqType$SchemaFactory = <T extends ZodType>(",
+                "export function BareSeqType$SchemaFactory<T extends ZodType>(",
             ),
         ] {
             assert!(zod.contains(factory), "Got:\n{zod}");
@@ -2102,7 +2102,7 @@ mod branded_sibling_inner_tests {
             "Got:\n{zod}"
         );
         assert!(
-            zod.contains("export const OpenTag$SchemaFactory = <TagType extends ZodType>("),
+            zod.contains("export function OpenTag$SchemaFactory<TagType extends ZodType>("),
             "Got:\n{zod}"
         );
     }

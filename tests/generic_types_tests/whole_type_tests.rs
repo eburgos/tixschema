@@ -165,7 +165,7 @@ mod zod {
             "Got: {zod}"
         );
         assert!(
-            zod.contains("export const ArchiveEntry$SchemaFactory ="),
+            zod.contains("export function ArchiveEntry$SchemaFactory"),
             "Got: {zod}"
         );
         assert!(!zod.contains("ArchiveEntry$Schema:"), "Got: {zod}");
@@ -178,9 +178,9 @@ mod zod {
         let zod = ArchiveEntry::<String, f64, String, u32, String>::zod_schema();
         assert!(
             zod.contains(
-                "  idType: IdType & { [ArchiveEntry$SchemaMemo]?: WeakMap<DateType, \
-                 WeakMap<TagType, WeakMap<SizeType, WeakMap<OwnerType, \
-                 ArchiveEntry$SchemaOf<IdType, DateType, TagType, SizeType, OwnerType>>>>> },"
+                "const ArchiveEntry$SchemaFactoryCache = new WeakMap<ZodType, WeakMap<ZodType, \
+                 WeakMap<ZodType, WeakMap<ZodType, WeakMap<ZodType, ArchiveEntry$SchemaOf<ZodType, \
+                 ZodType, ZodType, ZodType, ZodType>>>>>>();"
             ),
             "Got: {zod}"
         );
@@ -199,7 +199,7 @@ mod zod {
         let brand = ArchiveId::<String>::zod_schema();
         assert!(brand.contains(".brand<\"ArchiveId\">()"), "Got: {brand}");
         assert!(
-            brand.contains("export const ArchiveId$SchemaFactory ="),
+            brand.contains("export function ArchiveId$SchemaFactory"),
             "Got: {brand}"
         );
         let holder = ArchiveStamp::<String>::zod_schema();
@@ -224,7 +224,7 @@ mod zod {
             "Got: {tagged}"
         );
         assert!(
-            tagged.contains("export const ArchiveEvent$SchemaFactory ="),
+            tagged.contains("export function ArchiveEvent$SchemaFactory"),
             "Got: {tagged}"
         );
 
@@ -232,7 +232,7 @@ mod zod {
         assert!(untagged.contains("z.union(["), "Got: {untagged}");
         assert!(untagged.contains("id: idType,"), "Got: {untagged}");
         assert!(
-            untagged.contains("export const ArchiveWire$SchemaFactory ="),
+            untagged.contains("export function ArchiveWire$SchemaFactory"),
             "Got: {untagged}"
         );
     }

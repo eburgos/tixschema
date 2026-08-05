@@ -352,7 +352,7 @@ mod zod {
     fn a_generic_type_publishes_a_factory_where_a_plain_type_publishes_a_schema() {
         let generic = Wrapper::<String>::zod_schema();
         assert!(
-            generic.contains("export const Wrapper$SchemaFactory = "),
+            generic.contains("export function Wrapper$SchemaFactory"),
             "Got: {generic}"
         );
         assert!(
@@ -393,7 +393,7 @@ mod zod {
     fn a_generic_tuple_struct_publishes_a_factory_too() {
         let zod = Positional::<String>::zod_schema();
         assert!(
-            zod.contains("export const Positional$SchemaFactory = "),
+            zod.contains("export function Positional$SchemaFactory"),
             "Got: {zod}"
         );
         assert!(zod.contains("z.tuple([idType, z.string()])"), "Got: {zod}");
@@ -411,7 +411,7 @@ mod zod {
             ("Untagged", Untagged::<String>::zod_schema()),
         ] {
             assert!(
-                zod.contains(&format!("export const {flavour}$SchemaFactory = ")),
+                zod.contains(&format!("export function {flavour}$SchemaFactory")),
                 "Got: {zod}"
             );
             assert!(zod.contains("idType"), "Got: {zod}");
@@ -669,7 +669,7 @@ mod zod {
     fn a_generic_type_that_flattens_still_defers_its_base() {
         let zod = Carried::<String>::zod_schema();
         assert!(
-            zod.contains("export const Carried$SchemaFactory = "),
+            zod.contains("export function Carried$SchemaFactory"),
             "Got: {zod}"
         );
         assert!(zod.contains("id: idType,"), "Got: {zod}");
@@ -686,9 +686,9 @@ mod zod {
         let zod = Wrapper::<String>::zod_schema();
         assert!(
             zod.contains(
-                "  const hit = idType[Wrapper$SchemaMemo];\n  if (hit) return hit;\n\n  const \
-                 schema = buildWrapper$Schema(idType);\n  idType[Wrapper$SchemaMemo] = \
-                 schema;\n  return schema;\n};"
+                "  const hit = Wrapper$SchemaFactoryCache.get(idType);\n  if (hit) return \
+                 hit;\n\n  const schema = buildWrapper$Schema(idType);\n  \
+                 Wrapper$SchemaFactoryCache.set(idType, schema);\n  return schema;\n}"
             ),
             "Got: {zod}"
         );
@@ -701,7 +701,7 @@ mod zod {
     fn every_argument_keys_a_level_of_its_own() {
         let zod = Quintet::<u32, u32, u32, u32, u32>::zod_schema();
         for lookup in [
-            "  let byBType = aType[Quintet$SchemaMemo];",
+            "  let byBType = Quintet$SchemaFactoryCache.get(aType);",
             "  let byCType = byBType.get(bType);",
             "  let byDType = byCType.get(cType);",
             "  let byEType = byDType.get(dType);",
@@ -734,9 +734,8 @@ mod zod {
         );
         assert!(
             zod.contains(
-                "export const Wrapper$SchemaFactory = <IdType extends ZodType>(\n  idType: \
-                 IdType & { [Wrapper$SchemaMemo]?: Wrapper$SchemaOf<IdType> },\n): \
-                 Wrapper$SchemaOf<IdType> => {"
+                "export function Wrapper$SchemaFactory<IdType extends ZodType>(\n  idType: \
+                 IdType,\n): Wrapper$SchemaOf<IdType>;"
             ),
             "Got: {zod}"
         );
@@ -757,36 +756,47 @@ mod zod {
             zod.contains("\n  keyType: KeyType,\n  valueType: ValueType,\n)"),
             "Got: {zod}"
         );
-        assert!(!zod.contains("keyType: ZodType"), "Got: {zod}");
-        assert!(!zod.contains("valueType: ZodType"), "Got: {zod}");
+        // The widened spelling appears exactly once each, in the implementation signature the
+        // overload above covers — never in what a caller is offered.
+        assert_eq!(zod.matches("keyType: ZodType,").count(), 1, "Got: {zod}");
+        assert_eq!(zod.matches("valueType: ZodType,").count(), 1, "Got: {zod}");
     }
 
-    /// One parameter memoizes on the argument itself, so the memo's type is the schema built from
-    /// that very argument and there is nothing left to look a value up in.
+    /// The precise signature is declared as an overload and the store is keyed at the widened one
+    /// the implementation takes, so the read is already the implementation's return type.
     #[cfg(feature = "typescript")]
     #[test]
-    fn one_parameter_memoizes_on_the_argument() {
+    fn one_parameter_writes_one_overload_over_one_weak_map() {
         let zod = Wrapper::<String>::zod_schema();
         assert!(
-            zod.contains("  idType: IdType & { [Wrapper$SchemaMemo]?: Wrapper$SchemaOf<IdType> },"),
+            zod.contains(
+                "const Wrapper$SchemaFactoryCache = new WeakMap<ZodType, \
+                 Wrapper$SchemaOf<ZodType>>();"
+            ),
             "Got: {zod}"
         );
-        assert!(!zod.contains("WeakMap"), "Got: {zod}");
+        assert!(
+            zod.contains(
+                "export function Wrapper$SchemaFactory<IdType extends ZodType>(\n  idType: \
+                 IdType,\n): Wrapper$SchemaOf<IdType>;\nexport function \
+                 Wrapper$SchemaFactory(\n  idType: ZodType,\n): Wrapper$SchemaOf<ZodType> {"
+            ),
+            "Got: {zod}"
+        );
         assert!(!zod.contains("interface "), "Got: {zod}");
     }
 
-    /// Beyond the first, each argument keys a `WeakMap` level of its own — every one of them a
-    /// parameter the factory's own signature binds, so each level's value type depends on its key
-    /// type for real.
+    /// One `WeakMap` level per parameter, nested to the exact depth the type declares, and each
+    /// level below the first built where it is first needed.
     #[cfg(feature = "typescript")]
     #[test]
-    fn each_argument_after_the_first_keys_a_weak_map_level_of_its_own() {
+    fn each_parameter_keys_a_weak_map_level_of_its_own() {
         let zod = Quintet::<u32, u32, u32, u32, u32>::zod_schema();
         assert!(
             zod.contains(
-                "  aType: AType & { [Quintet$SchemaMemo]?: WeakMap<BType, WeakMap<CType, \
-                 WeakMap<DType, WeakMap<EType, Quintet$SchemaOf<AType, BType, CType, DType, \
-                 EType>>>>> },"
+                "const Quintet$SchemaFactoryCache = new WeakMap<ZodType, WeakMap<ZodType, \
+                 WeakMap<ZodType, WeakMap<ZodType, WeakMap<ZodType, Quintet$SchemaOf<ZodType, \
+                 ZodType, ZodType, ZodType, ZodType>>>>>>();"
             ),
             "Got: {zod}"
         );
@@ -823,11 +833,11 @@ mod zod {
             "Got: {zod}"
         );
         assert!(
-            zod.contains("const Wrapper$SchemaMemo = Symbol(\"Wrapper$Schema\");"),
+            zod.contains("const Wrapper$SchemaFactoryCache = new WeakMap();"),
             "Got: {zod}"
         );
         assert!(
-            zod.contains("export const Wrapper$SchemaFactory = (\n  idType,\n) => {"),
+            zod.contains("export function Wrapper$SchemaFactory(\n  idType,\n) {"),
             "Got: {zod}"
         );
         assert!(!zod.contains("interface "), "Got: {zod}");
@@ -861,7 +871,7 @@ mod zod {
     fn every_generic_publisher_binds_its_parameter_as_a_factory_argument() {
         let alias = super::boxed_schema::Schema::zod_schema();
         assert!(
-            alias.contains("export const Boxed$SchemaFactory = "),
+            alias.contains("export function Boxed$SchemaFactory"),
             "Got: {alias}"
         );
         assert!(alias.contains("z.array(valueType)"), "Got: {alias}");
@@ -869,7 +879,7 @@ mod zod {
 
         let brand = Tagged::<String>::zod_schema();
         assert!(
-            brand.contains("export const Tagged$SchemaFactory = "),
+            brand.contains("export function Tagged$SchemaFactory"),
             "Got: {brand}"
         );
         assert!(brand.contains("  valueType.meta({"), "Got: {brand}");
@@ -974,13 +984,13 @@ mod zod {
         );
     }
 
-    /// Nothing a generated module carries is shared between the types in it: each factory declares
-    /// its own store, so a consumer's generator has no preamble to emit ahead of them.
+    /// Nothing a generated module carries is shared between the types in it, so a consumer's
+    /// generator has no preamble to emit ahead of them.
     #[test]
-    fn a_generic_type_carries_its_whole_memo_itself() {
+    fn a_generic_type_carries_its_whole_cache_itself() {
         let zod = Wrapper::<String>::zod_schema();
         assert!(
-            zod.contains("const Wrapper$SchemaMemo = Symbol(\"Wrapper$Schema\");"),
+            zod.contains("$SchemaFactoryCache = new WeakMap"),
             "Got: {zod}"
         );
         assert!(!zod.contains("createSchemaCache"), "Got: {zod}");

@@ -10810,8 +10810,8 @@ fn zod_factory_arguments(parameters: &[String]) -> String {
 
 /// The private key a factory hangs its memo on, one per item so no two share a slot.
 #[cfg(feature = "zod")]
-fn zod_memo_name(item_name: &str) -> String {
-    format!("{item_name}$SchemaMemo")
+fn zod_cache_name(item_name: &str) -> String {
+    format!("{item_name}$SchemaFactoryCache")
 }
 
 /// What that key holds: the schema itself where the item declares one parameter, and a `WeakMap`
@@ -10821,41 +10821,55 @@ fn zod_memo_name(item_name: &str) -> String {
 /// the key type for real — the dependency a module-scope store cannot express, and the reason
 /// nothing here is asserted.
 #[cfg(all(feature = "zod", feature = "typescript"))]
-fn zod_memo_value_type(item_name: &str, parameters: &[String]) -> String {
-    parameters.iter().skip(1).rev().fold(
-        format!("{item_name}$SchemaOf<{}>", parameters.join(", ")),
-        |below, parameter| format!("WeakMap<{parameter}, {below}>"),
+fn zod_cache_type(item_name: &str, parameters: &[String]) -> String {
+    let widened = parameters
+        .iter()
+        .map(|_| "ZodType")
+        .collect::<Vec<_>>()
+        .join(", ");
+    parameters.iter().skip(1).fold(
+        format!("WeakMap<ZodType, {item_name}$SchemaOf<{widened}>>"),
+        |below, _| format!("WeakMap<ZodType, {below}>"),
     )
+}
+
+/// The implementation signature's parameter list — every argument widened to `ZodType`, the type
+/// the store is keyed at.
+#[cfg(all(feature = "zod", feature = "typescript"))]
+fn zod_factory_widened_arguments(parameters: &[String]) -> String {
+    parameters.iter().fold(String::new(), |mut acc, parameter| {
+        let _ = write!(acc, "\n  {}: ZodType,", zod_factory_argument(parameter));
+        acc
+    })
 }
 
 /// The factory's own parameter list: the arguments the builder takes, with the first carrying the
 /// optional memo the factory reads and writes.
 #[cfg(feature = "zod")]
-fn zod_factory_memo_parameters(item_name: &str, parameters: &[String]) -> String {
+fn zod_factory_declaration(item_name: &str, parameters: &[String], bounds: &str) -> String {
     #[cfg(not(feature = "typescript"))]
     let written = {
-        let _: &str = item_name;
-        zod_factory_arguments(parameters)
+        let _: (&str, &str) = (item_name, bounds);
+        format!(
+            "export function {item_name}$SchemaFactory({}\n)",
+            zod_factory_arguments(parameters)
+        )
     };
     #[cfg(feature = "typescript")]
-    let written =
-        parameters
+    let written = {
+        let widened = parameters
             .iter()
-            .enumerate()
-            .fold(String::new(), |mut acc, (index, parameter)| {
-                let argument = zod_factory_argument(parameter);
-                if index == 0 {
-                    let _ = write!(
-                        acc,
-                        "\n  {argument}: {parameter} & {{ [{}]?: {} }},",
-                        zod_memo_name(item_name),
-                        zod_memo_value_type(item_name, parameters)
-                    );
-                } else {
-                    let _ = write!(acc, "\n  {argument}: {parameter},");
-                }
-                acc
-            });
+            .map(|_| "ZodType")
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "export function {item_name}$SchemaFactory{bounds}({}\n): {item_name}$SchemaOf<{}>;\n\
+             export function {item_name}$SchemaFactory({}\n): {item_name}$SchemaOf<{widened}>",
+            zod_factory_arguments(parameters),
+            parameters.join(", "),
+            zod_factory_widened_arguments(parameters)
+        )
+    };
     written
 }
 
@@ -10868,25 +10882,10 @@ fn zod_factory_memo_parameters(item_name: &str, parameters: &[String]) -> String
 #[cfg(feature = "zod")]
 fn zod_factory_body(item_name: &str, parameters: &[String]) -> String {
     let arguments: Vec<String> = parameters.iter().map(|p| zod_factory_argument(p)).collect();
-    let memo = zod_memo_name(item_name);
-    let first = arguments.first().map_or_else(String::new, Clone::clone);
     let built = zod_factory_memoized_binding(item_name, parameters);
-
-    if parameters.len() == 1 {
-        return format!(
-            "  const hit = {first}[{memo}];\n  if (hit) return hit;\n\n  {built};\n  \
-             {first}[{memo}] = schema;\n  return schema;"
-        );
-    }
-
     let mut body = String::new();
-    let mut holder = format!("by{}", parameters[1]);
-    let _ = write!(
-        body,
-        "  let {holder} = {first}[{memo}];\n  if (!{holder}) {{\n    {holder} = new \
-         WeakMap();\n    {first}[{memo}] = {holder};\n  }}\n\n"
-    );
-    for depth in 2..parameters.len() {
+    let mut holder = zod_cache_name(item_name);
+    for depth in 1..parameters.len() {
         let below = format!("by{}", parameters[depth]);
         let key = &arguments[depth - 1];
         let _ = write!(
@@ -11105,29 +11104,21 @@ fn zod_factory_block(
         )
     };
 
+    let cache = zod_cache_name(item_name);
     #[cfg(feature = "typescript")]
     let declarations = format!(
-        "type {item_name}$SchemaOf{bounds} = ReturnType<\n  typeof {builder}<{}>\n>;\n\n",
-        parameters.join(", ")
+        "type {item_name}$SchemaOf{bounds} = ReturnType<\n  typeof {builder}<{}>\n>;\n\nconst \
+         {cache} = new {}();\n\n",
+        parameters.join(", "),
+        zod_cache_type(item_name, parameters)
     );
     #[cfg(not(feature = "typescript"))]
-    let declarations = String::new();
-
-    #[cfg(feature = "typescript")]
-    let returns = format!(": {item_name}$SchemaOf<{}>", parameters.join(", "));
-    #[cfg(not(feature = "typescript"))]
-    let returns = String::new();
+    let declarations = format!("const {cache} = new WeakMap();\n\n");
 
     let default_block = zod_default_block(item_name, rust_ident, parameters, defaults);
+    let declaration = zod_factory_declaration(item_name, parameters, &bounds);
 
-    let memo = zod_memo_name(item_name);
-    let factory_parameters = zod_factory_memo_parameters(item_name, parameters);
-
-    format!(
-        "const {memo} = Symbol(\"{item_name}$Schema\");\n\n{built}\n\n{declarations}export const \
-         {item_name}$SchemaFactory = \
-         {bounds}({factory_parameters}\n){returns} => {{\n{body}\n}};{default_block}{reexport}"
-    )
+    format!("{built}\n\n{declarations}{declaration} {{\n{body}\n}}{default_block}{reexport}")
 }
 
 /// The binding a type that declares no parameter publishes: the raw schema, then the exported

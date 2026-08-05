@@ -818,8 +818,6 @@ export type Wrapper<IdType> = {
   name: string;
 };
 
-const Wrapper$SchemaMemo = Symbol("Wrapper$Schema");
-
 const buildWrapper$Schema = <IdType extends ZodType>(
   idType: IdType,
 ) =>
@@ -833,16 +831,21 @@ type Wrapper$SchemaOf<IdType extends ZodType> = ReturnType<
   typeof buildWrapper$Schema<IdType>
 >;
 
-export const Wrapper$SchemaFactory = <IdType extends ZodType>(
-  idType: IdType & { [Wrapper$SchemaMemo]?: Wrapper$SchemaOf<IdType> },
-): Wrapper$SchemaOf<IdType> => {
-  const hit = idType[Wrapper$SchemaMemo];
+const Wrapper$SchemaFactoryCache = new WeakMap<ZodType, Wrapper$SchemaOf<ZodType>>();
+
+export function Wrapper$SchemaFactory<IdType extends ZodType>(
+  idType: IdType,
+): Wrapper$SchemaOf<IdType>;
+export function Wrapper$SchemaFactory(
+  idType: ZodType,
+): Wrapper$SchemaOf<ZodType> {
+  const hit = Wrapper$SchemaFactoryCache.get(idType);
   if (hit) return hit;
 
   const schema = buildWrapper$Schema(idType);
-  idType[Wrapper$SchemaMemo] = schema;
+  Wrapper$SchemaFactoryCache.set(idType, schema);
   return schema;
-};
+}
 
 export const Wrapper$SchemaDefault: ZodType<Wrapper<string>> = Wrapper$SchemaFactory(z.string());
 ```
@@ -948,26 +951,28 @@ There is deliberately no fallback. Guessing a filling produces a document that s
 
 #### The module preamble
 
-A factory memoizes on the argument it was handed, under a module-private symbol of its own. Nothing is shared between one type and the next, so a generated module is the types in it and there is no preamble to emit ahead of them. The memo's type is written where every type parameter is bound -- the factory's own signature -- so it says exactly what it holds and the read needs no assertion:
+Each factory declares its own store, so a generated module is the types in it and nothing else -- there is no preamble to emit ahead of them, and nothing shared between one type and the next.
+
+A `WeakMap` fixes both of its own parameters at construction, so its value type cannot depend on its key type; a store declared beside the factory is therefore keyed and valued at the widened `ZodType` spelling. What recovers the precise types is an **overload**: the signature a caller sees names real type parameters, and the implementation beneath it takes the widened ones the store is written at. The read is then already the implementation's return type, so there is nothing to cast.
 
 ```typescript
-export const Wrapper$SchemaFactory = <IdType extends ZodType>(
-  idType: IdType & { [Wrapper$SchemaMemo]?: Wrapper$SchemaOf<IdType> },
-): Wrapper$SchemaOf<IdType> => { ... };
+const Wrapper$SchemaFactoryCache = new WeakMap<ZodType, Wrapper$SchemaOf<ZodType>>();
+
+export function Wrapper$SchemaFactory<IdType extends ZodType>(
+  idType: IdType,
+): Wrapper$SchemaOf<IdType>;
+export function Wrapper$SchemaFactory(
+  idType: ZodType,
+): Wrapper$SchemaOf<ZodType> { ... }
 ```
 
-That is the whole point of hanging it there rather than in a module-scope map: a `WeakMap` declared beside the factory fixes both of its parameters at construction, so its value type cannot depend on its key type and every read comes back needing a cast. On the argument, `IdType` is in scope, and the memo is the schema built from that very argument.
-
-Beyond the first argument the remaining ones key a `WeakMap` level each, and those are bound by the same signature:
+A type declaring N parameters writes N nested levels, each keyed by one argument, and the levels below the first are built where they are first needed:
 
 ```typescript
-export const Quintet$SchemaFactory = <AType extends ZodType, BType extends ZodType, CType extends ZodType, DType extends ZodType, EType extends ZodType>(
-  aType: AType & { [Quintet$SchemaMemo]?: WeakMap<BType, WeakMap<CType, WeakMap<DType, WeakMap<EType, Quintet$SchemaOf<AType, BType, CType, DType, EType>>>>> },
-  bType: BType, cType: CType, dType: DType, eType: EType,
-): Quintet$SchemaOf<AType, BType, CType, DType, EType> => { ... };
+const Quintet$SchemaFactoryCache = new WeakMap<ZodType, WeakMap<ZodType, WeakMap<ZodType, WeakMap<ZodType, WeakMap<ZodType, Quintet$SchemaOf<ZodType, ZodType, ZodType, ZodType, ZodType>>>>>>();
 ```
 
-Nothing in the emitted output is `as`, `any`, or `unknown`. The symbol is module-private, so two types never share a slot and nothing a consumer holds can collide with one; it is invisible to `Object.keys`, to JSON, and to serialization, and it is collected with the argument it hangs on rather than pinned for the life of the module.
+Nothing in the emitted output is `as`, `any`, or `unknown`, and nothing a caller passes is written to. The store holds the arguments weakly, so a schema nobody else holds is collected rather than pinned for the life of the module.
 
 #### An alias is a factory too
 
@@ -1026,8 +1031,6 @@ Generated TypeScript (with `zod` feature):
 
 ```typescript
 export type UserId<IdType> = IdType & $brand<"UserId">;
-const UserId$SchemaMemo = Symbol("UserId$Schema");
-
 const buildUserId$Schema = <IdType extends ZodType>(
   idType: IdType,
 ) =>
@@ -1039,16 +1042,21 @@ type UserId$SchemaOf<IdType extends ZodType> = ReturnType<
   typeof buildUserId$Schema<IdType>
 >;
 
-export const UserId$SchemaFactory = <IdType extends ZodType>(
-  idType: IdType & { [UserId$SchemaMemo]?: UserId$SchemaOf<IdType> },
-): UserId$SchemaOf<IdType> => {
-  const hit = idType[UserId$SchemaMemo];
+const UserId$SchemaFactoryCache = new WeakMap<ZodType, UserId$SchemaOf<ZodType>>();
+
+export function UserId$SchemaFactory<IdType extends ZodType>(
+  idType: IdType,
+): UserId$SchemaOf<IdType>;
+export function UserId$SchemaFactory(
+  idType: ZodType,
+): UserId$SchemaOf<ZodType> {
+  const hit = UserId$SchemaFactoryCache.get(idType);
   if (hit) return hit;
 
   const schema = buildUserId$Schema(idType);
-  idType[UserId$SchemaMemo] = schema;
+  UserId$SchemaFactoryCache.set(idType, schema);
   return schema;
-};
+}
 
 export const UserId$SchemaDefault: $ZodBranded<ZodString, "UserId"> = UserId$SchemaFactory(z.string());
 
@@ -1339,8 +1347,6 @@ pub struct DocumentId<IdType>(pub IdType);
 Generated Zod:
 
 ```typescript
-const DocumentId$SchemaMemo = Symbol("DocumentId$Schema");
-
 const buildDocumentId$Schema = <IdType extends ZodType>(
   idType: IdType,
 ) =>
@@ -1353,16 +1359,21 @@ type DocumentId$SchemaOf<IdType extends ZodType> = ReturnType<
   typeof buildDocumentId$Schema<IdType>
 >;
 
-export const DocumentId$SchemaFactory = <IdType extends ZodType>(
-  idType: IdType & { [DocumentId$SchemaMemo]?: DocumentId$SchemaOf<IdType> },
-): DocumentId$SchemaOf<IdType> => {
-  const hit = idType[DocumentId$SchemaMemo];
+const DocumentId$SchemaFactoryCache = new WeakMap<ZodType, DocumentId$SchemaOf<ZodType>>();
+
+export function DocumentId$SchemaFactory<IdType extends ZodType>(
+  idType: IdType,
+): DocumentId$SchemaOf<IdType>;
+export function DocumentId$SchemaFactory(
+  idType: ZodType,
+): DocumentId$SchemaOf<ZodType> {
+  const hit = DocumentId$SchemaFactoryCache.get(idType);
   if (hit) return hit;
 
   const schema = buildDocumentId$Schema(idType);
-  idType[DocumentId$SchemaMemo] = schema;
+  DocumentId$SchemaFactoryCache.set(idType, schema);
   return schema;
-};
+}
 
 export const DocumentId$SchemaDefault: $ZodBranded<ZodString, "DocumentId"> = DocumentId$SchemaFactory(z.string());
 ```
