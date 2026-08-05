@@ -422,7 +422,7 @@ mod readme {
             "pub struct Node<IdType> {",
             &Node::<String>::zod_schema(),
             &[
-                "const buildNode$Schema = <IdType extends z.ZodType>(",
+                "const buildNode$Schema = <IdType extends ZodType>(",
                 "  idType: IdType,",
                 ") =>",
                 "  z.strictObject({",

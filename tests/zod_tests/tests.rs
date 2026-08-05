@@ -155,7 +155,7 @@ fn test_zod_with_typescript_feature_includes_type_annotations() {
     );
     assert!(
         zod.contains(
-            "export const BasicStruct$Schema: z.ZodType<BasicStruct> = BasicStruct$RawSchema;"
+            "export const BasicStruct$Schema: ZodType<BasicStruct> = BasicStruct$RawSchema;"
         ),
         "Should export typed schema when typescript feature enabled. Got: {zod}"
     );
@@ -261,7 +261,7 @@ fn test_plain_enum_with_typescript_has_type_annotation() {
         "Plain enum with typescript should have $RawSchema. Got: {zod}"
     );
     assert!(
-        zod.contains("export const Status$Schema: z.ZodType<Status> = Status$RawSchema;"),
+        zod.contains("export const Status$Schema: ZodType<Status> = Status$RawSchema;"),
         "Plain enum with typescript should have typed $Schema. Got: {zod}"
     );
 }
@@ -436,7 +436,7 @@ fn test_zod_without_typescript_uses_simple_export() {
         "Without typescript, should use simple export. Got: {zod}"
     );
     assert!(
-        !zod.contains("z.ZodType"),
+        !zod.contains("ZodType"),
         "Without typescript, should not have type annotations. Got: {zod}"
     );
     assert!(

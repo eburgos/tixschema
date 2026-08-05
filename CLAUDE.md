@@ -362,7 +362,7 @@ With `zod` + `typescript` features:
 ```typescript
 export type UserId<ID_TYPE> = ID_TYPE & z.$brand<"UserId">;
 const UserId$RawSchema = z.string().brand<"UserId">();
-export const UserId$Schema: z.ZodType<UserId<string>> = UserId$RawSchema;
+export const UserId$Schema: ZodType<UserId<string>> = UserId$RawSchema;
 ```
 
 With `typescript` only (no `zod`):
@@ -420,8 +420,8 @@ collide. The levels are written out to the exact depth the type declares rather 
 a loop needs a key type it cannot name and a value it cannot type, which means `unknown` and a
 cast at every level, while the written-out form comes back already typed.
 
-Every parameter is a real TypeScript type parameter (`<IdType extends z.ZodType>`), never a bare
-`z.ZodType` annotation — `z.ZodType` defaults its own parameters, so an argument annotated with it
+Every parameter is a real TypeScript type parameter (`<IdType extends ZodType>`), never a bare
+`ZodType` annotation — `ZodType` defaults its own parameters, so an argument annotated with it
 infers every field as `unknown`.
 
 `typescript_preamble!()` returns the one helper the factories share, `createSchemaCache`, which
