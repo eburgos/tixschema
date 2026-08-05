@@ -4445,14 +4445,16 @@ fn a_default_types_refusal_is_spanned_on_what_earned_it() {
 }
 
 /// A filling is rendered through the dispatch a field's type is, and that dispatch takes a name it
-/// has no arm for to be another `#[model_schema]` item — right for `Foo`, gibberish for `char`,
-/// which emitted a call into a `char_schema` module nothing publishes and left the author reading
-/// an `E0433` about a module they never wrote plus two `E0425`s about the generated body's own
-/// bindings. Refused at the entry instead, in words that name the type and the limitation.
+/// has no arm for to be another `#[model_schema]` item — right for `Foo`, gibberish for a reserved
+/// primitive name the dispatch has no arm for, which emitted a call into a module nothing publishes
+/// and left the author reading an `E0433` about a module they never wrote plus two `E0425`s about
+/// the generated body's own bindings. Refused at the entry instead, in words that name the type and
+/// the limitation. `char` is no longer among them: it gained `FieldDefType::Char` and is asserted
+/// admitted in `a_renderable_or_sibling_named_filling_is_left_alone` instead.
 #[cfg(feature = "jsonschema")]
 #[test]
 fn a_filling_no_document_can_be_built_from_is_refused_at_the_entry() {
-    for written in ["char", "i128", "u128", "f16", "f128"] {
+    for written in ["i128", "u128", "f16", "f128"] {
         let messages = default_types_messages(
             "pub struct Probe<ValueType> { pub held: ValueType }",
             &format!("default_types(ValueType = {written})"),
@@ -4482,10 +4484,10 @@ fn a_filling_no_document_can_be_built_from_is_refused_at_the_entry() {
 fn an_undescribable_filling_refusal_is_spanned_on_the_filling() {
     let refusals = default_types_refusals(
         "pub struct Probe<WideType, NarrowType> { pub wide: WideType, pub narrow: NarrowType }",
-        "default_types(WideType = String, NarrowType = char)",
+        "default_types(WideType = String, NarrowType = i128)",
     );
     assert_eq!(refusals.len(), 1, "got: {refusals:?}");
-    assert_eq!(refusals[0].span().source_text().as_deref(), Some("char"));
+    assert_eq!(refusals[0].span().source_text().as_deref(), Some("i128"));
 }
 
 /// Only what is provably not a sibling is refused. A bare `Foo` is a legitimate forward reference
@@ -4498,6 +4500,7 @@ fn a_renderable_or_sibling_named_filling_is_left_alone() {
         "Foo",
         "String",
         "bool",
+        "char",
         "u8",
         "u64",
         "i64",

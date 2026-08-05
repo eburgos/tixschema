@@ -3478,7 +3478,10 @@ fn non_string_inner_shape(inner: &FieldDef) -> Option<&'static str> {
         | FieldDefType::F32
         | FieldDefType::F64 => Some("numeric"),
         FieldDefType::TypeParam(_) | FieldDefType::Unknown => Some("opaque"),
-        FieldDefType::String | FieldDefType::StringLiteral(_) => None,
+        // A `char` writes the one-character string every other string-shaped arm here does, and
+        // `validate()` reaches it the same way it reaches a numeric or boolean inner: through
+        // `Display`.
+        FieldDefType::Char | FieldDefType::String | FieldDefType::StringLiteral(_) => None,
         #[cfg(feature = "object_id")]
         FieldDefType::ObjectId => None,
         #[cfg(feature = "chrono")]
@@ -3567,7 +3570,9 @@ const fn scalar_json_type_keyword(field_type: &FieldDefType) -> Option<&'static 
         | FieldDefType::U32
         | FieldDefType::U64
         | FieldDefType::Usize => Some("integer"),
-        FieldDefType::String | FieldDefType::StringLiteral(_) => Some("string"),
+        FieldDefType::Char | FieldDefType::String | FieldDefType::StringLiteral(_) => {
+            Some("string")
+        }
         #[cfg(feature = "chrono")]
         FieldDefType::DateTime
         | FieldDefType::NaiveDate
@@ -5114,6 +5119,7 @@ fn branded_inner_composite(inner: &FieldDef) -> Option<BrandedComposite> {
         FieldDefType::Tuple(..) => Some(BrandedComposite::Tuple),
         FieldDefType::TypeParam(_) | FieldDefType::Unknown => Some(BrandedComposite::Opaque),
         FieldDefType::Boolean
+        | FieldDefType::Char
         | FieldDefType::F32
         | FieldDefType::F64
         | FieldDefType::I8
@@ -7491,7 +7497,9 @@ fn tagged_content(inner: &FieldDef) -> TaggedContent {
         | FieldDefType::U32
         | FieldDefType::U64
         | FieldDefType::Usize => TaggedContent::Refused("an integer"),
-        FieldDefType::String | FieldDefType::StringLiteral(_) => TaggedContent::Refused("a string"),
+        FieldDefType::Char | FieldDefType::String | FieldDefType::StringLiteral(_) => {
+            TaggedContent::Refused("a string")
+        }
         #[cfg(feature = "chrono")]
         FieldDefType::DateTime
         | FieldDefType::NaiveDate
@@ -8204,6 +8212,9 @@ fn field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
             sibling_json_schema_value(name, arguments, fld.type_span)
         }
         FieldDefType::String => string_field_json_schema_value(fld),
+        FieldDefType::Char => {
+            quote! { serde_json::json!({ "type": "string", "minLength": 1, "maxLength": 1 }) }
+        }
         FieldDefType::StringLiteral(literal) => {
             quote! { serde_json::json!({ "type": "string", "const": #literal }) }
         }
@@ -9426,6 +9437,7 @@ const fn chrono_json_schema_format(field_type: &FieldDefType) -> Option<&'static
         FieldDefType::NaiveTime => Some("time"),
         FieldDefType::NaiveDateTime | FieldDefType::DateTime => Some("date-time"),
         FieldDefType::Boolean
+        | FieldDefType::Char
         | FieldDefType::F32
         | FieldDefType::F64
         | FieldDefType::I8
@@ -9470,6 +9482,9 @@ fn chrono_json_schema_item(field_type: &FieldDefType) -> Option<proc_macro2::Tok
 fn scalar_field_json_schema_item(fld: &FieldDef) -> Option<proc_macro2::TokenStream> {
     let item_schema = match &fld.field_type {
         FieldDefType::String => quote! { { "type": "string" } },
+        // Fixed at 1 rather than read from `model_schema_prop`: a `char` carries none of those
+        // constraints, and this is what serde writes for it wherever it stands.
+        FieldDefType::Char => quote! { { "type": "string", "minLength": 1, "maxLength": 1 } },
         FieldDefType::StringLiteral(literal) => {
             quote! { { "type": "string", "const": #literal } }
         }
@@ -9856,6 +9871,7 @@ fn map_key_path(key: &FieldDef) -> MapKeyPath<'_> {
         FieldDefType::SiblingType(..)
         | FieldDefType::Unknown
         | FieldDefType::Boolean
+        | FieldDefType::Char
         | FieldDefType::StringLiteral(_)
         | FieldDefType::U8
         | FieldDefType::U16
@@ -9921,6 +9937,7 @@ fn map_key_element_name(key: &FieldDef) -> String {
         }
         FieldDefType::String | FieldDefType::StringLiteral(_) => "String".to_owned(),
         FieldDefType::Boolean => "bool".to_owned(),
+        FieldDefType::Char => "char".to_owned(),
         FieldDefType::U8 => "u8".to_owned(),
         FieldDefType::U16 => "u16".to_owned(),
         FieldDefType::U32 => "u32".to_owned(),
@@ -9993,6 +10010,7 @@ fn map_key_rejection(fld: &FieldDef) -> Option<MapKeyRejection> {
         | FieldDefType::Unknown
         | FieldDefType::StringLiteral(_)
         | FieldDefType::Boolean
+        | FieldDefType::Char
         | FieldDefType::String
         | FieldDefType::U8
         | FieldDefType::U16
@@ -10239,6 +10257,7 @@ fn build_map_member_item(value: &FieldDef) -> Result<MapMemberItem, MapMemberRej
         // `None`. Named exhaustively rather than caught by a wildcard: a new variant must be given
         // a member schema, not silently widened into an open object.
         FieldDefType::Boolean
+        | FieldDefType::Char
         | FieldDefType::F32
         | FieldDefType::F64
         | FieldDefType::I8
@@ -10526,6 +10545,20 @@ fn build_boolean_field_schema(fld: &FieldDef, field_name_str: &str) -> proc_macr
     }
 }
 
+/// Builds the JSON schema for a `char` field: the one-character string serde writes for it, with
+/// `minLength`/`maxLength` fixed at 1 rather than read from `model_schema_prop` — a `char` field
+/// carries none of those constraints.
+#[cfg(feature = "jsonschema")]
+fn build_char_field_schema(fld: &FieldDef, field_name_str: &str) -> proc_macro2::TokenStream {
+    let schema = arrayed_json_schema_value(
+        fld,
+        quote! { serde_json::json!({ "type": "string", "minLength": 1, "maxLength": 1 }) },
+    );
+    quote! {
+        properties.insert(#field_name_str.to_string(), { #schema });
+    }
+}
+
 /// Builds the JSON schema for a `SiblingType` field (references to other generated types).
 #[cfg(feature = "jsonschema")]
 fn build_sibling_type_field_schema(
@@ -10696,6 +10729,7 @@ fn build_field_type_schema(fld: &FieldDef, field_name_str: &str) -> proc_macro2:
             build_numeric_field_schema(fld, field_name_str, keyword)
         }
         FieldDefType::Boolean => build_boolean_field_schema(fld, field_name_str),
+        FieldDefType::Char => build_char_field_schema(fld, field_name_str),
         #[cfg(feature = "object_id")]
         FieldDefType::ObjectId => build_object_id_field_schema(fld, field_name_str),
         #[cfg(feature = "chrono")]
