@@ -165,7 +165,7 @@ mod zod {
             "Got: {zod}"
         );
         assert!(
-            zod.contains("export const ArchiveEntry$SchemaFactory ="),
+            zod.contains("export function ArchiveEntry$SchemaFactory"),
             "Got: {zod}"
         );
         assert!(!zod.contains("ArchiveEntry$Schema:"), "Got: {zod}");
@@ -176,18 +176,20 @@ mod zod {
     #[test]
     fn a_five_parameter_factory_memoizes_one_level_per_argument() {
         let zod = ArchiveEntry::<String, f64, String, u32, String>::zod_schema();
-        for level in 1_u8..=4_u8 {
-            assert!(
-                zod.contains(&format!(
-                    "interface ArchiveEntry$SchemaFactoryCacheL{level}<"
-                )),
-                "level {level} missing: {zod}"
-            );
-        }
         assert!(
-            zod.contains("ArchiveEntry$SchemaFactoryCacheL4<IdType, DateType, TagType, SizeType>"),
+            zod.contains(
+                "const ArchiveEntry$SchemaFactoryCache = new WeakMap<ZodType, WeakMap<ZodType, \
+                 WeakMap<ZodType, WeakMap<ZodType, WeakMap<ZodType, ArchiveEntry$SchemaOf<ZodType, \
+                 ZodType, ZodType, ZodType, ZodType>>>>>>();"
+            ),
             "Got: {zod}"
         );
+        for below in ["byDateType", "byTagType", "bySizeType", "byOwnerType"] {
+            assert!(
+                zod.contains(&format!("    {below} = new WeakMap();")),
+                "level {below} missing: {zod}"
+            );
+        }
     }
 
     /// A generic brand is a factory too: the brand is appended to whatever schema the argument
@@ -197,7 +199,7 @@ mod zod {
         let brand = ArchiveId::<String>::zod_schema();
         assert!(brand.contains(".brand<\"ArchiveId\">()"), "Got: {brand}");
         assert!(
-            brand.contains("export const ArchiveId$SchemaFactory ="),
+            brand.contains("export function ArchiveId$SchemaFactory"),
             "Got: {brand}"
         );
         let holder = ArchiveStamp::<String>::zod_schema();
@@ -222,7 +224,7 @@ mod zod {
             "Got: {tagged}"
         );
         assert!(
-            tagged.contains("export const ArchiveEvent$SchemaFactory ="),
+            tagged.contains("export function ArchiveEvent$SchemaFactory"),
             "Got: {tagged}"
         );
 
@@ -230,7 +232,7 @@ mod zod {
         assert!(untagged.contains("z.union(["), "Got: {untagged}");
         assert!(untagged.contains("id: idType,"), "Got: {untagged}");
         assert!(
-            untagged.contains("export const ArchiveWire$SchemaFactory ="),
+            untagged.contains("export function ArchiveWire$SchemaFactory"),
             "Got: {untagged}"
         );
     }

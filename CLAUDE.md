@@ -414,20 +414,21 @@ read the other's factory behind `z.lazy` rather than at the top of a `const` ini
 module loads regardless of which of the two names the consuming project's entity list writes
 first.
 
-Each factory memoizes on the identity of its arguments, one cache level per parameter, so two
-calls with the same argument objects return the identical schema and no two argument lists
-collide. The levels are written out to the exact depth the type declares rather than looped over:
-a loop needs a key type it cannot name and a value it cannot type, which means `unknown` and a
-cast at every level, while the written-out form comes back already typed.
+Each factory memoizes on the identity of its arguments, one `WeakMap` level per parameter
+(`zod_cache_type` writes the nesting, `zod_factory_body` the walk), so two calls with the same
+argument objects return the identical schema and no two argument lists collide.
+
+A `WeakMap` fixes both of its own parameters at construction, so its value type cannot depend on
+its key type and the store is written at the widened `ZodType` spelling throughout. What recovers
+the precise types is an overload, which `zod_factory_declaration` emits: the signature a caller
+sees names real type parameters, the implementation beneath it takes the widened ones the store is
+keyed at, and the read is therefore already the implementation's return type. Nothing emitted is
+`as`, `any` or `unknown`; nothing a caller passes is written to; and there is no preamble — a
+generated module is the types in it and nothing shared between them.
 
 Every parameter is a real TypeScript type parameter (`<IdType extends ZodType>`), never a bare
 `ZodType` annotation — `ZodType` defaults its own parameters, so an argument annotated with it
 infers every field as `unknown`.
-
-`typescript_preamble!()` returns the one helper the factories share, `createSchemaCache`, which
-every generated module carries once above its per-type definitions. It holds the only assertion
-anywhere in the output: a cache's value type depends on its key type, which TypeScript can declare
-but cannot construct.
 
 A generic type may reach itself, directly or through a second type reaching back. JSON Schema
 hoists it into `$defs` once and points a `$ref` at that definition; TypeScript writes the name
