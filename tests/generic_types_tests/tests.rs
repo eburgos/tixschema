@@ -119,8 +119,6 @@ mod typescript {
             ts.contains("  by_key: Partial<Record<string, ValueType>>;"),
             "Got: {ts}"
         );
-        // An `Option` carrying no `ts_optional` writes `T | undefined`, whatever the attribute
-        // that drops its key from the wire says.
         assert!(ts.contains("  maybe: ValueType | undefined;"), "Got: {ts}");
         assert!(ts.contains("  tuple: [KeyType, ValueType];"), "Got: {ts}");
     }
@@ -246,14 +244,9 @@ mod zod {
     #[cfg(all(feature = "typescript", feature = "serde"))]
     use super::{ConstrainedEchoedDefault, ConstrainedId, DeepEchoedDefault};
 
-    /// Two generic items whose declared defaults name each other: `CycleLeader`'s names
-    /// `CycleFollower` and `CycleFollower`'s names `CycleLeader` back, at arguments neither can have
-    /// registered yet when the other is expanded — one macro invocation sees one type, so neither
-    /// side can know at expansion time that the other's declared default will turn out to name it
-    /// back. Nothing folds, both sides call the other's factory, and both calls are deferred exactly
-    /// as an unfolded reference to any other sibling's factory already is: the module loads and
-    /// resolves each side's read only once something asks the resulting schema to validate, so
-    /// which of the two names is written first in the generated module is never asked.
+    /// Two generic items whose declared defaults name each other. Neither has registered the
+    /// other's arguments when it expands, so neither folds; both calls are deferred, and which of
+    /// the two names is written first in the generated module is never asked.
     #[test]
     fn a_cycle_between_two_defaults_is_deferred_on_both_sides() {
         let leader = CycleLeader::<u32>::zod_schema();

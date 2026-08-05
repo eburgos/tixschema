@@ -2623,14 +2623,10 @@ fn a_string_filling_annotates_the_example_as_no_filling_does() {
     assert_eq!(render(&filled), render(&super::ModelSchemaArgs::default()));
 }
 
-/// The three shapes a declared default renders as: a primitive's ordinary Zod expression, another
-/// primitive's, and a reference to a generic sibling read back through [`super::default_zod_rendering`]
-/// rather than reconstructed. The third row is the one that matters — `DocumentId` is registered as
-/// a factory publisher whose own `$SchemaDefault` was recorded at exactly `z.string()`, and
-/// `IdType = DocumentId<String>` names it at that identical argument, so the render folds onto
-/// `DocumentId$SchemaDefault` instead of composing `DocumentId$SchemaFactory(z.string())` a second
-/// time — deferred, since `DocumentId$SchemaDefault` is a module-scope `const` this one's own
-/// `const` cannot be known to be written above or below.
+/// The three shapes a declared default renders as. The third row is the one that matters:
+/// `IdType = DocumentId<String>` names that sibling at exactly the argument its own
+/// `$SchemaDefault` was recorded at, so the render folds onto that binding — deferred, two
+/// module-scope `const`s having no knowable order between them.
 #[cfg(feature = "zod")]
 #[test]
 fn declared_default_renders_each_shape_the_table_describes() {
@@ -2666,13 +2662,9 @@ fn declared_default_renders_each_shape_the_table_describes() {
     }
 }
 
-/// The direct-sibling fold gate (`array_depth == 0 && !is_optional()`) scopes the fold correctly —
-/// a wrapped default has no bare `DocumentId$SchemaDefault` binding to fold onto — but is not the
-/// deferral boundary: [`super::default_zod_rendering`] falls through to
-/// [`crate::field_type::FieldDef::names_a_sibling_binding`] for everything the fold gate declines,
-/// which asks whether the rendered tree names a sibling *anywhere*, `Vec`/`Option`/`Map`/`Tuple`
-/// wrapped or not. The `Vec<String>` row is the control: nothing inside it names a sibling, so it
-/// stays eager exactly as the bare-primitive rows above do.
+/// The direct-sibling fold gate scopes the fold but is not the deferral boundary: a wrapped default
+/// has no bare binding to fold onto, yet still names a sibling and still defers. The `Vec<String>`
+/// row is the control, naming none and staying eager.
 #[cfg(feature = "zod")]
 #[test]
 fn declared_default_renders_each_wrapped_shape_the_table_describes() {
@@ -3800,14 +3792,10 @@ fn a_tuple_struct_records_the_value_surface_its_slots_publish() {
     }
 }
 
-/// A brand constraining one of its own type parameters no longer has nothing to hang the checks
-/// on: it consults the parameter's *declared default* instead of the parameter itself, the same
-/// way a concrete argument is consulted through the registry. A `String` default carries the
-/// checks fine, and an entry the declaration left out falls back to `String` —
-/// [`super::declared_default_field`]'s own fallback, [`super::schema_example_value_type`]'s for the
-/// identical gap — so `pattern_args()`, which declares no `default_types` at all, is admitted here
-/// too: this guard alone requires nothing, and `jsonschema` is what actually requires an entry,
-/// through the unrelated `default_types_guard_errors`.
+/// A brand constraining one of its own type parameters consults that parameter's *declared
+/// default* rather than the parameter itself. An entry the declaration left out falls back to
+/// `String`, so this guard alone requires no `default_types`; `jsonschema` is what requires an
+/// entry, through the unrelated `default_types_guard_errors`.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn string_constraints_over_the_brands_own_type_parameter_consult_the_declared_default() {
@@ -4441,13 +4429,9 @@ fn a_default_types_refusal_is_spanned_on_what_earned_it() {
     }
 }
 
-/// A filling is rendered through the dispatch a field's type is, and that dispatch takes a name it
-/// has no arm for to be another `#[model_schema]` item — right for `Foo`, gibberish for a reserved
-/// primitive name the dispatch has no arm for, which emitted a call into a module nothing publishes
-/// and left the author reading an `E0433` about a module they never wrote plus two `E0425`s about
-/// the generated body's own bindings. Refused at the entry instead, in words that name the type and
-/// the limitation. `char` is no longer among them: it gained `FieldDefType::Char` and is asserted
-/// admitted in `a_renderable_or_sibling_named_filling_is_left_alone` instead.
+/// The field-type dispatch takes a name it has no arm for to be another `#[model_schema]` item —
+/// right for `Foo`, gibberish for a reserved primitive, which emitted a call into a module nothing
+/// publishes. Refused at the entry instead, in words that name the type.
 #[cfg(feature = "jsonschema")]
 #[test]
 fn a_filling_no_document_can_be_built_from_is_refused_at_the_entry() {
@@ -5735,13 +5719,9 @@ fn a_required_map_value_carries_no_nullable_wrap() {
     }
 }
 
-/// The kind an alias registers is its *target's* answer, because a type path resolves through the
-/// alias — the same four verdicts a brand carries up from its inner, and for the same reason. A
-/// target serde writes as a bare string makes the alias one too, whatever spelling that target
-/// wears; a target serde stringifies for the author makes the alias key the open object that bare
-/// target keys; a target serde writes as no key at all leaves the alias refused, under its own name.
-/// `Vec<Slot>` is the collection, not the enum it holds; a target this expansion has not seen
-/// registered is `Unknown`, which is not a negative.
+/// The kind an alias registers is its *target's* answer, a type path resolving through the alias —
+/// the same four verdicts a brand carries up from its inner. `Vec<Slot>` is the collection, not the
+/// enum it holds; a target this expansion has not seen is `Unknown`, which is not a negative.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn an_alias_registers_the_kind_of_what_it_targets() {
@@ -6910,13 +6890,10 @@ fn brand_json_schema_over(inner_ty: &syn::Type) -> String {
     .to_string()
 }
 
-/// A named type resolves to one schema module wherever it is written, and a brand is one of those
-/// places: it carries its inner by the same reference a field carries it by, so what the module
-/// name is derived from cannot differ between the two. A name the registry knows resolves through
-/// the registry in both, and a name it does not know assumes the module that name's own
-/// `#[model_schema()]` would publish — which for a type declared without the attribute is a module
-/// nothing emits, and rustc reports the `E0433` in either position. Nothing the expansion holds can
-/// tell those two apart, so that report is the whole contract, and it has to be one contract.
+/// A named type resolves to one schema module wherever it is written, a brand carrying its inner by
+/// the same reference a field does. A name the registry does not know assumes the module that
+/// name's own `#[model_schema()]` would publish, and rustc reports the `E0433` in either position —
+/// which is the whole contract, since nothing the expansion holds can tell the two cases apart.
 #[cfg(feature = "jsonschema")]
 #[test]
 fn a_named_type_resolves_to_the_same_module_in_field_and_brand_position() {

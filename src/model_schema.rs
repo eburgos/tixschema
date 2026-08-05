@@ -1258,12 +1258,8 @@ fn has_serde_transparent(attrs: &[syn::Attribute]) -> bool {
 /// `build_item_docs_and_description`; a member publishes no second surface.
 ///
 /// The no-docs fallback names what is documented as it is exported, not as it is declared in Rust,
-/// so a `JSDoc` header never contradicts the line under it.
-///
-/// A ` ```rust example ` block is dropped before its lines reach the body, the way
-/// `item_plain_doc_lines` drops it: the block is Rust source, and nothing reads it as such once it
-/// is sitting in a `TypeScript` comment. A consumer after the example reads the Rust docs. What is
-/// left reaches the body as written — this is the one surface that publishes docs unflattened.
+/// so a `JSDoc` header never contradicts the line under it. A ` ```rust example ` block is dropped
+/// on the way in — it is Rust source, unreadable as such from a `TypeScript` comment.
 fn build_jsdoc_body(docs_vec: Option<&[String]>, fallback_name: &str) -> String {
     item_jsdoc_body(&item_lines_or_name(docs_vec, fallback_name, |doc_lines| {
         strip_examples_from_docs(doc_lines)
@@ -2359,23 +2355,10 @@ fn with_prefixed_tokens(expanded: TokenStream, prefix: &[proc_macro2::TokenStrea
 /// declaring a const parameter, or none where it carries no example and none where it declares no
 /// const.
 ///
-/// A doc example is Rust the expansion has to compile, so its value is annotated with the item's
-/// own name at one instantiation — every parameter filled in, a type parameter taking the type
-/// `default_types` declares for it or `String` where it declares none. A const takes no filling
-/// from that convention: both spellings name a type, and a const is a value. Nor can one be read
-/// off the item, since `default_types` declares types and no value is the one every
-/// const-parameterised example is written at, so one picked here would render the example at a
-/// length the author never wrote. So the example is refused where it was written, rather than
-/// expanded into an annotation that fails `E0107` before anything runs.
-///
-/// Answered at the one seam every expanded shape is dispatched from, so a struct and an enum cannot
-/// come to answer differently, and a branded newtype is answered before the struct path splits it
-/// off. An alias reaches here too and is deliberately left out: it publishes no `schema_example()`
-/// at all, so its example is already unread and a const on it costs nothing.
-///
-/// Only a build that reads an example owes the refusal, which is why this is `zod`-gated: without
-/// it no `schema_example()` is emitted and an example on a const-declaring item is exactly as
-/// unread as an example on any other item.
+/// A doc example is annotated with the item's own name at one instantiation, and a const takes no
+/// filling from that convention — both spellings name a type, and a const is a value. So the
+/// example is refused where it was written rather than expanded into an `E0107`. An alias is left
+/// out deliberately: it publishes no `schema_example()`, so its example is already unread.
 #[cfg(feature = "zod")]
 fn const_parameter_example_errors(item: &Item) -> Vec<proc_macro2::TokenStream> {
     let (generics, attrs) = if let Item::Struct(item_struct) = item {
@@ -5258,15 +5241,9 @@ fn item_plain_doc_lines(doc_lines: &[String]) -> Vec<String> {
 /// so a `JSDoc` header never contradicts the `export type` one line beneath it and a description
 /// never names an item something no surface exports.
 ///
-/// Whether anything was said is read off the flattened lines rather than off the attribute, because
-/// the flattening is what decides: a ` ```rust example ` block is Rust source and is dropped, so an
-/// item documented with nothing else has an attribute and still says nothing, and is left naming
-/// itself the way an undocumented one is.
-///
-/// Every item shape and member reaches that fallback through here, so no path can drift from the
-/// rest by spelling it separately. What a caller brings of its own is `flatten` — how its docs
-/// reach the surface, not what it says when it has none. Ungated because the member call sites
-/// are: a field's docs are read whatever features are on.
+/// Whether anything was said is read off the flattened lines rather than off the attribute: a
+/// ` ```rust example ` block is Rust source and is dropped, so an item documented with nothing else
+/// has an attribute and still says nothing.
 fn item_lines_or_name(
     docs_vec: Option<&[String]>,
     item_name: &str,
@@ -11061,15 +11038,11 @@ fn zod_default_block(
     )
 }
 
-/// The `$SchemaDefault` annotation [`zod_default_block`] writes: the plain `ZodType<Name<...>>`
-/// spelling for an ordinary generic item — tsc already accepts a factory's return type there, since
-/// nothing in the chain calls `.brand()`, so nothing narrows the classic `ZodType` interface's own
-/// deprecated `_output` field out from under it. A branded newtype's factory always ends its chain
-/// in `.brand()` (see [`branded_zod_expression`]), so its return type is always some
-/// `$ZodBranded<Argument, Name>` — never the plain `Name<...>` instantiation `ZodType`
-/// names — and the annotation has to read the same way, exactly as [`branded_zod_const_block`]
-/// already annotates the non-generic case. The class is written bare throughout, per
-/// [`branded_zod_type_name`].
+/// The `$SchemaDefault` annotation [`zod_default_block`] writes: plain `ZodType<Name<...>>` for an
+/// ordinary generic item, and `$ZodBranded<Argument, Name>` for a branded newtype, whose factory
+/// always ends its chain in `.brand()` — a return type strict tsc will not accept under the plain
+/// spelling, the classic `ZodType` interface's deprecated `_output` field being computed at the
+/// pre-brand type. Classes are written bare, per [`branded_zod_type_name`].
 #[cfg(all(feature = "zod", feature = "typescript"))]
 fn branded_default_annotation(
     item_name: &str,
@@ -11108,13 +11081,9 @@ fn branded_default_annotation(
 }
 
 /// The class a bare-parameter brand's own declared-default argument is annotated with, for
-/// [`branded_default_annotation`]: the eager expression's own class from [`branded_zod_type_name`]
-/// bare, or that same class wrapped in `ZodLazy<...>` for a deferred one — `typeof {schema}` when
-/// the deferred target is a plain binding name, which is every deferred shape
-/// [`default_zod_rendering`] folds or defers to a sibling's own `$Schema`/`$SchemaDefault`; the
-/// widened class otherwise, for the one shape it is not — a declared default naming a generic
-/// sibling at some filling other than that sibling's own, whose un-folded reference is a factory
-/// call rather than a name `typeof` can read.
+/// [`branded_default_annotation`]: the eager expression's class bare, or that class inside
+/// `ZodLazy<...>` for a deferred one — spelled `typeof {schema}` where the deferred target is a
+/// binding name, and widened where it is a factory call `typeof` cannot read.
 #[cfg(all(feature = "zod", feature = "typescript"))]
 fn branded_default_argument_class(field: &FieldDef, rendering: &DefaultZodRendering) -> String {
     match rendering {

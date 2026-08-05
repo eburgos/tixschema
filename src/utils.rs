@@ -947,20 +947,8 @@ pub fn to_snake_case(name: &str) -> String {
     result
 }
 
-/// Extracts the first Rust code example from documentation comments.
-///
-/// Looks for a code fence with the format ` ```rust example` and extracts
-/// all code until the closing ` ``` `. If multiple examples are found,
-/// only the first one is returned.
-///
-/// # Arguments
-///
-/// * `docs` - A slice of documentation comment lines.
-///
-/// # Returns
-///
-/// An `Option<String>` containing the example code if found, or `None` if
-/// no example fence is present.
+/// The code inside the first ` ```rust example ` fence in these doc lines, or `None` where there is
+/// no such fence. Later fences are ignored.
 #[cfg(feature = "zod")]
 pub fn extract_example_from_docs(docs: &[String]) -> Option<String> {
     let mut in_example_block = false;

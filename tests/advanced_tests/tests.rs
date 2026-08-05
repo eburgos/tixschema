@@ -265,9 +265,8 @@ fn assert_ts_contains_fields(ts_definition: &str, assertions: &[(&str, &str)]) {
     }
 }
 
-/// Holds the members whose key serde drops for a `None` to the `T | undefined` spelling. The
-/// attribute that drops the key decides what reaches the wire, never which of the two TypeScript
-/// spellings is written — only `ts_optional` asks for `field?: T`, and none of these carries it.
+/// Holds each member to `T | undefined`; none of these fields carries the `ts_optional` that would
+/// ask for the other spelling.
 #[cfg(all(feature = "typescript", feature = "zod"))]
 fn assert_ts_contains_omitted_fields(ts_definition: &str, assertions: &[(&str, &str)]) {
     for (field, expected_type) in assertions {
@@ -536,9 +535,6 @@ fn test_documented_struct() {
     assert!(ts_definition.contains("name: string;"));
     assert!(ts_definition.contains("email: string;"));
     assert!(ts_definition.contains("is_active: boolean;"));
-    // HashMap becomes Partial<Record<...>>
-    // An `Option` carrying no `ts_optional` writes `T | undefined`, whatever the attribute that
-    // drops its key from the wire says.
     assert!(
         ts_definition.contains("metadata: Partial<Record<string, string>> | undefined;"),
         "Got: {ts_definition}"

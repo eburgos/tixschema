@@ -102,9 +102,7 @@ fn the_predicate_omitted_key_is_absent_from_the_payload_serde_writes() {
     );
 }
 
-/// An `Option` writes `T | undefined` whatever drops its key from the wire; only `ts_optional`
-/// asks for the optional-key spelling, and this field carries none. The members serde always
-/// writes are unaffected either way.
+/// `age` carries no `ts_optional`, so the attribute that drops its key leaves the spelling alone.
 #[test]
 #[cfg(feature = "typescript")]
 fn typescript_writes_the_option_as_undefined_valued() {

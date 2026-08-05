@@ -437,18 +437,12 @@ impl FieldDef {
         !self.is_optional() && !self.omits_value
     }
 
-    /// Whether the object key this field writes may be absent, which is the question the two
-    /// spellings of an optional member answer differently — `field?: T` admits the payload with no
-    /// such key, `field: T | undefined` demands the key and lets its value be `undefined`.
+    /// Whether the object key this field writes may be absent — `field?: T` admits the payload
+    /// with no such key, `field: T | undefined` demands it.
     ///
-    /// For an `Option` field the answer is `ts_optional` and nothing else. The serde attribute that
-    /// drops the key decides what reaches the wire — `required` on the JSON surface, `.optional()`
-    /// on the Zod one — but not which of the two TypeScript spellings is written, or the flag whose
-    /// whole purpose is to ask for one of them would be inert on every field that carries it: the
-    /// `Option`-null guard requires that same attribute of every named `Option` field.
-    ///
-    /// A field that is not an `Option` has no second spelling to choose between, so the attribute
-    /// is the only thing left that can absent its key.
+    /// The key-dropping serde attribute is deliberately not read for an `Option`: the
+    /// `Option`-null guard requires one of every named `Option` field, so reading it here would
+    /// leave `ts_optional` inert on every field that carries it.
     fn key_may_be_absent(&self) -> bool {
         if self.is_optional() {
             self.model_schema_prop_meta
@@ -472,13 +466,10 @@ impl FieldDef {
     }
 
     /// Whether this field's rendering reads any other item's own module-scope Zod binding — a
-    /// factory call or a bare `$Schema` const — at any depth, wrapped in a `Vec`/`Option`/`Map`/
-    /// `Tuple` or named directly. [`default_zod_rendering`](crate::model_schema) asks this once its
-    /// own direct-sibling fold gate declines, since that gate answers a narrower question (can this
-    /// argument fold onto a bare `$SchemaDefault`) than deferral needs (does the rendered tree name
-    /// a sibling's binding at all) — `Tagged$SchemaFactory` inside
-    /// `z.array(Tagged$SchemaFactory(z.string()))` is exactly as much a module-scope `const` read as
-    /// a bare `Tagged$SchemaFactory(z.string())` is.
+    /// factory call or a bare `$Schema` const — at any depth, wrapped or named directly. Deferral
+    /// asks a wider question than the direct-sibling fold gate does:
+    /// `z.array(Tagged$SchemaFactory(z.string()))` reads a sibling `const` exactly as much as a
+    /// bare `Tagged$SchemaFactory(z.string())` does.
     #[cfg(feature = "zod")]
     pub fn names_a_sibling_binding(&self) -> bool {
         match &self.field_type {

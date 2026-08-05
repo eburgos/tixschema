@@ -339,8 +339,7 @@ fn test_discriminated_union_with_serde_zod() {
 fn test_compliant_optionals_typescript() {
     let ts = CompliantOptionals::ts_definition();
 
-    // `ts_optional` on `tag` is the whole of why it is spelled with an optional key; `note`
-    // carries the same `skip_serializing_if` and none of the flag, so it keeps `T | undefined`.
+    // Same `skip_serializing_if` on both; the flag on `tag` is the only difference.
     assert!(
         ts.contains("tag?: string;"),
         "expected `tag?: string;`:\n{ts}"
