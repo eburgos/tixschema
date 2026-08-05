@@ -54,25 +54,6 @@ pub enum VariantKind {
 }
 
 /// Enum representing the possible types a field can have in the schema generation system.
-///
-/// This enum is central to tixschema's type mapping system. It categorizes Rust types into
-/// categories that can be translated to TypeScript types and Zod schemas. The variants cover
-/// primitive types, complex structures, and special cases like `ObjectId` (feature-dependent).
-///
-/// Key points from crate documentation:
-/// - Primitives map to TS equivalents (e.g., String -> string, numbers -> number)
-/// - Collections like Vec<T> become Array<T> (handled via `FieldDef`'s `array_depth` count)
-/// - `HashMap`<String, T> becomes Partial<Record<string, T>> (Map variant)
-/// - Enums and nested structs use `SiblingType`
-/// - All types must follow naming conventions (e.g., end with Json suffix for structs)
-///
-/// Feature dependencies:
-/// - "`object_id"`: Enables `ObjectId` variant for `MongoDB` support
-/// - Without features, falls back to basic mappings
-///
-/// Equality is the question `as = Type` asks: do two written types describe the same value on every
-/// surface? The variants a spelling collapses onto answer it — `Path` reaching `String` is the same
-/// type here as `PathBuf` is — and the nested defs answer it through [`FieldDef`]'s own `PartialEq`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FieldDefType {
     /// Boolean primitive - maps to boolean.
@@ -136,13 +117,6 @@ pub enum FieldDefType {
     /// Tuple type - generates anonymous object in TS/Zod.
     Tuple(Vec<FieldDef>),
     /// One of the enclosing item's own type parameters — `IdType` in `struct Wrapper<IdType>`.
-    ///
-    /// Held apart from [`FieldDefType::SiblingType`] because the three surfaces answer for it
-    /// differently, and none of them answers with a reference to a generated type of that name:
-    /// TypeScript binds the parameter for real and renders the name it was written with, Zod binds
-    /// the argument its factory takes for it, and JSON Schema — which has no parameters at all —
-    /// writes the document of whatever filled it. [`FieldDef::erase_type_parameters`] is where that
-    /// rule is written down and where a written name becomes this.
     TypeParam(String),
     U16,
     U32,
@@ -154,68 +128,6 @@ pub enum FieldDefType {
 }
 
 /// Struct representing a field's definition for schema generation.
-///
-/// This is the core data structure used to analyze and generate schemas for each field
-/// in a struct or enum variant. It's created by `get_field_def()` and used in
-/// `model_schema.rs` to build the full type definitions.
-///
-/// Fields:
-/// - `nullable_levels`: which array levels the field was written with an `Option` at. Level 0 is
-///   what `field_type` names and level `array_depth` is the field as a whole, so `Vec<Option<T>>`
-///   records level 0 and `Option<Vec<T>>` records level 1 — two different values on the wire
-///   (`[null]` against `null`) that a single flag could not tell apart. `is_optional` asks it for
-///   the outermost level, the only one whose `None` is not written inside an array and so the only
-///   one whose flavor depends on where the field sits: a dropped or `| undefined`-valued key /
-///   `z.union([type, z.undefined()])` in struct-field position — `omits_value` deciding which of
-///   the two the key gets — and `| null` / `z.nullable(type)` in a tuple element or map value,
-///   neither of which can be dropped the way an object key can.
-/// - name: Safe field name (uses serde rename if feature enabled)
-/// - docs: Doc comments from Rust - included in generated TS as `JSDoc`
-/// - `field_type`: The core type classification (see `FieldDefType`)
-/// - `array_depth`: How many array levels wrap the type — one per `Vec`/slice/array/set the field
-///   was written under, so `Vec<Vec<T>>` is 2. Zero is a bare value, which is what `is_array` asks.
-/// - `array_lengths`: the element count of every level written as a fixed-size `[T; N]` with a
-///   literal `N`, one entry per such level and numbered the way `nullable_levels` numbers them. A
-///   level absent from the list holds however many items were written — what every other sequence
-///   spelling holds, and what a non-literal `N` records, the expansion having no value to read a
-///   const generic or a computed length from. Only the two validating surfaces spend it: the JSON
-///   schema pins the level with `minItems`/`maxItems` and Zod with `.length(N)`, so both reject the
-///   wrong-length payload serde itself refuses to deserialize. TypeScript keeps `Array<T>` — the
-///   fixed-length form its type system has is the N-element tuple, written out element by element,
-///   which stops being readable long before `N` stops being legal.
-/// - `model_schema_prop_meta`: Optional metadata from #[`model_schema_prop`] attribute
-///   - Used for overrides like literals, minLength, etc.
-///   - See Phase 5 in `notes/20250707_field_features.md` for minLength details
-/// - `omits_value`: whether the serde attributes on a *named* field leave its value out of the
-///   serialized output entirely rather than writing it — a `None` under a
-///   `skip_serializing_if = "Option::is_none"`, an empty `Vec` under a `Vec::is_empty`, every
-///   value at all under a bare `skip`. Only a named field has a key to drop: a positional one is
-///   written by its place in a tuple, where nothing can be omitted. A field carrying it is one
-///   whose key serde may never write, which is what the object surfaces ask before choosing
-///   between the two spellings of an optional member — the key-optional `field?: T` for a key
-///   that may be absent, `field: T | undefined` for one that is always written — and what takes
-///   the field out of the JSON surface's `required`. Read in every build: the attribute stating
-///   it is on the field whatever the features say, and one declaration describes one wire.
-/// - `absent_from_wire`: whether the serde attributes on a *named* field take its key out of both
-///   directions at once — nothing serde writes carries it and nothing serde reads keeps what a
-///   payload put under it. A bare `skip` says so, and so do `skip_serializing` and
-///   `skip_deserializing` written side by side, which is the same wire spelled out. A field
-///   carrying it is one no surface describes at all: the surfaces describe the payload serde
-///   writes, and there is no such key in any of them. Read in every build, for the same reason
-///   `omits_value` is.
-/// - `type_span`: where the type this field carries was written — the name segment of a path, the
-///   whole type otherwise, and the innermost name under a wrapper, so `Vec<Inner>` points at
-///   `Inner`. The JSON schema is the one surface that emits a Rust path built from a type name, so
-///   it is the one that can fail to resolve, and this is what its reference carries so the failure
-///   is reported at the user's type instead of at `#[model_schema()]`. Present only under
-///   `jsonschema` for that reason.
-///
-/// Usage notes:
-/// - Created recursively for nested types
-/// - Handles Option<T> by recording its array level in `nullable_levels`
-/// - For `HashMap`, only String keys allowed
-/// - Feature "serde" affects name (rename attributes)
-/// - Feature "zod" enables `zod_type()` method
 #[derive(Clone, Debug)]
 pub struct FieldDef {
     pub absent_from_wire: bool,
@@ -249,20 +161,6 @@ impl PartialEq for FieldDef {
 impl FieldDef {
     /// The enclosing item's own type parameter this field reaches *below* its own position — the
     /// `T` a `Later<T>` hands to the type it names, and the same `T` inside a tuple or a map.
-    ///
-    /// [`Self::parameter_shape_name`] answers for the field itself, this for everything it is
-    /// written over, and a field answering either one describes a value the expansion never sees a
-    /// type for. What differs is what can still be said about it: a field that *is* a parameter has
-    /// no shape at all, while one merely written over a parameter keeps the shape it was written
-    /// with — an array stays an array — and only the leaf goes opaque. So a bound written against
-    /// the shape still reaches something, and a bound written against the leaf reaches nothing on
-    /// any surface however the instantiation fills it.
-    ///
-    /// The first such parameter in declaration order is the one named; a field reaching two names
-    /// them both for the same reason, and one is enough to say what the answer is.
-    ///
-    /// Reads a def already rewritten by [`Self::erase_type_parameters`], for the reason
-    /// `parameter_shape_name` does.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     pub fn argument_parameter_name(&self) -> Option<&str> {
         match &self.field_type {
@@ -304,18 +202,6 @@ impl FieldDef {
     }
 
     /// The element of a collection wrapper, as the field the wrapper's own serialization makes it.
-    ///
-    /// A `Vec<T>` and a set of `T` both write a JSON array of `T`, so the element carries the
-    /// array-ness and answers for what the array holds. The field's own constraints ride along:
-    /// they have nothing but the element to land on, exactly as on the `Vec` spelling, which the
-    /// parser hands over already collapsed onto its element.
-    ///
-    /// Every array level survives the move: the element's own, the one this wrapper adds, and the
-    /// ones the wrapper itself sits under. The result therefore stands for the whole field, and a
-    /// caller must not re-apply the field's own levels on top of it. Each level keeps what it was
-    /// written with — its nullability, and the fixed length of a `[T; N]` — renumbered where it
-    /// moved: the element's levels are the innermost and keep their numbers, while the wrapper's
-    /// own sit above the array it adds.
     pub fn collection_element_field(&self, element: &Self) -> Self {
         let mut arrayed = element.clone();
         arrayed.name.clone_from(&self.name);
@@ -337,12 +223,6 @@ impl FieldDef {
 
     /// The shape this field renders when the values a bound could be spelled against are its
     /// members rather than the field itself.
-    ///
-    /// A map writes its keys and its values, a tuple writes each of its elements, and every surface
-    /// builds those from the inner field defs — which carry no meta, the field's own sitting on the
-    /// outer def none of them reads. A length, a pattern or a range names one value, and
-    /// `model_schema_prop` has no way to say which member it meant, so a bound written here reaches
-    /// nothing on any surface; the caller turns that into a guard error naming the field.
     pub const fn composite_shape_name(&self) -> Option<&'static str> {
         match &self.field_type {
             FieldDefType::Map(_, _) => Some("a map"),
@@ -387,16 +267,6 @@ impl FieldDef {
 
     #[cfg(feature = "zod")]
     /// Checks if this field contains a reference to the given type name.
-    ///
-    /// This is used to detect recursive types where a type references itself.
-    /// For example, `Vec<DynamicValue>` inside `DynamicValue` would return true.
-    ///
-    /// The check is recursive, looking into:
-    /// - `SiblingType` direct references
-    /// - `Map` key and value types
-    /// - `Tuple` element types
-    /// - array wrappers (Vec<T>)
-    /// - `is_optional` wrappers (Option<T>)
     pub fn contains_type_reference(&self, type_name: &str) -> bool {
         match &self.field_type {
             FieldDefType::SiblingType(name, generics) => {
@@ -405,7 +275,6 @@ impl FieldDef {
                 if name == type_name || stripped_name == type_name {
                     return true;
                 }
-                // Also check generic arguments
                 generics
                     .iter()
                     .any(|g| g.contains_type_reference(type_name))
@@ -448,35 +317,6 @@ impl FieldDef {
     /// Rewrites every name that is one of the enclosing item's own type parameters into
     /// [`FieldDefType::TypeParam`], so the surfaces stop reading it as a reference to another
     /// generated type.
-    ///
-    /// This is the one rule the two validating surfaces read a type parameter under, and the one
-    /// place they part company with TypeScript over it. A parameter names no type at expansion, so
-    /// neither surface can leave it standing: each renders the filling that reached it instead —
-    /// the argument the enclosing Zod factory binds, the document the JSON caller supplied or the
-    /// item declared for itself — while the shape it sits in, a tuple's arity, an array, a map's
-    /// keys, stays described either way. TypeScript needs no such rule: it is a type surface, and
-    /// `export type Wrapper<IdType> = { id: IdType }` binds the parameter for real, so it renders
-    /// the name.
-    ///
-    /// Zod is why the rule cannot stop at JSON. Zod publishes *values*, and a `const` cannot be
-    /// parameterised, so a parameter left to render as the `Name$Schema` binding every unresolved
-    /// type is named after would reference a binding no emitted module declares — the consumer
-    /// pasting the output gets a `ReferenceError` before a payload is read. That is why only the
-    /// enclosing item's *own* parameters are rewritten: a genuinely unresolved sibling type keeps
-    /// its `$Schema` reference, because the type it names does publish that binding.
-    ///
-    /// The rewrite carries into what a schema surface may then claim about the value. Each surface
-    /// reaches a parameter through a filling of its own — Zod through the argument the enclosing
-    /// factory binds, JSON through the one document written for the instantiation that asked — so a
-    /// branded newtype constraining one of its own parameters is refused, through the opaque arm of
-    /// `non_string_inner_shape` this rewrite puts it in front of. Three surfaces answering three
-    /// ways is the refusal: a `minLength` written at the declaration would hold against one filling
-    /// on each schema surface, while `validate()` measures `Display` at every instantiation.
-    ///
-    /// Recurses through `SiblingType` generics, `Map` keys/values, and `Tuple` elements. Applied
-    /// after the field guards have read the field, so every guard asks its question of the type
-    /// the author wrote — and in every build, features or none, because which of the two a name is
-    /// is a fact about the declaration rather than about the surfaces reading it.
     pub fn erase_type_parameters(&mut self, parameters: &[String]) {
         if let FieldDefType::SiblingType(name, _) = &self.field_type
             && parameters.iter().any(|parameter| parameter == name)
@@ -502,16 +342,6 @@ impl FieldDef {
 
     /// The name of the type this field renders as, when that type's schema is one the crate writes
     /// whole and a `model_schema_prop` bound has no place in.
-    ///
-    /// Each of these renders a shape fixed here rather than the plain string or number a length, a
-    /// pattern or a range is spelled against: a chrono value as its own ISO spelling, an `ObjectId`
-    /// as the `{"$oid": …}` object serde writes it as. None of the three surfaces reads a bound for
-    /// them and neither does the Rust validator, so a bound written on one reaches nothing; the
-    /// caller turns that into a guard error naming the field instead of dropping it.
-    ///
-    /// Only the field's own rendering is asked about. A map or a tuple holding one of these
-    /// describes its members separately, and a bound on the field around them is
-    /// [`Self::composite_shape_name`]'s to answer for.
     pub const fn fixed_shape_name(&self) -> Option<&'static str> {
         match &self.field_type {
             #[cfg(feature = "object_id")]
@@ -602,11 +432,6 @@ impl FieldDef {
     /// Whether every payload serde writes carries a key for this field — what the JSON surface's
     /// `required` names, and the one question there that a field's `Option`-ness alone cannot
     /// answer.
-    ///
-    /// An `Option` in struct-field position may write no key. A serde attribute that omits the
-    /// value means the same thing for a field of any type. Either one is enough to take the field
-    /// out of `required`, because `required` is a claim about every payload and one payload
-    /// without the key is enough to falsify it.
     #[cfg(feature = "jsonschema")]
     pub fn key_is_required(&self) -> bool {
         !self.is_optional() && !self.omits_value
@@ -615,18 +440,6 @@ impl FieldDef {
     /// Whether the object key this field writes may be absent, which is the question the two
     /// spellings of an optional member answer differently — `field?: T` admits the payload with no
     /// such key, `field: T | undefined` demands the key and lets its value be `undefined`.
-    ///
-    /// Two things say it, and either alone is enough. `ts_optional` says it for the TypeScript
-    /// surface on the author's word, which only an `Option` field may give. A serde attribute that
-    /// omits the value says it off the wire, whatever the field is written as: the payload serde
-    /// writes simply has no key there. That second one asks nothing about `Option`-ness on purpose
-    /// — a `Vec` behind a `Vec::is_empty` predicate has no `None` anywhere in it and its key still
-    /// goes missing, so a rule keyed on `Option` would describe a payload serde does not write.
-    ///
-    /// The two overlap on every field that carries both, which leaves the flag deciding this only
-    /// where no such attribute was written — a field the `serde` feature's `Option`-null guard
-    /// refuses, so the flag's own answer is one a build with that feature off is the only place to
-    /// read.
     fn key_may_be_absent(&self) -> bool {
         self.omits_value
             || (self.is_optional()
@@ -656,18 +469,6 @@ impl FieldDef {
     /// a sibling's binding at all) — `Tagged$SchemaFactory` inside
     /// `z.array(Tagged$SchemaFactory(z.string()))` is exactly as much a module-scope `const` read as
     /// a bare `Tagged$SchemaFactory(z.string())` is.
-    ///
-    /// Unlike [`Self::reaches_a_type_declared_later`], registration is never consulted: a declared
-    /// default is rendered once, standing alone rather than beside the fields of the item that
-    /// declares it, so nothing here can say whether the sibling it names has registered by the time
-    /// this runs — deferring unconditionally is the same answer [`deferred_zod_operand`]'s other
-    /// callers already give for a flattened base and the fold above. The recursion shape matches
-    /// [`Self::contains_type_reference`]: sibling generics, map values, tuple elements. A sequence
-    /// wrapper's own name is not itself a sibling — it renders as the array its elements describe,
-    /// never a binding of its own — so it is excluded exactly as
-    /// [`Self::reaches_a_type_declared_later`] excludes it, while its element is still walked. A map
-    /// key is left unwalked entirely: `HashMap<String, T>` is the only key this crate accepts, and
-    /// `String` can never itself be a sibling reference.
     #[cfg(feature = "zod")]
     pub fn names_a_sibling_binding(&self) -> bool {
         match &self.field_type {
@@ -751,15 +552,6 @@ impl FieldDef {
     }
 
     /// The name of the first `OsString`/`OsStr` this field reaches, at any depth.
-    ///
-    /// Neither has a primitive mapping and neither can get one: serde writes them as an externally
-    /// tagged enum whose variant is the target platform — `{"Unix":[u8, …]}` or
-    /// `{"Windows":[u16, …]}` — so the same Rust field has two wire forms and no schema can
-    /// describe both. Left unmapped they read as an ordinary `SiblingType`, and the generated code
-    /// would reference a schema module the user never wrote; the caller turns this into a guard
-    /// error naming the field instead.
-    ///
-    /// Recurses through `SiblingType` generics, `Map` keys/values, and `Tuple` elements.
     pub fn os_string_name(&self) -> Option<&str> {
         match &self.field_type {
             FieldDefType::SiblingType(name, generics) => {
@@ -810,17 +602,6 @@ impl FieldDef {
 
     /// The enclosing item's own type parameter this field renders as, when a bound spelled against
     /// it names a value whose type the expansion never sees.
-    ///
-    /// A parameter names no type at expansion — the instantiation names one, and one schema is
-    /// written for every instantiation. So the two validating surfaces describe the value as the
-    /// opaque one, which takes no length, no pattern and no range, while the generated validator
-    /// and serde read whatever type the instantiation supplied and hold it to nothing written here.
-    /// A bound therefore reaches nothing on any surface, exactly as one written beside a map's
-    /// members does; the caller turns that into a guard error naming the parameter.
-    ///
-    /// Only a field already read through [`Self::erase_type_parameters`] answers here: which of
-    /// the two a written name is — the item's own parameter or a reference to another type — is
-    /// that rewrite's question, and asking it twice is how the two answers come to differ.
     pub fn parameter_shape_name(&self) -> Option<&str> {
         match &self.field_type {
             FieldDefType::TypeParam(name) => Some(name),
@@ -857,30 +638,6 @@ impl FieldDef {
     /// Whether this field reaches a type the registry does not hold yet — a `#[model_schema]` item
     /// declared below the one being expanded, whether or not that item declares a parameter of its
     /// own.
-    ///
-    /// A generic reference is written as a call to the factory that item goes on to publish, the
-    /// only binding that can take the arguments written here; a zero-argument reference is written
-    /// as a bare read of that item's own `$Schema` const. Both are spliced in as they stand into
-    /// the containing object literal, and each carries a different danger for it. A factory call
-    /// only runs when the enclosing factory is itself later called, well after every module has
-    /// loaded — but where the item below points back at this one, that call re-enters this factory
-    /// before it has reached its cache, and the pair recurses until the stack ends. A bare `$Schema`
-    /// read carries no such call to defer re-entering, but the object literal reading it eagerly
-    /// *is* that other item's own top-level const initializer — so the danger is reading a name a
-    /// module below has not declared yet, the same temporal-dead-zone hazard `deferred_zod_operand`
-    /// exists to solve for a flattened base and a declared default.
-    ///
-    /// Deferring exactly these references is enough to end both, and it needs no cycle to be found.
-    /// Every cycle contains at least one of them: if every reference in a cycle named something
-    /// already registered, declaration positions would strictly decrease all the way round, which
-    /// no cycle can do. What is left once they are deferred is a graph whose every remaining
-    /// reference names something declared earlier, so it cannot cycle and every chain of eager
-    /// calls ends — and a lone forward reference belonging to no cycle at all is ended the same way,
-    /// since nothing here needs one to exist.
-    ///
-    /// The same partial-answer regime the export name and the map-key registry already run under:
-    /// a name the registry does not hold is a name expanded later, and one it does hold was
-    /// expanded before.
     #[cfg(feature = "zod")]
     pub fn reaches_a_type_declared_later(&self) -> bool {
         match &self.field_type {
@@ -924,20 +681,6 @@ impl FieldDef {
 
     /// Rewrites any `Self` type reference to the concrete enclosing type name, at the parameters
     /// the enclosing item declares.
-    ///
-    /// A recursive type may refer to itself with the `Self` keyword (e.g. `Array(Vec<Self>)`). The
-    /// macro detects recursion and renders references by comparing type names, so `Self` must be
-    /// resolved to the actual type name before that logic runs; afterwards `Vec<Self>` is treated
-    /// exactly like `Vec<EnclosingType>`.
-    ///
-    /// `Self` on a *generic* item names that item at its own parameters — it is the one spelling
-    /// whose arguments are implied rather than written — so the parameters are restored here, where
-    /// the name is. Left off, the reference reads as a name with no arguments at all: the Zod
-    /// surface calls the item's factory with none of the arguments it requires, and the TypeScript
-    /// one writes a bare name beside a declaration that binds parameters. `Self` cannot be written
-    /// with arguments of its own, so there is nothing here to overwrite.
-    ///
-    /// Recurses through `SiblingType` generics, `Map` keys/values, and `Tuple` elements.
     pub fn resolve_self_references(&mut self, type_name: &str, parameters: &[String]) {
         match &mut self.field_type {
             FieldDefType::SiblingType(name, generics) => {
@@ -1002,10 +745,6 @@ impl FieldDef {
     /// The members of the untagged union this field names as an object flattening it spells them,
     /// as the registry recorded them — and nothing for a field that names no such union, and for one
     /// whose members carry no exclusion the union's own name does not already describe.
-    ///
-    /// Answered under the same bound [`Self::zod_union_members`] is answered under, and for the same
-    /// reason: what is spliced in the name's place has to be the whole of what the operand
-    /// describes.
     #[cfg(all(feature = "serde", feature = "typescript"))]
     pub fn ts_union_members(&self) -> Vec<String> {
         let wrapped = self
@@ -1123,19 +862,6 @@ impl FieldDef {
     /// The key a `Partial<Record<…>>` is written with: the key's own type, except where the key is
     /// one of the enclosing item's type parameters, which states `string` — the same answer
     /// [`Self::zod_map_key_type`] gives, for the same reason.
-    ///
-    /// This is the one place the type surface stops rendering a parameter as itself, and the
-    /// declaration is what forces it. `Record<K, T>` is declared `K extends keyof any`, so a
-    /// declaration that hands it a parameter it binds without bounding does not type-check at all —
-    /// the consumer pasting the emitted `.ts` gets the error before writing a value. Bounding the
-    /// parameter instead moves the failure rather than fixing it: the bound propagates to every
-    /// name written over the item, and `unknown` — what a binding annotated for the erased value
-    /// fills the parameter with — does not satisfy it either.
-    ///
-    /// What the member gives up is naming the parameter. What it gains is the guarantee serde
-    /// already makes: an instantiation either writes this map's keys as strings or refuses the
-    /// whole map at serialization, so no filling of the parameter ever reaches the wire as
-    /// anything else. The value beside the key still names whatever parameter it was written with.
     fn typescript_map_key_typename(&self) -> String {
         if self.parameter_shape_name().is_some() {
             return "string".to_owned();
@@ -1145,12 +871,6 @@ impl FieldDef {
 
     /// What this field contributes to an object that writes its members beside its own, on the
     /// TypeScript surface: the value itself, with no answer for the outermost `Option`.
-    ///
-    /// A merged source has no key of its own, so that `Option` is not the question
-    /// [`Self::typescript_typename`] answers. There, a `None` is a key the object leaves out; here
-    /// it is every one of the source's keys left out at once — the object writes its own members
-    /// merged with the source's or writes its own alone, and a choice between two key sets belongs
-    /// where the merge is assembled rather than on the operand it is assembled from.
     #[cfg(feature = "typescript")]
     pub fn typescript_merged_typename(&self) -> String {
         self.typescript_base()
@@ -1171,28 +891,6 @@ impl FieldDef {
     }
 
     /// Generates the TypeScript type name for this field.
-    ///
-    /// This method is the core of TypeScript type generation. It recursively builds
-    /// the TS type string based on `field_type`, `array_depth`, and `nullable_levels`.
-    ///
-    /// Process:
-    /// 1. Match on `field_type` to get base type
-    /// 2. Wrap in Array<...> once per `array_depth` level, adding `| null` inside the wrap at each
-    ///    level written as an `Option` — the array is always written, so the `None` is an item
-    /// 3. If `is_optional`, which is that question asked of the outermost level: struct-field
-    ///    position adds `| undefined`, or nothing at all where the key itself may be absent and
-    ///    [`Self::optional_key_marker`] writes the `?` that says so; tuple-element and map-value
-    ///    positions add `| null` (neither can be omitted like an object key, so a `None` there
-    ///    serializes as `null`)
-    ///
-    /// Feature notes:
-    /// - "`object_id"`: Uses special `ObjectId` type
-    /// - Ignores `model_schema_prop_meta` currently (except implicitly through `field_type`)
-    /// - For `StringLiteral`, generates quoted string literal
-    /// - All Rust numbers map to 'number' in TS
-    ///
-    /// See the emitters in `model_schema.rs` for how this is spliced into a full type definition.
-    /// Examples in README.md show generated output.
     pub fn typescript_typename(&self) -> String {
         let pre_result = self.typescript_base();
         if self.is_optional() {
@@ -1226,14 +924,6 @@ impl FieldDef {
     /// The type match plus one `z.array(…)` per array level, each carrying the `z.nullable(…)` of
     /// the level it wraps and the `.length(N)` of a level written as a fixed-size `[T; N]`, before
     /// the preprocess wrap.
-    ///
-    /// Zod is a validator, so it says what the JSON schema says: serde reads a `[T; N]` back only
-    /// from an array of exactly `N` items, and `.length` is that constraint spelled directly. The
-    /// TypeScript surface takes the other answer and stays `Array<T>` — see `array_lengths`.
-    ///
-    /// A set's element re-enters the rendering here rather than at `zod_base`: it carries a copy of
-    /// the field's own metadata, and the preprocess wrap belongs once, outside the array — where
-    /// the `Vec` spelling of the same field puts it.
     #[cfg(feature = "zod")]
     fn zod_array_base(&self) -> String {
         let result = match &self.field_type {
@@ -1348,17 +1038,6 @@ impl FieldDef {
 
     /// The key schema a `z.record(…)` is written with: the key's own, except where the key is one
     /// of the enclosing item's type parameters.
-    ///
-    /// A record key has to produce string keys, and the opaque value a parameter describes as
-    /// everywhere else declines to say anything at all about them — the one position where saying
-    /// nothing says less than the wire already guarantees. serde is what guarantees it: an
-    /// instantiation either writes this map's object keys as strings or refuses the whole map at
-    /// serialization with `key must be a string`, with no fallback form, so `z.string()` holds for
-    /// every instantiation that serializes at all. It is also the answer the JSON surface reads off
-    /// the same key through its own classification, which is what keeps the two saying one thing.
-    ///
-    /// Only a bare key reaches the parameter arm: a key written under a sequence or an `Option`
-    /// wrapper is refused before any surface renders the map.
     #[cfg(feature = "zod")]
     fn zod_map_key_type(&self) -> String {
         if self.parameter_shape_name().is_some() {
@@ -1409,19 +1088,16 @@ impl FieldDef {
     #[cfg(feature = "zod")]
     fn zod_string_type(&self) -> String {
         let mut result = "z.string()".to_owned();
-        // Add min length validation if specified
         if let Some(meta) = &self.model_schema_prop_meta
             && let Some(min_len) = meta.min_length
         {
             result = format!("{result}.min({min_len})");
         }
-        // Add max length validation if specified
         if let Some(meta) = &self.model_schema_prop_meta
             && let Some(max_len) = meta.max_length
         {
             result = format!("{result}.max({max_len})");
         }
-        // Add pattern validation if specified
         if let Some(meta) = &self.model_schema_prop_meta
             && let Some(pattern) = &meta.pattern
         {
@@ -1433,29 +1109,6 @@ impl FieldDef {
 
     #[cfg(feature = "zod")]
     /// Generates the Zod schema string for this field (requires "zod" feature).
-    ///
-    /// Similar to `typescript_typename()` but generates Zod validation schema.
-    /// Uses z.* functions appropriate to the type.
-    ///
-    /// Additional logic:
-    /// - For String: Adds .`min(min_len)` if `model_schema_prop_meta` has `min_length`
-    /// - For literals: Uses z.literal(...)
-    /// - For `ObjectId`: Uses regex validation for hex string
-    /// - Wraps with `z.array()` once per `array_depth` level, wrapping `z.nullable(…)` inside it
-    ///   at each level written as an `Option` and appending `.length(N)` at each level written as a
-    ///   fixed-size `[T; N]`
-    /// - If `is_optional`, which is that question asked of the outermost level: struct-field
-    ///   position wraps `z.union([type, z.undefined()])`; tuple-element and map-value positions wrap
-    ///   `z.nullable(type)` (neither can be omitted like an object key, so a `None` there
-    ///   serializes as `null`)
-    /// - Otherwise, if the key may still go missing — a serde attribute dropping the value of a
-    ///   field that is no `Option` — appends `.optional()`. The value under the key is unchanged,
-    ///   so the type is left as it stands and only its presence is relaxed. Recorded against zod
-    ///   4.4.3: inside a `z.strictObject`, that member admits the payload with the key absent and
-    ///   the payload carrying it, still rejects `null`, and still rejects an unrecognized key.
-    ///
-    /// Requires Zod v4 in frontend - generates v4-compatible syntax.
-    /// See `notes/20250706_features.md` for Zod feature details.
     pub fn zod_type(&self) -> String {
         let pre_result = self.zod_base();
         if self.is_optional() {
@@ -1469,16 +1122,6 @@ impl FieldDef {
 
     /// The members of the untagged union this field names, as the registry recorded them, and
     /// nothing for a field that names no such union.
-    ///
-    /// A merge cannot join a union as one operand — an intersection recognizes exactly the keys its
-    /// operands name, and a `z.union` names none — so it joins one member per branch instead, and
-    /// these are the branches. The members are recorded already multiplied out, so a member that is
-    /// itself a union has already contributed its own.
-    ///
-    /// Answered only for a field whose whole Zod spelling *is* the name the registry keys — an
-    /// array level or a preprocess wrap is part of what the operand validates, and a member spliced
-    /// in the name's place would drop it. The outermost `Option` is not one of those: it is what
-    /// [`Self::zod_merged_schema`] already leaves to the merge.
     #[cfg(feature = "zod")]
     pub fn zod_union_members(&self) -> Vec<ZodUnionMember> {
         let wrapped = self
@@ -1513,12 +1156,6 @@ fn zod_factory_call(name: &str, arguments: &[FieldDef]) -> String {
 }
 
 /// The one list of std wrappers the crate renders as arrays, shared by every surface.
-///
-/// Membership is decided on the wire and nothing else: serde writes each of these as a JSON array
-/// of its single element type, so each describes as the `Vec` of that element does. The maps are
-/// absent because they write objects; `Vec` is listed even though the parser collapses it onto its
-/// element as an array level long before anything asks a wrapper's name, so that a `Vec` written
-/// where a wrapper name is read still takes the wrapper path.
 pub fn is_sequence_wrapper(name: &str) -> bool {
     matches!(
         name,
@@ -1528,17 +1165,6 @@ pub fn is_sequence_wrapper(name: &str) -> bool {
 
 /// The number of leading type arguments a std container's wire form is written from, or `None` for
 /// a name that is not one of them.
-///
-/// std's hashed maps and sets carry a hasher past the types they write, and each of these
-/// containers takes an allocator beside it. Neither reaches the wire — serde writes the same bytes
-/// whichever is named — so neither is part of what the container describes as, and an argument past
-/// this count is dropped rather than read as a type of its own.
-///
-/// The count is what the container is claimed on, not what it is written with: a spelling carrying
-/// fewer arguments than this is not the container at all, and is left to fall through as the
-/// sibling it was written as, where the schema module it names is reported unresolvable against the
-/// author's own type. The one-argument list is the surfaces' shared answer for what writes a JSON
-/// array, so a wrapper cannot be read here as a container and there as a name of its own.
 fn container_wire_arity(name: &str) -> Option<usize> {
     if name == "HashMap" || name == "BTreeMap" {
         Some(2)
@@ -1550,28 +1176,11 @@ fn container_wire_arity(name: &str) -> Option<usize> {
 }
 
 /// The one list of std wrappers the crate reads straight through to what they hold.
-///
-/// Membership is decided on the wire and nothing else: serde writes each of these as its inner
-/// value, with nothing of its own around it, so a field written under one is the very field its
-/// inner type is. The parser therefore collapses them onto that inner field and no surface ever
-/// learns a wrapper was written — which is what keeps a wrapper name out of the generated output,
-/// where none of the three surfaces has any meaning for it.
-///
-/// `Cow` is covered on the same terms despite carrying a lifetime beside its type: the lifetime is
-/// not a type argument and never reaches the collected arguments, so a `Cow` arrives with the one
-/// argument a `Box` arrives with. The interior-mutability wrappers are absent — that is a wider
-/// list than this defect was measured over, not a claim that they write anything else.
 pub fn is_transparent_wrapper(name: &str) -> bool {
     matches!(name, "Arc" | "Box" | "Cow" | "Rc")
 }
 
 /// Classifies a `syn::Variant` into its `VariantKind`.
-///
-/// This determines how the variant should be rendered in TypeScript/Zod:
-/// - Unit → no content field
-/// - Named → individual named fields
-/// - `TupleSingle` → flattened `value: T`
-/// - `TupleMultiple` → tuple `value: [T1, T2, ...]`
 pub fn classify_variant(variant: &Variant) -> VariantKind {
     match &variant.fields {
         Fields::Unit => VariantKind::Unit,
@@ -1590,29 +1199,6 @@ pub fn classify_variant(variant: &Variant) -> VariantKind {
 }
 
 /// Main function to create `FieldDef` from `syn::Type`.
-///
-/// This is the entry point for field analysis. It recursively parses the Rust type
-/// syntax tree to build the `FieldDef` structure.
-///
-/// Handles:
-/// - Primitives and simple types (via `get_field_def_type_or_sibling`)
-/// - Generics (Option<T>, Vec<T>, `HashMap`<K,V>)
-/// - Tuples, arrays, slices, references
-/// - Falls back to Unknown for unsupported types
-///
-/// Key behaviors:
-/// - Strips references (&T -> T)
-/// - Counts an `array_depth` level for each Vec, slice, array
-/// - Records a nullable level for each Option, at the array level it was written at
-/// - Only supports `HashMap`<String, T> (panics or errors otherwise per rules)
-/// - Uses `safe_type_name()` to strip Json suffix
-///
-/// Called from `process_field()` in `model_schema.rs` for each struct field.
-///
-/// Builds a `FieldDef` for a `Type::Path` (named type, possibly with generic arguments).
-///
-/// Handles `Option<T>`, `Vec<T>`, `HashMap`/`BTreeMap`, `DateTime<Tz>`, and falls back to
-/// `SiblingType`/`Unknown` for everything else.
 fn get_field_def_from_type_path(
     type_path: &syn::TypePath,
     safe_name: String,
@@ -1671,13 +1257,6 @@ fn get_field_def_from_type_path(
 }
 
 /// Builds a `FieldDef` for a named type written with generic arguments.
-///
-/// Handles `Option<T>`, `Vec<T>`, the transparent wrappers, `HashMap`/`BTreeMap` and
-/// `DateTime<Tz>`, and falls back to `SiblingType` for everything else.
-///
-/// Only the type arguments are read. A lifetime writes nothing, so a type carrying one arrives here
-/// with the arguments it would have without it — which is what lets `Cow<'a, T>` be answered for by
-/// the same single-argument arms as `Box<T>`.
 fn get_field_def_from_generic_type(
     type_ident: &Ident,
     args: &syn::AngleBracketedGenericArguments,
@@ -1778,16 +1357,6 @@ fn get_field_def_from_generic_type(
 }
 
 /// The def a single-argument wrapper collapses onto, for the wrappers that collapse.
-///
-/// A collapse keeps the field and drops only the wrapper. The docs were written where the field
-/// was, not around what it holds, so they cross onto the element the field's own name crosses onto
-/// — the element was parsed with none of its own to lose. Everything a wrapper could sit around or
-/// inside is already on that element and rides along untouched: `Option` lifts its optionality onto
-/// the outermost level, a sequence counts one more level, and a wrapper that is not on the wire at
-/// all adds nothing for the field to carry and hands the element over whole.
-///
-/// `None` for every other name, which is a wrapper this does not answer for rather than one that
-/// collapses to nothing — the caller goes on to its own arms.
 fn collapsed_wrapper_def(
     ident: &str,
     element: &FieldDef,
@@ -1824,12 +1393,6 @@ fn literal_array_length(len: &syn::Expr) -> Option<usize> {
 }
 
 /// Debug logging: Set `RUST_LOG=trace` to see HashMap/SiblingType creation.
-///
-/// The arms below classify by the shape they are handed, so what they are handed is the type as
-/// written: a `macro_rules!` substitution arrives grouped, and the grouping is read off before any
-/// arm looks. Everything reached from here comes back through this function, so a substitution
-/// nested inside a written shape — `Vec<$t>`, `&$t`, `($a, $b)` — is read through on its own way
-/// down.
 pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
     let safe_name = safe_type_name(name);
     let written = written_type(ty);
@@ -1894,18 +1457,6 @@ pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
 }
 
 /// Helper to map Rust type name strings to `FieldDefType`.
-///
-/// Used in `get_field_def` for types without generics.
-///
-/// Mapping rules:
-/// - Built-in primitives to their variants
-/// - Types ending with "Json" to `SiblingType` (strips suffix in TS)
-/// - Other types to `SiblingType`
-/// - `ObjectId`: Special handling if feature enabled, else `SiblingType` with warning
-///
-/// Feature "`object_id"`:
-/// - Enables special `ObjectId` variant
-/// - Without: Prints compile-time warning and treats as custom type
 fn get_field_def_type_or_sibling(t_name: &str) -> FieldDefType {
     if lookup_alias_info(t_name).is_some() {
         return FieldDefType::SiblingType(t_name.to_owned(), vec![]);
@@ -1966,22 +1517,6 @@ fn get_field_def_type_or_sibling(t_name: &str) -> FieldDefType {
 
 /// Whether a name is one the language reserves for a primitive type that
 /// [`get_field_def_type_or_sibling`] has no arm for.
-///
-/// The dispatch above is total by construction: a name it does not recognise is taken for a sibling
-/// — another `model_schema` item, named before or after this one — and rendered as a reference to
-/// the module that item publishes. That is the right reading of `Foo`, which may well be declared
-/// below, and it is gibberish for a reserved primitive name the dispatch has no arm for: no module
-/// of that name will ever exist, so the reference resolves to nothing and the author reads an
-/// `E0433` about a module they never wrote.
-///
-/// The two cannot be told apart by tokens, so only what is *provably* not a sibling is named here:
-/// the primitive names the language reserves, minus the ones the dispatch does answer for — `char`
-/// among them since it gained [`FieldDefType::Char`]. A caller refusing on this answer refuses
-/// exactly the spellings that cannot become siblings later.
-///
-/// `f16` and `f128` are listed with `i128` and `u128` although the language does not yet stabilise
-/// them: they are reserved primitive names either way, and a build that gains them should reach a
-/// refusal naming the limitation rather than the phantom module.
 #[cfg(feature = "jsonschema")]
 pub fn is_undescribable_primitive(name: &str) -> bool {
     matches!(name, "i128" | "u128" | "f16" | "f128")
@@ -2010,12 +1545,6 @@ pub fn parse_serde_field_attributes(attrs: &[Attribute]) -> SerdeFieldMeta {
 }
 
 /// Utility to check if an enum is a plain unit enum (no fields in variants).
-///
-/// Used in `model_schema.rs` to distinguish plain enums (union types) from
-/// tagged enums (discriminated unions).
-///
-/// Plain enums generate string unions in TS/Zod.
-/// See enum examples in README.md.
 pub fn is_plain_enum(item_enum: &ItemEnum) -> bool {
     item_enum
         .variants

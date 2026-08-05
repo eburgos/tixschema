@@ -515,11 +515,6 @@ mod zod {
     /// own default folds the argument onto that item's own `$SchemaDefault`, so the checks and
     /// brand it declared are carried in by reference instead of rebuilt under a `z.string()` the
     /// memo would not share with it.
-    ///
-    /// The folded reference is deferred through `z.lazy` — `Tagged$SchemaDefault` is a module-scope
-    /// `const` like `EchoedDefault$SchemaDefault` itself, and a generated module concatenates one
-    /// string per type in whatever order the consuming project's entity list produces, so nothing
-    /// here can know whether `Tagged`'s `const` is written above this one or below it.
     #[test]
     fn a_default_naming_a_siblings_own_default_folds_onto_its_binding() {
         let zod = EchoedDefault::<String>::zod_schema();

@@ -41,12 +41,6 @@ pub const fn should_generate_json_schema() -> bool {
 }
 
 /// One type parameter of a generic item, as that item's own schema module reads it.
-///
-/// JSON Schema has no type parameters, so every document is written at one filling. The two members
-/// are the two ends of that: `binding` is the local the item's body reaches this parameter's
-/// argument document through — every position that renders the parameter names it — and `default`
-/// is the document the standalone form fills the slot with, the item's own declared filling
-/// rendered through the dispatch every other type position is rendered through.
 pub struct SchemaParameter {
     pub binding: proc_macro2::Ident,
     pub default: proc_macro2::TokenStream,
@@ -62,37 +56,6 @@ fn defs_pointer(def_name: &str) -> String {
 }
 
 /// The JSON-schema methods a schema module publishes.
-///
-/// `json_schema` is the document a caller asks for. `json_schema_within` is that same description
-/// written into a document already being built, and carries the two things that have to travel
-/// with it: the names whose descriptions are still being written, and the definitions the
-/// document's root must hold.
-///
-/// A cycle is only knowable there. A type names another by inlining it, and no expansion can see
-/// the cycle it is part of — the other type may not have been expanded yet, and one that has been
-/// cannot be revisited. So the name is recognized while the description runs: a name re-entered
-/// while still in flight describes as a `$ref` into `$defs`, and the frame that put it in flight
-/// hoists its body to the root that pointer resolves against.
-///
-/// What travels beside each name is the filling its body is being written at, because a pointer
-/// resolves to that body and nothing else. A name re-entered at the same filling is the cycle the
-/// `$ref` describes; one re-entered at another is a body the document has no second place to hold,
-/// and is refused rather than pointed at the wrong one.
-///
-/// An item declaring type parameters publishes each of those two at a filling as well: JSON Schema
-/// has no parameters, so a document exists only once each of them names a type, and which types
-/// those are is the reference site's to say. So `json_schema_with` and `json_schema_within_with`
-/// take the fillings positionally, in the order the item declares its parameters, and the two
-/// argumentless forms are those same two applied to what the item declared for itself. An item
-/// declaring none publishes the pair alone: there is no slot to fill, and nothing to pass.
-///
-/// Which of the argumentless forms evaluates that declared filling is not free to choose. A
-/// filling may name another item, and such a document is written by asking that item's own
-/// `within` — which reads the names in flight and the definitions being hoisted. Only
-/// `json_schema_within` holds those, so it is the one that evaluates the declared documents, and
-/// `json_schema` reaches its own filling the same way every other rooted document is reached: by
-/// running `within` against a fresh document. An item declaring parameters is rooted exactly as
-/// one declaring none is.
 pub fn json_schema_methods(
     def_name: &str,
     body: &proc_macro2::TokenStream,
@@ -208,13 +171,6 @@ fn guarded_description(
 
 /// How a reference coming back around to a name at another filling refuses, as the tokens the
 /// guard raises it with.
-///
-/// A pointer resolves to one body, and the document holds one definition per name — so the
-/// reference has nowhere to put the body its own arguments describe, and writing the pointer anyway
-/// would stand the other filling's members where this one's belong. Both fillings are named because
-/// which of them is the mistake is the author's to say, and the way past is named beside them: write
-/// the reference at the filling already being written, or give each filling a definition of its own
-/// by keying `$defs` by name and filling rather than by name.
 fn refilled_cycle_refusal(def_name: &str) -> proc_macro2::TokenStream {
     let message = format!(
         "`{def_name}`: a reference closes a cycle at a filling the document is not being written \
@@ -259,15 +215,6 @@ fn rooted_document(described: &proc_macro2::TokenStream) -> proc_macro2::TokenSt
 
 /// The filling an item declared for itself, handed on to the form that takes fillings — the body
 /// of the argumentless `within`, which is the one frame that owns the recursion state.
-///
-/// The documents are bound to a local before the delegation rather than written into the call. A
-/// filling naming another item describes through that item's own `within`, which reads the run's
-/// two values; a borrow taken for the delegation would still be live while the filling asked for
-/// its own, and neither value exists at all in a frame that does not receive them. Bound here,
-/// each filling runs to completion in turn and the borrows are handed on only once the array
-/// holds them all — the remedy a reference site carrying a nested generic argument already uses.
-///
-/// Declaration order, which is the order the fillings are read back off the argument list in.
 fn declared_delegation(parameters: &[SchemaParameter]) -> proc_macro2::TokenStream {
     let declared = parameters.iter().map(|parameter| &parameter.default);
     quote::quote! {
@@ -277,13 +224,6 @@ fn declared_delegation(parameters: &[SchemaParameter]) -> proc_macro2::TokenStre
 }
 
 /// The locals the body reads its parameters through, bound off the argument list positionally.
-///
-/// A caller supplying fewer arguments than the item declares parameters leaves the rest at the
-/// permissive empty schema, which is what a parameter with nothing said about it always described
-/// as. The names are underscore-led because a parameter the declaration binds need not reach the
-/// document at all — one written only in a bound, or behind a key serde writes as a string
-/// whatever fills it — and an item is not owed a warning for a parameter it declares and the wire
-/// does not carry.
 fn argument_bindings(parameters: &[SchemaParameter]) -> proc_macro2::TokenStream {
     let bound = parameters.iter().enumerate().map(|(position, parameter)| {
         let binding = &parameter.binding;
@@ -426,19 +366,6 @@ fn merge_readers() -> proc_macro2::TokenStream {
 }
 
 /// What the merge holds while it multiplies, as the tokens that declare it.
-///
-/// The spelling travels with the source that used it, because the two spellings say different
-/// things about a payload more than one branch admits. A discriminated enum's members are
-/// exclusive, so `oneOf` costs it nothing; an untagged enum is first-match-wins, and members whose
-/// key sets overlap admit each other's payloads as a matter of course — under `oneOf` the document
-/// would reject exactly what serde writes for the narrower member. So the branches a source
-/// multiplies out are held under that source's own wrapper, and a second source multiplies each of
-/// them again from there: the wrappers nest rather than flatten into one, and each branch set keeps
-/// the rule its own union was written under.
-///
-/// A source is a tree rather than a list for the same reason: a branch that is itself a union was
-/// written under a spelling of its own, and grafting its leaves onto the source's wrapper would
-/// answer for them under a rule they were not written under.
 fn merged_tree() -> proc_macro2::TokenStream {
     quote::quote! {
         enum Branches<'defs> {
@@ -560,12 +487,6 @@ fn merged_tree() -> proc_macro2::TokenStream {
 }
 
 /// How the expansion refuses a schema it cannot merge, as the tokens that declare the refusals.
-///
-/// The whole merged body and a branch any depth down are the same two failures, so one expansion
-/// answers for both and each refusal carries both wordings: an empty position is the body itself,
-/// and any other names the branch it was reached through. A branch's position is the trail of
-/// one-based choices taken to reach it, so a member of a nested union is named `1.2` rather than
-/// twice as `2`.
 fn expansion_refusals(diagnostic: &MergeDiagnostic<'_>) -> proc_macro2::TokenStream {
     let MergeDiagnostic {
         cycle_remedy,
@@ -633,19 +554,6 @@ fn expansion_refusals(diagnostic: &MergeDiagnostic<'_>) -> proc_macro2::TokenStr
 }
 
 /// The branch tree one merged schema contributes, as the tokens that declare how it is read.
-///
-/// A union names no type of its own, so the branch is where the questions the whole merged body was
-/// asked are asked again — and serde cannot write a branch that is not an object into the object
-/// being written any more than it could write the whole value that way. A branch that is a deferred
-/// name carries none of the members it stands for, so it is read back out of the definitions first,
-/// the same way the whole merged body is. A branch that is itself a union names no members either,
-/// so the questions are asked again below it, and again, until every leaf is an object the base can
-/// merge or a refusal.
-///
-/// Two things bound the descent. Plain nesting reaches a strictly smaller part of a finite document,
-/// so it ends on its own; a deferred name does not, because the body it resolves to may name it
-/// back. So the names resolved on the way down are carried, and a name reached twice on one path is
-/// a cycle by construction.
 fn branch_expansion() -> proc_macro2::TokenStream {
     quote::quote! {
         fn expanded_branches<'defs>(
@@ -726,31 +634,6 @@ fn branch_expansion() -> proc_macro2::TokenStream {
 }
 
 /// A base object's members with the members of every schema merged beside them.
-///
-/// serde writes a `#[serde(flatten)]` base and an internally tagged variant's newtype content the
-/// same way — what is merged contributes its members to the object the base is writing — so both
-/// describe through this one merge rather than each spelling its own. `base` is a
-/// `serde_json::Map` expression and every entry of `merged` a `serde_json::Value` one; the result
-/// is a `serde_json::Value`.
-///
-/// A merged schema that is itself a union multiplies out rather than collapsing, so each branch
-/// stays a closed object naming exactly the members that branch writes. Both spellings of a union
-/// are read: a discriminated enum's `oneOf` and an untagged one's `anyOf` alike name what serde
-/// picked one of, and the merged schema is the union of the merges. A source reached through an
-/// `Option` offers its own absence beside whatever it described as, the two key sets being what the
-/// field actually writes.
-///
-/// Only a value serde writes as an object has members to contribute, and the expansion cannot
-/// always tell which types those are — a name reaches the merge without saying what it writes. The
-/// schema it produces does say, so the merge reads it there: a description naming any type but
-/// `object` is refused rather than merged, which is the last point at which the wrong schema can
-/// still be stopped. The one exception is the `null` of a choice the edge itself offers, which is
-/// the source's own absence written out and is read as that. A flatten edge that closes a cycle is
-/// refused on the same terms, named for the frame that read it.
-///
-/// The reading itself is the tokens [`merge_readers`] emits, and what the multiplication is carried
-/// in is [`merged_tree`]; both are written into the block this returns, so the whole merge is one
-/// expression the caller can place wherever a `serde_json::Value` is wanted.
 pub fn merged_object_value(
     base: &proc_macro2::TokenStream,
     merged: &[MergedSource],

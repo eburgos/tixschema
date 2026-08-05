@@ -277,10 +277,6 @@ fn test_untagged_entry_constructible() {
     assert!(entry.data_element_id.is_empty());
 }
 
-// ========================================================================
-// TypeScript
-// ========================================================================
-
 #[test]
 #[cfg(feature = "typescript")]
 fn test_tuple_single_union_typescript() {
@@ -325,10 +321,6 @@ fn test_flatten_end_to_end_typescript() {
         "Got:\n{variant_ts}"
     );
 }
-
-// ========================================================================
-// Zod
-// ========================================================================
 
 #[test]
 #[cfg(feature = "zod")]
@@ -396,10 +388,6 @@ fn test_flatten_end_to_end_zod() {
     );
 }
 
-// ========================================================================
-// JSON Schema
-// ========================================================================
-
 #[test]
 #[cfg(feature = "jsonschema")]
 fn test_tuple_single_union_json_schema() {
@@ -455,10 +443,6 @@ fn test_flatten_end_to_end_json_schema() {
     assert_eq!(any_of[1]["pattern"], "^[0-9]{4}-[0-9]{2}-[0-9]{2}$");
 }
 
-// ========================================================================
-// Serde round-trip
-// ========================================================================
-
 #[test]
 fn test_serde_round_trip_string_member() {
     let value = DateValue::S(DateString("2026-06-26".to_owned()));
@@ -490,10 +474,6 @@ fn test_serde_round_trip_number_member() {
     let back: DateValue = serde_json::from_str(&json).unwrap();
     assert_eq!(back, value);
 }
-
-// ========================================================================
-// Untagged newtype variant holding an `Option` — the slot the three surfaces read against
-// ========================================================================
 
 /// What serde writes for an untagged newtype variant whose content is `None` — the capture the
 /// three surface assertions below are read against.
@@ -549,10 +529,6 @@ fn test_untagged_newtype_option_content_json_schema_null_flavor() {
     );
     assert_eq!(any_of[1], serde_json::json!({ "type": "string" }));
 }
-
-// ========================================================================
-// Untagged member holding a map — the key the guard reads off the written type
-// ========================================================================
 
 /// A key that enumerates its members, and an open one, both render the map their written type
 /// earns: the guard is a filter over keys the registry rules out, never a rewrite of the ones it

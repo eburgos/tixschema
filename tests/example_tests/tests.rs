@@ -17,16 +17,13 @@ fn test_simple_enum_example() {
         Numeric,
     }
 
-    // Check that schema_example() method exists and returns correct value
     let example = DataType::schema_example();
     assert_eq!(example.as_str().unwrap(), "Numeric");
 
-    // Check that zod schema includes the example
     let zod = DataType::zod_schema();
     assert!(zod.contains("example:"));
     assert!(zod.contains("\"Numeric\""));
 
-    // Verify that example injection doesn't drop $Schema line
     #[cfg(feature = "typescript")]
     {
         assert!(
@@ -58,12 +55,10 @@ fn test_simple_struct_example() {
         pub name: String,
     }
 
-    // Check that schema_example() method exists
     let example = User::schema_example();
     assert_eq!(example["name"].as_str().unwrap(), "John Doe");
     assert_eq!(example["age"].as_u64().unwrap(), 25);
 
-    // Check that zod schema includes the example
     let zod = User::zod_schema();
     assert!(zod.contains("example:"));
     assert!(zod.contains("John Doe"));
@@ -92,14 +87,12 @@ fn test_complex_struct_with_logic() {
         pub tags: Vec<String>,
     }
 
-    // Check that schema_example() method exists and logic executed correctly
     let example = ComplexUser::schema_example();
     assert_eq!(example["id"].as_str().unwrap(), "usr_123");
     assert_eq!(example["tags"][0].as_str().unwrap(), "admin");
     assert_eq!(example["tags"][1].as_str().unwrap(), "active");
     assert_eq!(example["age"].as_u64().unwrap(), 30);
 
-    // Check that zod schema includes the example
     let zod = ComplexUser::zod_schema();
     assert!(zod.contains("example:"));
 }
@@ -127,13 +120,11 @@ fn test_nested_types_example() {
         pub tags: Vec<String>,
     }
 
-    // Check that schema_example() method exists
     let example = Profile::schema_example();
     assert_eq!(example["tags"][0].as_str().unwrap(), "tag1");
     assert_eq!(example["metadata"]["key1"].as_str().unwrap(), "value1");
     assert_eq!(example["optional_field"].as_str().unwrap(), "present");
 
-    // Check that zod schema includes the example
     let zod = Profile::zod_schema();
     assert!(zod.contains("example:"));
 }
@@ -157,13 +148,11 @@ fn test_discriminated_enum_example() {
         UserDeleted { user_id: String },
     }
 
-    // Check that schema_example() method exists
     let example = Event::schema_example();
     assert_eq!(example["type"].as_str().unwrap(), "UserCreated");
     assert_eq!(example["user_id"].as_str().unwrap(), "user_123");
     assert_eq!(example["timestamp"].as_str().unwrap(), "2024-01-01");
 
-    // Check that zod schema includes the example
     let zod = Event::zod_schema();
     assert!(zod.contains("example:"));
 }
@@ -185,7 +174,6 @@ fn test_multiple_examples_uses_first() {
         pub value: u32,
     }
 
-    // Check that only the first example is used
     let example = FirstExample::schema_example();
     assert_eq!(example["value"].as_u64().unwrap(), 1);
 }
@@ -204,10 +192,6 @@ fn test_no_example_no_method() {
     };
     assert!(no_example.value.is_empty());
 
-    // schema_example() should not exist, so we can't call it
-    // This test just verifies it compiles without the method
-
-    // However, zod schema should still be generated without example
     #[cfg(feature = "zod")]
     {
         let zod = NoExample::zod_schema();
@@ -230,7 +214,6 @@ fn test_typescript_zod_format() {
 
     let zod = Test::zod_schema();
 
-    // Should have TypeScript-style format with ZodType
     assert!(zod.contains("ZodType<"));
     assert!(zod.contains("$RawSchema"));
     assert!(zod.contains("example:"));
@@ -251,7 +234,6 @@ fn test_javascript_zod_format() {
 
     let zod = Test::zod_schema();
 
-    // Should have JavaScript-style format without ZodType
     assert!(!zod.contains("ZodType<"));
     assert!(zod.contains("example:"));
 }
@@ -276,9 +258,7 @@ fn test_serde_attributes_in_example() {
         pub user_id: String,
     }
 
-    // Check that example serializes with serde attributes
     let example = UserWithSerde::schema_example();
-    // The example should have camelCase keys
     assert!(example.get("userId").is_some());
     assert_eq!(
         example["emailAddress"].as_str().unwrap(),
@@ -310,10 +290,8 @@ fn test_objectid_example() {
         pub name: String,
     }
 
-    // Check that schema_example() method exists
     let example = Document::schema_example();
     assert_eq!(example["name"].as_str().unwrap(), "test");
-    // ObjectId should serialize to { "$oid": "..." } format
     assert!(example["id"].get("$oid").is_some());
 
     let zod = Document::zod_schema();
@@ -335,7 +313,6 @@ fn test_example_fence_must_be_exact() {
     let regular_fence = RegularFence { value: 0 };
     assert_eq!(regular_fence.value, 0_u32);
 
-    // schema_example() should not exist since fence is not "rust example"
     #[cfg(feature = "zod")]
     {
         let zod = RegularFence::zod_schema();
@@ -354,9 +331,6 @@ fn test_empty_example_block() {
         pub value: u32,
     }
 
-    // We test with a valid example instead
-    // An empty example block would cause a compilation error
-    // which is the desired behavior
     let zod = ValidExample::zod_schema();
     assert!(zod.contains("value"));
 }
@@ -377,7 +351,6 @@ fn test_regex_transform_println() {
         String,
     }
 
-    // Check that transformation worked - should extract the variable
     let example = DataType::schema_example();
     assert_eq!(example.as_str().unwrap(), "Integer");
 
@@ -400,7 +373,6 @@ fn test_regex_transform_let_underscore() {
         Inactive,
     }
 
-    // Check that transformation worked - should extract the value
     let example = Status::schema_example();
     assert_eq!(example.as_str().unwrap(), "Active");
 
@@ -425,7 +397,6 @@ fn test_description_strips_examples() {
     }
 
     let zod = DescriptionTest::zod_schema();
-    // Description should not contain the example code
     assert!(!zod.contains("DescriptionTest { value: 42 }"));
     // Note: Structs don't embed descriptions in .meta() currently (only enums do)
 }
@@ -445,9 +416,7 @@ fn test_description_escapes_quotes() {
     }
 
     let zod = QuoteTest::zod_schema();
-    // The generated code should have escaped quotes in description
     assert!(zod.contains("example:"));
-    // Check that the description is properly formatted with escaped quotes
     assert!(zod.contains("description:"));
     assert!(zod.contains(r#"\"quoted\""#));
 }

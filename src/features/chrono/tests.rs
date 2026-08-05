@@ -26,7 +26,6 @@ fn test_datetime_number_zod_schema_is_self_contained_arrow() {
     assert!(schema.contains("arg instanceof Date) return arg.getTime();"));
     assert!(schema.contains("typeof arg === \"string\") return Date.parse(arg);"));
     assert!(schema.ends_with("z.number())"));
-    // Must not reference a named helper or the ISO datetime renderer.
     assert!(!schema.contains("z.iso.datetime"));
 }
 

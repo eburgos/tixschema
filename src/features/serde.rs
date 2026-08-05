@@ -53,14 +53,6 @@ impl SerdeKeyOmission {
 
     /// Whether the attributes take the member out of exactly one of serde's two directions, which
     /// leaves what serde writes and what serde reads two different payloads.
-    ///
-    /// Where the member has a key, the two payloads still overlap — the key is simply absent from
-    /// one of them, which an optional key describes. Where it has only a place in a tuple there is
-    /// no such spelling, so the question is the positional seams' to ask.
-    ///
-    /// Not gated on any feature, for the reason [`Self::absent_from_wire`] is not: the variant walk
-    /// that reads it runs in every build, and a toggle that changed the answer would leave one
-    /// declaration refused in one build and described in another.
     pub const fn drops_one_direction_only(self) -> bool {
         self.omits_key != self.skips_deserializing
     }
@@ -145,24 +137,12 @@ fn consume_unread_value(nested: &ParseNestedMeta<'_>) -> syn::Result<()> {
 
 /// Whether the field writes a value for itself when its key is missing, in either spelling
 /// (`default` and `default = "path"`).
-///
-/// Asked of the attributes rather than carried on [`SerdeFieldMeta`]: nothing the generated
-/// surfaces describe turns on it — it is read where a serde hook is written, to decide whether
-/// that hook has a missing key to answer for, and where a guard asks whether a dropped key can be
-/// read back.
 pub fn has_serde_default(attrs: &[Attribute]) -> bool {
     parse_serde_key_omission(attrs).defaulted
 }
 
 /// The rejection for a `cfg_attr` carrying a `serde(...)` attribute, or `None` for every other
 /// `cfg_attr` — gated derives and gated docs stay legal.
-///
-/// A `cfg_attr` on a field or a variant is expanded only after the attribute proc-macro has been
-/// handed the item, so a serde attribute written inside one arrives here unexpanded and would
-/// otherwise be walked past in silence. (An item's own attribute list is resolved by rustc first,
-/// so those arrive already expanded or already stripped and never reach this check.) Reading the
-/// payload would mean applying it in builds where the consumer's cfg predicate is false, and that
-/// predicate cannot be evaluated from a proc macro, so the attribute is rejected, not guessed at.
 #[cfg(feature = "serde")]
 fn cfg_attr_serde_rejection(attr: &Attribute) -> Option<Error> {
     let Meta::List(list) = &attr.meta else {

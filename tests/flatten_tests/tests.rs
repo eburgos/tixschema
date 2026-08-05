@@ -993,10 +993,6 @@ struct OptUnionHolder {
 /// Whether `payload` is accepted by a document every leaf of which is an object closed by
 /// `additionalProperties: false`: a leaf accepts when it names every key the payload carries and
 /// requires no key it does not.
-///
-/// A union is read by the rule its spelling names — `oneOf` accepts on exactly one matching branch
-/// and `anyOf` on at least one — so a document that nests one union inside another is read the way
-/// a validator reads it, wrapper by wrapper.
 #[cfg(feature = "jsonschema")]
 fn closed_document_accepts(schema: &serde_json::Value, payload: &serde_json::Value) -> bool {
     if let Some(branches) = schema.get("oneOf") {
@@ -1057,10 +1053,6 @@ fn test_flatten_structs_constructible() {
     assert!(no_flatten.id.is_empty());
 }
 
-// ========================================================================
-// TypeScript
-// ========================================================================
-
 #[test]
 #[cfg(feature = "typescript")]
 fn test_flatten_typescript_intersection() {
@@ -1108,10 +1100,6 @@ fn test_flatten_variant_keeps_pascal_discriminator_and_camel_fields() {
     assert!(ts.contains("sampleValues:"));
     assert!(!ts.contains("sample_values"));
 }
-
-// ========================================================================
-// Zod
-// ========================================================================
 
 #[test]
 #[cfg(feature = "zod")]
@@ -1215,10 +1203,6 @@ fn test_a_flatten_cycle_through_a_variants_content_defers_both_sides() {
         "`CycleVariantContent$Schema` is read eagerly in: {host}"
     );
 }
-
-// ========================================================================
-// JSON Schema
-// ========================================================================
 
 #[test]
 #[cfg(feature = "jsonschema")]
@@ -1395,10 +1379,6 @@ fn test_the_deferred_flatten_document_is_byte_identical() {
         r##"{"$defs":{"FlatNode":{"type":"object","additionalProperties":false,"properties":{"children":{"type":"array","items":{"$ref":"#/$defs/FlatNode"}},"val":{"type":"string"}},"required":["children","val"]}},"type":"object","properties":{"extra":{"type":"string"},"children":{"type":"array","items":{"$ref":"#/$defs/FlatNode"}},"val":{"type":"string"}},"required":["extra","children","val"],"additionalProperties":false}"##
     );
 }
-
-// ========================================================================
-// Serialization round-trip
-// ========================================================================
 
 #[test]
 fn test_flatten_serialization_is_flat() {
@@ -2213,10 +2193,6 @@ fn test_an_optional_flattened_union_offers_every_member_and_their_absence() {
 /// the object's own beside none of them. `| undefined` said something else — that the whole value
 /// may be missing — and `&` binds tighter than `|`, so it admitted neither payload the object
 /// writes for an absent base.
-///
-/// The absent branch is the base's own keys mapped to `never` rather than `{}`. Both spell the same
-/// two payloads for a base written whole, and only the mapped one keeps a base written in part out:
-/// `{}` is every object, so a payload carrying one of the base's members passes through it.
 #[test]
 #[cfg(feature = "typescript")]
 fn test_the_optional_flatten_type_offers_the_base_and_its_absence() {
@@ -2272,10 +2248,6 @@ fn test_the_optional_flatten_schema_offers_the_base_and_its_absence() {
 /// And no branch of it admits a base written in part. The base joins a branch whole, under the name
 /// its own schema is bound to, or the branch is the object's own keys alone — so a payload carrying
 /// some of the base's members belongs to neither, and neither does a bare `undefined`.
-///
-/// Read off zod 4.4.3: this union accepts `{"left":"l","right":true,"own":"o"}` and `{"own":"o"}`,
-/// and rejects `{"left":"l","own":"o"}`, `{"right":true,"own":"o"}`, `undefined`, and any payload
-/// carrying a key neither the object nor the base names.
 #[test]
 #[cfg(feature = "zod")]
 fn test_the_optional_flatten_schema_admits_no_partial_base() {
@@ -2386,11 +2358,6 @@ fn test_the_named_nullable_flatten_document_admits_the_captured_payloads() {
 /// the name, or the object's own keys alone. The name is left spelled as the nullable binding it is
 /// — the null side of it carries no key an intersection could take, so the branch that names it
 /// admits exactly the payload the base writes.
-///
-/// Read off zod 4.4.3, the emitted spelling transcribed: this union accepts
-/// `{"left":"l","right":true,"own":"o"}` and `{"own":"o"}`, and rejects `{"left":"l","own":"o"}`,
-/// `{"right":true,"own":"o"}` and any payload carrying a key neither the object nor the base names
-/// — payload for payload what the `Option`-typed field's own schema answers.
 #[test]
 #[cfg(feature = "zod")]
 fn test_the_named_nullable_flatten_schema_offers_the_base_and_its_absence() {
@@ -2412,10 +2379,6 @@ fn test_the_named_nullable_flatten_schema_offers_the_base_and_its_absence() {
 /// value branch — an intersection distributes over the choice behind it and the `null` side takes no
 /// key, so that branch is already the base's — while the branch carrying none of the base's members
 /// reads them off the value side by name, a choice having no key of its own for `keyof` to find.
-///
-/// Read off tsc 7.0.2 under `--strict`, the emitted declarations compiled as written: this type
-/// accepts `{ own: "o", left: "l", right: true }` and `{ own: "o" }`, and rejects
-/// `{ own: "o", left: "l" }` — payload for payload what the `Option`-typed field's own type answers.
 #[test]
 #[cfg(feature = "typescript")]
 fn test_the_named_nullable_flatten_type_offers_the_base_and_its_absence() {
@@ -2558,14 +2521,6 @@ fn test_a_non_optional_flatten_schema_is_byte_identical() {
 /// What serde writes for a flattened untagged enum is one key set per member, and what Zod says
 /// about it is the object multiplied over those members: a union of intersections, not an
 /// intersection with a union.
-///
-/// Read off zod 4.4.3: named as one operand, this schema rejected both payloads serde writes —
-/// `{"own":"o","a":"x"}` and `{"own":"o","b":true}` each came back `invalid_union`, one branch
-/// calling `own` an unrecognized key and the other missing the member it names. An intersection
-/// recognizes exactly the keys its operands name and a `z.union` names none, so each branch was
-/// asked to validate the whole payload alone. Multiplied out, both are accepted, and the schema
-/// still rejects `{"own":"o"}`, `{"a":"x"}`, `{"own":"o","a":"x","b":true}` and any payload
-/// carrying a key neither the object nor the matched member names.
 #[test]
 #[cfg(feature = "zod")]
 fn test_the_untagged_flatten_schema_multiplies_the_object_over_the_unions_members() {
@@ -2602,10 +2557,6 @@ fn test_the_untagged_flatten_schema_names_no_union_as_an_operand() {
 /// The two choices multiply. An `Option` around the union offers the members or none of them, and
 /// the union offers one member or another, so the object writes one branch per member and one more
 /// for the absence — the same multiplication the JSON-schema document is written from.
-///
-/// Read off zod 4.4.3: this union accepts `{"own":"o","a":"x"}`, `{"own":"o","b":true}` and
-/// `{"own":"o"}`, and rejects `{"a":"x"}`, `{"own":"o","a":"x","b":true}`, `{"own":"o","extra":1}`
-/// and a bare `undefined`.
 #[test]
 #[cfg(feature = "zod")]
 fn test_an_optional_untagged_flatten_multiplies_the_members_and_the_absence() {
@@ -2690,14 +2641,6 @@ fn test_a_nested_untagged_flatten_multiplies_over_the_leaf_members() {
 
 /// A union declared below the object that flattens it is named as one operand — the spelling that
 /// rejects every payload the object writes, kept deliberately.
-///
-/// The members travel through the registry, and the registry holds what has already expanded, so a
-/// source declared below has none to offer. Nothing at the merge tells that source apart from a
-/// plain struct declared below, so a refusal would have to fire on every forward-declared base —
-/// including the two that flatten each other, which no declaration order puts both above the other
-/// and which this crate compiles today. The merge falls back instead: a union flattened by an
-/// object must be declared above that object, which is the ordering the deferred operands already
-/// document the other half of.
 #[test]
 #[cfg(feature = "zod")]
 fn test_a_union_declared_below_the_object_is_named_as_one_operand() {
@@ -2804,9 +2747,6 @@ fn test_the_unions_declared_below_the_object_are_still_named_as_one_operand() {
 /// written for the scalar member was the object intersected with it, which no payload satisfies and
 /// which nothing reported. The declaration that would carry it does not exist under this feature,
 /// so what the refusal is pinned against is the field it names.
-///
-/// The reach is the recording's: a union declared below the object records nothing for the merge to
-/// read, so that one is still named as the one operand it is.
 #[test]
 #[cfg(feature = "zod")]
 fn test_a_union_with_a_scalar_member_declared_below_is_still_named_as_one_operand() {
@@ -3159,11 +3099,6 @@ fn test_the_direct_tagged_flatten_document_admits_the_captured_payloads() {
 /// And Zod multiplies the object over the same variants, each written in the spelling a merge joins
 /// rather than the one the union publishes: the unit variant is the key serde writes for it, not the
 /// literal the enum's own schema names.
-///
-/// Read off zod 4.4.3, the emitted spelling transcribed: this union accepts `{"own":"o","Bare":null}`
-/// and `{"own":"o","Wrapped":{"b":true}}`, and rejects `{"own":"o"}`, `{"own":"o","Bare":"Bare"}`,
-/// `{"own":"o","Bare":null,"Wrapped":{"b":true}}`, `{"Bare":null}` and any payload carrying a key
-/// neither the object nor the matched variant names.
 #[test]
 #[cfg(feature = "zod")]
 fn test_the_direct_tagged_flatten_schema_multiplies_the_object_over_the_variants() {
@@ -3183,17 +3118,6 @@ fn test_the_direct_tagged_flatten_schema_multiplies_the_object_over_the_variants
 /// And TypeScript spells the same two key sets, because it cannot reach them by distributing: the
 /// bare string a unit variant publishes standing alone intersects the object to `never`, and the
 /// payload serde writes for that variant belongs to no branch of the result.
-///
-/// Each key set also says it does not carry the other's tag, which is what keeps the type on the one
-/// variant at a time serde writes. Without it the excess-property check reads the union of both key
-/// sets and either branch is satisfied by a payload carrying both.
-///
-/// Read off tsc 7.0.2 under `--strict`, the emitted declarations compiled as written: this type
-/// accepts `{ own: "o", Bare: null }` and `{ own: "o", Wrapped: { b: true } }`, and rejects
-/// `{ own: "o" }`, `{ own: "o", Bare: "Bare" }`, `{ Bare: null }` and
-/// `{ own: "o", Bare: null, Wrapped: { b: true } }`. Named as the enum's own union, the first of
-/// those was `TS2353: 'Bare' does not exist in type '{ own: string; } & { Wrapped: FlatSecond; }'`;
-/// without the exclusions the last one was accepted.
 #[test]
 #[cfg(feature = "typescript")]
 fn test_the_direct_tagged_flatten_type_spells_the_key_set_serde_writes() {
@@ -3240,12 +3164,6 @@ fn test_a_directly_flattened_all_object_tagged_enum_round_trips_every_variant() 
 /// So Zod multiplies the object over those variants too. Nothing about them has to be proved: an
 /// intersection recognizes exactly the keys its operands name and a `z.union` names none, so the
 /// object joined to the union as one operand describes a payload set no value inhabits.
-///
-/// Read off zod 4.4.3, the emitted spelling transcribed: named as one operand, this schema rejected
-/// both payloads serde writes — `{"own":"o","One":{"a":"x"}}` and `{"own":"o","Two":{"b":true}}`.
-/// Multiplied out, both are accepted, and the schema still rejects `{"own":"o"}`,
-/// `{"One":{"a":"x"}}`, `{"own":"o","One":{"a":"x"},"Two":{"b":true}}` and any payload carrying a
-/// key neither the object nor the matched variant names.
 #[test]
 #[cfg(feature = "zod")]
 fn test_the_all_object_tagged_direct_flatten_schema_multiplies_the_object_over_the_variants() {
@@ -3267,12 +3185,6 @@ fn test_the_all_object_tagged_direct_flatten_schema_multiplies_the_object_over_t
 /// about the other: the excess-property check reads the union of both key sets, so a payload
 /// carrying both tags satisfies either branch structurally — a payload serde writes for no value and
 /// the other three surfaces refuse. Spelling the variants is what carries that.
-///
-/// Read off tsc 7.0.2 under `--strict`, the emitted declarations compiled as written: this type
-/// accepts `{ own: "o", One: { a: "x" } }` and `{ own: "o", Two: { b: true } }`, and rejects
-/// `{ own: "o" }`, `{ One: { a: "x" } }` and
-/// `{ own: "o", One: { a: "x" }, Two: { b: true } }`. Named as the enum's own union, that last one
-/// was accepted.
 #[test]
 #[cfg(feature = "typescript")]
 fn test_an_all_object_tagged_direct_flatten_type_closes_each_variant_against_the_other() {
@@ -3297,10 +3209,6 @@ fn test_an_all_object_tagged_direct_flatten_document_is_byte_identical() {
 /// read: `keyof` a union is the keys its branches share, so before the exclusions the branch was an
 /// empty mapped type — `{}`, which every object passes through, including one carrying part of a
 /// variant's key set.
-///
-/// Read off tsc 7.0.2 under `--strict`, the emitted declarations compiled as written: this type
-/// accepts `{ own: "o" }`, `{ own: "o", One: { a: "x" } }` and `{ own: "o", Two: { b: true } }`, and
-/// rejects `{ own: "o", One: { a: "x" }, Two: { b: true } }`.
 #[test]
 #[cfg(feature = "typescript")]
 fn test_the_optional_all_object_tagged_flatten_type_names_the_keys_its_absence_leaves_out() {
@@ -3364,11 +3272,6 @@ fn test_a_directly_flattened_inline_untagged_union_round_trips_every_member() {
 
 /// So the merged type spells the members in the union's name's place, each closed against the keys
 /// the other names.
-///
-/// Read off tsc 7.0.2 under `--strict`, the emitted declarations compiled as written: this type
-/// accepts `{ own: "o", left: "l" }` and `{ own: "o", right: true }`, and rejects `{ own: "o" }`,
-/// `{ left: "l" }` and `{ own: "o", left: "l", right: true }`. Named as the enum's own union, that
-/// last one was accepted.
 #[test]
 #[cfg(feature = "typescript")]
 fn test_an_inline_untagged_direct_flatten_type_closes_each_member_against_the_other() {

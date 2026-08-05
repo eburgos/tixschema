@@ -1,4 +1,3 @@
-// Tests requiring both zod and typescript features
 #[cfg(all(feature = "zod", feature = "typescript"))]
 mod zod_ts_tests {
     use super::*;
@@ -8,14 +7,12 @@ mod zod_ts_tests {
     #[serde(transparent)]
     pub struct CorrelationId(pub String);
 
-    // Branded newtype with doc comment description
     /// A unique document identifier.
     #[model_schema()]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct DocId(pub String);
 
-    // Generic branded newtype with doc comment and example
     /// Generic document identifier.
     ///
     /// - `DocumentId<String>` for API/HTTP layer.
@@ -34,7 +31,6 @@ mod zod_ts_tests {
     #[serde(transparent)]
     pub struct RoleId<IdType>(pub IdType);
 
-    // Integer inner type branded newtype
     #[model_schema()]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
@@ -49,16 +45,10 @@ mod zod_ts_tests {
         );
     }
 
-    /// The parameter is what the brand wraps, and a value surface reaches it through the argument
-    /// the enclosing factory binds for it — so the brand lands on the schema the caller supplied
-    /// rather than on a value that admits anything whatever it was filled with. The TypeScript
-    /// type beside it keeps `IdType`, its own declaration binding it for real.
-    ///
-    /// The builder itself carries no `$ZodBranded` — its own bound is the plain `IdType extends
-    /// ZodType`, unlike the non-generic const's own base schema, which names it directly. Only
-    /// `$SchemaDefault`, called at the declared default, has a concrete filling to annotate with
-    /// one (txsch-bpnj) — the shape `an_unconstrained_generic_brands_default_is_still_branded`
-    /// below pins.
+    /// The brand lands on the schema the caller supplied rather than on a value that admits
+    /// anything whatever it was filled with. Only `$SchemaDefault`, called at the declared
+    /// default, has a concrete filling to annotate with `$ZodBranded`; the builder's own bound
+    /// stays the plain `IdType extends ZodType`.
     #[test]
     fn test_branded_newtype_zod_schema() {
         let zod = RoleId::<String>::zod_schema();
@@ -73,13 +63,10 @@ mod zod_ts_tests {
         assert!(!zod[..builder_end].contains("$ZodBranded"), "Got: {zod}");
     }
 
-    /// Shape (b) from txsch-bpnj's capture: an *unconstrained* generic brand — no
-    /// `minLength`/`maxLength`/`pattern` at all — still has its `$SchemaDefault` annotated
-    /// `$ZodBranded<ZodString, "RoleId">` rather than `ZodType<RoleId<string>>`: the
-    /// factory's chain ends in `.brand()` whether or not there is a check to route, so the same
-    /// `_output` mismatch applies with or without one. Every class name is spelled off the `z`
-    /// namespace, since none resolves as a bare name under the documented `import { z } from
-    /// "zod";` (txsch-9rcw).
+    /// An *unconstrained* generic brand — no `minLength`/`maxLength`/`pattern` at all — still has
+    /// its `$SchemaDefault` annotated `$ZodBranded<ZodString, "RoleId">` rather than
+    /// `ZodType<RoleId<string>>`: the factory's chain ends in `.brand()` whether or not there is a
+    /// check to route.
     #[test]
     fn an_unconstrained_generic_brands_default_is_still_branded() {
         let zod = RoleId::<String>::zod_schema();
@@ -95,7 +82,6 @@ mod zod_ts_tests {
     #[test]
     fn test_branded_newtype_preserves_generic_param_name() {
         let ts = RoleId::<String>::ts_definition();
-        // Should contain IdType not T or any other name
         assert!(
             ts.contains("IdType"),
             "Should preserve generic param name. Got: {ts}"
@@ -124,12 +110,10 @@ mod zod_ts_tests {
     #[test]
     fn test_branded_newtype_non_generic_zod_schema_content() {
         let zod = CorrelationId::zod_schema();
-        // Should contain the raw schema definition
         assert!(
             zod.contains("const CorrelationId$RawSchema = z.string().brand"),
             "Should contain raw schema. Got: {zod}"
         );
-        // Should contain the exported typed schema
         assert!(
             zod.contains("export const CorrelationId$Schema: $ZodBranded<ZodString, \"CorrelationId\"> = CorrelationId$RawSchema"),
             "Should contain exported schema referencing raw schema. Got: {zod}"
@@ -139,14 +123,12 @@ mod zod_ts_tests {
     #[test]
     fn test_branded_newtype_integer_inner() {
         let ts = SequenceNum::ts_definition();
-        // Non-generic u64 maps to "number" in TypeScript
         assert!(
             ts.contains("export type SequenceNum = number & $brand<\"SequenceNum\">"),
             "Should have number branded type. Got: {ts}"
         );
 
         let zod = SequenceNum::zod_schema();
-        // Zod should use z.number().int() for u64
         assert!(
             zod.contains("z.number().int()"),
             "Should use z.number().int() for u64. Got: {zod}"
@@ -168,7 +150,6 @@ mod zod_ts_tests {
             zod.contains("A unique document identifier"),
             "Zod schema should contain doc comment text. Got:\n{zod}"
         );
-        // Must still have $Schema line after .meta()
         assert!(
             zod.contains("export const DocId$Schema:"),
             "Zod schema should have $Schema after .meta(). Got:\n{zod}"
@@ -190,8 +171,6 @@ mod zod_ts_tests {
             zod.contains("example:"),
             "Should contain example from doc comment. Got:\n{zod}"
         );
-        // The example lands inside the one `.meta({` the brand writes, and the binding the item
-        // publishes still stands after it.
         assert!(
             zod.contains("  example: \"64de3d95ff45b119e5b53a7e\",\n}).brand<\"DocumentId\">();"),
             "Should have the example inside the described block. Got:\n{zod}"
@@ -213,12 +192,10 @@ mod zod_ts_tests {
     }
 }
 
-// Tests for branded newtypes with string constraints
 #[cfg(all(feature = "zod", feature = "typescript", feature = "serde"))]
 mod constrained_branded_tests {
     use super::*;
 
-    // Pattern-only constraint
     #[model_schema(pattern = "^[0-9a-fA-F]{24}$")]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
@@ -294,7 +271,6 @@ mod constrained_branded_tests {
 
     #[test]
     fn test_constrained_branded_serde_rejects_invalid() {
-        // Serde should reject values that don't match constraints
         let too_short: Result<SlugId, _> = serde_json::from_str("\"ab\"");
         assert!(
             too_short.is_err(),
@@ -348,7 +324,6 @@ mod constrained_branded_tests {
             zod.contains(".check(z.regex(/^[0-9a-fA-F]{24}$/))"),
             "Should contain pattern. Got:\n{zod}"
         );
-        // Should not contain min/max
         assert!(!zod.contains(".min("), "Should not have min. Got:\n{zod}");
         assert!(!zod.contains(".max("), "Should not have max. Got:\n{zod}");
 
@@ -476,13 +451,10 @@ mod objectid_branded_surface_tests {
     }
 
     /// A brand's string constraints measure the inner's `Display` — the bare hex — which on the
-    /// wire is the `$oid` member, so both schema surfaces carry them there. Zod has no string
-    /// check to apply to the object itself.
-    ///
-    /// The brand's own `pattern` is layered rather than written over the hex the type always
-    /// holds: one JSON Schema string carries one `pattern`, and writing the brand's into that slot
-    /// dropped the type's — which is how a brand wider than the hex came to admit, on this surface
-    /// alone, strings an `ObjectId` can never hold.
+    /// wire is the `$oid` member, so both schema surfaces carry them there. The brand's own
+    /// `pattern` is layered rather than written over the hex the type always holds: one JSON
+    /// Schema string carries one `pattern`, and writing the brand's into that slot dropped the
+    /// type's.
     #[test]
     fn a_constrained_objectid_brand_carries_its_constraints_on_the_oid_member() {
         let zod = HexObjectId::zod_schema();
@@ -528,8 +500,7 @@ mod objectid_branded_surface_tests {
     }
 
     /// Every `pattern` the `$oid` member states, applied: the member's own and the one each `allOf`
-    /// branch adds. A payload has to match all of them, which is what a single `pattern` keyword
-    /// cannot say and so what tells a layered brand pattern from one written over the type's.
+    /// branch adds — which is what tells a layered brand pattern from one written over the type's.
     fn admits_oid(schema: &serde_json::Value, hex: &str) -> bool {
         let member = &schema["properties"]["$oid"];
         member["pattern"]
@@ -571,10 +542,8 @@ mod objectid_branded_surface_tests {
         }
     }
 
-    /// An arrayed `ObjectId` writes the array around the `$oid` object, which is a container and
-    /// so is described by the slot dispatch — the same rendering the unbranded tuple struct over
-    /// the same `Vec` publishes. Every position reads one builder, so the item here is the object
-    /// field position carries too.
+    /// An arrayed `ObjectId` writes the array around the `$oid` object, described by the slot
+    /// dispatch — the same rendering the unbranded tuple struct over the same `Vec` publishes.
     #[test]
     fn an_arrayed_objectid_brand_describes_the_array_of_oid_objects() {
         let zod = ObjectIdList::zod_schema();
@@ -607,7 +576,6 @@ mod objectid_branded_surface_tests {
     }
 }
 
-// Branded newtype referenced from a struct (all features enabled)
 #[cfg(all(feature = "zod", feature = "typescript", feature = "jsonschema"))]
 mod branded_in_struct_all_features_tests {
     use super::*;
@@ -695,7 +663,6 @@ mod branded_in_struct_all_features_tests {
     }
 }
 
-// Branded newtype referenced from a struct (zod+typescript, no jsonschema)
 #[cfg(all(feature = "zod", feature = "typescript", not(feature = "jsonschema")))]
 mod branded_in_struct_no_jsonschema_tests {
     use super::*;
@@ -742,7 +709,6 @@ mod branded_in_struct_no_jsonschema_tests {
     }
 }
 
-// Branded newtype referenced from a struct (jsonschema only, no zod/typescript)
 #[cfg(all(
     feature = "jsonschema",
     not(feature = "zod"),
@@ -798,7 +764,6 @@ mod branded_in_struct_jsonschema_only_tests {
     }
 }
 
-// Branded newtype referenced from a struct (typescript only, no zod/jsonschema)
 #[cfg(all(
     feature = "typescript",
     not(feature = "zod"),
@@ -839,7 +804,6 @@ mod branded_in_struct_typescript_only_tests {
     }
 }
 
-// Branded newtype with constraints — json_schema should include them
 #[cfg(feature = "jsonschema")]
 mod branded_constrained_json_schema_tests {
     use super::*;
@@ -907,7 +871,6 @@ mod branded_constrained_json_schema_tests {
         assert_eq!(schema["type"], "string", "Got: {schema}");
         assert_eq!(schema["minLength"], 3_i64, "Got: {schema}");
         assert_eq!(schema["maxLength"], 50_i64, "Got: {schema}");
-        // No pattern constraint — should not be present
         assert!(schema.get("pattern").is_none(), "Got: {schema}");
     }
 }
@@ -944,24 +907,17 @@ mod constrained_generic_branded_tests {
     }
 
     /// A declared default naming `StrictDocumentId` at exactly its own declared default — the
-    /// `ProDoctivity` `EcmDocument`/`DocumentId` shape the fold feature was motivated by. Before
-    /// the fix, the comparison read `StrictDocumentId$SchemaDefault`'s emitted text — the
-    /// `.min`/`.max`/`.check` chain and all — against the plain rendering this struct's own field
-    /// computes, so the two could never agree and the fold silently composed an unconstrained
-    /// `StrictDocumentId$SchemaFactory(z.string())` in its place.
+    /// shape the fold exists for.
     #[model_schema(default_types(HolderType = StrictDocumentId<String>))]
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct StrictDocumentIdHolder<HolderType> {
         pub id: HolderType,
     }
 
-    /// A SECOND constrained generic brand — itself carrying string constraints, unlike
-    /// `StrictDocumentIdHolder` above, which carries none — whose declared default names
-    /// `StrictDocumentId` at exactly its own declared default. The fold (txsch-qobf) resolves
-    /// `default_zod_rendering` to the deferred `z.lazy(() => StrictDocumentId$SchemaDefault)`
-    /// spelling, and `OuterId`'s own checks have to compose *inside* that thunk rather than after
-    /// it — the folded-generic-sibling half of txsch-euxz's bug, the non-generic half being
-    /// `constrained_default_names_a_sibling_tests::OuterBrand` below.
+    /// A second constrained generic brand whose declared default names `StrictDocumentId` at
+    /// exactly its own declared default, so the fold defers to
+    /// `z.lazy(() => StrictDocumentId$SchemaDefault)` and `OuterId`'s own checks have to compose
+    /// *inside* that thunk rather than after it.
     #[model_schema(minLength = 10, default_types(WrapType = StrictDocumentId<String>))]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
@@ -985,16 +941,7 @@ mod constrained_generic_branded_tests {
     }
 
     /// `$SchemaDefault` is the factory called at the declared default argument, with the checks
-    /// composed onto that argument — exactly the shape the design settled on.
-    ///
-    /// Annotated `$ZodBranded<ZodString, "StrictDocumentId">` rather than
-    /// `ZodType<StrictDocumentId<string>>`: the factory's own chain always ends in `.brand()`, and
-    /// strict tsc rejects the plain `ZodType<...>` spelling there — the classic interface's
-    /// deprecated `_output` field is computed at the pre-brand type and a brand intersection does
-    /// not refresh it (txsch-bpnj). `$ZodBranded` matches the spelling the non-generic const
-    /// already carries for the identical reason, and every class name is spelled off the `z`
-    /// namespace, since none resolves as a bare name under the documented `import { z } from
-    /// "zod";` (txsch-9rcw).
+    /// composed onto that argument.
     #[test]
     fn the_default_composes_the_factory_with_the_constrained_argument() {
         let zod = StrictDocumentId::<String>::zod_schema();
@@ -1035,20 +982,11 @@ mod constrained_generic_branded_tests {
         );
     }
 
-    /// `OuterId` is itself constrained, and its declared default folds onto `StrictDocumentId`'s
-    /// own `$SchemaDefault` — the deferred, checks-carrying binding, not a plain
-    /// `StrictDocumentId$SchemaFactory(z.string())` reconstruction. `OuterId`'s own `minLength`
-    /// check composes *inside* the `z.lazy(...)` thunk, over `.check(...)`'s base spelling rather
-    /// than `.min(...)`'s chain spelling — the deferred target's annotation is not guaranteed to
-    /// carry `ZodString`'s own chain methods, only the `.check(...)` every schema exposes. Before
-    /// the fix, this same check was appended after the thunk closed, landing on `ZodLazy`, which
-    /// has neither.
-    ///
-    /// Annotated `$ZodBranded<ZodLazy<typeof StrictDocumentId$SchemaDefault>, "OuterId">`
-    /// rather than `ZodType<OuterId<StrictDocumentId<string>>>` — the same `.brand()`-vs-`ZodType`
-    /// mismatch `the_default_composes_the_factory_with_the_constrained_argument` documents, with
-    /// the deferred target's own type spelled through `typeof` (txsch-bpnj), and every class name
-    /// spelled off the `z` namespace (txsch-9rcw).
+    /// `OuterId`'s declared default folds onto `StrictDocumentId$SchemaDefault` — the deferred,
+    /// checks-carrying binding — and `OuterId`'s own `minLength` composes *inside* the
+    /// `z.lazy(...)` thunk, over `.check(...)`'s base spelling: the deferred target's annotation is
+    /// not guaranteed to carry `ZodString`'s chain methods, only the `.check(...)` every schema
+    /// exposes.
     #[test]
     fn a_constrained_brands_default_naming_another_constrained_brands_default_composes_the_checks_inside_the_thunk()
      {
@@ -1093,8 +1031,8 @@ mod constrained_generic_branded_tests {
     }
 }
 
-/// The non-generic-sibling half of txsch-euxz's bug: a constrained generic brand whose declared
-/// default names an ordinary (non-generic) `#[model_schema]` sibling. Held apart from
+/// A constrained generic brand whose declared default names an ordinary (non-generic)
+/// `#[model_schema]` sibling. Held apart from
 /// `constrained_generic_branded_tests` above (whose fixtures all name a *generic* sibling) so each
 /// module pins one of the two spellings `default_zod_rendering` can defer to — a bare `$Schema`
 /// here, a folded `$SchemaDefault` there.
@@ -1113,21 +1051,18 @@ mod constrained_default_names_a_sibling_tests {
     /// A constrained generic brand whose declared default names `InnerString` — a non-generic
     /// sibling, so `default_zod_rendering` defers to its bare `$Schema` binding (never a
     /// `$SchemaDefault`, which only a generic sibling publishes) rather than reconstructing it
-    /// eagerly. This is the exact repro from txsch-euxz's own bug report.
+    /// eagerly.
     #[model_schema(minLength = 3, default_types(T = InnerString))]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct OuterBrand<T>(pub T);
 
-    /// Before the fix: `OuterBrand$SchemaFactory(z.lazy(() => InnerString$Schema).min(3))` —
-    /// `.min` landing on `ZodLazy`, which does not have it. After: the check composes inside the
-    /// thunk, over `InnerString$Schema`'s own base `.check(...)` surface.
+    /// The check composes inside the thunk, over `InnerString$Schema`'s own base `.check(...)`
+    /// surface — `.min` after the thunk closed would land on `ZodLazy`, which does not have it.
     ///
-    /// Annotated `$ZodBranded<ZodLazy<typeof InnerString$Schema>, "OuterBrand">` rather
-    /// than `ZodType<OuterBrand<InnerString>>` — the same `.brand()`-vs-`ZodType` mismatch
-    /// `constrained_generic_branded_tests` documents for the primitive-default case, with the
-    /// deferred target's own type spelled through `typeof` (txsch-bpnj), and every class name
-    /// spelled off the `z` namespace (txsch-9rcw).
+    /// Annotated `$ZodBranded<ZodLazy<typeof InnerString$Schema>, "OuterBrand">` for the same
+    /// `.brand()`-vs-`ZodType` mismatch, with the deferred target's own type spelled through
+    /// `typeof`.
     #[test]
     fn a_constrained_brands_default_naming_a_non_generic_sibling_composes_the_check_inside_the_thunk()
      {
@@ -1171,7 +1106,6 @@ mod constrained_default_names_a_sibling_tests {
     }
 }
 
-// Display impl is generated for branded newtypes when any schema feature is enabled
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 mod branded_display_tests {
     use super::*;
@@ -1247,13 +1181,8 @@ mod branded_no_display_tests {
 }
 
 /// The four surfaces of a brand whose inner writes a container, pinned against what serde writes
-/// for it.
-///
-/// `#[serde(transparent)]` puts the inner on the wire by itself, so an array inner writes an
-/// array, a map inner an object, and a tuple inner the fixed-arity array — never a string. The
-/// TypeScript type and the Zod value already described those; the Zod type annotation and the JSON
-/// schema are pinned here beside them, so a consumer type-checking the exported binding and one
-/// validating a payload read the same shape.
+/// for it: `#[serde(transparent)]` puts the inner on the wire by itself, so an array inner writes
+/// an array, a map inner an object, and a tuple inner the fixed-arity array — never a string.
 #[cfg(all(
     feature = "jsonschema",
     feature = "serde",
@@ -1561,20 +1490,7 @@ mod branded_composite_inner_tests {
     }
 }
 
-/// The four surfaces of a brand whose inner is written out of the brand's own type parameters,
-/// pinned against what serde writes for it.
-///
-/// A parameter changes nothing about what `#[serde(transparent)]` puts on the wire: a `Vec` inner
-/// writes its array whether the elements are `String` or a parameter. So the shape around the
-/// parameter is described here exactly as the same shape is described where it is written without
-/// a brand — the generic alias beside each brand is that shape, and every surface is asserted to
-/// carry the same rendering it does.
-///
-/// The parameter itself carries what an uninstantiated parameter carries in every other position:
-/// its own name in TypeScript, where the declaration binds it for real; the argument the enclosing
-/// factory binds in Zod, where a schema is a value the caller has to fill before anything can
-/// validate; and the permissive empty schema in JSON, where the one document written covers every
-/// filling and so can describe none of them.
+/// The four surfaces of a brand whose inner is written out of the brand's own type parameters.
 #[cfg(all(
     feature = "jsonschema",
     feature = "serde",
@@ -1763,13 +1679,10 @@ mod branded_generic_inner_tests {
         }
     }
 
-    /// Zod publishes values, and a value-level surface has no generic a `const` can be declared
-    /// over: a parameter rendered as the `Name$Schema` binding every unresolved type is named
-    /// after would reference a binding no emitted module ever declares, and the consumer that
-    /// pastes the output gets a `ReferenceError` before any payload is read.
-    ///
-    /// Asserted over the brand and the alias together, because both compose their value from the
-    /// same rendering and so would drift apart one landing at a time.
+    /// A parameter rendered as the `Name$Schema` binding every unresolved type is named after
+    /// would reference a binding no emitted module declares, and the consumer that pastes the
+    /// output gets a `ReferenceError` before any payload is read. Asserted over the brand and the
+    /// alias together, since both compose their value from the same rendering.
     #[test]
     fn no_emitted_zod_value_references_a_binding_named_after_a_parameter() {
         for zod in [
@@ -1851,12 +1764,10 @@ mod branded_example_arity_tests {
     }
 }
 
-/// What a build emitting no TypeScript writes for a brand.
-///
-/// The name a brand carries is a *type* argument to `.brand`, and the binding's annotation is a
-/// type — neither of which a JavaScript parser reads, and a module carrying either stops at load
-/// rather than at a payload. Zod's runtime brand takes no argument at all, so the bare call is the
-/// same value under a spelling JavaScript does read.
+/// What a build emitting no TypeScript writes for a brand: the name a brand carries is a *type*
+/// argument to `.brand` and the binding's annotation is a type — neither of which a JavaScript
+/// parser reads. Zod's runtime brand takes no argument at all, so the bare call is the same value
+/// under a spelling JavaScript does read.
 #[cfg(all(feature = "zod", not(feature = "typescript")))]
 mod branded_javascript_flavour_tests {
     use super::*;
@@ -1889,13 +1800,8 @@ mod branded_javascript_flavour_tests {
     }
 }
 
-/// The four surfaces of a brand whose inner names another type, pinned against what serde writes
-/// for it.
-///
-/// `#[serde(transparent)]` puts the named type on the wire by itself, so an object inner writes
-/// that object — never a string. The TypeScript type and the Zod value already deferred to the
-/// name; the JSON schema and the Zod type annotation are pinned here beside them, so a consumer
-/// type-checking the exported binding and one validating a payload read the same shape.
+/// The four surfaces of a brand whose inner names another type: `#[serde(transparent)]` puts the
+/// named type on the wire by itself, so an object inner writes that object — never a string.
 #[cfg(all(
     feature = "jsonschema",
     feature = "serde",
@@ -1972,10 +1878,9 @@ mod branded_sibling_inner_tests {
     #[serde(transparent)]
     pub struct LateSlug(pub String);
 
-    // The same forward declaration with the inner's argument fixed where it is written, which is
-    // what the refusal for a parameterised inner does not reach. Written above `LateTag`, with
-    // `TrailingFixedTag` below it, so the one declaration stands here in both the orders it can be
-    // written in — the registry silent for the first and answering for the second.
+    // The same forward declaration with the inner's argument fixed where it is written. Written
+    // above `LateTag`, with `TrailingFixedTag` below it, so the one declaration stands in both the
+    // orders it can be written in — the registry silent for the first, answering for the second.
     #[model_schema(minLength = 3)]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
@@ -2103,16 +2008,10 @@ mod branded_sibling_inner_tests {
         );
     }
 
-    /// A brand reaching a name before the named item has expanded is asking a registry that has
-    /// nothing recorded for it, and the constrained brand keeps the emission it has always had
-    /// rather than being refused for where its inner happens to be written.
-    ///
-    /// That absence is the same one an unresolved user type leaves — a type this crate never
-    /// expands, whose schema the author supplies — so refusing on it would refuse the second for
-    /// the sake of the first. The consult is kept for the registration that follows instead, and
-    /// here that registration proves a string and settles it silently: what the author reads is the
-    /// same verdict wherever the two items are written. The `Display` assertion still bounds the
-    /// Rust surface either way.
+    /// A brand reaching a name before the named item has expanded asks a registry that has nothing
+    /// recorded for it, and keeps its emission rather than being refused for where its inner
+    /// happens to be written: that absence is the same one an unresolved user type leaves, so
+    /// refusing on it would refuse the second for the sake of the first.
     #[test]
     fn a_constrained_brand_over_a_forward_declared_sibling_keeps_its_emission() {
         assert_eq!(
@@ -2157,13 +2056,8 @@ mod branded_sibling_inner_tests {
     }
 
     /// The same declaration written after the item it names carries the same checks to the same
-    /// three surfaces, byte for byte.
-    ///
-    /// What `LateTag` records is a position rather than a word, so the registry answers with the
-    /// argument this brand wrote — a string, which is what the emission composes the checks onto.
-    /// One word could not have said that: it would have to stand for every filling, and the only
-    /// word that does is the opaque one, which refuses the very declaration the other order
-    /// admits. What the author reads is the same verdict wherever the two items are written.
+    /// three surfaces, byte for byte: what `LateTag` records is a position rather than a word, so
+    /// the registry answers with the argument this brand wrote.
     #[test]
     fn a_constrained_brand_over_a_fixed_instantiation_reads_the_same_in_either_order() {
         assert_eq!(TrailingFixedTag::json_schema(), FixedTag::json_schema());
@@ -2598,7 +2492,6 @@ mod constrained_no_display_tests {
     }
 }
 
-// zod=OFF, typescript=ON tests
 #[cfg(all(feature = "typescript", not(feature = "zod")))]
 mod no_zod_tests {
     use super::*;
@@ -2608,7 +2501,6 @@ mod no_zod_tests {
     #[serde(transparent)]
     pub struct RoleIdNoZod<IdType>(pub IdType);
 
-    // Non-generic branded newtype without Zod
     #[model_schema()]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
@@ -2632,12 +2524,10 @@ mod no_zod_tests {
     #[test]
     fn test_branded_newtype_non_generic_no_zod() {
         let ts = SessionToken::ts_definition();
-        // Should have unique symbol declaration
         assert!(
             ts.contains("declare const __brand_SessionToken: unique symbol"),
             "Should have unique symbol. Got: {ts}"
         );
-        // Should have non-generic type definition
         assert!(
             ts.contains(
                 "export type SessionToken = string & { readonly [__brand_SessionToken]: true }"
@@ -2647,7 +2537,6 @@ mod no_zod_tests {
     }
 }
 
-// Serde transparent test (always runs when serde is available)
 #[cfg(feature = "serde")]
 mod serde_tests {
     use super::*;
@@ -2664,28 +2553,23 @@ mod serde_tests {
 
     #[test]
     fn test_branded_newtype_serde_transparent() {
-        // WrappedString("abc") should serialize as "abc"
         let val = WrappedString("abc".to_owned());
         let json = serde_json::to_string(&val).unwrap();
         assert_eq!(json, "\"abc\"");
 
-        // "abc" should deserialize as WrappedString("abc")
         let deserialized: WrappedString = serde_json::from_str("\"abc\"").unwrap();
         assert_eq!(deserialized, WrappedString("abc".to_owned()));
     }
 
     #[test]
     fn test_branded_newtype_generic_serde_roundtrip() {
-        // Serialize a generic branded newtype with String inner type
         let original = GenericId::<String>("abc-123".to_owned());
         let json = serde_json::to_string(&original).unwrap();
         assert_eq!(json, "\"abc-123\"", "Should serialize transparently");
 
-        // Deserialize back
         let deserialized: GenericId<String> = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, original, "Roundtrip should preserve equality");
 
-        // Also test with a numeric inner type
         let num_original = GenericId::<u64>(42);
         let num_json = serde_json::to_string(&num_original).unwrap();
         assert_eq!(num_json, "42", "Should serialize u64 transparently");
@@ -2698,14 +2582,10 @@ mod serde_tests {
     }
 }
 
-/// One value is one wire, and every spelling of that value publishes the one JSON type keyword the
-/// wire describes as.
-///
-/// `#[serde(transparent)]` puts the inner on the wire by itself, so a brand over a `u32` writes
-/// exactly what a field, a one-slot tuple struct and an alias of the same `u32` write. The four are
-/// pinned against each other because a keyword taken from the rendered TypeScript name instead of
-/// from the type spelled `integer` three times and `number` once — the same wire named twice, which
-/// the merge repeating the keyword cannot pick a side in.
+/// Every spelling of one value publishes the one JSON type keyword its wire describes as: a brand
+/// over a `u32` writes exactly what a field, a one-slot tuple struct and an alias of the same `u32`
+/// write. Pinned against each other because a keyword taken from the rendered TypeScript name
+/// instead of from the type spelled `integer` three times and `number` once.
 #[cfg(all(feature = "jsonschema", feature = "serde"))]
 mod branded_scalar_keyword_tests {
     use super::*;

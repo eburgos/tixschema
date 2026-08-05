@@ -21,22 +21,10 @@ use syn::ItemStruct;
 
 /// The JavaScript engine generation the emitted Zod regex literals and JSON Schema `pattern`
 /// keywords are written for, and therefore the line the guard admits and refuses along.
-///
-/// A pattern this crate emits is read by whatever engine loads the generated schema, not by the
-/// one that happened to be installed where the derive ran, so the admission list has to be
-/// decided against a version written down rather than measured. ES2018 is the floor because it is
-/// what the guard's own translations already assume: `(?P<name>...)` is rewritten to
-/// `(?<name>...)`, and named capture groups are ES2018. Nothing else the crate emits needs
-/// anything newer, so nothing is bought by raising it.
 const JS_ENGINE_BASELINE: &str = "ES2018";
 
 /// What a JavaScript regex literal makes of the three flags the ECMA-262 regular expression
 /// modifiers proposal did add.
-///
-/// An engine at [`JS_ENGINE_BASELINE`] predates the proposal and rejects the group opening; a
-/// recent one parses it and matches what the `regex` crate matches. That is why these are refused
-/// against the recorded baseline rather than against whichever runtime is at hand — the schema is
-/// read wherever it is loaded, not where it was generated.
 const MODIFIER_GROUP_ABOVE_BASELINE_READ_AS: &str = "a group opening the ECMA-262 regular \
                                                      expression modifiers proposal added, which \
                                                      an engine predating it rejects as it parses \
@@ -83,10 +71,6 @@ enum Divergence {
 /// asks of a name: what does serde write for a key spelled this way. A plain unit enum answers with
 /// its members, the enumeration the JSON-schema map-key expansion calls `enum_members()` for; every
 /// other answer is about the key's own wire form, a JSON object key being a string.
-///
-/// A type path sees straight through an alias and a `#[serde(transparent)]` brand writes what its
-/// inner writes, so both answer for their target and their inner rather than for themselves — and
-/// through the registry, so a chain of either carries its end's answer to every link.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AliasKind {
@@ -133,18 +117,6 @@ pub enum TrivialPattern {
 
 /// One member of an untagged union as the Zod surface writes it, beside the two things a merge
 /// that flattens the union has to know about it and cannot recover from the spelling.
-///
-/// `branch` is the trail of one-based choices the member sits at, so a member of a nested union is
-/// named `1.2` rather than twice as `2` — the position the JSON-schema merge names the same member
-/// by, the recording being already multiplied out where that merge descends.
-///
-/// `non_object` is what serde writes the member as when that is provably not an object, named by
-/// the JSON type keyword the other surface writes for it. serde flattens structs and maps and
-/// nothing else, so such a member is one no object can be merged with, on any surface.
-///
-/// Both travel under `serde` alone, which is the feature that reads `#[serde(untagged)]` and
-/// `#[serde(flatten)]` at all: without it nothing records a member and nothing merges one, and the
-/// spelling is all the Zod surface still writes.
 #[cfg(feature = "zod")]
 #[derive(Clone)]
 pub struct ZodUnionMember {
@@ -169,18 +141,6 @@ impl ZodUnionMember {
 
 /// One leaf of the value surface a `#[model_schema()]` item published, in the vocabulary the
 /// flatten-member refusal names a wire by.
-///
-/// `branch` is the trail of one-based choices the leaf sits at behind the name, empty for a surface
-/// that offers no choice at all — so an item publishing `anyOf[value, null]` carries its null at
-/// `2`, and a member naming that item carries it at the member's own position followed by that `2`.
-/// `non_object` is the JSON type keyword the leaf describes as where the registration proves it is
-/// no object, and `None` where nothing there proves it — a map, an object, and a name nothing has
-/// classified alike.
-///
-/// Recorded and read wherever `serde` meets a surface that writes a merge of its own — `zod`, which
-/// multiplies the object over the source's branches, and `typescript`, which spells the source's
-/// absence beside it. Without `serde` no field reaches a merge at all, and without either surface
-/// there is nothing that would ask.
 #[cfg(all(feature = "serde", any(feature = "zod", feature = "typescript")))]
 #[derive(Clone)]
 pub struct WireLeaf {
@@ -202,12 +162,6 @@ impl WireLeaf {
 
     /// Whether this leaf is the absence the name itself offers: the `null` of a choice the
     /// registration publishes at its own top level, one position in from the name and no deeper.
-    ///
-    /// That depth is what the answer turns on. serde writes no member at all for this leaf and
-    /// reads the payload carrying none of them back as the absent value, so a source reached this
-    /// way writes two key sets and the merge owes it both. A `null` further down sits under a
-    /// choice serde matched a member on, where the same payload is one serde writes and then
-    /// matches no member for — the refusal a member position already carries.
     pub fn is_published_absence(&self) -> bool {
         self.branch.len() == 1 && self.non_object == Some("null")
     }
@@ -230,17 +184,6 @@ pub struct FlattenVariant {
 
 /// What a `#[model_schema()]` item publishes as a value, as the constrained-brand guard reads
 /// shapes.
-///
-/// One word cannot answer for a name that publishes a family. A generic item whose written target
-/// *is* one of its own parameters writes whatever the instantiation hands it, so the only flat
-/// answer available at its declaration is the opaque one every parameter describes as — and a
-/// brand written over `Later<String>` would then be refused for a shape the emission never
-/// composes, while the same declaration written above it is admitted for want of any record at
-/// all. So such a name records the position instead, and the reader fills it with the argument the
-/// reference carries.
-///
-/// A target with its own fixed shape — a `Vec<T>`, a map, a tuple — records that shape, which no
-/// filling changes.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PublishedShape {
@@ -254,16 +197,6 @@ pub enum PublishedShape {
 
 /// A constrained brand's consult the registry had no record to answer with, kept until the named
 /// item registers and can answer it.
-///
-/// At the brand's own expansion a name declared below it and a name this crate never expands are
-/// one absence, and the argument the reference wrote proves nothing on its own — a publisher may
-/// write a string whatever its parameter is handed. So the admission stands at that moment, and
-/// what is recorded here is the question rather than a verdict. The registry is a compile-local
-/// recording the later expansion also writes to, so the item that finally registers under the name
-/// reads the questions naming it and answers them in its own output.
-///
-/// The arguments are kept as the shapes they resolve to rather than as the types they were written
-/// as, because the brand's expansion is the only one still holding those tokens.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[derive(Clone)]
 pub struct ShapeQuestion {
@@ -304,11 +237,6 @@ pub struct AliasInfo {
     /// What the value surface written under this name puts on the wire, one entry per leaf of it,
     /// and empty when nothing has been recorded at all. Filled by [`record_wire_leaves`] as each
     /// item registers.
-    ///
-    /// The shape above it answers the constrained-brand guard's question, which is what a check can
-    /// be appended to; this answers the merge's, which is whether an object can be joined to it —
-    /// two questions one word could not hold apart, an `integer` and a `number` being one shape and
-    /// two documents, and an array and a map one shape and opposite answers.
     #[cfg(all(feature = "serde", any(feature = "zod", feature = "typescript")))]
     pub wire: Vec<WireLeaf>,
     /// What an untagged enum's members are spelled as on the Zod surface, and empty for every other
@@ -320,23 +248,9 @@ pub struct AliasInfo {
 
 /// The walk over a parsed `pattern` that collects the rewrites its JavaScript spelling needs and
 /// the first construct that has no JavaScript spelling at all.
-///
-/// The AST walked is the one `regex::Regex::new` is itself built on, so the guard's reading of a
-/// pattern is the crate's own reading of it. A second grammar written here would answer for the
-/// crate's while drifting from it, and it would have to tell `[--/]`, three ordinary class members,
-/// from `[+--]`, a set difference — which the bytes alone do not say.
 #[derive(Default)]
 struct JsSpelling {
     /// The byte span of each construct that is rewritten, beside what it is rewritten to.
-    ///
-    /// Every rewrite is local — it replaces one construct's own span and leaves the bytes around
-    /// it alone — which is what makes it safe to apply them all in one pass: `(?P<name>` loses its
-    /// `P`, and a `\d`, `\w` or `\s` is replaced by the members it stands for. The `regex` crate
-    /// reads the results back exactly as it read the originals, so the one string that goes to all
-    /// three surfaces still means to the Rust validator what the guard decided it means.
-    ///
-    /// Escaping a class-opening `]` looks like the same kind of fix and is not — `[]-a]` is three
-    /// members and `[\]-a]` is a range — which is why that one is refused rather than rewritten.
     edits: Vec<(Range<usize>, &'static str)>,
     refusal: Option<Unportable>,
 }
@@ -416,17 +330,6 @@ impl JsSpelling {
     }
 
     /// Walks a `[...]` class, refusing it first if it is negated.
-    ///
-    /// A negated class is the last construct both grammars read and fill differently, and the
-    /// members cannot settle it: the complement is taken one code unit at a time there and one
-    /// character at a time here, so `[^0-9]` parts ways over an astral character exactly as the
-    /// `\D` above it does. Nothing is bought by admitting the bracketed spelling of a construct
-    /// already refused under its perl one.
-    ///
-    /// The one class whose `regex` reading does leave every astral character out has to name them
-    /// by astral bounds, and a flagless literal reads those as surrogate halves in descending
-    /// order and will not parse the class at all — so there is no admissible spelling to fall back
-    /// to, which is what makes refusal the whole verdict rather than a table of survivors.
     fn bracketed_class(&mut self, class: &ClassBracketed) {
         if class.negated {
             self.refuse_value_set(
@@ -597,12 +500,6 @@ impl JsSpelling {
     }
 
     /// Equalises a `\d`, `\w` or `\s` — or refuses its negation.
-    ///
-    /// The plain forms name a set each engine reads its own way, and the members they share can be
-    /// written out, so they are. The negated forms name a *complement*, and a complement taken one
-    /// code unit at a time is not the complement taken one character at a time however the members
-    /// are spelled: `[^0-9]` diverges over an astral character exactly as `\D` does. Nothing is
-    /// gained by rewriting them, so they are refused with the divergence named.
     fn perl_class(&mut self, perl: &ClassPerl, in_class: bool) {
         if perl.negated {
             self.refuse_value_set(
@@ -736,24 +633,6 @@ pub fn register_alias_info(
 
 /// Records what the value surface written under a name is, on the entry that name has just
 /// registered.
-///
-/// The question is the constrained-brand guard's: a brand appends `.min`/`.max`/a regex check to
-/// its inner's own schema binding, and a name is the one inner spelling whose binding this
-/// expansion cannot read off the declaration — the schema lives in the module the *named* item
-/// published. So each item answers for itself as it registers, and a brand over a name reads the
-/// answer back rather than guessing at it.
-///
-/// [`PublishedShape::Flat(None)`] is what an unanswered name and a string-checked one both leave,
-/// and the guard treats them alike: a name it cannot classify keeps the emission it has always
-/// had. That is the same regime the map-key registry already runs — `AliasKind::Unknown` is a name
-/// that was not registered before the type reading it — rather than a second one.
-///
-/// A name whose written target *is* one of its own parameters records that position instead of a
-/// word, because one word would have to stand for every instantiation and only the opaque one
-/// does — see [`PublishedShape`].
-///
-/// A chain resolves one link at a time and cannot cycle, because an entry is only ever built from
-/// entries registered before it.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 pub fn record_value_shape(rust_ident: &str, shape: PublishedShape) {
     ALIAS_INFO.with(|map| {
@@ -765,21 +644,6 @@ pub fn record_value_shape(rust_ident: &str, shape: PublishedShape) {
 
 /// Records what the value surface written under a name puts on the wire, on the entry that name has
 /// just registered.
-///
-/// The question is the flatten merge's: what serde writes for a member, named by the JSON type
-/// keyword the other surface writes for the same member, so the two refuse the same declaration in
-/// the same words. A name is the one member spelling the expansion reading it cannot answer for —
-/// the document lives in the module the *named* item published — so each item answers for itself as
-/// it registers.
-///
-/// Recorded as leaves rather than as one word because a published surface may be a choice: an item
-/// whose own surface is nullable publishes its value and a bare `null`, and the merge descending it
-/// names that `null` a level below the member. One word at the member's own position could not say
-/// where it sits, and naming it at the member's position would put the two merges into
-/// disagreement — the very thing the branch trail exists to prevent.
-///
-/// A chain resolves one link at a time and cannot cycle, because an entry is only ever built from
-/// entries registered before it.
 #[cfg(all(feature = "serde", any(feature = "zod", feature = "typescript")))]
 pub fn record_wire_leaves(rust_ident: &str, leaves: &[WireLeaf]) {
     ALIAS_INFO.with(|map| {
@@ -791,22 +655,6 @@ pub fn record_wire_leaves(rust_ident: &str, leaves: &[WireLeaf]) {
 
 /// Records what an untagged enum's members are spelled as on the Zod surface, on the entry that
 /// enum has already registered.
-///
-/// A merge that flattens the enum is a different macro invocation from the enum's own, so the
-/// members reach it through the registry or not at all — an intersection recognizes exactly the
-/// keys its operands name, and a `z.union` names none, so the merge joins one member per branch
-/// rather than the union as one operand.
-///
-/// What is recorded is already multiplied out: a member that is itself a recorded union contributes
-/// that union's members instead of its own name. That leaves the merge nothing to walk, and the
-/// walk is what could not be made to terminate — two unions naming each other is a shape a merge is
-/// free to reach. The recording cannot hold such a cycle, because an entry is only ever built from
-/// entries registered before it.
-///
-/// Each member carries where it sits and whether serde writes it as an object, because the merge is
-/// the position that has to answer for both and the spelling tells it neither. The member itself is
-/// left alone: an untagged enum may hold a scalar, and it is joining that scalar to an object that
-/// no value satisfies.
 #[cfg(feature = "zod")]
 pub fn record_zod_union_members(rust_ident: &str, members: &[ZodUnionMember]) {
     ALIAS_INFO.with(|map| {
@@ -818,15 +666,6 @@ pub fn record_zod_union_members(rust_ident: &str, members: &[ZodUnionMember]) {
 
 /// Records what an untagged enum's members are spelled as where an object flattens the enum itself,
 /// on the entry that enum has already registered.
-///
-/// The two spellings of one union part where an object is joined to it. Standing alone the union
-/// describes one member at a time, and the enum's own name is the whole of what it publishes;
-/// intersected with an open object each member is left satisfied by a payload carrying the other
-/// members' keys as well, which serde writes for no value. The members recorded here carry the
-/// exclusions that close them against one another, so the merge can spell them in the name's place.
-///
-/// Nothing is recorded where those exclusions come to nothing — a union of names proves no key an
-/// object could be told to leave out — and the merge then names the union as it always did.
 #[cfg(all(feature = "serde", feature = "typescript"))]
 pub fn record_ts_union_members(rust_ident: &str, members: &[String]) {
     ALIAS_INFO.with(|map| {
@@ -838,19 +677,6 @@ pub fn record_ts_union_members(rust_ident: &str, members: &[String]) {
 
 /// Records what an externally tagged enum's variants are spelled as where an object flattens the
 /// enum itself, on the entry that enum has already registered.
-///
-/// A variant standing alone and the same variant written into an object being merged are two
-/// spellings of one wire. serde writes a data-carrying variant as the single-key object its name
-/// tags, which is what the union already publishes; it writes a unit variant as that name alone
-/// standing on its own, and as that name holding `null` where the enum is flattened — a key set,
-/// where the union publishes a bare string no object joins. So the flatten-edge spelling is recorded
-/// beside the union's rather than read back off it.
-///
-/// Recorded for every externally tagged enum, and read by each surface wherever the enum is
-/// flattened directly. A Zod intersection recognizes exactly the keys its operands name, so it takes
-/// one operand per variant; TypeScript distributes over a union of objects on its own and takes the
-/// variants for what the union alone cannot say — the key set serde writes for a unit variant, and
-/// each variant's silence about the keys its siblings tag.
 #[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod")))]
 pub fn record_flatten_variants(rust_ident: &str, variants: &[FlattenVariant]) {
     ALIAS_INFO.with(|map| {
@@ -861,22 +687,6 @@ pub fn record_flatten_variants(rust_ident: &str, variants: &[FlattenVariant]) {
 }
 
 /// Records which of the two Zod bindings a name publishes.
-///
-/// A reference reads this back rather than deciding for itself. The decision belongs to the named
-/// item — it turns on whether that item declares type parameters, nothing a reference can see — and
-/// is taken in one place, before the item is dispatched to its shape, so the binding an item
-/// publishes and every reference written to it move together whatever the reference was spelled
-/// with.
-///
-/// Held apart from the item's registry entry rather than on it, because a *self*-reference is
-/// written while the item's own expansion is still running: the entry is created as the item
-/// registers and its fields are rendered from it, so an answer stored on the entry would be read
-/// before the item that owns it had put one there — and the `false` a fresh entry carries reads as
-/// "publishes a `const`", which for a generic item names a binding nothing declares. Recorded here
-/// the answer stands from before the first field is rendered until after the last.
-///
-/// A name never recorded answers `false`, which is the right reading for every item that declares
-/// no parameters and for every name this expansion has not seen.
 #[cfg(feature = "zod")]
 pub fn record_zod_factory(rust_ident: &str, publishes: bool) {
     ZOD_FACTORY_PUBLISHERS.with(|names| {
@@ -898,14 +708,6 @@ pub fn publishes_zod_factory(rust_ident: &str) -> bool {
 /// Records `rust_ident`'s own `$SchemaDefault` fold-comparison keys — the plain [`FieldDef::zod_type`]
 /// rendering of each declared-default field, one per parameter in declaration order, computed
 /// before deferral and before a constrained brand's `.min`/`.max`/`.check` chain is appended.
-///
-/// This is a comparison key, not the text `$SchemaDefault` emits: the fold in
-/// [`default_zod_rendering`] renders a downstream reference's own arguments the same plain way, so
-/// the two must agree in form for the comparison to ever succeed. Recorded once as the item's
-/// `$SchemaDefault` is built, so a later item whose own declared default names this one at the
-/// identical arguments can read them back and fold onto this binding instead of composing a second
-/// call the memo cache does not share with it — two separately written `z.string()` calls are two
-/// different objects, and the cache keys on argument identity, not on what the argument says.
 #[cfg(feature = "zod")]
 pub fn record_zod_default_arguments(rust_ident: &str, arguments: Vec<String>) {
     ZOD_DEFAULT_ARGUMENTS.with(|map| {
@@ -922,16 +724,6 @@ pub fn zod_default_arguments(rust_ident: &str) -> Option<Vec<String>> {
 }
 
 /// The characters a `\d`, `\w` or `\s` covers in *both* engines, written out as a class body.
-///
-/// The `regex` crate reads the three as Unicode classes and a flagless JavaScript literal reads
-/// the narrower ASCII ones, so the reading the two share is the ASCII one, spelled out. For `\s`
-/// the two Unicode sets are not even nested — the `regex` crate spaces U+0085 and JavaScript does
-/// not, JavaScript spaces U+FEFF and the `regex` crate does not — which leaves the ASCII run as
-/// the only common ground rather than merely the safe one.
-///
-/// Returned as the bare body and the bracketed class, because where the construct sits decides
-/// which is written: a class nested inside a class is a construct the guard refuses, so a `\d`
-/// inside one contributes its members and not another `[...]`.
 const fn perl_class_equalised(kind: &ClassPerlKind) -> (&'static str, &'static str) {
     match *kind {
         ClassPerlKind::Digit => ("0-9", "[0-9]"),
@@ -955,19 +747,6 @@ pub fn lookup_alias_info(rust_ident: &str) -> Option<AliasInfo> {
 
 /// The type a spelling names, read through the invisible grouping a `macro_rules!` substitution
 /// arrives inside.
-///
-/// A type written through a `$t:ty` metavariable reaches the expansion wrapped in a
-/// `None`-delimited group — rustc's way of keeping the substituted type one unit whatever the
-/// expansion writes around it — which `syn` parses as [`Type::Group`]. The grouping is all it is:
-/// the type inside is the one the author wrote, at the spans they wrote it at, and it renders the
-/// same source text. What differs is the shape, and every reader below classifies by shape, so a
-/// substituted `String` handed over ungrouped is a type none of their arms answer for — it lands
-/// on the opaque value, silently, and the field comes to admit anything.
-///
-/// Substitutions nest — a metavariable passed on through a second `macro_rules!` arrives grouped
-/// twice — so the grouping is read all the way through rather than one layer off. A parenthesised
-/// type is left alone: `(String)` is a grouping the author wrote, and `syn` keeps it as
-/// [`Type::Paren`] precisely so it can be told from this one.
 pub fn written_type(ty: &Type) -> &Type {
     let mut current = ty;
     while let Type::Group(group) = current {
@@ -987,12 +766,6 @@ pub fn safe_type_name(key: &str) -> String {
 /// The schema module a `#[model_schema()]` item publishes — an alias, a struct, an enum, a branded
 /// newtype alike — which is also the module a reference assumes for a name the registry does not
 /// hold.
-///
-/// A reference written *before* the item expands has nothing but the Rust ident to name a module
-/// from — the registry is empty of the item, and the exported name is not recoverable from the
-/// ident once a `name = "…"` override is in play. So the module is named from the ident on both
-/// sides, and the two spellings agree in either declaration order. A rename moves what the item is
-/// exported as; it does not move where the item's schema lives.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 pub fn ident_schema_module_name(rust_ident: &str) -> String {
     format!("{}_schema", to_snake_case(&safe_type_name(rust_ident)))
@@ -1016,13 +789,6 @@ pub fn compute_alias_export_name(rust_ident: &str, override_name: Option<&str>) 
 /// cannot answer for it, which is what a reference standing *before* the item expanded has and
 /// nothing else — the ident with the `Json` suffix taken off, that being what the field walk
 /// records for a sibling and what [`ident_schema_module_name`] names the module from.
-///
-/// An item exported under this spelling already answers at it. One exported under any other — an
-/// alias, which is given the `Type` suffix, or anything carrying a `name = "…"` override — does
-/// not, so it publishes the ident as a name of its own on each nominal surface: the two
-/// declaration orders then spell the reference differently, and both spellings are defined by the
-/// same emission. The module seam settled the same question for the JSON surface, which addresses
-/// a Rust path rather than a name.
 #[cfg(any(feature = "typescript", feature = "zod"))]
 fn ident_reexport_name(rust_ident: &str, export_name: &str) -> Option<String> {
     let referenced = safe_type_name(rust_ident);
@@ -1030,18 +796,6 @@ fn ident_reexport_name(rust_ident: &str, export_name: &str) -> Option<String> {
 }
 
 /// The names an item's own declaration binds as type parameters.
-///
-/// This is the whole of what separates a name the expansion cannot resolve *because it is a
-/// parameter* from one it cannot resolve because the type lives elsewhere: the first is in scope
-/// at the declaration and names no type any emitted output can reference, the second names a type
-/// that publishes its own schema module. Every surface that has to draw that line draws it here —
-/// see [`crate::field_type::FieldDef::erase_type_parameters`] for what each of them then does with
-/// it.
-///
-/// Lifetimes and const parameters name no type a field position can be written out of, so they are
-/// left out. That is also why an emitted `impl` block is spelled from `split_for_impl` instead of
-/// from this list: the block has to carry every parameter the declaration binds, lifetimes and
-/// consts included, while only these can reach a schema.
 pub fn type_parameters_in_scope(generics: &Generics) -> Vec<String> {
     generics
         .params
@@ -1055,14 +809,6 @@ pub fn type_parameters_in_scope(generics: &Generics) -> Vec<String> {
 
 /// The parameter list a generic item's `TypeScript` declaration is written under — `<IdType>`,
 /// `<IdType, DateType>` — or the empty string for an item that binds none.
-///
-/// Spelled once for the alias, the struct and every enum shape, so the three cannot come to write
-/// the same declaration differently. The names are written as declared, which is what a field
-/// typed with one already renders as: the declaration and the fields it binds have to spell a
-/// parameter the same way or the type does not close.
-///
-/// A lifetime and a const parameter never reach here — they name no type `TypeScript` has a
-/// declaration slot for — so `struct Label<'a>` publishes a plain `export type Label`.
 #[cfg(feature = "typescript")]
 pub fn ts_generic_params(generics: &Generics) -> String {
     let parameters = type_parameters_in_scope(generics);
@@ -1086,10 +832,6 @@ pub fn ident_reexport_ts(rust_ident: &str, export_name: &str, ts_generics: &str)
 /// The zod counterpart of [`ident_reexport_ts`] — a binding, not a second schema, so the two names
 /// carry the one schema the item published. It is written unannotated because a zod-only build has
 /// no `ZodType` to annotate it with, and the binding's own type is the exported schema's.
-///
-/// `binding_suffix` is what the item's own binding is named with, and the two names have to agree
-/// on it: a generic type publishes a factory rather than a schema, so both spellings end in
-/// `$SchemaFactory` there and in `$Schema` everywhere else.
 #[cfg(feature = "zod")]
 pub fn ident_reexport_zod(rust_ident: &str, export_name: &str, binding_suffix: &str) -> String {
     ident_reexport_name(rust_ident, export_name).map_or_else(String::new, |referenced| {
@@ -1113,12 +855,6 @@ pub fn zod_factory_argument(parameter: &str) -> String {
 
 /// The local a JSON document binds one type parameter's argument document to — `_arg_id_type` for
 /// `IdType`.
-///
-/// The counterpart of [`zod_factory_argument`] on the surface that writes Rust rather than
-/// JavaScript, and named off the parameter for the same reason: the argument reads as the parameter
-/// it fills while staying a name of its own beside it. Snake case because that is what a Rust local
-/// is spelled in, and underscore-led because a declared parameter need not reach the document at
-/// all — the item is not owed a warning for one the wire does not carry.
 #[cfg(feature = "jsonschema")]
 pub fn json_argument_binding(parameter: &str) -> String {
     format!("_arg_{}", to_snake_case(parameter))
@@ -1127,26 +863,12 @@ pub fn json_argument_binding(parameter: &str) -> String {
 /// [`compute_alias_export_name`] for a declared item — a struct, an enum, a tuple struct, a branded
 /// newtype. Without an override the item keeps the name it is declared under, which is the one
 /// difference from an alias: an alias has no surface name of its own and is given the `Type` suffix.
-///
-/// This is the single seam every item path takes its exported name from, and the registry is keyed
-/// by the Rust ident and answers with it, so a sibling naming the type in Rust resolves to whatever
-/// it is exported as.
 pub fn compute_item_export_name(rust_ident: &str, override_name: Option<&str>) -> String {
     override_name.map_or_else(|| safe_type_name(rust_ident), ToOwned::to_owned)
 }
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 /// Extracts and concatenates documentation comments from a `syn::ItemStruct`.
-///
-/// # Arguments
-///
-/// * `item_struct` - A reference to the `syn::ItemStruct` to process.
-///
-/// # Returns
-///
-/// An `Option<String>` containing the concatenated documentation,
-/// or `None` if no doc comments are found. Returns an empty string
-/// if doc comments exist but are empty.
 pub fn get_struct_docs(item_struct: &ItemStruct) -> Option<Vec<String>> {
     collect_doc_lines(&item_struct.attrs)
 }
@@ -1249,7 +971,6 @@ pub fn extract_example_from_docs(docs: &[String]) -> Option<String> {
         // Strip leading asterisk from block-style comments
         let cleaned = trimmed.strip_prefix('*').unwrap_or(trimmed).trim();
 
-        // Check for opening fence
         if cleaned == "```rust example" {
             if !example_lines.is_empty() {
                 // Already found one example, return it
@@ -1259,7 +980,6 @@ pub fn extract_example_from_docs(docs: &[String]) -> Option<String> {
             continue;
         }
 
-        // Check for closing fence
         if in_example_block && cleaned == "```" {
             // Found complete example
             break;
@@ -1281,14 +1001,6 @@ pub fn extract_example_from_docs(docs: &[String]) -> Option<String> {
 }
 
 /// Transforms doctest-compatible example code to be suitable for `schema_example()`.
-///
-/// Applies regex transformations to convert code that returns () (for doctest)
-/// into code that returns the actual value (for schema serialization).
-///
-/// Current transformations:
-/// - Strips `use` statements (type is already in scope in impl block)
-/// - `println!("...", value);` → `value`
-/// - `let _: Type = value;` → `value`
 #[cfg(feature = "zod")]
 fn transform_example_code(code: &str) -> String {
     let mut result = code.to_owned();
@@ -1333,13 +1045,11 @@ pub fn strip_examples_from_docs(docs: &[String]) -> Vec<String> {
         // Strip leading asterisk from block-style comments
         let cleaned = trimmed.strip_prefix('*').unwrap_or(trimmed).trim();
 
-        // Check for opening fence
         if cleaned == "```rust example" {
             in_example_block = true;
             continue;
         }
 
-        // Check for closing fence
         if in_example_block && cleaned == "```" {
             in_example_block = false;
             continue;
@@ -1372,30 +1082,6 @@ const fn js_line_terminator_escape(ch: char) -> Option<&'static str> {
 
 /// A `pattern` attribute value in the spelling every surface it is spliced into reads the same
 /// way, or the rejection that keeps it off them, spanned on the literal the author wrote.
-///
-/// One string reaches three surfaces: the Rust validator's `regex::Regex::new(...).unwrap()`, the
-/// Zod schema's JavaScript regex literal, and the JSON Schema `pattern` keyword, which ECMA-262
-/// defines as a JavaScript regex. A pattern the `regex` crate cannot parse is a panic at the first
-/// validated value. A pattern only the `regex` crate can parse is quieter and worse: the derive
-/// expands clean and the generated JavaScript either throws where it loads or, where the two
-/// grammars disagree rather than collide, matches a different set of strings than the Rust
-/// validator it was written beside. Both verdicts are reached here, at expansion.
-///
-/// Where a construct has a spelling both grammars read alike, it is rewritten instead of refused,
-/// and the rewrite is what every surface receives — the Rust validator included, which is what
-/// keeps the three from validating different sets. There are two: `(?P<name>...)` becomes
-/// `(?<name>...)`, one group under two spellings; and `\d`, `\w` and `\s` become the members they
-/// stand for, the `regex` crate reading the three as Unicode classes where a flagless literal
-/// reads the narrower ASCII ones. The first changes nothing about what the pattern matches. The
-/// second narrows the Rust side on purpose, to the set the JavaScript side was going to enforce
-/// regardless.
-///
-/// What has no such spelling is refused with the construct named. That covers `.` and the negated
-/// `\D`, `\W` and `\S`: a flagless literal matches one UTF-16 code unit where the `regex` crate
-/// matches one character, so writing the members out settles which characters are named and never
-/// how many code units one of them is. A `]` opening a character class looks like a fixable
-/// spelling and is not — `[]-a]` is three members and `[\]-a]` is a range — so it too is refused
-/// rather than escaped.
 pub fn portable_pattern(lit: &LitStr) -> Result<String, syn::Error> {
     let pattern = lit.value();
     if let Err(err) = regex::Regex::new(&pattern) {
@@ -1459,28 +1145,6 @@ fn js_spelling(pattern: &str) -> Result<String, String> {
 
 /// The `pattern` handed back when it turns some value away, or the refusal it earns for admitting
 /// every value -- spanned on the literal the author wrote.
-///
-/// A `pattern` that matches at some position of every string is a constraint that constrains
-/// nothing. Nothing downstream can make it say anything: the generated validator would reject no
-/// value, and the Zod and JSON Schema surfaces would publish a check every payload passes. Taking
-/// it silently leaves the author holding a contract that says the value is checked when nothing
-/// checks it -- the same claim a bound written where no surface reads one is refused for, so it is
-/// refused the same way, where it is written.
-///
-/// It also settles what such a pattern would have been emitted as. The `str` call
-/// [`trivial_pattern`] names for a simple pattern does not exist here -- there is no call for "and
-/// then check nothing" -- and dropping the check from a validator whose only constraint is that
-/// pattern leaves `value` unread in the emitted `pub fn validate_..._value(value: &str)`, which is
-/// a fresh `-D warnings` failure in the consumer crate the validator is written into. Refusing at
-/// expansion means no such validator is ever emitted.
-///
-/// What stays on the regex path is every pattern that turns some value away, `\b` included. That
-/// one is the residual: `clippy::trivial_regex` flags it and names no replacement -- a probe of
-/// `#[model_schema_prop(pattern = r"\b")]` under `cargo clippy --all-targets -- -D warnings` in a
-/// crate denying `clippy::nursery` reports `trivial regex ... the regex is unlikely to be useful
-/// as it is` against the `#[model_schema]` attribute -- and it is left standing, because `\b` is a
-/// real constraint: the empty string holds no word boundary, so a value is turned away by it, and
-/// refusing it would drop a check the author is owed.
 pub fn constraining_pattern(lit: &LitStr, pattern: String) -> Result<String, syn::Error> {
     if admits_every_value(&pattern) {
         return Err(syn::Error::new_spanned(
@@ -1499,17 +1163,6 @@ pub fn constraining_pattern(lit: &LitStr, pattern: String) -> Result<String, syn
 /// Whether a search for `pattern` succeeds in every haystack, read off the HIR rather than off the
 /// pattern text: `^` and `(^)` and `^|a` are one verdict written three ways, and `^$` is written
 /// out of the same two anchors as `^` and `$` yet admits only the empty string.
-///
-/// The rule is one sentence with one exception. A pattern admits every value when nothing in it
-/// asks the haystack for anything -- when it matches the empty string wherever it is tried
-/// ([`matches_at_every_position`]) -- and the exception is that a single whole-text anchor asks
-/// for nothing either, since every haystack has a start and an end. Two of them do ask: `^$` pins
-/// both to one position, which only the empty string has.
-///
-/// It errs toward `false` everywhere the reading is not certain, and everything it declines keeps
-/// its `regex::Regex`, where being conservative costs nothing. `^^` and `(?:^)+` are both admit-
-/// everything shapes it does not classify, and a pattern the parser cannot read is not classified
-/// at all -- that one is [`portable_pattern`]'s refusal to make, ahead of this one.
 fn admits_every_value(pattern: &str) -> bool {
     regex_syntax::ParserBuilder::new()
         .unicode(true)
@@ -1549,11 +1202,6 @@ fn concat_matches_every_haystack(parts: &[hir::Hir]) -> bool {
 
 /// Whether this sub-expression matches the empty string at every position of every haystack, and
 /// so asks the haystack for nothing at all.
-///
-/// A repetition that may run zero times is such a match wherever it is tried, whatever it repeats;
-/// an alternation is one as soon as any single branch is. A literal or a class consumes a
-/// character, and a look-around holds only where the haystack has the property it names -- `^` at
-/// the start, `\b` at a word boundary — so neither asks for nothing.
 fn matches_at_every_position(hir: &hir::Hir) -> bool {
     match hir.kind() {
         hir::HirKind::Empty => true,
@@ -1579,30 +1227,6 @@ fn is_text_anchor(hir: &hir::Hir) -> bool {
 /// What a `pattern` accepts stated without a regex, for exactly the patterns
 /// `clippy::trivial_regex` proves one is unnecessary for -- and `None` for every other pattern,
 /// which keeps its `regex::Regex` and is the only thing that reads a pattern of any real shape.
-///
-/// The lint is right, and it is the consumer who pays for being wrong: the `Regex::new` it fires
-/// on is written by this crate into the consumer's crate, so the diagnostic lands on their
-/// `#[model_schema]` attribute with no edit available at that site. Answering it means emitting
-/// the call it asks for, and the emitted call has to accept and reject the same values the regex
-/// did, byte for byte, or a pattern would mean one thing in a consumer denying the lint and
-/// another in one that does not.
-///
-/// So the classification is clippy's own, read off `clippy_lints/src/regex.rs::is_trivial_regex`
-/// (rust-lang/rust-clippy) and mirrored arm for arm: a bare literal, and a concatenation whose
-/// only non-literal parts are a leading `^`, a trailing `$`, or both. It is deliberately no wider
-/// than that. A shape the lint does not name is left on the regex path, where it costs nothing;
-/// a shape misread as trivial would silently change which values a constraint admits.
-///
-/// Two of the shapes the lint calls trivial and offers no replacement for -- a pattern that
-/// matches everything (`""`, `^`, `$`), and one whose alternatives are all empty (`|`) -- never
-/// reach here at all: [`constraining_pattern`] refuses them where they are written, since there is
-/// no call to emit for them, only the absence of a check. The third, a bare `\b`, does reach here
-/// and keeps its regex, because it turns a value away and so has a check worth keeping.
-///
-/// The HIR walked is the one the lint reads, parsed with the options it parses with, so what is
-/// classified here is what it classifies. Anchors are the whole-haystack `Look::Start` and
-/// `Look::End` alone -- the line anchors `(?m)` turns those into never reach this crate, since
-/// [`portable_pattern`] refuses an inline flag before a pattern is ever emitted.
 #[cfg(feature = "serde")]
 pub fn trivial_pattern(pattern: &str) -> Option<TrivialPattern> {
     let parsed = regex_syntax::ParserBuilder::new()
@@ -1677,13 +1301,6 @@ fn literal_needle(parts: &[hir::Hir]) -> Option<String> {
 }
 
 /// Escapes a regex pattern for splicing between the `/` delimiters of a JavaScript regex literal.
-///
-/// The pattern is already a regex, so what needs work is what the literal syntax alone gives a
-/// meaning to: the `/` delimiter, which becomes `\/`, and a raw line terminator, which the literal
-/// cannot carry at all and so becomes its escape. A backslash escape is consumed whole, which keeps
-/// an authored `\/` from gaining a second backslash and keeps a literal `\\` from being read as the
-/// escape for the `/` that follows it. A backslash before a raw line terminator is an identity
-/// escape, and the escape form denotes that same character.
 #[cfg(feature = "zod")]
 pub fn escape_js_regex_literal(pattern: &str) -> String {
     let mut result = String::with_capacity(pattern.len());

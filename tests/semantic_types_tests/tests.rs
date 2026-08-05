@@ -6,10 +6,6 @@ use serde::{Deserialize, Serialize};
 #[cfg(all(test, feature = "typescript"))]
 use tixschema::model_schema;
 
-// ========================================================================
-// Type Alias Definitions
-// ========================================================================
-
 #[cfg(all(test, feature = "typescript"))]
 #[model_schema(name = "AuditId")]
 pub type AuditId = OrderId;
@@ -129,10 +125,6 @@ struct NestedAliasStruct {
     owner: DocumentId,
 }
 
-// ========================================================================
-// Basic Type Alias Tests - TypeScript Generation
-// ========================================================================
-
 #[test]
 #[cfg(feature = "typescript")]
 fn test_string_alias_typescript() {
@@ -230,10 +222,6 @@ fn test_tuple_alias_typescript() {
     );
 }
 
-// ========================================================================
-// Generic Type Alias Tests
-// ========================================================================
-
 #[test]
 #[cfg(feature = "typescript")]
 fn test_single_generic_alias_typescript() {
@@ -270,10 +258,6 @@ fn test_double_generic_alias_typescript() {
     );
 }
 
-// ========================================================================
-// Nested Type Alias Tests
-// ========================================================================
-
 #[test]
 #[cfg(feature = "typescript")]
 fn test_nested_alias_typescript() {
@@ -291,10 +275,6 @@ fn test_nested_alias_typescript() {
         "Should reference OrderId type. Got: {ts}"
     );
 }
-
-// ========================================================================
-// Type Aliases Used in Struct Fields
-// ========================================================================
 
 #[test]
 #[cfg(all(feature = "typescript", feature = "serde"))]
@@ -342,10 +322,6 @@ fn test_struct_with_nested_alias_fields() {
     );
 }
 
-// ========================================================================
-// Type Aliases in Collections
-// ========================================================================
-
 #[test]
 #[cfg(all(feature = "typescript", feature = "serde"))]
 fn test_alias_in_vec() {
@@ -371,10 +347,6 @@ fn test_alias_in_hashmap() {
         "Should use DocumentId in HashMap. Got: {ts}"
     );
 }
-
-// ========================================================================
-// Zod Schema Tests
-// ========================================================================
 
 #[test]
 #[cfg(all(feature = "zod", feature = "typescript"))]
@@ -443,16 +415,11 @@ fn test_vec_of_alias_references_schema() {
 fn test_struct_with_alias_zod_schema() {
     let zod = DocumentRecord::zod_schema();
 
-    // The struct should generate a proper Zod schema
     assert!(
         zod.contains("z.strictObject"),
         "Should contain Zod object schema. Got: {zod}"
     );
 }
-
-// ========================================================================
-// JSON Schema Tests
-// ========================================================================
 
 /// An alias publishes the schema of the type it names, so a slot filled by the alias validates
 /// exactly what the aliased type validates — the scalar mapping being the same one a field written
@@ -569,7 +536,6 @@ fn test_generic_alias_json_schema() {
 fn test_struct_with_alias_json_schema() {
     let schema = DocumentRecord::json_schema();
 
-    // The struct should generate a proper JSON schema
     assert_eq!(
         schema["type"], "object",
         "Should be an object schema. Got: {schema:?}"
@@ -595,25 +561,17 @@ fn test_struct_with_alias_json_schema() {
     }
 }
 
-// ========================================================================
-// Module Structure Tests
-// ========================================================================
-
 #[test]
 #[cfg(feature = "typescript")]
 fn test_alias_generates_module() {
-    // Verify that the alias generates the expected module structure
-    // The module should be accessible as `document_id_schema`
     let ts = document_id_schema::Schema::ts_definition();
 
-    // If we can call this method, the module was generated correctly
     assert!(!ts.is_empty(), "Module should be accessible");
 }
 
 #[test]
 #[cfg(feature = "typescript")]
 fn test_multiple_aliases_generate_separate_modules() {
-    // Each alias should generate its own module
     let doc_ts = document_id_schema::Schema::ts_definition();
     let rev_ts = revision_schema::Schema::ts_definition();
     let score_ts = score_schema::Schema::ts_definition();
@@ -622,14 +580,9 @@ fn test_multiple_aliases_generate_separate_modules() {
     assert!(rev_ts.contains("Revision"));
     assert!(score_ts.contains("Score"));
 
-    // They should be different
     assert_ne!(doc_ts, rev_ts);
     assert_ne!(rev_ts, score_ts);
 }
-
-// ========================================================================
-// Edge Cases and Complex Scenarios
-// ========================================================================
 
 #[test]
 #[cfg(all(feature = "typescript", feature = "serde"))]
@@ -650,10 +603,6 @@ fn test_complex_alias_usage() {
         "Should handle HashMap<String, Vec<Alias>>. Got: {ts}"
     );
 }
-
-// ========================================================================
-// Name Override Tests
-// ========================================================================
 
 #[test]
 #[cfg(feature = "typescript")]
@@ -678,10 +627,6 @@ fn test_name_override() {
         "Original type name should reach nothing but the re-export. Got: {ts}"
     );
 }
-
-// ========================================================================
-// Documentation Tests
-// ========================================================================
 
 #[test]
 #[cfg(feature = "typescript")]

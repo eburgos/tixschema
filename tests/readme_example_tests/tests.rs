@@ -131,12 +131,6 @@ fn test_the_optional_fields_example_is_declarable_and_shows_what_it_emits() {
 
 /// A bullet from the "Supported Serde attributes" list, held to what it claims the generator
 /// writes.
-///
-/// Three things have to agree: the README still carries the bullet as its own line, the bullet
-/// still quotes each spelling, and the generator still writes it. A bullet summarising an attribute
-/// it no longer describes correctly is what this catches — the list stated for a long time that
-/// `skip_serializing_if` did not affect the generated types, which the omitted-key contract had
-/// already made false.
 fn assert_readme_bullet_shows(bullet: &str, emission: &str, spellings: &[&str]) {
     assert!(
         readme().lines().any(|line| line == bullet),

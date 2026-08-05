@@ -78,7 +78,6 @@ fn test_string_pair_tuple_field_zod() {
         zod.contains("values: z.tuple([z.string(), z.string()])"),
         "Expected z.tuple in Zod schema. Got: {zod}"
     );
-    // Must not emit the malformed bare-object-literal form.
     assert!(
         !zod.contains("element_0"),
         "Should not emit element_N keys in Zod. Got: {zod}"

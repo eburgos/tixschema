@@ -51,7 +51,6 @@ fn test_pattern_ts_type_unaffected() {
     }
 
     let ts = PatternTsTest::ts_definition();
-    // TypeScript type should just be string, no regex info in the type body
     assert!(ts.contains("data_element_id: string"), "TS: {ts}");
     assert!(!ts.contains("regex"), "TS should not contain regex: {ts}");
     // The type body itself (after the JSDoc comment) should not have pattern syntax
@@ -194,7 +193,6 @@ fn test_preprocess_json_schema_unaffected() {
     }
 
     let schema = PreprocessJsonSchema::json_schema();
-    // JSON schema should be same as without preprocess - just string type
     let properties = schema["properties"].as_object().unwrap();
     let date_schema = &properties["date_value"];
     assert_eq!(date_schema["type"], "string");
@@ -213,15 +211,12 @@ fn test_pattern_and_preprocess_same_field() {
     }
 
     let schema = PatternAndPreprocess::zod_schema();
-    // Should have preprocess wrapping the string with pattern check
     assert!(schema.contains("z.preprocess(trim,"), "Schema: {schema}");
     assert!(
         schema.contains(".check(z.regex(/^[0-9a-fA-F]{24}$/))"),
         "Schema: {schema}"
     );
 }
-
-// ==================== Pattern with optional field ====================
 
 #[cfg(feature = "zod")]
 #[test]
@@ -235,14 +230,11 @@ fn test_pattern_optional_field_zod() {
     }
 
     let schema = PatternOptional::zod_schema();
-    // Optional field with pattern: z.union([z.string().check(z.regex(...)), z.undefined()])
     assert!(
         schema.contains("z.union([z.string().check(z.regex(/^[0-9]+$/)), z.undefined()])"),
         "Expected optional pattern union in Zod schema: {schema}"
     );
 }
-
-// ==================== Pattern combined with minLength/maxLength ====================
 
 #[cfg(feature = "zod")]
 #[test]
@@ -291,8 +283,6 @@ fn test_pattern_with_min_length_json_schema() {
     );
 }
 
-// ==================== Preprocess with optional field ====================
-
 #[cfg(feature = "zod")]
 #[test]
 fn test_preprocess_optional_field_zod() {
@@ -311,8 +301,6 @@ fn test_preprocess_optional_field_zod() {
         "Expected preprocess inside optional union in Zod schema: {schema}"
     );
 }
-
-// ==================== Preprocess with multiple fields ====================
 
 #[cfg(feature = "zod")]
 #[test]
@@ -337,8 +325,6 @@ fn test_preprocess_different_fields() {
     );
 }
 
-// ==================== Pattern with special regex characters ====================
-
 #[cfg(feature = "zod")]
 #[test]
 fn test_pattern_special_regex_chars() {
@@ -359,8 +345,6 @@ fn test_pattern_special_regex_chars() {
     );
 }
 
-// ==================== Preprocess ordering with three functions ====================
-
 #[cfg(feature = "zod")]
 #[test]
 fn test_preprocess_ordering_three_fns() {
@@ -378,8 +362,6 @@ fn test_preprocess_ordering_three_fns() {
         "Expected correct nesting order a(b(c(inner))): {schema}"
     );
 }
-
-// ==================== Pattern on enum variant combined with minLength ====================
 
 #[cfg(all(feature = "zod", feature = "serde"))]
 #[test]
@@ -404,8 +386,6 @@ fn test_pattern_enum_variant_with_min_length() {
         "Expected .check(z.regex(...)) in Zod enum schema: {schema}"
     );
 }
-
-// ==================== Serde validation for pattern with enum variant ====================
 
 #[cfg(all(
     feature = "serde",
@@ -445,8 +425,6 @@ fn test_pattern_enum_variant_serde_validation() {
         "Error should mention pattern mismatch: {err_str}"
     );
 }
-
-// ==================== Forward slash inside the Zod regex literal ====================
 
 // The Zod surface splices a pattern into a JS regex literal, where `/` is the delimiter: an
 // unescaped one closes the literal early and the emitted TypeScript stops parsing. That escaping
@@ -567,8 +545,6 @@ fn test_the_escaped_zod_pattern_matches_the_value_set_the_validator_enforces() {
         );
     }
 }
-
-// ==================== Line terminators inside the Zod regex literal ====================
 
 // A JS regex literal cannot carry a raw line terminator: the literal ends at the line break and
 // the emitted TypeScript stops parsing, exactly as an unescaped delimiter did. The escape form

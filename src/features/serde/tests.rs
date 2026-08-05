@@ -2,26 +2,22 @@ use super::*;
 
 #[test]
 fn test_rename_all_transformations() {
-    // Test camelCase
     assert_eq!(apply_rename_all("user_name", Some("camelCase")), "userName");
     assert_eq!(
         apply_rename_all("first_name", Some("camelCase")),
         "firstName"
     );
 
-    // Test PascalCase
     assert_eq!(
         apply_rename_all("user_name", Some("PascalCase")),
         "UserName"
     );
 
-    // Test kebab-case
     assert_eq!(
         apply_rename_all("user_name", Some("kebab-case")),
         "user-name"
     );
 
-    // Test no transformation
     assert_eq!(apply_rename_all("user_name", None), "user_name");
 }
 
@@ -35,7 +31,6 @@ fn test_final_field_name() {
         untagged: false,
     };
 
-    // Test field with explicit rename
     let field_meta_with_rename = SerdeFieldMeta {
         cfg_attr_rejection: None,
         rename: Some("customName".to_owned()),
@@ -47,7 +42,6 @@ fn test_final_field_name() {
         "customName"
     );
 
-    // Test field with rename_all
     let field_meta_no_rename = SerdeFieldMeta {
         cfg_attr_rejection: None,
         rename: None,

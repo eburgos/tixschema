@@ -32,8 +32,6 @@ trait UnpublishedValidate {
     }
 }
 
-// ==================== String constraint: maxLength ====================
-
 #[cfg(all(feature = "serde", feature = "zod"))]
 #[test]
 fn test_max_length_zod() {
@@ -89,8 +87,6 @@ fn test_min_and_max_length_zod() {
     );
 }
 
-// ==================== String constraint: maxLength — JSON Schema ====================
-
 #[cfg(all(feature = "serde", feature = "jsonschema"))]
 #[test]
 fn test_max_length_json_schema() {
@@ -130,8 +126,6 @@ fn test_min_and_max_length_json_schema() {
         "Expected maxLength:50 in JSON schema: {schema_str}"
     );
 }
-
-// ==================== String constraint: maxLength — Rust validation ====================
 
 #[cfg(all(
     feature = "serde",
@@ -178,8 +172,6 @@ fn test_max_length_rust_invalid() {
     );
 }
 
-// ==================== String constraint: minLength — Rust validation ====================
-
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
@@ -224,8 +216,6 @@ fn test_min_length_rust_invalid() {
         "Error should mention 'too short': {err_str}"
     );
 }
-
-// ==================== Combined string constraints ====================
 
 #[cfg(all(
     feature = "serde",
@@ -284,8 +274,6 @@ fn test_combined_string_constraints_pattern_fail() {
     let result: Result<CombinedStringPattern, _> = serde_json::from_str(invalid);
     assert!(result.is_err(), "Value failing pattern should fail");
 }
-
-// ==================== validate() method — string ====================
 
 #[cfg(all(
     feature = "serde",
@@ -369,8 +357,6 @@ fn test_validate_method_multiple_errors() {
     assert_eq!(errors.len(), 2, "Should have 2 errors, got: {errors:?}");
 }
 
-// ==================== Numeric constraints: minimum/maximum — Zod ====================
-
 #[cfg(all(feature = "serde", feature = "zod"))]
 #[test]
 fn test_minimum_zod() {
@@ -426,8 +412,6 @@ fn test_float_minimum_maximum_zod() {
     );
 }
 
-// ==================== Numeric constraints: minimum/maximum — JSON Schema ====================
-
 #[cfg(all(feature = "serde", feature = "jsonschema"))]
 #[test]
 fn test_minimum_json_schema() {
@@ -463,8 +447,6 @@ fn test_maximum_json_schema() {
         "Expected 'maximum' in JSON schema: {schema_str}"
     );
 }
-
-// ==================== Numeric constraints: minimum/maximum — Rust validation ====================
 
 #[cfg(all(
     feature = "serde",
@@ -569,7 +551,6 @@ fn test_minimum_at_boundary() {
         pub count: i32,
     }
 
-    // Exactly at minimum should pass
     let valid = r#"{"count": 5}"#;
     let result: Result<MinBoundary, _> = serde_json::from_str(valid);
     assert!(
@@ -592,7 +573,6 @@ fn test_maximum_at_boundary() {
         pub count: i32,
     }
 
-    // Exactly at maximum should pass
     let valid = r#"{"count": 5}"#;
     let result: Result<MaxBoundary, _> = serde_json::from_str(valid);
     assert!(
@@ -601,8 +581,6 @@ fn test_maximum_at_boundary() {
         result.err()
     );
 }
-
-// ==================== validate() method — numeric ====================
 
 #[cfg(all(
     feature = "serde",
@@ -652,8 +630,6 @@ fn test_validate_method_numeric_err() {
         "Error message should mention 'too small': {errors:?}"
     );
 }
-
-// ==================== validate() method — pattern ====================
 
 #[cfg(all(
     feature = "serde",
@@ -760,8 +736,6 @@ fn test_validate_method_pattern_and_length() {
     );
 }
 
-// ==================== validate() method — maxLength ====================
-
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
@@ -815,8 +789,6 @@ fn test_validate_method_max_length_err() {
     );
 }
 
-// ==================== validate() method — mixed string and numeric ====================
-
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
@@ -857,8 +829,6 @@ fn test_validate_method_mixed_string_numeric() {
         "Should contain numeric 'too small' error: {errors:?}"
     );
 }
-
-// ==================== Float numeric validation — Rust (serde) ====================
 
 #[cfg(all(
     feature = "serde",
@@ -950,8 +920,6 @@ fn test_maximum_float_rust_invalid() {
     );
 }
 
-// ==================== validate() method — float ====================
-
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
@@ -979,8 +947,6 @@ fn test_validate_method_float_err() {
     );
 }
 
-// ==================== Combined minimum+maximum — Zod ====================
-
 #[cfg(all(feature = "serde", feature = "zod"))]
 #[test]
 fn test_min_max_numeric_zod() {
@@ -1001,8 +967,6 @@ fn test_min_max_numeric_zod() {
         "Expected .max() in Zod schema: {schema}"
     );
 }
-
-// ==================== Combined minimum+maximum — JSON Schema ====================
 
 #[cfg(all(feature = "serde", feature = "jsonschema"))]
 #[test]
@@ -1025,8 +989,6 @@ fn test_min_max_numeric_json_schema() {
         "Expected 'maximum' in JSON schema: {schema_str}"
     );
 }
-
-// ==================== TypeScript unaffected by constraints ====================
 
 #[cfg(all(feature = "serde", feature = "typescript"))]
 #[test]
@@ -1074,7 +1036,6 @@ fn test_constraints_dont_affect_typescript() {
         !type_section.contains("z.number"),
         "TypeScript type should not contain z.number: {type_section}"
     );
-    // Type fields should still be plain `string` and `number`
     assert!(
         type_section.contains("username: string"),
         "TypeScript should have 'username: string': {type_section}"
@@ -1084,8 +1045,6 @@ fn test_constraints_dont_affect_typescript() {
         "TypeScript should have 'age: number': {type_section}"
     );
 }
-
-// ==================== Edge cases ====================
 
 #[cfg(all(
     feature = "serde",
@@ -1100,7 +1059,6 @@ fn test_boundary_min_length_zero() {
         pub tag: String,
     }
 
-    // Empty string should pass with minLength = 0
     let instance = MinLenZero { tag: String::new() };
     let validate_result = instance.validate();
     assert!(
@@ -1109,7 +1067,6 @@ fn test_boundary_min_length_zero() {
         validate_result.err()
     );
 
-    // Also test via serde
     let valid = r#"{"tag": ""}"#;
     let serde_result: Result<MinLenZero, _> = serde_json::from_str(valid);
     assert!(
@@ -1132,7 +1089,6 @@ fn test_pattern_empty_string_match() {
         pub empty_field: String,
     }
 
-    // Empty string should match "^\s*$"
     let valid_instance = PatternEmpty {
         empty_field: String::new(),
     };
@@ -1143,7 +1099,6 @@ fn test_pattern_empty_string_match() {
         valid_result.err()
     );
 
-    // Non-empty string should NOT match "^\s*$"
     let invalid_instance = PatternEmpty {
         empty_field: "not empty".to_owned(),
     };
@@ -1230,8 +1185,6 @@ fn test_pattern_pinning_both_ends_to_one_position() {
         "Rejection should read exactly as the regex path words it: {errors:?}"
     );
 }
-
-// ==================== Constraints under Option / wrappers / sequences ====================
 
 #[cfg(all(
     feature = "serde",
@@ -1482,8 +1435,6 @@ fn test_validate_boxed_option_string() {
         "A None under a Box still writes nothing to constrain"
     );
 }
-
-// ==================== Constraints on the wire, under Option / wrappers / sequences ====================
 
 /// The gate every consumer reaches first. A constraint describes the value the field puts on the
 /// wire, so a payload carrying a value the constraint rejects is rejected as it is read — at the
@@ -1844,8 +1795,6 @@ fn test_two_variants_naming_one_field_keep_their_own_constraints() {
         "A value Upload admits is not held to Delete's minimum"
     );
 }
-
-// ==================== validate() method — enum members ====================
 
 /// The struct and its single-variant tagged twin carry the same constraint on the same member, so
 /// an author who changes the one declaration into the other reads the identical sentence back.
@@ -2230,8 +2179,6 @@ fn test_every_variant_shape_reaches_the_accessor() {
         .unwrap();
     EveryShape::Nothing.validate().unwrap();
 }
-
-// ==================== The error strings the README prints ====================
 
 /// The README's `validate()` example prints the errors a caller reads back, and a reader who greps
 /// for one of those sentences, or writes an assertion against it, is holding the crate to it. So

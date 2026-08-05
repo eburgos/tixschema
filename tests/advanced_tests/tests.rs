@@ -13,11 +13,9 @@ struct Address {
     zip_code: String,
 }
 
-// Test complex nested structures (fixed to work with actual macro)
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct Company {
-    // Changed to string keys only - HashMap<String, Department> not supported
     department_names: Vec<String>,
     employees: Vec<Employee>,
     headquarters: Address,
@@ -38,7 +36,6 @@ struct CompanySettings {
     retirement_plan: Option<RetirementPlan>,
 }
 
-// Test discriminated union with complex fields
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "eventType", rename_all = "camelCase")]
@@ -77,7 +74,6 @@ struct ContactInfo {
     phone: Option<String>,
 }
 
-// Test with documentation comments
 /// A user account in the system.
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -95,7 +91,6 @@ struct DocumentedUser {
     name: String,
 }
 
-// Test edge cases with various field types (simplified)
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct EdgeCases {
@@ -103,7 +98,6 @@ struct EdgeCases {
     float_number: f32,
     medium_number: u32,
     nested_array: Vec<ContactInfo>,
-    // Nested optional structures
     #[serde(skip_serializing_if = "Option::is_none")]
     nested_optional: Option<ContactInfo>,
     numbers: Vec<u32>,
@@ -111,15 +105,11 @@ struct EdgeCases {
     optional_nested_array: Option<Vec<ContactInfo>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     optional_numbers: Option<Vec<u32>>,
-    // Optional collections
     #[serde(skip_serializing_if = "Option::is_none")]
     optional_strings: Option<Vec<String>>,
     small_number: u16,
-    // Simple maps (only string keys and values supported)
     string_map: HashMap<String, String>,
-    // Collections with different types
     strings: Vec<String>,
-    // Different numeric types
     tiny_number: u8,
 }
 
@@ -307,7 +297,6 @@ fn test_complex_nested_json_schema() {
     let settings_schema = CompanySettings::json_schema();
     let retirement_schema = RetirementPlan::json_schema();
 
-    // Verify all schemas are objects
     assert_eq!(company_schema["type"], "object");
     assert_eq!(employee_schema["type"], "object");
     assert_eq!(project_schema["type"], "object");
@@ -315,7 +304,6 @@ fn test_complex_nested_json_schema() {
     assert_eq!(settings_schema["type"], "object");
     assert_eq!(retirement_schema["type"], "object");
 
-    // Verify Company schema has all expected properties
     let company_properties = company_schema["properties"].as_object().unwrap();
     assert!(company_properties.contains_key("id"));
     assert!(company_properties.contains_key("name"));
@@ -324,7 +312,6 @@ fn test_complex_nested_json_schema() {
     assert!(company_properties.contains_key("headquarters"));
     assert!(company_properties.contains_key("settings"));
 
-    // Verify array properties are correctly typed
     assert_eq!(company_properties["employees"]["type"], "array");
     assert_eq!(company_properties["department_names"]["type"], "array");
     assert_eq!(
@@ -332,7 +319,6 @@ fn test_complex_nested_json_schema() {
         "string"
     );
 
-    // Verify RetirementPlan is a discriminated union
     assert!(retirement_schema.get("oneOf").is_some());
     let one_of = retirement_schema["oneOf"].as_array().unwrap();
     assert_eq!(one_of.len(), 3);
@@ -345,16 +331,13 @@ fn test_complex_nested_ts_definition() {
     let employee_definition = Employee::ts_definition();
     let retirement_definition = RetirementPlan::ts_definition();
 
-    // Check that nested types are properly referenced (without Json suffix)
     assert!(company_definition.contains("employees: Array<Employee>;"));
     assert!(company_definition.contains("department_names: Array<string>;"));
     assert!(company_definition.contains("headquarters: Address;"));
     assert!(company_definition.contains("settings: CompanySettings;"));
 
-    // Check optional fields in nested structures
     assert!(employee_definition.contains("manager?: string;"));
 
-    // Check discriminated union
     assert!(retirement_definition.contains("type: \"option401k\""));
     assert!(retirement_definition.contains("type: \"pension\""));
     assert!(retirement_definition.contains("type: \"roth\""));
@@ -362,7 +345,6 @@ fn test_complex_nested_ts_definition() {
     assert!(retirement_definition.contains("yearsOfServiceRequired: number;"));
     assert!(retirement_definition.contains("contributionLimit: number;"));
 
-    // Check Zod schema references (without Json suffix) - now in separate method
     let company_zod_schema = Company::zod_schema();
     let employee_zod_schema = Employee::zod_schema();
 
@@ -373,7 +355,6 @@ fn test_complex_nested_ts_definition() {
     assert!(employee_zod_schema.contains("manager: z.union([z.string(), z.undefined()])"));
 }
 
-// Test serialization consistency
 #[test]
 fn test_serialization_consistency() {
     let project = Project {
@@ -385,15 +366,12 @@ fn test_serialization_consistency() {
         budget: Some(50000),
     };
 
-    // Serialize to JSON
     let json_str = serde_json::to_string(&project).unwrap();
     let json_value: Value = serde_json::from_str(&json_str).unwrap();
 
-    // Deserialize back
     let deserialized: Project = serde_json::from_value(json_value.clone()).unwrap();
     assert_eq!(project, deserialized);
 
-    // Check that the JSON matches expected structure
     assert_eq!(json_value["id"], "proj_123");
     assert_eq!(json_value["name"], "New Website");
     assert_eq!(json_value["status"], "inProgress"); // Should be camelCase
@@ -408,13 +386,11 @@ fn test_edge_cases_json_schema() {
     let schema = EdgeCases::json_schema();
     let properties = schema["properties"].as_object().unwrap();
 
-    // Check numeric types
     assert_eq!(properties["tiny_number"]["type"], "integer");
     assert_eq!(properties["small_number"]["type"], "integer");
     assert_eq!(properties["medium_number"]["type"], "integer");
     assert_eq!(properties["float_number"]["type"], "number");
 
-    // Check array types
     assert_eq!(properties["strings"]["type"], "array");
     assert_eq!(properties["strings"]["items"]["type"], "string");
     assert_eq!(properties["numbers"]["type"], "array");
@@ -422,14 +398,12 @@ fn test_edge_cases_json_schema() {
     assert_eq!(properties["booleans"]["type"], "array");
     assert_eq!(properties["booleans"]["items"]["type"], "boolean");
 
-    // Check map types
     assert_eq!(properties["string_map"]["type"], "object");
     assert_eq!(
         properties["string_map"]["additionalProperties"]["type"],
         "string"
     );
 
-    // Check required vs optional fields
     let required = schema["required"].as_array().unwrap();
     assert!(required.contains(&Value::String("tiny_number".to_owned())));
     assert!(required.contains(&Value::String("strings".to_owned())));
@@ -444,7 +418,6 @@ fn test_edge_cases_json_schema() {
 fn test_edge_cases_ts_definition() {
     let ts_definition = EdgeCases::ts_definition();
 
-    // Check numeric types, arrays, optional arrays, maps, and nested types
     assert_ts_contains_fields(
         &ts_definition,
         &[
@@ -469,7 +442,6 @@ fn test_edge_cases_ts_definition() {
         ],
     );
 
-    // Check Zod schemas
     let zod_schema = EdgeCases::zod_schema();
     assert_zod_contains_fields(
         &zod_schema,
@@ -514,13 +486,11 @@ fn test_complex_discriminated_union() {
     let schema = ComplexEvent::json_schema();
     let ts_definition = ComplexEvent::ts_definition();
 
-    // Check that it's a discriminated union
     assert_eq!(schema["type"], "object");
     assert!(schema.get("oneOf").is_some());
     let one_of = schema["oneOf"].as_array().unwrap();
     assert_eq!(one_of.len(), 3);
 
-    // Check that each variant has the correct discriminator
     for variant in one_of {
         let properties = variant["properties"].as_object().unwrap();
         assert!(properties.contains_key("eventType"));
@@ -528,25 +498,21 @@ fn test_complex_discriminated_union() {
         assert!(properties["eventType"].get("const").is_some());
     }
 
-    // Check TypeScript definition
     assert!(ts_definition.contains("eventType: \"userRegistered\""));
     assert!(ts_definition.contains("eventType: \"purchaseCompleted\""));
     assert!(ts_definition.contains("eventType: \"systemMaintenance\""));
 
-    // Check that field names are converted to camelCase
     assert!(ts_definition.contains("userId: string;"));
     assert!(ts_definition.contains("registrationSource: string;"));
     assert!(ts_definition.contains("orderId: string;"));
     assert!(ts_definition.contains("totalAmount: number;"));
     assert!(ts_definition.contains("paymentMethod: string;"));
-    // Address type reference should not have Json suffix
     assert!(ts_definition.contains("shippingAddress?: Address;"));
     assert!(ts_definition.contains("scheduledStart: string;"));
     assert!(ts_definition.contains("estimatedDuration: number;"));
     assert!(ts_definition.contains("affectedServices: Array<string>;"));
     assert!(ts_definition.contains("notificationSent: boolean;"));
 
-    // Check Zod discriminated union - now in separate method
     let zod_schema = ComplexEvent::zod_schema();
     assert!(zod_schema.contains("z.discriminatedUnion(\"eventType\""));
 }
@@ -557,7 +523,6 @@ fn test_documented_struct() {
     let schema = DocumentedUser::json_schema();
     let ts_definition = DocumentedUser::ts_definition();
 
-    // Schema should still be valid
     assert_eq!(schema["type"], "object");
     let properties = schema["properties"].as_object().unwrap();
     assert!(properties.contains_key("id"));
@@ -566,7 +531,6 @@ fn test_documented_struct() {
     assert!(properties.contains_key("is_active"));
     assert!(properties.contains_key("metadata"));
 
-    // TypeScript definition should be generated (without Json suffix)
     assert!(ts_definition.contains("export type DocumentedUser = {"));
     assert!(ts_definition.contains("id: string;"));
     assert!(ts_definition.contains("name: string;"));
@@ -580,7 +544,6 @@ fn test_documented_struct() {
     );
 }
 
-// Test validation of generated JSON schemas
 #[test]
 #[cfg(feature = "jsonschema")]
 fn test_json_schema_validation() {
@@ -594,19 +557,15 @@ fn test_json_schema_validation() {
     ];
 
     for (name, schema) in schemas {
-        // All schemas should be objects
         assert!(schema.is_object(), "Schema for {name} should be an object");
 
-        // Should have required fields
         assert!(
             schema.get("type").is_some(),
             "Schema for {name} should have a type"
         );
 
-        // Object schemas should have properties
         if schema["type"] == "object" {
             if let Some(one_of) = schema.get("oneOf") {
-                // Discriminated union - check each variant
                 let variants = one_of.as_array().unwrap();
                 for variant in variants {
                     assert!(
@@ -615,7 +574,6 @@ fn test_json_schema_validation() {
                     );
                 }
             } else {
-                // Regular object - should have properties
                 assert!(
                     schema.get("properties").is_some(),
                     "Object schema for {name} should have properties"
@@ -623,13 +581,11 @@ fn test_json_schema_validation() {
             }
         }
 
-        // Should be valid JSON
         let json_str = serde_json::to_string(&schema).unwrap();
         let _: Value = serde_json::from_str(&json_str).unwrap();
     }
 }
 
-// Test actual serialization and deserialization roundtrip
 #[test]
 fn test_roundtrip_serialization() {
     let contact = ContactInfo {
@@ -652,15 +608,12 @@ fn test_roundtrip_serialization() {
         contact,
     };
 
-    // Test serialization
     let json_str = serde_json::to_string(&employee).unwrap();
     let json_value: Value = serde_json::from_str(&json_str).unwrap();
 
-    // Test deserialization
     let deserialized: Employee = serde_json::from_value(json_value).unwrap();
     assert_eq!(employee, deserialized);
 
-    // Test individual field serialization
     assert_eq!(deserialized.id, "emp_123");
     assert_eq!(deserialized.name, "Jane Smith");
     assert_eq!(deserialized.position, "Software Engineer");

@@ -130,24 +130,20 @@ enum Status {
 fn test_basic_struct_json_schema() {
     let schema = BasicStruct::json_schema();
 
-    // Check top-level schema properties
     assert_eq!(schema["type"], "object");
     assert_eq!(schema["additionalProperties"], false);
 
-    // Check properties exist
     let properties = schema["properties"].as_object().unwrap();
     assert!(properties.contains_key("name"));
     assert!(properties.contains_key("age"));
     assert!(properties.contains_key("score"));
     assert!(properties.contains_key("active"));
 
-    // Check property types
     assert_eq!(properties["name"]["type"], "string");
     assert_eq!(properties["age"]["type"], "integer");
     assert_eq!(properties["score"]["type"], "number");
     assert_eq!(properties["active"]["type"], "boolean");
 
-    // Check required fields
     let required = schema["required"].as_array().unwrap();
     assert_eq!(required.len(), 4);
     assert!(required.contains(&Value::String("name".to_owned())));
@@ -166,12 +162,10 @@ fn test_optional_fields_not_in_required() {
     assert!(properties.contains_key("optional_number"));
     assert!(properties.contains_key("optional_bool"));
 
-    // Check that optional fields have correct types
     assert_eq!(properties["optional_string"]["type"], "string");
     assert_eq!(properties["optional_number"]["type"], "integer");
     assert_eq!(properties["optional_bool"]["type"], "boolean");
 
-    // Check required array only contains required field
     let required = schema["required"].as_array().unwrap();
     assert_eq!(required.len(), 1);
     assert!(required.contains(&Value::String("required".to_owned())));
@@ -186,19 +180,15 @@ fn test_vec_fields_generate_array_schemas() {
 
     let properties = schema["properties"].as_object().unwrap();
 
-    // Check tags array
     assert_eq!(properties["tags"]["type"], "array");
     assert_eq!(properties["tags"]["items"]["type"], "string");
 
-    // Check numbers array
     assert_eq!(properties["numbers"]["type"], "array");
     assert_eq!(properties["numbers"]["items"]["type"], "integer");
 
-    // Check optional array
     assert_eq!(properties["optional_array"]["type"], "array");
     assert_eq!(properties["optional_array"]["items"]["type"], "string");
 
-    // Check required fields
     let required = schema["required"].as_array().unwrap();
     assert!(required.contains(&Value::String("tags".to_owned())));
     assert!(required.contains(&Value::String("numbers".to_owned())));
@@ -211,14 +201,12 @@ fn test_hashmap_generates_object_with_additional_properties() {
 
     let properties = schema["properties"].as_object().unwrap();
 
-    // Check metadata map
     assert_eq!(properties["metadata"]["type"], "object");
     assert_eq!(
         properties["metadata"]["additionalProperties"]["type"],
         "string"
     );
 
-    // Check counts map
     assert_eq!(properties["counts"]["type"], "object");
     assert_eq!(
         properties["counts"]["additionalProperties"]["type"],
@@ -272,14 +260,11 @@ fn test_nested_structs_present_in_schema() {
 
     let properties = schema["properties"].as_object().unwrap();
 
-    // Single nested object should have the address property
     assert!(properties.contains_key("address"));
 
-    // Array of nested objects should be an array
     assert!(properties.contains_key("previous_addresses"));
     assert_eq!(properties["previous_addresses"]["type"], "array");
 
-    // Verify Address schema exists and is correct
     assert_eq!(address_schema["type"], "object");
     let address_properties = address_schema["properties"].as_object().unwrap();
     assert!(address_properties.contains_key("street"));
@@ -305,7 +290,6 @@ fn test_integer_types_use_integer_schema() {
 
     let properties = schema["properties"].as_object().unwrap();
 
-    // All integer types should have type "integer"
     assert_eq!(properties["u8"]["type"], "integer");
     assert_eq!(properties["u16"]["type"], "integer");
     assert_eq!(properties["u32"]["type"], "integer");
@@ -324,7 +308,6 @@ fn test_float_types_use_number_schema() {
 
     let properties = schema["properties"].as_object().unwrap();
 
-    // Float types should have type "number"
     assert_eq!(properties["f32"]["type"], "number");
     assert_eq!(properties["f64"]["type"], "number");
 }
@@ -336,15 +319,12 @@ fn test_serde_rename_all_affects_property_names() {
 
     let properties = schema["properties"].as_object().unwrap();
 
-    // Should use camelCase names
     assert!(properties.contains_key("userName"));
     assert!(properties.contains_key("userEmail"));
 
-    // Should not contain original snake_case names
     assert!(!properties.contains_key("user_name"));
     assert!(!properties.contains_key("user_email"));
 
-    // Check required array uses renamed fields
     let required = schema["required"].as_array().unwrap();
     assert!(required.contains(&Value::String("userName".to_owned())));
     assert!(required.contains(&Value::String("userEmail".to_owned())));
@@ -370,7 +350,6 @@ fn test_complex_nested_collections() {
 
     let properties = schema["properties"].as_object().unwrap();
 
-    // HashMap<String, Vec<String>>
     assert_eq!(properties["map_of_arrays"]["type"], "object");
     let map_of_arrays_additional = properties["map_of_arrays"]["additionalProperties"]
         .as_object()
@@ -385,7 +364,6 @@ fn test_complex_nested_collections() {
         "integer"
     );
 
-    // Check required fields
     let required = schema["required"].as_array().unwrap();
     assert!(required.contains(&Value::String("map_of_arrays".to_owned())));
     assert!(!required.contains(&Value::String("optional_map".to_owned())));
@@ -409,14 +387,12 @@ fn test_objectid_generates_proper_schema() {
 
     let properties = schema["properties"].as_object().unwrap();
 
-    // ObjectId should be object with $oid field
     let id_prop = &properties["id"];
     assert_eq!(id_prop["type"], "object");
     assert_eq!(id_prop["properties"]["$oid"]["type"], "string");
     assert_eq!(id_prop["required"][0], "$oid");
     assert_eq!(id_prop["additionalProperties"], false);
 
-    // Optional ObjectId
     let author_prop = &properties["author_id"];
     assert_eq!(author_prop["type"], "object");
     assert_eq!(author_prop["properties"]["$oid"]["type"], "string");
@@ -455,10 +431,8 @@ fn test_schema_has_required_structure() {
 
     let schema = Test::json_schema();
 
-    // Should be a JSON object
     assert!(schema.is_object());
 
-    // Should have required keys
     assert!(schema.get("type").is_some());
     assert!(schema.get("properties").is_some());
     assert!(schema.get("required").is_some());

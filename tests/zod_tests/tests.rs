@@ -284,7 +284,6 @@ fn test_discriminated_union_uses_z_discriminated_union() {
 fn test_integer_types_use_int_modifier() {
     let zod = AllNumericTypes::zod_schema();
 
-    // All integer types should use .int()
     assert!(
         zod.contains("u8: z.number().int()"),
         "u8 should use .int(). Got: {zod}"
@@ -307,7 +306,6 @@ fn test_integer_types_use_int_modifier() {
 fn test_float_types_do_not_use_int_modifier() {
     let zod = AllNumericTypes::zod_schema();
 
-    // Float types should not use .int()
     assert!(
         zod.contains("f32: z.number()") && !zod.contains("f32: z.number().int()"),
         "f32 should not use .int(). Got: {zod}"
