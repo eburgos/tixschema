@@ -764,12 +764,17 @@ pub fn model_schema_prop(_args: TokenStream, input: TokenStream) -> TokenStream 
 /// const PREAMBLE: &str = tixschema::typescript_preamble!();
 /// ```
 ///
-/// A generic type publishes `X$SchemaFactory` rather than `X$Schema`, because a Zod schema is a
-/// runtime value and one value cannot stand for every filling of a parameter. It also publishes
-/// `X$SchemaDefault`, the factory called at the type's own declared `default_types` — the ordinary
-/// filling, memoized like any other call so a consumer of the common case never has to construct
-/// the argument list by hand. Each factory memoizes on the identity of the arguments it was
-/// handed, and `createSchemaCache` is the helper they all build those caches with:
+/// A type with no parameters publishes one name: `X$Schema`, the schema itself. A generic type
+/// publishes three. `X$SchemaFactory` is the function taking one schema argument per parameter —
+/// call it for any instantiation — because a Zod schema is a runtime value and one value cannot
+/// stand for every filling of a parameter. `X$SchemaDefault` is that factory already called at the
+/// type's own declared `default_types`, the ordinary filling, memoized like any other call so a
+/// consumer of the common case never has to construct the argument list by hand — reach for it
+/// instead of the factory whenever the default filling is the one you want. Constraints declared on
+/// the type (`minLength`, `pattern`, …) are checked against that declared default, not against
+/// every instantiation the factory could be called with — a caller supplying its own argument
+/// supplies its own schema, checks included. Each factory memoizes on the identity of the arguments
+/// it was handed, and `createSchemaCache` is the helper they all build those caches with:
 ///
 #[cfg_attr(
     feature = "typescript",

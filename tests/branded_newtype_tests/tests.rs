@@ -932,6 +932,19 @@ mod constrained_generic_branded_tests {
     #[serde(transparent)]
     pub struct StrictDocumentId<IdType>(pub IdType);
 
+    /// The generated `validate()` sits on `impl StrictDocumentId<String>` — the declared default —
+    /// not on a blanket `impl<IdType> StrictDocumentId<IdType>`, so a second inherent impl at a
+    /// different instantiation is not a duplicate-definition error. `u32` satisfies the `Display`
+    /// bound the generic brand's declaration carries.
+    impl StrictDocumentId<u32> {
+        pub fn validate(&self) -> Result<(), Vec<String>> {
+            if self.0 == 0 {
+                return Err(vec!["id must not be zero".to_owned()]);
+            }
+            Ok(())
+        }
+    }
+
     /// A declared default naming `StrictDocumentId` at exactly its own declared default — the
     /// `ProDoctivity` `EcmDocument`/`DocumentId` shape the fold feature was motivated by. Before
     /// the fix, the comparison read `StrictDocumentId$SchemaDefault`'s emitted text — the
@@ -1066,6 +1079,18 @@ mod constrained_generic_branded_tests {
         assert!(
             too_short.is_err(),
             "Should reject a value StrictDocumentId's own 24-hex bound rejects"
+        );
+    }
+
+    /// The hand-written `impl StrictDocumentId<u32>` above compiles beside the generated
+    /// `impl StrictDocumentId<String>` and it is the hand-written body that runs — the two are
+    /// written against different concrete types, so there is no ambiguity to resolve.
+    #[test]
+    fn a_hand_written_impl_for_another_instantiation_compiles_and_runs_beside_the_generated_one() {
+        StrictDocumentId(1_u32).validate().unwrap();
+        assert_eq!(
+            StrictDocumentId(0_u32).validate().unwrap_err(),
+            vec!["id must not be zero".to_owned()]
         );
     }
 }

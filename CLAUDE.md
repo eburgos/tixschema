@@ -228,7 +228,7 @@ pub struct BadConfig {
 - `NaiveTime` → `string` (Zod `z.iso.time()` wrapped in an inline preprocessor that also accepts millis-since-start-of-day)
 - `#[serde(flatten)]` field → TypeScript intersection (`A & B`), Zod `.and(...)`
 - `#[serde(untagged)]` enum → TypeScript union (`A | B`), Zod `z.union([...])`, JSON Schema `anyOf`
-- Type parameter → TypeScript parameter (`X<IdType>`), Zod `X$SchemaFactory(idType)` (memoized, one cache level per parameter), JSON Schema the document of whatever fills it — `default_types(...)` where the type stands alone, the reference site's arguments where a field embeds it. A lifetime is dropped on every surface, a borrowed value writing what its owned form writes; a const renders as an array length only, and is refused where it is handed to a written type as an argument
+- Type parameter → TypeScript parameter (`X<IdType>`), Zod `X$SchemaFactory(idType)` (memoized, one cache level per parameter) plus `X$SchemaDefault` — that same factory called at the item's own declared `default_types`, checks included — JSON Schema the document of whatever fills it — `default_types(...)` where the type stands alone, the reference site's arguments where a field embeds it. A lifetime is dropped on every surface, a borrowed value writing what its owned form writes; a const renders as an array length only, and is refused where it is handed to a written type as an argument
 
 ### 5. Zod v4 Requirements
 
@@ -335,6 +335,17 @@ match result {
 The macro also generates into the type's schema module:
 - `validate_{field}_value(&FieldType) -> Result<(), String>` — pure static validator per field
 - `deserialize_{field}(D) -> Result<FieldType, E>` — serde hook that calls the static validator
+
+For a generic type (one with type parameters), `validate()` is emitted only at the declared default
+instantiation — `impl DocumentId<String> { pub fn validate(&self) -> Result<(), Vec<String>> { … } }`,
+never a blanket `impl<IdType> DocumentId<IdType>` — because the constraints it checks (`minLength`,
+`pattern`, …) belong to that one concrete filling, the same one `X$SchemaDefault` enforces. Rust
+inherent impls do not specialize, so a blanket impl would make a downstream `impl
+DocumentId<ObjectId> { pub fn validate(&self) -> … }` a duplicate-definition error; pinning to the
+default leaves that door open for an author who wants their own validation on another instantiation.
+The schema delegates (`ts_definition()`, `zod_schema()`, `json_schema()`, …) are unaffected and stay
+on the type's own generic `impl<IdType> DocumentId<IdType>`, since they do not depend on the
+constraints.
 
 ### 8. Branded Newtypes
 
