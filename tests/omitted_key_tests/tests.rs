@@ -102,15 +102,16 @@ fn the_predicate_omitted_key_is_absent_from_the_payload_serde_writes() {
     );
 }
 
-/// `age: number | undefined` would demand the key the absent-key payload does not carry, so the
-/// member is written with an optional key instead. The members serde always writes keep theirs.
+/// An `Option` writes `T | undefined` whatever drops its key from the wire; only `ts_optional`
+/// asks for the optional-key spelling, and this field carries none. The members serde always
+/// writes are unaffected either way.
 #[test]
 #[cfg(feature = "typescript")]
-fn typescript_writes_the_omitted_key_as_optional() {
+fn typescript_writes_the_option_as_undefined_valued() {
     let ts = OmittedKeyFields::ts_definition();
 
-    assert!(ts.contains("age?: number;"), "Got: {ts}");
-    assert!(!ts.contains("age: number"), "Got: {ts}");
+    assert!(ts.contains("age: number | undefined;"), "Got: {ts}");
+    assert!(!ts.contains("age?:"), "Got: {ts}");
     assert!(ts.contains("id: string;"), "Got: {ts}");
     assert!(ts.contains("roles: Array<string>;"), "Got: {ts}");
 }

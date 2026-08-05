@@ -335,12 +335,11 @@ fn assert_ts_fields_contain(ts_definition: &str, fields: &[&str], expected_suffi
 
 /// The member spelling an `Option` field written with a `skip_serializing_if` renders as.
 ///
-/// serde drops the key for a `None`, so the payload has no such key and the member is written with
-/// an optional one. The attribute is on the field under every toggle, so this is one spelling and
-/// not two.
+/// The attribute drops the key from the wire, which the JSON `required` list and the Zod schema
+/// say; the TypeScript spelling is `ts_optional`'s to decide, and none of these fields carries it.
 #[cfg(all(feature = "typescript", feature = "zod"))]
 fn omitted_member(name: &str, ts_type: &str) -> String {
-    format!("{name}?: {ts_type};")
+    format!("{name}: {ts_type} | undefined;")
 }
 
 #[cfg(all(feature = "typescript", feature = "zod"))]

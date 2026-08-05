@@ -440,13 +440,23 @@ impl FieldDef {
     /// Whether the object key this field writes may be absent, which is the question the two
     /// spellings of an optional member answer differently — `field?: T` admits the payload with no
     /// such key, `field: T | undefined` demands the key and lets its value be `undefined`.
+    ///
+    /// For an `Option` field the answer is `ts_optional` and nothing else. The serde attribute that
+    /// drops the key decides what reaches the wire — `required` on the JSON surface, `.optional()`
+    /// on the Zod one — but not which of the two TypeScript spellings is written, or the flag whose
+    /// whole purpose is to ask for one of them would be inert on every field that carries it: the
+    /// `Option`-null guard requires that same attribute of every named `Option` field.
+    ///
+    /// A field that is not an `Option` has no second spelling to choose between, so the attribute
+    /// is the only thing left that can absent its key.
     fn key_may_be_absent(&self) -> bool {
-        self.omits_value
-            || (self.is_optional()
-                && self
-                    .model_schema_prop_meta
-                    .as_ref()
-                    .is_some_and(|m| m.ts_optional))
+        if self.is_optional() {
+            self.model_schema_prop_meta
+                .as_ref()
+                .is_some_and(|m| m.ts_optional)
+        } else {
+            self.omits_value
+        }
     }
 
     fn mark_fixed_length_at(&mut self, level: u8, length: usize) {

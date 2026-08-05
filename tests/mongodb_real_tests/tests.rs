@@ -83,7 +83,7 @@ fn test_real_objectid_basic_types() {
 
     assert!(ts_definition.contains("id: ObjectId;"));
     assert!(ts_definition.contains("name: string;"));
-    assert!(ts_definition.contains("email?: string;"));
+    assert!(ts_definition.contains("email: string | undefined;"));
 
     let zod_schema = RealUser::zod_schema();
     assert!(zod_schema.contains("id: z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: \"Invalid ObjectId\" }) }),"));
@@ -166,7 +166,7 @@ fn test_real_objectid_complex_structures() {
     assert!(ts_definition.contains("author_id: ObjectId;"));
     assert!(ts_definition.contains("references: Array<ObjectId>;"));
     assert!(ts_definition.contains("metadata: Partial<Record<string, ObjectId>>;"));
-    assert!(ts_definition.contains("parent_id?: ObjectId;"));
+    assert!(ts_definition.contains("parent_id: ObjectId | undefined;"));
     assert!(ts_definition.contains("nested_refs: Partial<Record<string, Array<ObjectId>>>;"));
 
     let zod_schema = RealDocument::zod_schema();

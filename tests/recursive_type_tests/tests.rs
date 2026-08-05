@@ -313,9 +313,7 @@ mod describes {
         );
 
         let boxed_self = produced("boxed_self_ts");
-        // serde drops the key for a `None`, which every build reads off the attribute on the
-        // field.
-        let next = "next?: ChainNode;";
+        let next = "next: ChainNode | undefined;";
         assert!(
             boxed_self.contains(next),
             "an optional box of self is the type's own name: {boxed_self}"

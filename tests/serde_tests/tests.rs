@@ -247,8 +247,8 @@ fn test_serde_with_optional_fields_typescript() {
     let ts = OptionalFields::ts_definition();
 
     assert!(ts.contains("requiredField: string;"));
-    assert!(ts.contains("optionalField?: string;"));
-    assert!(ts.contains("customOptional?: number;"));
+    assert!(ts.contains("optionalField: string | undefined;"));
+    assert!(ts.contains("customOptional: number | undefined;"));
 }
 
 #[test]
@@ -339,19 +339,15 @@ fn test_discriminated_union_with_serde_zod() {
 fn test_compliant_optionals_typescript() {
     let ts = CompliantOptionals::ts_definition();
 
-    // The `skip_serializing_if` is what makes the key optional; `ts_optional` on `tag` asks for the
-    // same spelling and so adds nothing on top of it.
+    // `ts_optional` on `tag` is the whole of why it is spelled with an optional key; `note`
+    // carries the same `skip_serializing_if` and none of the flag, so it keeps `T | undefined`.
     assert!(
         ts.contains("tag?: string;"),
         "expected `tag?: string;`:\n{ts}"
     );
     assert!(
-        ts.contains("note?: string;"),
-        "expected `note?: string;`:\n{ts}"
-    );
-    assert!(
-        !ts.contains(" | undefined"),
-        "no member of this type keeps a key serde may drop:\n{ts}"
+        ts.contains("note: string | undefined;"),
+        "expected `note: string | undefined;`:\n{ts}"
     );
 }
 
@@ -398,7 +394,8 @@ fn test_a_hyphenated_field_key_is_written_as_a_string() {
     let ts = Message::ts_definition();
 
     assert!(
-        ts.lines().any(|line| line == r#"  "reply-to"?: string;"#),
+        ts.lines()
+            .any(|line| line == r#"  "reply-to": string | undefined;"#),
         "expected the key as a string member:\n{ts}"
     );
     assert!(
