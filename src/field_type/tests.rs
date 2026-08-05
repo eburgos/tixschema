@@ -1,5 +1,8 @@
 use super::{FieldDef, FieldDefType};
 
+#[cfg(feature = "zod")]
+use crate::utils::{AliasKind, register_alias_info};
+
 /// The wrappers whose fields write a JSON array of their element, named here as they reach the
 /// renderers — `Vec` excluded, the parser having collapsed it long before.
 const SEQUENCE_WRAPPERS: [&str; 5] = [
@@ -548,4 +551,55 @@ fn test_a_substitution_inside_a_written_shape_is_read_through() {
         let parsed = super::get_field_def("items", &ty, "");
         assert_reads_alike(&parsed, &expected, &format!("for {written}"));
     }
+}
+
+/// [`FieldDef::reaches_a_type_declared_later`]'s zero-argument arm — see txsch-8r4v: a bare
+/// sibling reference to a `#[model_schema]` item not yet registered (declared below the one being
+/// expanded) has to defer exactly as a generic forward reference already does; a registered name
+/// (declared above) stays the safe, eager baseline the predicate always answered correctly.
+#[cfg(feature = "zod")]
+#[test]
+fn test_reaches_a_type_declared_later_answers_for_a_zero_argument_sibling() {
+    let unregistered = field(FieldDefType::SiblingType(
+        "NotYetDeclaredSibling".to_owned(),
+        Vec::new(),
+    ));
+    assert!(
+        unregistered.reaches_a_type_declared_later(),
+        "an unregistered zero-argument sibling is a forward reference"
+    );
+
+    register_alias_info(
+        "AlreadyDeclaredSibling",
+        "AlreadyDeclaredSibling",
+        "already_declared_sibling_schema",
+        AliasKind::NoEnumMembers,
+    );
+    let registered = field(FieldDefType::SiblingType(
+        "AlreadyDeclaredSibling".to_owned(),
+        Vec::new(),
+    ));
+    assert!(
+        !registered.reaches_a_type_declared_later(),
+        "a registered zero-argument sibling is not a forward reference"
+    );
+}
+
+/// A sequence wrapper's own name is never itself a forward reference, registered or not — it
+/// renders as the array its element describes rather than a binding of its own — while an
+/// unregistered element inside it still is, through the `any()` clause beside the exclusion.
+#[cfg(feature = "zod")]
+#[test]
+fn test_a_sequence_wrapper_name_is_never_itself_a_forward_reference() {
+    let wrapper_around_a_primitive = sequence_of("HashSet", FieldDefType::String);
+    assert!(!wrapper_around_a_primitive.reaches_a_type_declared_later());
+
+    let wrapper_around_a_forward_element = field(FieldDefType::SiblingType(
+        "HashSet".to_owned(),
+        vec![field(FieldDefType::SiblingType(
+            "StillUnregisteredSibling".to_owned(),
+            Vec::new(),
+        ))],
+    ));
+    assert!(wrapper_around_a_forward_element.reaches_a_type_declared_later());
 }

@@ -421,11 +421,11 @@ fn every_schema_a_forward_alias_reference_names_is_defined_by_the_emission() {
     .join("\n\n");
     for (written, referenced) in [
         (
-            "counts: z.array(LaterDeclaredCount$Schema)",
+            "get counts() { return z.array(LaterDeclaredCount$Schema); },",
             "LaterDeclaredCount",
         ),
         (
-            "ids: z.record(z.string(), LaterDeclaredId$Schema)",
+            "get ids() { return z.record(z.string(), LaterDeclaredId$Schema); },",
             "LaterDeclaredId",
         ),
     ] {

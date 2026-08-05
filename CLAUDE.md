@@ -389,24 +389,30 @@ decides which, and `zod_published_binding` the one seam that writes either.
 Beside the factory, a generic type also exports `X$SchemaDefault` — the factory called at the
 type's own declared `default_types`, so a consumer who wants the ordinary filling shares the memo
 rather than building a second schema for it. `zod_default_block` builds the const, through
-`default_zod_argument`, the same `get_field_def` path every field renders through; where a
+`default_zod_rendering`, the same `get_field_def` path every field renders through; where a
 declared default names another generic item at exactly the arguments that item calls its own,
 the rendered argument folds onto that item's `$SchemaDefault` instead of reconstructing a factory
 call the memo would not share with it — see `record_zod_default_arguments`. `zod_binding_reexport`
 covers both bindings wherever a renamed item re-exports its factory.
 
-`X$SchemaDefault` is a module-scope `const`, and any argument `default_zod_argument` renders as a
+`X$SchemaDefault` is a module-scope `const`, and any argument `default_zod_rendering` renders as a
 reference to another item — the fold above, or an ordinary (non-folding) call to that item's own
 `X$SchemaFactory` — names one more module-scope `const`. One macro invocation sees one type, so
 nothing here can know whether that `const` is written above this one in the generated module or
-below it; `default_zod_argument` defers every such reference through `deferred_zod_operand`, the
+below it; `default_zod_rendering` defers every such reference through `deferred_zod_operand`, the
 same `z.lazy(() => …)` wrap `.and(...)` already relies on for a flattened base. A self-contained
-expression like `z.string()` names no sibling `const` and is left eager. The deferral is also what
-ends a cycle between two declared defaults — `CycleLeader`'s naming `CycleFollower` and
-`CycleFollower`'s naming `CycleLeader` back: neither can have registered the other's arguments yet
-when it expands, so neither side folds, and both calls read the other's factory behind `z.lazy`
-rather than at the top of a `const` initializer — the module loads regardless of which of the two
-names the consuming project's entity list writes first.
+expression like `z.string()` names no sibling `const` and is left eager. The fold's own gate
+(`array_depth == 0 && !is_optional()`, a *direct* sibling) only scopes the fold — a default
+wrapped in a `Vec`/`Option`/`Map`/`Tuple` has no bare binding to fold onto — but deferral is not
+bounded by it: `FieldDef::names_a_sibling_binding` walks the whole rendered tree, so
+`Tagged$SchemaFactory` inside `z.array(Tagged$SchemaFactory(z.string()))` defers exactly as a bare
+`Tagged$SchemaFactory(z.string())` does, the `z.lazy` wrapping the whole expression rather than the
+factory call alone. The deferral is also what ends a cycle between two declared defaults —
+`CycleLeader`'s naming `CycleFollower` and `CycleFollower`'s naming `CycleLeader` back: neither can
+have registered the other's arguments yet when it expands, so neither side folds, and both calls
+read the other's factory behind `z.lazy` rather than at the top of a `const` initializer — the
+module loads regardless of which of the two names the consuming project's entity list writes
+first.
 
 Each factory memoizes on the identity of its arguments, one cache level per parameter, so two
 calls with the same argument objects return the identical schema and no two argument lists
@@ -433,10 +439,14 @@ than where the binding is finally spelled: the fields are rendered before then, 
 on the item's own registry entry would be read before the item had put one there.
 
 `write_field_type_and_schema` defers a member whose type reaches the item being defined, and one
-that reaches a type declared *below* it — `reaches_a_type_declared_later`. The second is what ends
-a cycle spanning two types: every cycle contains at least one reference pointing forward, since
-declaration positions cannot strictly decrease all the way round one, and what is left once those
-are deferred cannot cycle. The deferral is a getter rather than `z.lazy`, which at an operand
+that reaches a type declared *below* it — `reaches_a_type_declared_later`. The rule applies whether
+or not the referenced type declares a parameter of its own: a zero-argument sibling not yet
+registered is exactly as much a forward reference as a generic one, since its `X$Schema` is read
+eagerly at the top of the referencing item's own module-scope const initializer. The second clause
+is what ends a cycle spanning two types: every cycle contains at least one reference pointing
+forward, since declaration positions cannot strictly decrease all the way round one, and what is
+left once those are deferred cannot cycle. The deferral is a getter rather than `z.lazy`, which at
+an operand
 position collapses the factory's inferred return type to `any`.
 
 ### Declaring a Default Type per Parameter

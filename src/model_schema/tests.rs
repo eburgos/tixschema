@@ -2683,6 +2683,67 @@ fn declared_default_renders_each_shape_the_table_describes() {
     }
 }
 
+/// The direct-sibling fold gate (`array_depth == 0 && !is_optional()`) scopes the fold correctly —
+/// a wrapped default has no bare `DocumentId$SchemaDefault` binding to fold onto — but is not the
+/// deferral boundary: [`super::default_zod_rendering`] falls through to
+/// [`crate::field_type::FieldDef::names_a_sibling_binding`] for everything the fold gate declines,
+/// which asks whether the rendered tree names a sibling *anywhere*, `Vec`/`Option`/`Map`/`Tuple`
+/// wrapped or not. The `Vec<String>` row is the control: nothing inside it names a sibling, so it
+/// stays eager exactly as the bare-primitive rows above do.
+#[cfg(feature = "zod")]
+#[test]
+fn declared_default_renders_each_wrapped_shape_the_table_describes() {
+    register_alias_info(
+        "DocumentId",
+        "DocumentId",
+        "document_id_schema",
+        AliasKind::NoEnumMembers,
+    );
+    super::record_zod_factory("DocumentId", true);
+    super::record_zod_default_arguments("DocumentId", vec!["z.string()".to_owned()]);
+
+    for (parameter, filled_at, expected) in [
+        (
+            "IdType",
+            quote::quote! { Vec<DocumentId<String>> },
+            "z.lazy(() => z.array(DocumentId$SchemaFactory(z.string())))",
+        ),
+        (
+            "IdType",
+            quote::quote! { Option<DocumentId<String>> },
+            "z.lazy(() => \
+             z.union([DocumentId$SchemaFactory(z.string()), z.undefined()]).prefault(undefined))",
+        ),
+        (
+            "IdType",
+            quote::quote! { Vec<String> },
+            "z.array(z.string())",
+        ),
+        (
+            "IdType",
+            quote::quote! { HashMap<String, DocumentId<String>> },
+            "z.lazy(() => z.record(z.string(), DocumentId$SchemaFactory(z.string())))",
+        ),
+        (
+            "IdType",
+            quote::quote! { (String, DocumentId<String>) },
+            "z.lazy(() => z.tuple([z.string(), DocumentId$SchemaFactory(z.string())]))",
+        ),
+    ] {
+        let ty: syn::Type = syn::parse2(filled_at.clone()).unwrap();
+        let default_types = vec![(
+            syn::Ident::new(parameter, proc_macro2::Span::call_site()),
+            ty,
+        )];
+        let field = super::declared_default_field(parameter, &default_types);
+        assert_eq!(
+            super::default_zod_rendering(&field).into_argument(),
+            expected,
+            "for `{parameter} = {filled_at}`"
+        );
+    }
+}
+
 /// The fold only fires where the written arguments match the sibling's own recorded default; a
 /// reference to the same generic sibling at a *different* argument still calls its factory, exactly
 /// as an ordinary field naming it does — and that call is deferred exactly as the fold's own

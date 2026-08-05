@@ -238,10 +238,10 @@ mod zod {
     #[cfg(all(feature = "chrono", feature = "object_id"))]
     use super::MixedArguments;
     use super::{
-        Adjacent, Carried, CycleFollower, CycleLeader, EchoedDefault, EcmDocument, Envelope,
-        External, FolderTree, Holder, Internal, KeyedByParameter, LifetimeStruct,
-        OverriddenDefault, Pair, PlainConst, Positional, Quintet, Referrer, Summarised, Tagged,
-        Untagged, WireFolder, Wrapper, keyed_alias_schema,
+        Adjacent, BatchedDefault, Carried, CycleFollower, CycleLeader, EchoedDefault, EcmDocument,
+        Envelope, External, FolderTree, Holder, Internal, KeyedByParameter, LifetimeStruct,
+        ListedDefault, OverriddenDefault, Pair, PlainConst, Positional, Quintet, Referrer,
+        SlottedDefault, Summarised, Tagged, Untagged, WireFolder, Wrapper, keyed_alias_schema,
     };
     #[cfg(all(feature = "typescript", feature = "serde"))]
     use super::{ConstrainedEchoedDefault, ConstrainedId, DeepEchoedDefault};
@@ -544,6 +544,50 @@ mod zod {
             ),
             "Got: {zod}"
         );
+    }
+
+    /// A `default_types` entry wrapping a sibling reference in a `Vec` is deferred exactly like a
+    /// bare one — `Tagged$SchemaFactory` inside `z.array(...)` is as much a module-scope `const`
+    /// read as `Tagged$SchemaFactory` bare — so the whole wrapped expression is what `z.lazy`
+    /// wraps, not merely the factory call sitting inside it.
+    #[test]
+    fn a_default_wrapping_a_sibling_in_vec_defers_the_whole_expression() {
+        let zod = BatchedDefault::<Vec<Tagged<String>>>::zod_schema();
+        assert!(
+            zod.contains(
+                "= BatchedDefault$SchemaFactory(z.lazy(() => \
+                 z.array(Tagged$SchemaFactory(z.string()))));"
+            ),
+            "Got: {zod}"
+        );
+    }
+
+    /// The same hazard one level deeper through `Option` rather than `Vec`: the fold gate requires
+    /// `!is_optional()`, so this also falls through to the ordinary rendering, and that rendering
+    /// is deferred whole for the same reason the `Vec`-wrapped case above is.
+    #[test]
+    fn a_default_wrapping_a_sibling_in_option_defers_the_whole_expression() {
+        let zod = SlottedDefault::<Option<Tagged<String>>>::zod_schema();
+        assert!(
+            zod.contains(
+                "= SlottedDefault$SchemaFactory(z.lazy(() => \
+                 z.union([Tagged$SchemaFactory(z.string()), z.undefined()]).prefault(undefined)));"
+            ),
+            "Got: {zod}"
+        );
+    }
+
+    /// A `Vec`-wrapped default with nothing but a primitive inside names no sibling `const` at any
+    /// depth, so it stays eager exactly as a bare primitive default does — the deferral is keyed
+    /// on what the tree names, not on whether it is wrapped.
+    #[test]
+    fn a_default_wrapping_only_a_primitive_in_vec_stays_eager() {
+        let zod = ListedDefault::<Vec<String>>::zod_schema();
+        assert!(
+            zod.contains("= ListedDefault$SchemaFactory(z.array(z.string()));"),
+            "Got: {zod}"
+        );
+        assert!(!zod.contains("z.lazy"), "Got: {zod}");
     }
 
     /// Nothing else in this crate constructs `ConstrainedId` directly — every other use names it
@@ -1795,6 +1839,35 @@ pub struct EchoedDefault<HolderType> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OverriddenDefault<HolderType> {
     pub held: HolderType,
+}
+
+/// A declared default wrapping a sibling reference in a `Vec` — the direct-sibling fold gate
+/// requires `array_depth == 0`, so this falls through to the ordinary rendering, and that
+/// rendering names `Tagged$SchemaFactory` exactly as much as a bare reference does: it just does
+/// so from inside `z.array(...)` rather than at the argument's own top level.
+#[cfg(feature = "zod")]
+#[model_schema(default_types(Items = Vec<Tagged<String>>))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchedDefault<Items> {
+    pub items: Items,
+}
+
+/// The same hazard one level deeper through `Option` rather than `Vec`.
+#[cfg(feature = "zod")]
+#[model_schema(default_types(Slot = Option<Tagged<String>>))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlottedDefault<Slot> {
+    pub slot: Slot,
+}
+
+/// A `Vec`-wrapped default with nothing but a primitive inside — nothing here names a sibling
+/// `const` at any depth, so the wrapped expression stays eager exactly as a bare primitive
+/// default does.
+#[cfg(feature = "zod")]
+#[model_schema(default_types(Items = Vec<String>))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListedDefault<Items> {
+    pub items: Items,
 }
 
 /// A generic branded newtype whose inner is a bare type parameter, carrying string constraints —

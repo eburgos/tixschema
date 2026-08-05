@@ -366,10 +366,10 @@ fn test_complex_nested_ts_definition() {
     let company_zod_schema = Company::zod_schema();
     let employee_zod_schema = Employee::zod_schema();
 
-    assert!(company_zod_schema.contains("employees: z.array(Employee$Schema)"));
+    assert!(company_zod_schema.contains("get employees() { return z.array(Employee$Schema); },"));
     assert!(company_zod_schema.contains("department_names: z.array(z.string())"));
     assert!(company_zod_schema.contains("headquarters: Address$Schema"));
-    assert!(company_zod_schema.contains("settings: CompanySettings$Schema"));
+    assert!(company_zod_schema.contains("get settings() { return CompanySettings$Schema; },"));
     assert!(employee_zod_schema.contains("manager: z.union([z.string(), z.undefined()])"));
 }
 
