@@ -101,11 +101,9 @@ pub enum AliasKind {
 }
 
 /// The `str` method call a `pattern` says the same thing as, for the patterns a regex engine is
-/// avoidable work for.
-///
-/// Each variant carries the needle in the spelling the check takes it, which is the literal the
-/// pattern's own escapes already resolved to and not the pattern text: `^foo\.bar` starts with
-/// `foo.bar`, five bytes shorter than what was written.
+/// avoidable work for. Each variant carries the needle in the spelling the check takes it — the
+/// literal the pattern's own escapes already resolved to, not the pattern text: `^foo\.bar` starts
+/// with `foo.bar`, five bytes shorter than what was written.
 #[cfg(feature = "serde")]
 #[derive(Debug, PartialEq, Eq)]
 pub enum TrivialPattern {
@@ -174,11 +172,9 @@ impl WireLeaf {
 }
 
 /// What an object flattening an externally tagged enum joins for one of that enum's variants, on
-/// each surface that writes a merge of its own.
-///
-/// The two spellings are recorded together, from one reading of the rendered variant, because they
-/// answer one question — what serde writes for this variant into the object being merged — and a
-/// surface that answered it on its own would be free to drift from the other.
+/// each surface that writes a merge of its own. The two spellings are recorded together, from one
+/// reading of the rendered variant, since they answer one question — what serde writes for this
+/// variant into the object being merged — and answering it twice would let the two drift apart.
 #[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod")))]
 #[derive(Clone)]
 pub struct FlattenVariant {
@@ -590,20 +586,17 @@ thread_local! {
 }
 
 /// Keeps a constrained brand's unanswered consult for whichever expansion registers the name it
-/// asked about.
-///
-/// Recorded once the brand has passed its own guards, so a brand that publishes nothing leaves no
-/// question behind for a later item to refuse it over.
+/// asked about. Recorded once the brand has passed its own guards, so a brand that publishes
+/// nothing leaves no question behind for a later item to refuse it over.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 pub fn record_shape_question(question: ShapeQuestion) {
     SHAPE_QUESTIONS.with(|questions| questions.borrow_mut().push(question));
 }
 
-/// Every question asked about a name, in the order the brands asking them expanded.
-///
-/// The questions are left in place rather than taken: a name is registered by one expansion, and
-/// leaving them makes reading them an observation rather than a move — nothing downstream has to
-/// know whether something else read first.
+/// Every question asked about a name, in the order the brands asking them expanded. The questions
+/// are left in place rather than taken: a name is registered by one expansion, and leaving them
+/// makes reading them an observation rather than a move — nothing downstream has to know whether
+/// something else read first.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 pub fn shape_questions_for(rust_ident: &str) -> Vec<ShapeQuestion> {
     SHAPE_QUESTIONS.with(|questions| {
@@ -789,11 +782,9 @@ pub fn ident_schema_module_name(rust_ident: &str) -> String {
 }
 
 /// The export name is what `register_alias_info` stores and what the alias's TypeScript, zod, and
-/// JSON-schema surfaces are written under, so every feature that references an alias needs it —
-/// not just `typescript`.
-///
-/// An override is taken verbatim: the parser has already refused a value no surface can carry, so
-/// what arrives here is the name the author wrote.
+/// JSON-schema surfaces are written under, so every feature that references an alias needs it, not
+/// just `typescript`. An override is taken verbatim: the parser has already refused a value no
+/// surface can carry.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 pub fn compute_alias_export_name(rust_ident: &str, override_name: Option<&str>) -> String {
     override_name.map_or_else(
@@ -856,12 +847,10 @@ pub fn ident_reexport_zod(rust_ident: &str, export_name: &str, binding_suffix: &
     })
 }
 
-/// The identifier a factory binds one type parameter's schema argument to — `idType` for `IdType`.
-///
-/// A Zod schema is a value and a `const` cannot be parameterised, so a generic type publishes a
-/// function of one argument per parameter rather than a schema, and a field written with a
-/// parameter composes that argument. Lower-camel of the declared name, so the argument reads as
-/// the parameter it fills while staying a name of its own beside it.
+/// The identifier a factory binds one type parameter's schema argument to — `idType` for `IdType`,
+/// lower-camel of the declared name. A Zod schema is a value and a `const` cannot be
+/// parameterised, so a generic type publishes a function of one argument per parameter instead,
+/// and a field written with a parameter composes that argument.
 #[cfg(feature = "zod")]
 pub fn zod_factory_argument(parameter: &str) -> String {
     let mut characters = parameter.chars();
@@ -1092,12 +1081,10 @@ fn raw_statement_groups(lines: &[DocLine]) -> Vec<(String, proc_macro2::Span)> {
     groups
 }
 
-/// The example's tokens, each respanned onto the `///` line — or, for a value split across
-/// lines, the first line of the run — it was written on.
-///
-/// `transform_example_code`'s `println!`/`let _` unwrapping only ever matches a whole example's
-/// trailing statement (its regexes anchor on the end of the input), so it is applied to the last
-/// group alone; every earlier group keeps its own raw tokens, respanned but otherwise untouched.
+/// The example's tokens, each respanned onto the `///` line it was written on — or, for a value
+/// split across lines, the first line of the run. `transform_example_code`'s `println!`/`let _`
+/// unwrapping only matches a whole example's trailing statement, so it is applied to the last group
+/// alone; every earlier group keeps its own raw tokens, respanned but otherwise untouched.
 #[cfg(feature = "zod")]
 fn respan_example_tokens(lines: &[DocLine]) -> proc_macro2::TokenStream {
     let content: Vec<DocLine> = lines
@@ -1126,13 +1113,9 @@ fn respan_example_tokens(lines: &[DocLine]) -> proc_macro2::TokenStream {
 }
 
 /// The example's tokens, respanned line-by-line onto the `///` lines that wrote them, or `None`
-/// where there is no ` ```rust example ` fence.
-///
-/// `str::parse::<TokenStream>()` alone stamps every token with `Span::call_site()` — for an
-/// attribute macro, the whole `#[model_schema(...)]` invocation — so a typo or a type mismatch
-/// inside the example used to be reported there instead of on the line the author wrote. Each
-/// `///` line lowers to its own `#[doc = "..."]` attribute with a real span, which is enough to
-/// point the diagnostic at that line (or, where a value spans several lines, the first of them).
+/// where there is no ` ```rust example ` fence. `str::parse::<TokenStream>()` alone stamps every
+/// token with `Span::call_site()` — the whole `#[model_schema(...)]` invocation — so a typo or type
+/// mismatch inside the example used to be reported there instead of on the line the author wrote.
 #[cfg(feature = "zod")]
 pub fn extract_example_tokens(attrs: &[Attribute]) -> Option<proc_macro2::TokenStream> {
     let lines = doc_lines_with_spans(attrs);
@@ -1171,11 +1154,9 @@ fn transform_example_code(code: &str) -> String {
     result.trim().to_owned()
 }
 
-/// Strips example code blocks from documentation lines.
-///
 /// Every doc body the crate writes — an item's, an alias's, a field's, an enum variant's, and the
-/// descriptions spelled from the same lines — passes through here, so the block is dropped once
-/// rather than at each surface.
+/// descriptions spelled from the same lines — passes through here, so example blocks are dropped
+/// once rather than at each surface.
 pub fn strip_examples_from_docs(docs: &[String]) -> Vec<String> {
     let mut result = Vec::new();
     let mut in_example_block = false;
@@ -1326,12 +1307,11 @@ fn matches_every_haystack(hir: &hir::Hir) -> bool {
     }
 }
 
-/// Whether a concatenation matches at a position every haystack has.
-///
-/// Every part that asks the haystack for nothing can be tried anywhere, so a run of them matches
-/// anywhere; one whole-text anchor among them fixes that anywhere to a position every haystack
-/// still has. A second anchor is what breaks it -- `^$` requires the start and the end to be the
-/// same position -- and so is any part that consumes a character.
+/// Whether a concatenation matches at a position every haystack has. Every part that asks the
+/// haystack for nothing can be tried anywhere, so a run of them matches anywhere; one whole-text
+/// anchor among them fixes that anywhere to a position every haystack still has — a second anchor
+/// breaks it (`^$` requires the start and end to be the same position), and so does any part that
+/// consumes a character.
 fn concat_matches_every_haystack(parts: &[hir::Hir]) -> bool {
     parts.iter().filter(|part| is_text_anchor(part)).count() <= 1
         && parts
@@ -1387,12 +1367,10 @@ pub fn trivial_pattern(pattern: &str) -> Option<TrivialPattern> {
     }
 }
 
-/// A concatenation's equivalent check, decided by what sits at its two ends.
-///
-/// The arms are in the lint's order, and the fall-through it relies on is not reachable from any
-/// of them: a concatenation that starts or ends with an anchor holds something that is not a
-/// literal, so the all-literals reading is already ruled out by the time an anchored arm's needle
-/// comes back missing.
+/// A concatenation's equivalent check, decided by what sits at its two ends. The arms are in the
+/// lint's order; the fall-through they rely on is unreachable from any of them, since a
+/// concatenation that starts or ends with an anchor is not a literal, ruling out the all-literals
+/// reading before an anchored arm's needle can come back missing.
 #[cfg(feature = "serde")]
 fn trivial_concat(parts: &[hir::Hir]) -> Option<TrivialPattern> {
     let opens_at_text_start = is_anchor(parts.first()?, hir::Look::Start);
@@ -1420,11 +1398,10 @@ fn is_anchor(part: &hir::Hir, anchor: hir::Look) -> bool {
     matches!(*part.kind(), hir::HirKind::Look(look) if look == anchor)
 }
 
-/// The non-empty `str` a run of parts spells, or `None` where any of them is not a literal.
-///
-/// An empty needle would name a check that always passes, which is a different statement than any
-/// of these variants makes; bytes that are not UTF-8 name no `str` at all. Neither is reachable
-/// through a `pattern` parsed in UTF-8 mode, and both keep the regex rather than guess.
+/// The non-empty `str` a run of parts spells, or `None` where any of them is not a literal. An
+/// empty needle would name a check that always passes — a different statement than any of these
+/// variants makes — and bytes that are not UTF-8 name no `str` at all; neither is reachable through
+/// a `pattern` parsed in UTF-8 mode, so both keep the regex rather than guess.
 #[cfg(feature = "serde")]
 fn literal_needle(parts: &[hir::Hir]) -> Option<String> {
     let mut bytes: Vec<u8> = Vec::new();

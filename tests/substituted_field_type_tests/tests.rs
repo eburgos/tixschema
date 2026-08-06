@@ -1,9 +1,8 @@
 //! One declaration written twice: once through a `macro_rules!` metavariable, once by hand.
 //!
-//! The fixtures below are the same struct. The only thing that differs between them is which of
-//! the two ways the field types were spelled, and that is not something any surface describes — so
-//! every assertion here is the same assertion: the two describe identically, and neither describes
-//! a field as the opaque value.
+//! The fixtures below are the same struct — the only difference is which of the two ways the
+//! field types were spelled, which no surface describes. Every assertion here is the same
+//! assertion: the two describe identically, and neither describes a field as the opaque value.
 
 #[cfg(feature = "jsonschema")]
 mod jsonschema {
@@ -183,10 +182,9 @@ pub struct Written {
 #[serde(transparent)]
 pub struct WrittenSlug(pub String);
 
-/// The substituted item's surface under the written twin's name, so the two can be compared as the
-/// one description they are — the name is the only thing about them that differs.
-///
-/// The JSON document names nothing, so only the two rendered surfaces have a name to put back.
+/// The substituted item's surface under the written twin's name, so the two can be compared as
+/// the one description they are — the name is the only thing about them that differs. The JSON
+/// document names nothing, so only the two rendered surfaces have a name to put back.
 #[cfg(any(feature = "typescript", feature = "zod"))]
 fn as_written(rendered: &str) -> String {
     rendered.replace("Substituted", "Written")

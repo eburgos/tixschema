@@ -127,10 +127,8 @@ fn test_typescript_enabled_discriminated_enum_zod_schema() {
 #[test]
 #[cfg(not(feature = "typescript"))]
 fn test_typescript_disabled_struct_ts_definition_not_available() {
-    // The ts_definition method should not be available when typescript feature is disabled.
-    // This would cause a compile error if we tried to call TypeScriptTestUser::ts_definition().
-    // We can't test the compilation failure directly, but we can verify the method doesn't exist
-    // by checking that our code compiles without calling it.
+    // ts_definition() should not exist when the typescript feature is disabled — not directly
+    // testable as a compile failure, so we verify the surrounding code still compiles without it.
 }
 
 #[test]

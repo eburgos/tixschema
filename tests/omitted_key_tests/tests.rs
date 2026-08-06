@@ -1,10 +1,7 @@
-//! The wire is the arbiter. serde writes two payloads for a field carrying a `skip_serializing_if`
-//! — one with the key, one without it — and each surface is held to admitting exactly those two.
-//!
-//! The payloads are asserted first, in this file, so the surface expectations below are read off
-//! them rather than off each other. What serde writes does not turn on the crate's `serde` feature,
-//! and neither do the expectations: the attribute is on the declaration in every build, so every
-//! build owes the same answer.
+//! The wire is the arbiter. serde writes two payloads for a field carrying a
+//! `skip_serializing_if` — one with the key, one without — and each surface is held to admitting
+//! exactly those two, asserted first here so the surface expectations below are read off them.
+//! The attribute is on the declaration in every build, so every build owes the same answer.
 
 use serde::{Deserialize, Serialize};
 use tixschema::model_schema;
@@ -146,8 +143,8 @@ fn zod_keeps_the_undefined_union_that_already_admits_the_absent_key() {
 
 /// A plain `z.array(...)` member rejects the payload serde writes for an empty `Vec` — recorded
 /// against zod 4.4.3 under node v26.2.0, `safeParse({ id: "1" })` failing with `invalid_type` at
-/// `roles`. `.optional()` is what admits the absent key while still rejecting `null` and still
-/// rejecting an unrecognized key under the surrounding `z.strictObject`.
+/// `roles`. `.optional()` admits the absent key while still rejecting `null` and an unrecognized
+/// key under `z.strictObject`.
 #[test]
 #[cfg(feature = "zod")]
 fn zod_marks_the_predicate_omitted_key_optional() {

@@ -457,11 +457,10 @@ fn test_real_objectid_serialization() {
 }
 
 /// The hex a real `ObjectId` round-trips through serde, held to both generated surfaces at once.
-///
 /// The `pattern` keyword is a flagless ECMA-262 regex, so the Zod literal's flags are read here
-/// rather than dropped: a flag on one surface and not on the other is two contracts for one member,
-/// whatever the source spelling says. Lower-case is the only case there is to pin, because
-/// `ObjectId::to_hex()` is the only thing that writes this member.
+/// rather than dropped — a flag on one surface and not the other is two contracts for one member.
+/// Lower-case is the only case to pin, since `ObjectId::to_hex()` is the only thing that writes
+/// this member.
 #[test]
 #[cfg(all(feature = "object_id", feature = "jsonschema", feature = "zod"))]
 fn a_real_object_id_hex_satisfies_the_zod_literal_and_the_json_schema_pattern_alike() {

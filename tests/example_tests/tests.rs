@@ -422,9 +422,8 @@ fn test_description_escapes_quotes() {
 }
 
 /// A doc example on a generic item is Rust the expansion has to compile, and a parameter names no
-/// type to compile it at, so every parameter the item declares is instantiated at the filling
-/// `default_types` declares for it — here `String`, which is also what an undeclared parameter
-/// falls back to, so this item is annotated exactly as it was before the filling was read.
+/// type to compile it at — so every parameter is instantiated at the filling `default_types`
+/// declares, here `String`, the same fallback an undeclared parameter uses.
 #[cfg(feature = "zod")]
 #[test]
 fn a_generic_struct_renders_its_example_at_its_declared_filling() {
@@ -468,9 +467,8 @@ fn a_generic_enum_renders_its_example_at_its_declared_fillings() {
 }
 
 /// `default_types` is the one argument that names a concrete type per parameter, so the example is
-/// annotated at what the author already declared. A parameter bounded by a trait `String` does not
-/// satisfy then compiles, and the value the example builds is the one the filling admits rather
-/// than one an annotation picked over it contradicts.
+/// annotated at what the author already declared — a parameter bounded by a trait `String` does
+/// not satisfy still compiles, since the example builds the value the filling admits.
 #[cfg(feature = "zod")]
 #[test]
 fn a_bounded_parameter_renders_its_example_at_its_declared_filling() {
@@ -538,9 +536,8 @@ fn an_unfilled_parameter_keeps_the_string_instantiation() {
 }
 
 /// A filling written as `String` is exactly what an unfilled parameter falls back to, so the two
-/// items write the same schema down to the byte once their names are read as one — reading the
-/// declaration leaves every item the convention already got right untouched. Names of equal length
-/// so nothing but the name itself differs.
+/// items write the same schema down to the byte once their names are read as one. Names of equal
+/// length so nothing but the name itself differs.
 #[cfg(all(feature = "zod", not(feature = "jsonschema")))]
 #[test]
 fn a_string_filling_and_no_filling_write_the_same_schema() {
@@ -573,9 +570,8 @@ fn a_string_filling_and_no_filling_write_the_same_schema() {
 }
 
 /// A generic item publishes a factory, whose last `;` closes its arrow function — so the example
-/// anchors on the statement binding the schema the factory caches instead. That statement is the
-/// one place on the value every call returns that also keeps two calls with the same arguments the
-/// same schema: attaching at `return schema` would hand back an instance the cache never stored.
+/// anchors on the statement binding the cached schema instead. Attaching at `return schema` would
+/// hand back an instance the cache never stored.
 #[cfg(feature = "zod")]
 #[test]
 fn a_factory_carries_its_example_on_the_schema_it_memoizes() {

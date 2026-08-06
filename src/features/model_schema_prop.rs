@@ -8,10 +8,8 @@ use syn::{Attribute, Lit, LitStr, Type};
 
 use crate::utils::{constraining_pattern, portable_pattern};
 
-/// Every key the parser reads, in the order it tries them, as the unknown-key rejection names them.
-///
-/// A key added to [`parse_prop_key`] belongs here too: `no_key_the_parser_reads_is_rejected` walks
-/// this list back through the parser and fails on any name here it does not read.
+/// Every key the parser reads, in the order the unknown-key rejection names them. Add a new key to
+/// [`parse_prop_key`], add it here too, or `no_key_the_parser_reads_is_rejected` fails.
 const KNOWN_KEYS: &[&str] = &[
     "as",
     "literal",
@@ -144,12 +142,8 @@ pub struct ModelSchemaPropMeta {
     pub ts_optional: bool,
 }
 
-/// Parses `model_schema_prop` attributes from a field.
-///
 /// What the parser cannot read is recorded as [`ModelSchemaPropMeta::attr_rejection`] rather than
-/// dropped: this attribute is read here and nowhere else, so a key or value that stops at this
-/// parser reaches no emitter, and the field it was written to constrain is emitted as though the
-/// attribute had been left off.
+/// dropped, and the field is emitted as though the attribute had been left off.
 pub fn parse_model_schema_prop_attributes(attrs: &[Attribute]) -> ModelSchemaPropMeta {
     let mut meta = ModelSchemaPropMeta::default();
 
@@ -209,10 +203,9 @@ fn parse_prop_key(nested: &ParseNestedMeta, meta: &mut ModelSchemaPropMeta) -> s
     Ok(())
 }
 
-/// The `f64` a numeric bound was written as.
-///
-/// Both bounds reach a numeric comparison in the Rust validator and a numeric literal in the Zod
-/// and JSON schemas, so a value that is not a number is one no surface can carry.
+/// The `f64` a numeric bound was written as: both bounds reach a numeric comparison in the Rust
+/// validator and a numeric literal in the Zod and JSON schemas, so a non-number is one no surface
+/// can carry.
 fn numeric_bound(nested: &ParseNestedMeta, key: &str) -> syn::Result<f64> {
     let lit: syn::Lit = nested.value()?.parse()?;
     if let syn::Lit::Int(int) = &lit {

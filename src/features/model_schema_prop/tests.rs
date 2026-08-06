@@ -216,8 +216,6 @@ fn a_value_the_parser_cannot_read_is_refused() {
     }
 }
 
-/// A key the parser reads before the refused one still lands: the refusal reports the attribute,
-/// it does not discard what was already read.
 #[test]
 fn a_refusal_keeps_what_the_parser_had_already_read() {
     let meta = parse_model_schema_prop_attributes(&[parse_quote! {

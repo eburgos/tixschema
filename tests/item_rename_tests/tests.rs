@@ -51,11 +51,10 @@ pub struct ReferencesRenamedItems {
     pub tree: TreeUnderRustName,
 }
 
-/// Declaration order, taken both ways round. This struct names a renamed struct and a renamed enum
-/// that have not expanded yet, so the module each reference resolves to is derived from the item's
-/// Rust ident and nothing else; [`NamesRenamedItemsDeclaredEarlier`] names the same two once they
-/// are registered. Both have to reach the same modules, or one of the two orders names a module
-/// that was never emitted.
+/// Declaration order, taken both ways round: this struct names a renamed struct and enum that
+/// have not expanded yet, so the module each reference resolves to is derived from the item's
+/// Rust ident alone; [`NamesRenamedItemsDeclaredEarlier`] names the same two once registered.
+/// Both have to reach the same modules.
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NamesRenamedItemsDeclaredLater {
@@ -296,9 +295,8 @@ fn renamed_items_declared_under_their_reference_expand_in_this_feature_combinati
 
 /// A struct naming a renamed struct or enum declared under it used to refuse the whole crate: the
 /// reference assumed `later_renamed_gauge_schema` while the item published
-/// `renamed_later_gauge_schema`, and rustc reported an `E0433` for a module the author never
-/// wrote. One spelling now answers on both sides, so which side of the item the reference is
-/// written on changes nothing.
+/// `renamed_later_gauge_schema`, an `E0433` for a module never written. One spelling now answers
+/// on both sides.
 #[cfg(feature = "jsonschema")]
 #[test]
 fn an_item_reference_describes_the_same_on_either_side_of_the_item() {
@@ -348,9 +346,8 @@ fn a_forward_referenced_renamed_item_exports_under_the_override() {
 
 /// The two declaration orders write the reference differently and always will: a reference
 /// standing before the item has nothing but the Rust ident to spell it by, and an override is not
-/// recoverable from that ident. What has to hold is name parity — every name a reference writes is
-/// one the emission the author collects also defines — so each nominal surface answers at the
-/// ident as well as at the override.
+/// recoverable from that ident. What has to hold is name parity — each nominal surface answers at
+/// the ident as well as at the override.
 #[cfg(feature = "typescript")]
 #[test]
 fn every_name_a_forward_item_reference_writes_is_defined_by_the_emission() {

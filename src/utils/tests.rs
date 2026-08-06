@@ -19,11 +19,10 @@ const PORTABLE_PATTERNS: [&str; 9] = [
     r"[a\]b]",
 ];
 
-/// Every construct the guard refuses, beside the words the refusal has to name it by.
-///
-/// The list is the inventory of what `regex::Regex::new` accepts and a JavaScript regex literal
-/// either fails to parse or reads as something else, so it doubles as the record of what was
-/// checked against both grammars.
+/// Every construct the guard refuses, beside the words the refusal has to name it by — the
+/// inventory of what `regex::Regex::new` accepts and a JavaScript regex literal either fails to
+/// parse or reads as something else, so it doubles as the record of what was checked against both
+/// grammars.
 const UNPORTABLE_PATTERNS: [(&str, &str); 34] = [
     ("(?i)abc", "inline flag directive"),
     ("abc(?i)def", "inline flag directive"),
@@ -340,11 +339,9 @@ const NEGATED_CLASS_PATTERNS: [&str; 6] = [
 ];
 
 /// Every regex this crate writes into a generated schema itself, rather than carrying over from an
-/// author's `pattern`.
-///
-/// An author's pattern reaches the three surfaces through the guard, which equalises what it can
-/// and refuses the rest. One the crate writes reaches them directly, so without this list there
-/// are two contracts and only one of them is enforced.
+/// author's `pattern`. An author's pattern reaches the three surfaces through the guard, which
+/// equalises what it can and refuses the rest; one the crate writes reaches them directly, so
+/// without this list there are two contracts and only one of them is enforced.
 #[cfg(feature = "object_id")]
 const CRATE_EMITTED_PATTERNS: [&str; 1] = [OBJECT_ID_HEX_PATTERN];
 
@@ -725,9 +722,8 @@ fn test_escape_js_regex_literal_rewrites_an_identity_escaped_line_terminator() {
 }
 
 /// The module name a reference assumes for a name it has not seen and the one an alias goes on to
-/// publish are the same call, so nothing the alias is written with can pull them apart: the `Type`
-/// suffix an alias exports under and a `name = "…"` override both land on the export name only.
-/// The `Json` suffix is still read through, that being what every reference already spells.
+/// publish are the same call: the `Type` suffix an alias exports under and a `name = "…"` override
+/// both land on the export name only, and the `Json` suffix is still read through either way.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn ident_schema_module_name_is_derived_from_the_ident_alone() {
@@ -772,9 +768,8 @@ fn an_unrenamed_item_publishes_the_same_module_under_either_derivation() {
 }
 
 /// The ident re-export answers at the same spelling the module seam answers at: whatever a
-/// reference falls back to when the registry cannot help it, which is the ident with the `Json`
-/// suffix read through. An item exported under that spelling already answers there and publishes
-/// nothing.
+/// reference falls back to when the registry cannot help it, the ident with the `Json` suffix read
+/// through. An item already exported under that spelling publishes nothing.
 #[cfg(feature = "typescript")]
 #[test]
 fn a_ts_reexport_is_written_only_where_the_export_moved_off_the_ident() {
@@ -896,10 +891,9 @@ fn test_portable_pattern_admits_the_boundary_both_grammars_agree_on() {
 }
 
 /// `\d`, `\w` and `\s` are in both grammars under one spelling and cover different characters by
-/// it: the `regex` crate reads them as Unicode classes, and a flagless JavaScript literal reads
-/// the narrower ASCII ones. Neither engine can be told to mean the other, so the guard writes the
-/// set out in the members both engines do agree on and hands that one string to all three
-/// surfaces.
+/// it — Unicode classes in the `regex` crate, narrower ASCII ones in a flagless JavaScript literal
+/// — so the guard writes the set out in the members both engines agree on and hands that one
+/// string to all three surfaces.
 #[test]
 fn test_portable_pattern_equalises_the_classes_the_engines_cover_differently() {
     for (written, equalised) in EQUALISED_PATTERNS {
@@ -908,9 +902,8 @@ fn test_portable_pattern_equalises_the_classes_the_engines_cover_differently() {
 }
 
 /// The whole point, asserted end to end: the string the guard emits picks out the same haystacks
-/// in the `regex` crate — which is what the generated Rust validator runs it through — as in a
-/// flagless JavaScript regex literal, which is what the Zod schema and the JSON Schema `pattern`
-/// keyword are. Run over the constructs that used to diverge and over the ones that never did.
+/// in the `regex` crate — what the generated Rust validator runs it through — as in a flagless
+/// JavaScript regex literal — what the Zod schema and JSON Schema `pattern` keyword are.
 #[test]
 fn test_the_emitted_pattern_picks_out_the_same_haystacks_in_both_engines() {
     for (written, _) in EQUALISED_PATTERNS
@@ -951,11 +944,10 @@ fn test_every_pattern_the_crate_emits_is_a_fixed_point_of_the_guard() {
     }
 }
 
-/// The `$oid` hex, run over the haystacks that tell the engines apart, on the same recorded-
-/// JavaScript discipline as the table above: twenty-four ARABIC-INDIC digits are what a `\d` in
-/// that class admits in the `regex` crate and a flagless literal refuses, so they are the case the
-/// spelling turns on. The real `ObjectId` and the uppercase hex are there to say the value set the
-/// constant is *for* did not move.
+/// The `$oid` hex, run over the haystacks that tell the engines apart: twenty-four ARABIC-INDIC
+/// digits are what a `\d` admits in the `regex` crate and a flagless literal refuses, the case the
+/// spelling turns on. The real `ObjectId` and the uppercase hex say the value set the constant is
+/// *for* did not move.
 #[test]
 #[cfg(feature = "object_id")]
 fn test_the_emitted_object_id_hex_agrees_with_javascript_over_every_hex_shaped_haystack() {
@@ -973,10 +965,9 @@ fn test_the_emitted_object_id_hex_agrees_with_javascript_over_every_hex_shaped_h
     }
 }
 
-/// The constructs with no equalising spelling at all, and why: a flagless JavaScript literal
-/// matches one UTF-16 code unit where the `regex` crate matches one character, so anything that
-/// can match a character outside the Basic Multilingual Plane parts ways over every one of them.
-/// `[^0-9]` is no better than `\D` here, which is why these are refused rather than rewritten.
+/// The constructs with no equalising spelling at all: a flagless JavaScript literal matches one
+/// UTF-16 code unit where the `regex` crate matches one character, so any construct that can match
+/// a character outside the Basic Multilingual Plane parts ways over every one of them.
 #[test]
 fn test_portable_pattern_refuses_what_no_spelling_equalises() {
     for pattern in ["^.$", r"^\D$", r"^\W$", r"^\S$", r"[a\D]", r"[\s\S]"] {
@@ -989,9 +980,8 @@ fn test_portable_pattern_refuses_what_no_spelling_equalises() {
 }
 
 /// A negated class is the last construct that was admitted while covering different characters in
-/// the two engines, and it is refused the same way `\D`, `\W` and `\S` already are — which are the
-/// same class negated, so admitting the bracketed spelling was refusing a construct under one name
-/// and taking it under another.
+/// the two engines; it is refused the same way `\D`, `\W` and `\S` already are, since those are the
+/// same class negated under another spelling.
 #[test]
 fn test_portable_pattern_refuses_a_negated_class_whatever_its_members() {
     for pattern in NEGATED_CLASS_PATTERNS {

@@ -211,9 +211,8 @@ fn test_the_parser_counts_one_array_level_per_wrapper_written() {
 }
 
 /// A fixed-size array is written at one level and bounds that level alone, so the count lands on
-/// the level the `[T; N]` spells rather than on the field. A count the expansion cannot read — a
-/// const generic, a `const` item, a computed expression — and a slice, which spells no count at
-/// all, leave the level as unbounded as every other sequence spelling leaves it.
+/// the level the `[T; N]` spells rather than on the field. A count the expansion cannot read (a
+/// const generic, a `const` item, a computed expression) or a slice leaves the level unbounded.
 #[test]
 fn test_the_parser_records_a_fixed_array_length_at_the_level_it_bounds() {
     for (spelling, array_lengths) in [
@@ -439,9 +438,8 @@ fn test_a_schematizable_field_is_not_reported_as_an_os_string() {
 }
 
 /// An `Option` written inside a sequence wrapper and one written around it are two different
-/// values on the wire — `[null]` against `null` — so the parse has to keep them apart. The level
-/// each is recorded at is the level it was written at: the element's below the array it sits in,
-/// the field's own at the top, where `is_optional` answers for it.
+/// values on the wire — `[null]` against `null` — so the parse keeps them apart: each is recorded
+/// at the level it was written at, the element's below the array and the field's own at the top.
 #[test]
 fn test_the_parser_records_the_level_each_option_was_written_at() {
     for (spelling, array_depth, nullable_levels) in [
@@ -468,8 +466,7 @@ fn test_the_parser_records_the_level_each_option_was_written_at() {
 
 /// A covered wrapper writes the array its element decides, so the element's own `Option` is
 /// recorded at the level the wrapper puts it at — the same level the `Vec` spelling of the same
-/// field records it at, whichever wrapper name was written. Read off the surfaces, which is where
-/// the level shows.
+/// field records it at, whichever wrapper name was written.
 #[test]
 fn test_a_covered_wrapper_records_its_element_option_where_the_vec_spelling_does() {
     let vec_spelling: syn::Type = syn::parse_str("Vec<Option<u32>>").unwrap();
@@ -498,9 +495,8 @@ fn test_a_covered_wrapper_records_its_element_option_where_the_vec_spelling_does
 }
 
 /// The tokens a `macro_rules!` `$t:ty` substitution reaches an expansion as: the type's own tokens
-/// inside an invisible group, which is what keeps the substitution one unit whatever the expansion
-/// writes around it. Built here rather than expanded, so the depth can be chosen — a metavariable
-/// passed on through a second `macro_rules!` arrives grouped again.
+/// inside an invisible group, which keeps the substitution one unit whatever the expansion writes
+/// around it. Built here rather than expanded, so the depth can be chosen.
 fn substituted(spelling: &str, depth: usize) -> proc_macro2::TokenStream {
     let mut tokens: proc_macro2::TokenStream = spelling.parse().unwrap();
     for _ in 0..depth {
@@ -579,10 +575,9 @@ fn test_a_substitution_inside_a_written_shape_is_read_through() {
     }
 }
 
-/// [`FieldDef::reaches_a_type_declared_later`]'s zero-argument arm: a bare sibling reference to a
-/// `#[model_schema]` item not yet registered (declared below the one being expanded) has to defer
-/// exactly as a generic forward reference already does; a registered name (declared above) stays
-/// the eager baseline.
+/// [`FieldDef::reaches_a_type_declared_later`]'s zero-argument arm: a bare sibling reference to an
+/// unregistered `#[model_schema]` item defers exactly as a generic forward reference already does;
+/// a registered name stays the eager baseline.
 #[cfg(feature = "zod")]
 #[test]
 fn test_reaches_a_type_declared_later_answers_for_a_zero_argument_sibling() {

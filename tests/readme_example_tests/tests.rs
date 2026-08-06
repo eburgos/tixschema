@@ -1,22 +1,14 @@
 //! The README's `Option` examples, expanded here as the README declares them.
 //!
-//! An `Option` field serde writes as `null` for a `None` is refused where it is declared, so an
-//! example carrying one is not a declaration a reader can paste — and the block beside it, showing
-//! the key that declaration would render, describes a build the declaration cannot be written in.
-//! Each example is therefore held to two things: the README still declares it exactly as it is
-//! declared here, and the emission the README shows beside it is what the generator answers with.
-//! Drift on either side fails here rather than in someone's editor.
+//! An `Option` field serde writes as `null` for `None` is refused where declared, so an example
+//! carrying one is not a declaration a reader can paste. Each example is held to two things: the
+//! README declares it exactly as here, and the emission shown beside it is what the generator
+//! answers with — drift on either side fails here rather than in someone's editor.
 //!
-//! Each type is declared with its fields ordered alphabetically, as this crate's lints require of
-//! Rust source; the README orders its examples for reading. Only the order the members are written
-//! in differs, so every member is held as a whole line rather than as part of a block — what is
-//! pinned is the spelling of each, which is what an omitted key changes. A derive list is widened
-//! here for the same reason and to the same effect on the emission, which is none: the generator
-//! reads no derive but serde's.
-//!
-//! The README's `ts_optional` example is not here. The flag decides the key only where no serde
-//! attribute is read, so the section shows a declaration this module's build cannot compile; the
-//! same declares-and-shows pin sits in `optional_key_flag_tests`, gated the other way.
+//! Fields are declared alphabetically (this crate's lint requirement) while the README orders
+//! them for reading, so each member is held as a whole line rather than part of a block. The
+//! README's `ts_optional` example is not here — it cannot compile under this module's build — and
+//! is instead pinned in `optional_key_flag_tests`, gated the other way.
 
 #![cfg(all(feature = "serde", feature = "typescript"))]
 
@@ -348,11 +340,9 @@ fn test_the_chrono_example_is_declarable_and_shows_what_it_emits() {
     );
 }
 
-/// The README declares this, and the block beside it is the emission whole.
-///
-/// Held as one block rather than line by line, which is what a truncated paste needs: an emission
-/// shown down to its seventh line matches every line it shows and still leaves the reader without
-/// the factory the rest of the block declares.
+/// The README declares this, and the block beside it is the emission whole — held as one block
+/// rather than line by line, since a truncated paste (matching only the first several lines)
+/// would still leave the reader without the factory the rest declares.
 fn assert_readme_declares_and_shows_whole(declaration: &str, emission: &str) {
     assert!(
         readme().contains(declaration),
@@ -365,11 +355,9 @@ fn assert_readme_declares_and_shows_whole(declaration: &str, emission: &str) {
 }
 
 /// The "Branded Newtypes" example: a generic brand beside a non-generic one, and the whole of what
-/// each publishes.
-///
-/// A generic brand publishes a factory, so its emission runs well past the builder the block used
-/// to stop at — the type alias reading the builder's return back, the two-method cache interface,
-/// the cache itself and the exported factory. All of it is what a reader pastes.
+/// each publishes. A generic brand publishes a factory, so its emission runs well past the
+/// builder the block used to stop at — the alias, the cache interface, the cache itself and the
+/// exported factory, all of it what a reader pastes.
 #[test]
 #[cfg(feature = "zod")]
 fn test_the_branded_newtype_example_is_declarable_and_shows_what_it_emits() {
@@ -453,9 +441,8 @@ fn test_the_documented_branded_newtype_example_is_declarable_and_shows_what_it_e
 }
 
 /// The rejected half of the constrained-brand rule for an inner written over a parameter. Only its
-/// spelling can be held here — the declaration itself is a `compile_error!` by construction, which
-/// is what the rule says it should be — so what this pins is that the README still shows the two
-/// declarations the refusal is written about.
+/// spelling can be held here, since the declaration itself is a `compile_error!` by construction —
+/// this pins that the README still shows the two declarations the refusal is written about.
 #[test]
 fn test_the_constrained_brand_over_a_parameterised_inner_example_is_still_shown() {
     assert!(

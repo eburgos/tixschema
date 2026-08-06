@@ -59,10 +59,9 @@ enum NamedUnion {
     B { y: i64 },
 }
 
-// A struct variant's own `rename_all` cases its fields — the container rule serde applies to a
-// struct variant, distinct from the enum's own `rename_all` (which cases variant names, never the
-// fields inside one). Both variants carry one so the flatten holder below closes two renamed keys
-// against each other.
+// A struct variant's own `rename_all` cases its fields — distinct from the enum's own
+// `rename_all`, which cases variant names, never fields. Both variants carry one so the flatten
+// holder below closes two renamed keys against each other.
 #[model_schema()]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -145,11 +144,10 @@ enum ShapedUnion {
     Pair { pair: (i64, String) },
 }
 
-// The std wrappers serde writes as a JSON array of their element, written in untagged members. Each
-// writes what a `Vec` of the same element writes, so each member has to describe as that field does
-// rather than as a schema module named after the wrapper. `LinkedList` is covered too and has no
-// member here, the crate's own lints forbidding it a value of one; it is covered by name at the
-// dispatch's own unit tests instead.
+// The std wrappers serde writes as a JSON array of their element, written in untagged members:
+// each describes as the `Vec` of the same element does, not as a schema module named after the
+// wrapper. `LinkedList` has no member here — the crate's own lints forbid a value of one — so
+// it's covered by name at the dispatch's own unit tests instead.
 #[model_schema()]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -931,10 +929,9 @@ fn test_untagged_wrapper_member_wire() {
     }
 }
 
-/// A member holding a covered sequence wrapper describes as the array serde writes: the element's
-/// own schema under array wrapping. Held against the struct field written from the same type, which
-/// is the rendering a member must not diverge from — and which is where the wrapper name stopped
-/// standing for a schema module of its own.
+/// A member holding a covered sequence wrapper describes as the array serde writes — the element's
+/// own schema under array wrapping. Held against the struct field written from the same type, the
+/// rendering a member must not diverge from.
 #[test]
 #[cfg(feature = "jsonschema")]
 fn test_untagged_wrapper_member_json_schema() {
@@ -1041,9 +1038,9 @@ fn test_untagged_string_array_member_wire() {
 }
 
 /// A member holding a `String` under array levels describes as the array of strings serde writes,
-/// and as the struct field written from the same type describes. The member's value used to be the
-/// one the array wrap could not carry: a Rust block landing where the wrap's `serde_json::json!`
-/// reads a JSON object, which is the expansion that never reached a compiler.
+/// matching the struct field written from the same type. This used to be the one value the array
+/// wrap could not carry — a Rust block landing where the wrap's `serde_json::json!` reads a JSON
+/// object, an expansion that never reached a compiler.
 #[test]
 #[cfg(feature = "jsonschema")]
 fn test_untagged_string_array_member_json_schema() {
@@ -1190,10 +1187,10 @@ fn test_untagged_member_constraint_is_enforced_on_deserialize() {
     );
 }
 
-/// What a bound means in this position, pinned: serde tries the variants in order and a member the
-/// bound rejects takes its variant out of the running rather than ending the read — the same thing
-/// the union member's own schema does under `anyOf` and under `z.union`. So a violating value lands
-/// on the next branch that accepts it, and errors only when none does.
+/// What a bound means in this position: serde tries the variants in order, and a member the bound
+/// rejects takes its variant out of the running rather than ending the read — the same thing the
+/// union's own schema does under `anyOf` and `z.union`. A violating value lands on the next branch
+/// that accepts it, erroring only when none does.
 #[test]
 fn test_untagged_member_constraint_decides_which_variant_is_read() {
     assert_eq!(
@@ -1241,11 +1238,10 @@ fn test_untagged_objectid_member_spells_the_one_oid_object() {
     );
 }
 
-/// What the read costs the author, pinned. serde's derived `Deserialize` for an untagged enum drops
-/// each candidate's own error as it moves to the next, so when no variant accepts, the bound that
-/// refused the value is gone and one generic sentence stands in its place. The tagged twin, whose
-/// tag names the variant before its members are read, keeps the bound's own words. A serde upgrade
-/// that rewords the sentence lands here.
+/// What the read costs the author: serde's derived `Deserialize` for an untagged enum drops each
+/// candidate's own error as it moves to the next, so when no variant accepts, the bound's own
+/// error is gone and one generic sentence stands in its place. The tagged twin, whose tag names
+/// the variant before its members are read, keeps the bound's own words.
 #[test]
 fn test_untagged_member_bound_failure_reports_serdes_generic_sentence() {
     assert_eq!(

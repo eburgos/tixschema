@@ -1,10 +1,8 @@
 //! One `JSDoc` block, one shape, wherever a surface writes one.
 //!
 //! A block opens at the indent of the member it documents, carries its body at that same indent,
-//! and closes with the delimiter JavaScript closes a block comment with. Nothing between the block
-//! and what it documents, and nothing between the last member and the brace that closes the object
-//! — the emitted text is what a caller writes to a `.ts` file, so a struct, a plain enum and a
-//! tagged enum have to agree on all of it rather than each spelling its own.
+//! and closes with the delimiter JavaScript closes a block comment with — the emitted text is what
+//! a caller writes to a `.ts` file, so a struct, a plain enum and a tagged enum must all agree.
 
 #![cfg(feature = "typescript")]
 

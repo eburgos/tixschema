@@ -433,7 +433,7 @@ fn test_pattern_enum_variant_serde_validation() {
 // The Zod surface splices a pattern into a JS regex literal, where `/` is the delimiter: an
 // unescaped one closes the literal early and the emitted TypeScript stops parsing. That escaping
 // belongs to the splice alone — JSON Schema and the Rust-side validator carry the pattern as a
-// plain string and must see it byte for byte as written.
+// plain string, byte for byte.
 
 #[cfg(feature = "zod")]
 #[test]
@@ -552,8 +552,8 @@ fn test_the_escaped_zod_pattern_matches_the_value_set_the_validator_enforces() {
 
 // A JS regex literal cannot carry a raw line terminator: the literal ends at the line break and
 // the emitted TypeScript stops parsing, exactly as an unescaped delimiter did. The escape form
-// denotes the same character, so the literal keeps matching what the Rust-side validator enforces,
-// and the surfaces that carry the pattern as a plain string still see it byte for byte.
+// denotes the same character, so surfaces carrying the pattern as a plain string still see it
+// byte for byte.
 
 #[cfg(feature = "zod")]
 #[test]

@@ -178,12 +178,10 @@ fn assert_jsdoc_opens_with(ts: &str, expected: &str) {
     assert!(ts.starts_with(&header), "expected {expected} to open: {ts}");
 }
 
-/// The surface with the item's ident re-export taken off.
-///
-/// That line is the one place an item's Rust ident is written on purpose: a reference standing
-/// before the item has only the ident to spell, so each nominal surface answers at it. Everything
-/// else the item publishes is written under the name it is exported as, which is what the
-/// assertions below are about.
+/// The surface with the item's ident re-export taken off. That line is the one place an item's
+/// Rust ident is written on purpose — a reference standing before the item has only the ident to
+/// spell. Everything else is written under the name it's exported as, which the assertions below
+/// are about.
 #[cfg(any(feature = "typescript", feature = "zod"))]
 fn without_ident_reexport(surface: &str, ident: &str, exported: &str) -> String {
     surface
@@ -194,12 +192,10 @@ fn without_ident_reexport(surface: &str, ident: &str, exported: &str) -> String 
         )
 }
 
-/// The ` * ` lines a definition's `JSDoc` block is written from, with the block's own delimiters and
-/// the surrounding indentation set aside — what every shape spells from one body, and the one part
-/// of the emitted `TypeScript` the shapes may be held against each other over.
-///
-/// The rendered JSON schema an item publishes under `jsonschema` is appended after that body rather
-/// than written from it, so it is read as the end of the body and not as part of it.
+/// The ` * ` lines a definition's `JSDoc` block is written from, delimiters and surrounding
+/// indentation set aside — the one part of the emitted TypeScript the shapes may be held against
+/// each other over. The rendered JSON schema under `jsonschema` is appended after that body
+/// rather than written from it.
 #[cfg(feature = "typescript")]
 fn jsdoc_body_lines(ts: &str) -> Vec<String> {
     let (block, _) = ts

@@ -1154,9 +1154,8 @@ fn test_pattern_anchored_single_character_prefix() {
 }
 
 /// `^$` is written out of the two anchors a pattern admitting every value is written out of, and
-/// it is the one arrangement of them that still says something: both ends of the value at one
-/// position, which only the empty string has. It keeps validating, and it keeps compiling under a
-/// deny set that has no edit available at the attribute.
+/// is the one arrangement that still says something: both ends of the value at one position,
+/// which only the empty string has.
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
@@ -2102,9 +2101,8 @@ fn test_a_constraint_free_enum_publishes_no_validate_just_as_a_struct_does() {
 }
 
 /// The arm binds each constrained member under a name of its own, so a member spelled like
-/// something the body already reads is still checked rather than taking that name over: `errors` is
-/// the accumulator every check pushes into, and `value_0` is the head of the walk a wrapped member
-/// is reached through.
+/// something the body already reads is still checked rather than shadowing it: `errors` is the
+/// accumulator every check pushes into, `value_0` the head of a wrapped member's walk.
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
@@ -2180,11 +2178,10 @@ fn test_every_variant_shape_reaches_the_accessor() {
     EveryShape::Nothing.validate().unwrap();
 }
 
-/// The README's `validate()` example prints the errors a caller reads back, and a reader who greps
-/// for one of those sentences, or writes an assertion against it, is holding the crate to it. So
-/// the example is expanded here as written and held to the same two things: the generator answers
-/// with those exact sentences, and the README still shows them. Drift on either side fails here
-/// rather than in someone's editor.
+/// The README's `validate()` example prints the errors a caller reads back, and a reader who
+/// greps for one of those sentences is holding the crate to it. The example is expanded here as
+/// written and held to two things: the generator answers with those exact sentences, and the
+/// README still shows them.
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")

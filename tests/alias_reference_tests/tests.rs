@@ -57,10 +57,10 @@ pub type DocumentIdsByName = HashMap<String, ReferencedDocumentId>;
 #[model_schema()]
 pub type DocumentIdsBySlot = HashMap<DocumentSlot, ReferencedDocumentId>;
 
-/// Declaration order, taken both ways round. This struct names aliases that have not expanded yet,
-/// so the module each reference resolves to is derived from the alias's Rust ident and nothing
-/// else; [`NamesAliasesDeclaredEarlier`] names the same two once they are registered. Both have to
-/// reach the same modules, or one of the two orders names a module that was never emitted.
+/// Declaration order, taken both ways round: this struct names aliases that have not expanded
+/// yet, so the module each reference resolves to is derived from the alias's Rust ident alone;
+/// [`NamesAliasesDeclaredEarlier`] names the same two once registered. Both have to reach the
+/// same modules.
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NamesAliasesDeclaredLater {
@@ -332,8 +332,7 @@ fn aliases_declared_under_their_reference_expand_in_this_feature_combination() {
 
 /// A struct naming an alias declared under it used to refuse the whole crate: the reference
 /// assumed `later_declared_id_schema` while the alias published `later_declared_id_type_schema`,
-/// and rustc reported an `E0433` for a module the author never wrote. One spelling now answers on
-/// both sides, so which side of the alias the reference is written on changes nothing.
+/// an `E0433` for a module never written. One spelling now answers on both sides.
 #[cfg(feature = "jsonschema")]
 #[test]
 fn an_alias_reference_describes_the_same_on_either_side_of_the_alias() {
@@ -375,10 +374,9 @@ fn a_renamed_alias_exports_under_the_override_from_the_module_named_for_its_iden
     assert!(ts.contains("RenamedLaterDeclaredCount"), "got: {ts}");
 }
 
-/// An alias is never exported under its Rust ident — it is given the `Type` suffix, or whatever an
-/// override moves it to — so a forward reference to one always writes a name the alias's own
-/// `export type` line does not. The alias answers at that name too, and every name a reference
-/// writes is defined by the emission the author collects.
+/// An alias is never exported under its Rust ident — it's given the `Type` suffix, or whatever an
+/// override moves it to — so a forward reference always writes a name the alias's own
+/// `export type` line does not. The alias answers at that name too.
 #[cfg(feature = "typescript")]
 #[test]
 fn every_name_a_forward_alias_reference_writes_is_defined_by_the_emission() {

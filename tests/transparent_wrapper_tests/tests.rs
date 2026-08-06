@@ -334,9 +334,8 @@ fn ts_field_declarations(definition: &str) -> Vec<String> {
         .collect()
 }
 
-/// One populated instance of every wrapper twin, serialized, beside the bare spelling's.
-///
-/// `Cell` is not among them: its fixture holds a different, reduced field set (see
+/// One populated instance of every wrapper twin, serialized, beside the bare spelling's. `Cell`
+/// is not among them: its fixture holds a different, reduced field set (see
 /// `test_cell_field_writes_its_inner_value` and its neighbors below).
 fn covered_wrapper_payloads() -> [(&'static str, serde_json::Value); 7] {
     [
@@ -525,10 +524,9 @@ fn test_every_covered_wrapper_describes_as_the_inner_spelling() {
     }
 }
 
-/// The same holding on the `TypeScript` surface, with the fixture's own name set aside.
-/// Declarations rather than whole definitions, because the surrounding `JSDoc` differs for a reason
-/// of its own: a field written under an `Option` or a `Vec` has its doc comment dropped, so the
-/// twins' `Option`- and `Vec`-inner fields carry a doc comment the bare spelling has lost.
+/// The same holding on TypeScript, fixture name set aside. Declarations rather than whole
+/// definitions, because the surrounding `JSDoc` differs: a field under `Option` or `Vec` has its
+/// doc comment dropped, so the twins' inner fields carry a doc comment the bare spelling has lost.
 #[test]
 #[cfg(feature = "typescript")]
 fn test_every_covered_wrapper_types_as_the_inner_spelling() {

@@ -159,10 +159,8 @@ struct FlatOverEnum {
     tone: FlatHue,
 }
 
-/// A newtype over a `String` flattened into a struct: serde writes it as the string it wraps, which
-/// is no object and which the merge has nothing to join its own keys to. The name records that wire
-/// as it expands, so a build carrying the Zod merge refuses the declaration where it was written and
-/// only a build without one gets as far as the merge.
+/// A newtype over a `String` flattened into a struct: serde writes it as a string, not an object,
+/// so the Zod merge has nothing to join keys to and refuses the declaration where it was written.
 #[cfg(not(feature = "zod"))]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -177,10 +175,9 @@ struct FlatOverBrand {
     slug: FlatSlug,
 }
 
-/// The same newtype declared *below* the object that flattens it. The recording holds what has
-/// already expanded, so this one proves nothing about its wire and the guard keeps the
-/// declaration-order fallback — while the JSON-schema merge, which reads the document back at run
-/// time, refuses it wherever it is declared.
+/// The same newtype declared *below* the object that flattens it — the recording holds only what
+/// has already expanded, so the guard keeps the declaration-order fallback while the JSON-schema
+/// merge (reading the document at run time) refuses it regardless of order.
 #[cfg(any(feature = "jsonschema", feature = "zod"))]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -283,10 +280,9 @@ enum FlatScalarEither {
     Text(String),
 }
 
-/// Flattening it is what no value satisfies, and the Zod surface refuses the declaration once the
-/// members it multiplies over say which of them serde writes as a scalar. So the struct exists
-/// only where nothing records those members, which is where the JSON-schema merge answers for the
-/// same declaration at run time instead.
+/// Flattening it is what no value satisfies, so the Zod surface refuses the declaration once the
+/// members it multiplies over reveal a scalar. The struct exists only where nothing records those
+/// members — where the JSON-schema merge answers instead.
 #[cfg(not(feature = "zod"))]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -296,10 +292,9 @@ struct FlatOverScalarUntagged {
     own: String,
 }
 
-/// The same union declared *below* the object that flattens it. The recording holds what has
-/// already expanded, so this one carries no members and the Zod merge names it as the one operand
-/// it is — the fallback a forward reference already takes — while the JSON-schema merge, which
-/// reads the members back at run time, refuses it wherever it is declared.
+/// The same union declared *below* the object that flattens it — carrying no recorded members,
+/// the Zod merge falls back to naming it as a plain operand, while the JSON-schema merge
+/// (reading members at run time) refuses it regardless of order.
 #[cfg(any(feature = "jsonschema", feature = "zod"))]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -459,10 +454,9 @@ enum LaterMemberSlugEither {
     Slug(MemberSlug),
 }
 
-/// Three more members that name another item rather than spelling a type out, all three of them one
-/// word to the shape vocabulary and three different answers to the merge: a registration whose wire
-/// is a JSON array, one whose wire is the object a map writes, and one whose own published surface
-/// is nullable. serde flattens the map and refuses the other two.
+/// Three members naming another item rather than spelling a type out, each a different wire
+/// shape: one is a JSON array, one is the object a map writes, one has a nullable published
+/// surface. serde flattens only the map and refuses the other two.
 #[cfg(any(feature = "jsonschema", feature = "zod"))]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -574,10 +568,9 @@ enum LaterMemberMaybeEither {
     Maybe(MemberMaybeSecond),
 }
 
-/// A member naming a tagged enum. serde writes a data-carrying variant as the single-key object the
-/// variant's name tags, and writes a unit variant as that name alone — a bare string — so the choice
-/// this member stands for holds a leaf no object can be merged with, one level in from where the
-/// member stands.
+/// A member naming a tagged enum: serde writes a data-carrying variant as a single-key object but
+/// a unit variant as a bare string — a leaf no object can be merged with, one level in from the
+/// member.
 #[cfg(any(feature = "jsonschema", feature = "zod", feature = "typescript"))]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -625,11 +618,9 @@ enum LaterMemberExtBareEither {
     Ext(MemberExtBare),
 }
 
-/// The same tagged enum flattened directly, with no union between. That position asks what the
-/// member position asks — can serde read the payload back — and answers the other way: serde writes
-/// a unit variant as its name holding `null` into the object being written rather than as the bare
-/// string it is standing alone, and reads that payload back as the variant. One declaration, both
-/// directions, so the merges owe it one branch per variant.
+/// The same tagged enum flattened directly, with no union between: flattened, serde writes a unit
+/// variant as its name holding `null` rather than the bare string it is standing alone, and reads
+/// that back as the variant — so the merges owe it one branch per variant.
 #[cfg(any(feature = "jsonschema", feature = "zod", feature = "typescript"))]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -667,11 +658,9 @@ struct FlatOverMemberExtObjUntagged {
     own: String,
 }
 
-/// And that enum flattened directly, where the two merged surfaces multiply for different reasons. A
-/// Zod intersection recognizes exactly the keys its operands name and a `z.union` names none, so
-/// joining the object to the name admits nothing at all. TypeScript reaches every branch by
-/// distributing and needs the variants for what no branch says on its own: that it does not carry
-/// the tag its sibling carries.
+/// That enum flattened directly, where Zod and TypeScript multiply for different reasons: a Zod
+/// intersection recognizes only the keys its operands name and a `z.union` names none, so joining
+/// admits nothing; TypeScript distributes over every branch instead.
 #[cfg(any(feature = "jsonschema", feature = "zod", feature = "typescript"))]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -681,10 +670,9 @@ struct ExtObjDirectHolder {
     own: String,
 }
 
-/// The same enum reached through an `Option`, where the absence branch reads its keys off the
-/// operand beside it. `keyof` a union is the keys its branches share, which for two variants tagging
-/// different names was none at all — an empty mapped type, and one every object passes through.
-/// Closing each variant against the other is what gives that branch the keys to leave out.
+/// The same enum through an `Option`: `keyof` a union is the keys its branches share, which for
+/// two differently-tagged variants is none — an empty mapped type every object passes through —
+/// unless each variant is closed against the other.
 #[cfg(feature = "typescript")]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -694,10 +682,9 @@ struct OptExtObjHolder {
     own: String,
 }
 
-/// An untagged union written over the objects its members are rather than over names, and the struct
-/// that flattens it. serde matches a member on its shape and writes one member's keys at a time, and
-/// the members here are the only ones whose keys the declaration itself spells — a member written as
-/// a name is what it is written as, and the merge is told nothing it could close the others against.
+/// An untagged union written over the objects its members are, rather than over names — the only
+/// case where the declaration itself spells each member's keys, since serde matches a member by
+/// shape.
 #[cfg(any(feature = "jsonschema", feature = "zod", feature = "typescript"))]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -888,12 +875,10 @@ enum NestCycleInner {
     Back(Box<NestCycleOuter>),
 }
 
-/// A base reached through an `Option`, and the object that flattens it. serde writes the base's
-/// members beside the object's own when the field is `Some` and writes the object alone when it is
-/// `None` — the declaration guard forces `skip_serializing_if` on the field, so the absent form is
-/// the only `None` the crate admits.
-///
-/// Two required members, so a payload carrying one of them is a base serde never writes.
+/// A base reached through an `Option`: serde writes the base's members beside the object's own
+/// when `Some`, and the object alone when `None` — the guard forces `skip_serializing_if`, so
+/// absence is the only `None` the crate admits. Two required members, so a payload carrying only
+/// one is a base serde never writes.
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct OptBase {
@@ -909,11 +894,9 @@ struct OptHolder {
     own: String,
 }
 
-/// The other spelling of reaching that same absence: a registration whose own published surface is
-/// nullable, flattened directly with no union between. serde writes the base's members beside the
-/// object's own or writes the object's own alone, exactly as the `Option`-typed field does, and
-/// reads both forms back — so the two spellings are one declaration and the merge owes them one
-/// answer.
+/// The other spelling of the same absence: a nullable-surfaced registration flattened directly, no
+/// union between. serde reads and writes both forms exactly as the `Option`-typed field does, so
+/// the merge owes both spellings one answer.
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct MaybeOptBase(Option<OptBase>);
@@ -926,12 +909,10 @@ struct NamedMaybeHolder {
     own: String,
 }
 
-/// The same two spellings over a value that is no object. A registration whose published surface is
-/// a nullable scalar writes one of its two values and refuses the other: serde writes nothing for
-/// the `None` and reads the object's own keys back as it, and refuses the `Some` outright. So one
-/// declaration carries a branch that round-trips and a branch no payload satisfies, which is the
-/// declaration the guard refuses where it was written — and only a build without the Zod surface
-/// gets as far as either merge.
+/// The same two spellings over a scalar rather than an object: serde writes nothing for `None`
+/// (reading the object's own keys back as it) but refuses `Some` outright — one branch
+/// round-trips, the other satisfies no payload, so the guard refuses the declaration where it was
+/// written.
 #[cfg(not(feature = "zod"))]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -946,10 +927,9 @@ struct MaybeCountHolder {
     own: String,
 }
 
-/// The same registration declared *below* the object that flattens it. The recording holds what has
-/// already expanded, so this one proves nothing about its wire and the guard keeps the
-/// declaration-order fallback — while the JSON-schema merge, which reads the document back at run
-/// time, refuses it wherever it is declared.
+/// The same registration declared *below* the object that flattens it — the recording holds only
+/// what has already expanded, so the guard keeps the declaration-order fallback while the
+/// JSON-schema merge (reading the document at run time) refuses it regardless of order.
 #[cfg(any(feature = "jsonschema", feature = "zod"))]
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -1129,9 +1109,8 @@ fn test_no_flatten_zod_unchanged() {
 }
 
 /// A base's schema is a `const` the emitted module reads, and nothing orders one type's module
-/// against another's. A flattened base named straight into the intersection would be read while
-/// the const initializer runs, which fails outright for any base declared below the type that
-/// flattens it — so the operand is the deferred form and the read happens when something validates.
+/// against another's — naming it straight into the intersection would fail for a base declared
+/// below, so the operand is deferred until something validates.
 #[test]
 #[cfg(feature = "zod")]
 fn test_a_flattened_base_is_never_read_while_the_const_initializes() {
@@ -1176,10 +1155,9 @@ fn test_a_flatten_cycle_defers_both_sides_of_the_pair() {
     );
 }
 
-/// An intersection operand is written in two places — a struct's flattened base and an internally
-/// tagged newtype variant's content — and a cycle can run through both. Deferring one side alone
-/// leaves the other reading a name that a module declared below has not bound yet, so both sides
-/// carry the same deferral and the pair loads whichever order the modules are assembled in.
+/// An intersection operand is written in two places — a flattened base and an internally tagged
+/// variant's content — and a cycle can run through both, so both sides carry the same deferral
+/// regardless of module assembly order.
 #[test]
 #[cfg(feature = "zod")]
 fn test_a_flatten_cycle_through_a_variants_content_defers_both_sides() {
@@ -1630,11 +1608,9 @@ fn test_a_string_member_of_a_later_flattened_untagged_enum_is_refused_by_the_mer
     assert!(FlatOverLaterScalarUntagged::json_schema().is_object());
 }
 
-/// A member reached through an `Option` is the one shape where serde's two directions describe
-/// different payload sets. It writes the flattened `None` as the object's own keys alone, with no
-/// error, and then refuses to read those same keys back — the untagged enum matches no member for
-/// them. So there is no branch a multiplication could write: spelling the absence accepts a
-/// document `from_value` rejects, and omitting it rejects one `to_value` writes.
+/// An `Option` member is the one shape where serde's two directions describe different payload
+/// sets: it writes flattened `None` as the object's own keys alone with no error, then refuses to
+/// read those same keys back — no branch a multiplication could write covers both directions.
 #[test]
 #[cfg(any(feature = "jsonschema", feature = "zod"))]
 fn test_an_optional_flattened_union_member_is_written_and_then_not_read_back() {
@@ -2153,10 +2129,9 @@ fn test_the_optional_flatten_schema_rejects_a_partial_base() {
     }
 }
 
-/// The document that says both: the base's members joined to the object's under one branch, and the
-/// object's own alone under another. `anyOf` is what the choice is written with — the branches
-/// overlap wherever the base can write no members of its own, which is the same payload the absent
-/// branch stands for.
+/// The document says both: base members joined to the object's under one `anyOf` branch, the
+/// object's own alone under another — the branches overlap on the payload the absent branch
+/// stands for.
 #[test]
 #[cfg(feature = "jsonschema")]
 fn test_the_optional_flatten_document_offers_the_base_and_its_absence() {
@@ -2189,10 +2164,9 @@ fn test_an_optional_flattened_union_offers_every_member_and_their_absence() {
     );
 }
 
-/// The same two key sets on the TypeScript surface: the object's own members beside the base's, or
-/// the object's own beside none of them. `| undefined` said something else — that the whole value
-/// may be missing — and `&` binds tighter than `|`, so it admitted neither payload the object
-/// writes for an absent base.
+/// The same two key sets on TypeScript: `| undefined` said something else — that the whole value
+/// may be missing — and `&` binds tighter than `|`, so it admitted neither payload for an absent
+/// base.
 #[test]
 #[cfg(feature = "typescript")]
 fn test_the_optional_flatten_type_offers_the_base_and_its_absence() {
@@ -2224,11 +2198,9 @@ fn test_an_optional_flattened_union_type_offers_its_members_and_their_absence() 
     );
 }
 
-/// What Zod says about the same base: a choice between the object's own keys merged with the base
-/// and the object's own keys alone. The choice is written outside the intersection because that is
-/// the only place Zod can read it — an intersection recognizes the keys its operands name, and an
-/// operand that is itself a choice leaves each branch answering for the keys the other one carries,
-/// which rejects every payload the object writes.
+/// Zod writes the choice outside the intersection because that's the only place it can read it —
+/// an intersection recognizes only the keys its operands name, so a choice operand would leave
+/// each branch missing the other's keys.
 #[test]
 #[cfg(feature = "zod")]
 fn test_the_optional_flatten_schema_offers_the_base_and_its_absence() {
@@ -2284,10 +2256,8 @@ fn test_the_optional_flatten_schema_binds_the_objects_own_keys_once() {
     );
 }
 
-/// The same two payloads reached through a name rather than through an `Option` in the field's own
-/// type: serde writes the base's members beside the object's own or writes the object's own alone,
-/// and reads both back as the value that wrote them. One declaration, both directions — which is
-/// what says the merge owes it the two key sets rather than a refusal.
+/// The same two payloads reached through a name rather than an `Option`: serde reads and writes
+/// both forms, so the merge owes it two key sets rather than a refusal.
 #[test]
 fn test_a_named_nullable_flattened_base_writes_its_members_or_nothing() {
     let forms: [(Option<OptBase>, serde_json::Value); 2] = [
@@ -2354,10 +2324,8 @@ fn test_the_named_nullable_flatten_document_admits_the_captured_payloads() {
     }
 }
 
-/// And Zod writes the same choice around the same intersection: the object's own keys merged with
-/// the name, or the object's own keys alone. The name is left spelled as the nullable binding it is
-/// — the null side of it carries no key an intersection could take, so the branch that names it
-/// admits exactly the payload the base writes.
+/// Zod writes the same choice around the intersection, leaving the name spelled as the nullable
+/// binding it is — its null side carries no key an intersection could take.
 #[test]
 #[cfg(feature = "zod")]
 fn test_the_named_nullable_flatten_schema_offers_the_base_and_its_absence() {
@@ -2375,10 +2343,9 @@ fn test_the_named_nullable_flatten_schema_offers_the_base_and_its_absence() {
     );
 }
 
-/// And TypeScript writes the same choice over the same two key sets. The name itself carries the
-/// value branch — an intersection distributes over the choice behind it and the `null` side takes no
-/// key, so that branch is already the base's — while the branch carrying none of the base's members
-/// reads them off the value side by name, a choice having no key of its own for `keyof` to find.
+/// TypeScript writes the same choice: the name carries the value branch since the intersection
+/// distributes over it and `null` takes no key, while the other branch reads the base's members
+/// off the value side by name.
 #[test]
 #[cfg(feature = "typescript")]
 fn test_the_named_nullable_flatten_type_offers_the_base_and_its_absence() {
@@ -2393,10 +2360,9 @@ fn test_the_named_nullable_flatten_type_offers_the_base_and_its_absence() {
     );
 }
 
-/// The absence is a question about what the name published and nothing else, so a direct flatten
-/// naming an item whose surface is not nullable is spelled exactly as it was before there was a
-/// second branch to spell — one intersection on Zod, one closed object on the document, and the
-/// bare name on TypeScript.
+/// The absence is a question about what the name published — a direct flatten naming a
+/// non-nullable item is spelled exactly as before there was a second branch: one intersection on
+/// Zod, one closed object on the document, the bare name on TypeScript.
 #[test]
 #[cfg(feature = "typescript")]
 fn test_a_named_non_nullable_flatten_type_is_byte_identical() {
@@ -2614,10 +2580,8 @@ fn test_an_aliased_untagged_flatten_multiplies_over_the_same_members() {
     );
 }
 
-/// A union nested inside a union contributes its leaves and not its name: the nesting writes no key
-/// of its own, and a name standing for a union carries no key set for the intersection to read.
-/// Where every level holds one member there is one combination, so the object's own keys stay where
-/// they were and the leaf joins them directly.
+/// A union nested inside a union contributes its leaves, not its name — the nesting writes no key
+/// of its own, so the object's own keys stay where they were and the leaf joins them directly.
 #[test]
 #[cfg(feature = "zod")]
 fn test_a_nested_untagged_flatten_multiplies_over_the_leaf_members() {
@@ -2684,10 +2648,9 @@ fn test_a_standalone_union_with_a_scalar_member_is_byte_identical() {
     assert_eq!(FlatScalarEither::zod_schema(), EXPECTED);
 }
 
-/// A union holding a member reached through an `Option`, and ones holding members that name a
-/// brand or a plain enum, are unions like any other while nothing flattens them: the member is a
-/// branch of the choice, and each is spelled byte for byte as it was before the merge could tell
-/// the shapes apart.
+/// A union holding an `Option`-reached member, a brand, or a plain enum is a union like any other
+/// while nothing flattens it — each spelled byte for byte as before the merge could tell the
+/// shapes apart.
 #[test]
 #[cfg(feature = "zod")]
 fn test_standalone_unions_the_merge_now_refuses_are_byte_identical() {
@@ -2743,10 +2706,8 @@ fn test_the_unions_declared_below_the_object_are_still_named_as_one_operand() {
     );
 }
 
-/// And flattening one is refused at expansion rather than emitted — the branch that used to be
-/// written for the scalar member was the object intersected with it, which no payload satisfies and
-/// which nothing reported. The declaration that would carry it does not exist under this feature,
-/// so what the refusal is pinned against is the field it names.
+/// Flattening one is refused at expansion rather than emitted — the branch that used to be written
+/// for the scalar member intersected with it, which no payload satisfies and nothing reported.
 #[test]
 #[cfg(feature = "zod")]
 fn test_a_union_with_a_scalar_member_declared_below_is_still_named_as_one_operand() {
@@ -2802,10 +2763,9 @@ fn test_a_named_array_member_of_a_later_flattened_untagged_enum_is_refused_by_th
     assert!(FlatOverLaterMemberBagUntagged::json_schema().is_object());
 }
 
-/// A member naming a registration whose own published surface is nullable carries the same null the
-/// member written `Option<T>` carries, one name away — and serde's two directions describe
-/// different payload sets for it exactly as they do there: the absent form is written without an
-/// error and then matches no member on the way back.
+/// A member naming a nullable-surfaced registration carries the same null an `Option<T>` member
+/// carries, one name away — serde's two directions describe different payload sets exactly as
+/// there.
 #[test]
 #[cfg(any(feature = "jsonschema", feature = "zod"))]
 fn test_a_named_nullable_flattened_union_member_is_written_and_then_not_read_back() {
@@ -3028,10 +2988,9 @@ fn test_the_tagged_enums_are_byte_identical_standing_alone() {
     );
 }
 
-/// The direct position asks the round-trip question the member position asks and gets the other
-/// answer. serde writes the unit variant as its name holding `null` into the object being written —
-/// not the bare string it is standing alone — and reads that payload back as the variant, so the
-/// declaration is one serde admits in both directions.
+/// The direct position asks the same round-trip question and gets the other answer: serde writes
+/// the unit variant as its name holding `null`, not the bare string it is standing alone, and
+/// reads that back as the variant.
 #[test]
 #[cfg(any(feature = "jsonschema", feature = "zod"))]
 fn test_a_directly_flattened_tagged_enum_round_trips_every_variant() {
@@ -3180,11 +3139,9 @@ fn test_the_all_object_tagged_direct_flatten_schema_multiplies_the_object_over_t
     );
 }
 
-/// TypeScript distributes an intersection over a union of objects on its own, so the branches are
-/// ones the enum's own name already reaches. What the name does not reach is what each branch says
-/// about the other: the excess-property check reads the union of both key sets, so a payload
-/// carrying both tags satisfies either branch structurally — a payload serde writes for no value and
-/// the other three surfaces refuse. Spelling the variants is what carries that.
+/// TypeScript distributes the intersection over the union on its own, but the excess-property
+/// check reads the union of both key sets — a payload carrying both tags would satisfy either
+/// branch structurally, which no value produces. Spelling the variants is what rules that out.
 #[test]
 #[cfg(feature = "typescript")]
 fn test_an_all_object_tagged_direct_flatten_type_closes_each_variant_against_the_other() {
@@ -3205,10 +3162,9 @@ fn test_an_all_object_tagged_direct_flatten_document_is_byte_identical() {
     );
 }
 
-/// And the absence branch beside the same enum reads the closed variants' keys, where it had none to
-/// read: `keyof` a union is the keys its branches share, so before the exclusions the branch was an
-/// empty mapped type — `{}`, which every object passes through, including one carrying part of a
-/// variant's key set.
+/// The absence branch beside the same enum reads the closed variants' keys, where it had none to
+/// read: `keyof` a union is the keys its branches share, which before the exclusions was an empty
+/// mapped type `{}` that every object passes through.
 #[test]
 #[cfg(feature = "typescript")]
 fn test_the_optional_all_object_tagged_flatten_type_names_the_keys_its_absence_leaves_out() {
