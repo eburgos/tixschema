@@ -40,7 +40,7 @@ mod zod_ts_tests {
     fn test_branded_newtype_ts_definition() {
         let ts = RoleId::<String>::ts_definition();
         assert!(
-            ts.contains("export type RoleId<IdType> = IdType & z.$brand<\"RoleId\">"),
+            ts.contains("export type RoleId<IdType> = IdType & $brand<\"RoleId\">"),
             "Got: {ts}"
         );
     }
@@ -92,7 +92,7 @@ mod zod_ts_tests {
     fn test_branded_newtype_non_generic() {
         let ts = CorrelationId::ts_definition();
         assert!(
-            ts.contains("export type CorrelationId = string & z.$brand<\"CorrelationId\">"),
+            ts.contains("export type CorrelationId = string & $brand<\"CorrelationId\">"),
             "Got: {ts}"
         );
     }
@@ -124,7 +124,7 @@ mod zod_ts_tests {
     fn test_branded_newtype_integer_inner() {
         let ts = SequenceNum::ts_definition();
         assert!(
-            ts.contains("export type SequenceNum = number & z.$brand<\"SequenceNum\">"),
+            ts.contains("export type SequenceNum = number & $brand<\"SequenceNum\">"),
             "Should have number branded type. Got: {ts}"
         );
 
@@ -426,7 +426,7 @@ mod objectid_branded_surface_tests {
     fn an_unconstrained_objectid_brand_describes_the_oid_object_on_every_surface() {
         assert_eq!(
             PlainObjectId::ts_definition(),
-            r#"export type PlainObjectId = ObjectId & z.$brand<"PlainObjectId">;"#
+            r#"export type PlainObjectId = ObjectId & $brand<"PlainObjectId">;"#
         );
         let zod = PlainObjectId::zod_schema();
         assert!(
@@ -1317,7 +1317,7 @@ mod branded_composite_inner_tests {
     fn an_array_brand_describes_the_array_on_every_surface() {
         assert_eq!(
             LabelList::ts_definition(),
-            r#"export type LabelList = Array<string> & z.$brand<"LabelList">;"#
+            r#"export type LabelList = Array<string> & $brand<"LabelList">;"#
         );
         let zod = LabelList::zod_schema();
         assert!(
@@ -1338,7 +1338,7 @@ mod branded_composite_inner_tests {
     fn a_map_brand_describes_the_object_on_every_surface() {
         assert_eq!(
             WeightMap::ts_definition(),
-            r#"export type WeightMap = Partial<Record<string, number>> & z.$brand<"WeightMap">;"#
+            r#"export type WeightMap = Partial<Record<string, number>> & $brand<"WeightMap">;"#
         );
         let zod = WeightMap::zod_schema();
         assert!(
@@ -1361,7 +1361,7 @@ mod branded_composite_inner_tests {
     fn a_tuple_brand_describes_the_fixed_arity_array_on_every_surface() {
         assert_eq!(
             LabelPair::ts_definition(),
-            r#"export type LabelPair = [string, number] & z.$brand<"LabelPair">;"#
+            r#"export type LabelPair = [string, number] & $brand<"LabelPair">;"#
         );
         let zod = LabelPair::zod_schema();
         assert!(
@@ -1422,7 +1422,7 @@ mod branded_composite_inner_tests {
     fn an_opaque_brand_admits_any_value() {
         assert_eq!(
             Payload::ts_definition(),
-            r#"export type Payload = unknown & z.$brand<"Payload">;"#
+            r#"export type Payload = unknown & $brand<"Payload">;"#
         );
         let zod = Payload::zod_schema();
         assert!(
@@ -1561,7 +1561,7 @@ mod branded_generic_inner_tests {
     fn an_arrayed_parameter_brand_describes_the_array_on_every_surface() {
         assert_eq!(
             TagList::<String>::ts_definition(),
-            r#"export type TagList<T> = Array<T> & z.$brand<"TagList">;"#
+            r#"export type TagList<T> = Array<T> & $brand<"TagList">;"#
         );
         let zod = TagList::<String>::zod_schema();
         assert!(zod.contains("  z.array(t).meta({"), "Got:\n{zod}");
@@ -1580,7 +1580,7 @@ mod branded_generic_inner_tests {
     fn a_mapped_parameter_brand_describes_the_object_on_every_surface() {
         assert_eq!(
             WeightIndex::<u32>::ts_definition(),
-            r#"export type WeightIndex<T> = Partial<Record<string, T>> & z.$brand<"WeightIndex">;"#
+            r#"export type WeightIndex<T> = Partial<Record<string, T>> & $brand<"WeightIndex">;"#
         );
         let zod = WeightIndex::<u32>::zod_schema();
         assert!(
@@ -1609,7 +1609,7 @@ mod branded_generic_inner_tests {
     fn a_bare_parameter_brand_matches_the_generic_field_convention() {
         assert_eq!(
             BareTag::<String>::ts_definition(),
-            r#"export type BareTag<T> = T & z.$brand<"BareTag">;"#
+            r#"export type BareTag<T> = T & $brand<"BareTag">;"#
         );
         let zod = BareTag::<String>::zod_schema();
         assert!(zod.contains("  t.meta({"), "Got:\n{zod}");
@@ -1948,7 +1948,7 @@ mod branded_sibling_inner_tests {
     fn a_sibling_brand_describes_the_named_type_on_every_surface() {
         assert_eq!(
             WrappedPart::ts_definition(),
-            r#"export type WrappedPart = Part & z.$brand<"WrappedPart">;"#
+            r#"export type WrappedPart = Part & $brand<"WrappedPart">;"#
         );
         let zod = WrappedPart::zod_schema();
         assert!(
@@ -2095,7 +2095,7 @@ mod branded_sibling_inner_tests {
         );
         assert_eq!(
             TrailingFixedTag::ts_definition(),
-            r#"export type TrailingFixedTag = LateTag<string> & z.$brand<"TrailingFixedTag">;"#
+            r#"export type TrailingFixedTag = LateTag<string> & $brand<"TrailingFixedTag">;"#
         );
         TrailingFixedTag(LateTag("abcd".to_owned()))
             .validate()
@@ -2115,7 +2115,7 @@ mod branded_sibling_inner_tests {
     fn an_unconstrained_generic_brand_over_a_parameterised_inner_is_unchanged() {
         assert_eq!(
             OpenTag::<String>::ts_definition(),
-            r#"export type OpenTag<TagType> = LateTag<TagType> & z.$brand<"OpenTag">;"#
+            r#"export type OpenTag<TagType> = LateTag<TagType> & $brand<"OpenTag">;"#
         );
         let zod = OpenTag::<String>::zod_schema();
         assert!(
@@ -2341,7 +2341,7 @@ mod branded_chrono_inner_tests {
         );
         assert_eq!(
             Stamp::ts_definition(),
-            r#"export type Stamp = string & z.$brand<"Stamp">;"#
+            r#"export type Stamp = string & $brand<"Stamp">;"#
         );
     }
 }

@@ -144,7 +144,7 @@ fn every_renamed_shape_is_written_under_the_override() {
 #[test]
 fn a_renamed_brand_is_tagged_by_the_override() {
     let ts = BrandUnderRustName::ts_definition();
-    assert!(ts.contains("z.$brand<\"RenamedBrand\">"), "got: {ts}");
+    assert!(ts.contains("$brand<\"RenamedBrand\">"), "got: {ts}");
     let zod = BrandUnderRustName::zod_schema();
     assert!(zod.contains(".brand<\"RenamedBrand\">()"), "got: {zod}");
 }

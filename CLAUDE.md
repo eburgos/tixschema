@@ -389,7 +389,7 @@ pub struct CorrelationId(pub String);
 
 With `zod` + `typescript` features:
 ```typescript
-export type CorrelationId = string & z.$brand<"CorrelationId">;
+export type CorrelationId = string & $brand<"CorrelationId">;
 const CorrelationId$RawSchema = z.string().brand<"CorrelationId">().meta({
   description: "CorrelationId",
 });
@@ -408,7 +408,7 @@ pub struct UserId<IdType>(pub IdType);
 ```
 
 ```typescript
-export type UserId<IdType> = IdType & z.$brand<"UserId">;
+export type UserId<IdType> = IdType & $brand<"UserId">;
 const buildUserId$Schema = <IdType extends ZodType>(
   idType: IdType,
 ) =>
