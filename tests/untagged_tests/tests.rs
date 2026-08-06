@@ -59,6 +59,42 @@ enum NamedUnion {
     B { y: i64 },
 }
 
+// A struct variant's own `rename_all` cases its fields — the container rule serde applies to a
+// struct variant, distinct from the enum's own `rename_all` (which cases variant names, never the
+// fields inside one). Both variants carry one so the flatten holder below closes two renamed keys
+// against each other.
+#[model_schema()]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum RenameAllUnion {
+    #[serde(rename_all = "kebab-case")]
+    Fresh { subject_line: String },
+    #[serde(rename_all = "kebab-case")]
+    Reply { reply_to: String },
+}
+
+#[cfg(feature = "typescript")]
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RenameAllUnionHolder {
+    #[serde(flatten)]
+    body: RenameAllUnion,
+    own: String,
+}
+
+// The identifier-legal control: a rename needing no quoting, proving the fix reaches every rename
+// rather than only the ones the quoting rule happens to also cover.
+#[cfg(feature = "typescript")]
+#[model_schema()]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum RenamedIdentifierUnion {
+    One {
+        #[serde(rename = "replyTo")]
+        reply_to: String,
+    },
+}
+
 // Untagged enum whose struct variant carries an `Option` that keeps `None` off the wire, matching
 // the absent form the union member renders.
 #[model_schema()]
@@ -297,6 +333,45 @@ fn test_named_union_typescript() {
     );
 }
 
+/// A variant's own `rename_all` reaches its fields on the untagged path, the same as it does on the
+/// struct-field path — quoted here since kebab-case is not identifier-legal.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_rename_all_union_typescript() {
+    let ts = RenameAllUnion::ts_definition();
+    assert!(
+        ts.contains(
+            r#"export type RenameAllUnion = { "subject-line": string } | { "reply-to": string };"#
+        ),
+        "Got:\n{ts}"
+    );
+}
+
+/// The identifier-legal control: the rename still reaches the surface, quoting or not.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_renamed_identifier_union_typescript() {
+    let ts = RenamedIdentifierUnion::ts_definition();
+    assert!(
+        ts.contains("export type RenamedIdentifierUnion = { replyTo: string };"),
+        "Got:\n{ts}"
+    );
+}
+
+/// The flatten-operand seam and its sibling exclusions, both members renamed: neither key is the
+/// Rust ident, on either side of the union.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_rename_all_union_flatten_sibling_exclusions() {
+    let ts = RenameAllUnionHolder::ts_definition();
+    assert!(
+        ts.contains(
+            "} & ({ \"subject-line\": string; \"reply-to\"?: never } | { \"reply-to\": string; \"subject-line\"?: never });"
+        ),
+        "Got:\n{ts}"
+    );
+}
+
 #[test]
 #[cfg(feature = "typescript")]
 fn test_compliant_union_typescript() {
@@ -366,6 +441,20 @@ fn test_named_union_zod() {
 
 #[test]
 #[cfg(feature = "zod")]
+fn test_rename_all_union_zod() {
+    let zod = RenameAllUnion::zod_schema();
+    assert!(
+        zod.contains(r#"z.strictObject({ "reply-to": z.string(), })"#),
+        "Got:\n{zod}"
+    );
+    assert!(
+        zod.contains(r#"z.strictObject({ "subject-line": z.string(), })"#),
+        "Got:\n{zod}"
+    );
+}
+
+#[test]
+#[cfg(feature = "zod")]
 fn test_compliant_union_zod() {
     let zod = CompliantUnion::zod_schema();
     assert!(
@@ -415,6 +504,59 @@ fn test_named_union_json_schema() {
 
 #[test]
 #[cfg(feature = "jsonschema")]
+fn test_rename_all_union_json_schema() {
+    let schema = RenameAllUnion::json_schema();
+    let any_of = schema["anyOf"].as_array().unwrap();
+    let branch = any_of
+        .iter()
+        .find(|branch| {
+            branch["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("reply-to")
+        })
+        .unwrap();
+    assert_eq!(branch["required"], serde_json::json!(["reply-to"]));
+}
+
+/// A closed document — every leaf `additionalProperties: false` — accepts exactly the payload serde
+/// writes for a variant-`rename_all` member, and the value round-trips through it.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_rename_all_union_round_trips_through_its_closed_schema() {
+    let value = RenameAllUnion::Reply {
+        reply_to: "x".to_owned(),
+    };
+    let payload = serde_json::to_value(&value).unwrap();
+    assert_eq!(payload, serde_json::json!({ "reply-to": "x" }));
+
+    let schema = RenameAllUnion::json_schema();
+    let any_of = schema["anyOf"].as_array().unwrap();
+    let branch = any_of
+        .iter()
+        .find(|branch| {
+            branch["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("reply-to")
+        })
+        .unwrap();
+    let named = branch["properties"].as_object().unwrap();
+    let required = branch["required"].as_array().unwrap();
+    let written = payload.as_object().unwrap();
+    assert!(written.keys().all(|key| named.contains_key(key)));
+    assert!(
+        required
+            .iter()
+            .all(|key| written.contains_key(key.as_str().unwrap()))
+    );
+
+    let back: RenameAllUnion = serde_json::from_value(payload).unwrap();
+    assert_eq!(back, value);
+}
+
+#[test]
+#[cfg(feature = "jsonschema")]
 fn test_compliant_union_json_schema() {
     let schema = CompliantUnion::json_schema();
     let any_of = schema["anyOf"].as_array().unwrap();
@@ -456,6 +598,28 @@ fn test_serde_round_trip_string_member() {
     let json = serde_json::to_string(&value).unwrap();
     assert_eq!(json, "\"2026-06-26\"");
     let back: DateValue = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, value);
+}
+
+/// The unrenamed member is untouched by the fix: `Fresh` still writes and reads its own field name.
+#[test]
+fn test_serde_round_trip_unrenamed_untagged_member() {
+    let value = NamedUnion::A {
+        x: "text".to_owned(),
+    };
+    let json = serde_json::to_string(&value).unwrap();
+    assert_eq!(json, r#"{"x":"text"}"#);
+}
+
+/// A variant's own `rename_all` reaches the wire, not just the schema surfaces above.
+#[test]
+fn test_serde_round_trip_rename_all_union_member() {
+    let value = RenameAllUnion::Fresh {
+        subject_line: "hi".to_owned(),
+    };
+    let json = serde_json::to_string(&value).unwrap();
+    assert_eq!(json, r#"{"subject-line":"hi"}"#);
+    let back: RenameAllUnion = serde_json::from_str(&json).unwrap();
     assert_eq!(back, value);
 }
 
