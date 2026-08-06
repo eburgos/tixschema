@@ -286,7 +286,7 @@ mod zod {
 mod json_schema {
     use super::{
         ArchiveBranch, ArchiveEntry, ArchiveEvent, ArchiveId, ArchiveNode, ArchiveStamp,
-        ArchiveTrunk, ArchiveWire,
+        ArchiveTrunk, ArchiveWire, Looped, TwoLoopedFillings,
     };
 
     /// JSON Schema has no type parameters, so the document exists at one filling: the declared one.
@@ -346,16 +346,19 @@ mod json_schema {
     }
 
     /// A document cannot be written to the bottom of a recursion, so the type is hoisted into
-    /// `$defs` once and the recursive member points a `$ref` back at it. One definition per name,
-    /// which holds because every reference around this cycle carries the same filling.
+    /// `$defs` once and the recursive member points a `$ref` back at it. One definition per name
+    /// *and filling* — the key carries a readable label off the filling's own `"type"` keyword
+    /// plus a digest, since a document can hold this same generic name again at a different
+    /// filling (see the sibling-fillings test below), and a bare name would let the two collide.
     #[test]
     fn a_recursive_generic_is_hoisted_once_and_pointed_back_at() {
         assert_eq!(
             serde_json::to_string(&ArchiveNode::<String>::json_schema()).unwrap(),
-            "{\"$defs\":{\"ArchiveNode\":{\"type\":\"object\",\"additionalProperties\":false,\"prop\
-             erties\":{\"children\":{\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/ArchiveNode\"\
-             }},\"id\":{\"type\":\"string\"}},\"required\":[\"children\",\"id\"]}},\"$ref\":\"#/$de\
-             fs/ArchiveNode\"}"
+            "{\"$defs\":{\"ArchiveNode.string-1579594ac99678fa\":{\"type\":\"object\",\"additional\
+             Properties\":false,\"properties\":{\"children\":{\"type\":\"array\",\"items\":{\"$ref\
+             \":\"#/$defs/ArchiveNode.string-1579594ac99678fa\"}},\"id\":{\"type\":\"string\"}},\"r\
+             equired\":[\"children\",\"id\"]}},\"$ref\":\"#/$defs/ArchiveNode.string-1579594ac9967\
+             8fa\"}"
         );
     }
 
@@ -366,22 +369,114 @@ mod json_schema {
     fn a_generic_cycle_is_hoisted_at_whichever_type_the_document_is_built_from() {
         assert_eq!(
             serde_json::to_string(&ArchiveBranch::<String>::json_schema()).unwrap(),
-            "{\"$defs\":{\"ArchiveBranch\":{\"type\":\"object\",\"additionalProperties\":false,\"pr\
-             operties\":{\"entries\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"additiona\
-             lProperties\":false,\"properties\":{\"branches\":{\"type\":\"array\",\"items\":{\"$ref\
-             \":\"#/$defs/ArchiveBranch\"}},\"id\":{\"type\":\"string\"}},\"required\":[\"branches\
-             \",\"id\"]}},\"label\":{\"type\":\"string\"}},\"required\":[\"entries\",\"label\"]}},\
-             \"$ref\":\"#/$defs/ArchiveBranch\"}"
+            "{\"$defs\":{\"ArchiveBranch.string-1579594ac99678fa\":{\"type\":\"object\",\"addition\
+             alProperties\":false,\"properties\":{\"entries\":{\"type\":\"array\",\"items\":{\"type\
+             \":\"object\",\"additionalProperties\":false,\"properties\":{\"branches\":{\"type\":\"\
+             array\",\"items\":{\"$ref\":\"#/$defs/ArchiveBranch.string-1579594ac99678fa\"}},\"id\"\
+             :{\"type\":\"string\"}},\"required\":[\"branches\",\"id\"]}},\"label\":{\"type\":\"str\
+             ing\"}},\"required\":[\"entries\",\"label\"]}},\"$ref\":\"#/$defs/ArchiveBranch.strin\
+             g-1579594ac99678fa\"}"
         );
 
         assert_eq!(
             serde_json::to_string(&ArchiveTrunk::<String>::json_schema()).unwrap(),
-            "{\"$defs\":{\"ArchiveTrunk\":{\"type\":\"object\",\"additionalProperties\":false,\"pro\
-             perties\":{\"branches\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"additiona\
-             lProperties\":false,\"properties\":{\"entries\":{\"type\":\"array\",\"items\":{\"$ref\
-             \":\"#/$defs/ArchiveTrunk\"}},\"label\":{\"type\":\"string\"}},\"required\":[\"entries\
-             \",\"label\"]}},\"id\":{\"type\":\"string\"}},\"required\":[\"branches\",\"id\"]}},\"$\
-             ref\":\"#/$defs/ArchiveTrunk\"}"
+            "{\"$defs\":{\"ArchiveTrunk.string-1579594ac99678fa\":{\"type\":\"object\",\"additiona\
+             lProperties\":false,\"properties\":{\"branches\":{\"type\":\"array\",\"items\":{\"type\
+             \":\"object\",\"additionalProperties\":false,\"properties\":{\"entries\":{\"type\":\"a\
+             rray\",\"items\":{\"$ref\":\"#/$defs/ArchiveTrunk.string-1579594ac99678fa\"}},\"label\
+             \":{\"type\":\"string\"}},\"required\":[\"entries\",\"label\"]}},\"id\":{\"type\":\"st\
+             ring\"}},\"required\":[\"branches\",\"id\"]}},\"$ref\":\"#/$defs/ArchiveTrunk.string\
+             -1579594ac99678fa\"}"
+        );
+    }
+
+    /// Two sibling fields naming the same recursive generic at different fillings are the shape
+    /// neither the in-flight cycle check nor a bare `$defs` key can tell apart: the frames are
+    /// sequential rather than nested, so neither reference is ever in flight while the other runs.
+    /// Each filling gets its own definition and its own `$ref`; a third field at the same filling
+    /// as the first still shares that one definition; and each definition's own recursive member
+    /// resolves back to its own filling rather than whichever filling was written last.
+    #[test]
+    fn siblings_at_different_fillings_of_one_recursive_generic_each_get_their_own_definition() {
+        let document = TwoLoopedFillings::json_schema();
+        let defs = document["$defs"].as_object().unwrap();
+        assert_eq!(
+            defs.len(),
+            2,
+            "one definition per distinct filling: {defs:?}"
+        );
+
+        let strings_ref = &document["properties"]["strings"];
+        let also_strings_ref = &document["properties"]["also_strings"];
+        let numbers_ref = &document["properties"]["numbers"];
+        assert_eq!(
+            strings_ref, also_strings_ref,
+            "two references at the same filling still share one definition: {document}"
+        );
+        assert_ne!(
+            strings_ref, numbers_ref,
+            "two references at different fillings must not share a definition: {document}"
+        );
+
+        let key_of = |reference: &serde_json::Value| {
+            reference["$ref"]
+                .as_str()
+                .and_then(|r| r.strip_prefix("#/$defs/"))
+                .unwrap()
+                .to_owned()
+        };
+        let strings_key = key_of(strings_ref);
+        let numbers_key = key_of(numbers_ref);
+        assert_ne!(strings_key, numbers_key);
+
+        // A `$ref` is a URI-reference; RFC 3986 forbids all of these in one, whatever filling built
+        // the key it points at.
+        for key in [&strings_key, &numbers_key] {
+            for forbidden in ['"', '{', '}', '[', ']', ',', ':', ' '] {
+                assert!(
+                    !key.contains(forbidden),
+                    "$defs key carries a character a URI-reference forbids: {forbidden:?} in {key}"
+                );
+            }
+        }
+
+        let strings_body = &defs[&strings_key];
+        let numbers_body = &defs[&numbers_key];
+        assert_eq!(
+            strings_body["properties"]["value"],
+            serde_json::json!({ "type": "string" })
+        );
+        assert_eq!(
+            numbers_body["properties"]["value"],
+            serde_json::json!({ "type": "integer" })
+        );
+
+        // Each definition's own recursive member closes back on itself, not on the other filling.
+        assert_eq!(
+            strings_body["properties"]["children"]["items"],
+            serde_json::json!({ "$ref": format!("#/$defs/{strings_key}") })
+        );
+        assert_eq!(
+            numbers_body["properties"]["children"]["items"],
+            serde_json::json!({ "$ref": format!("#/$defs/{numbers_key}") })
+        );
+
+        // What each definition actually admits is what serde actually writes for that filling.
+        let string_node = Looped::<String> {
+            children: Vec::new(),
+            value: "leaf".to_owned(),
+        };
+        assert_eq!(
+            serde_json::to_value(&string_node).unwrap()["value"],
+            serde_json::json!("leaf")
+        );
+        let number_node = Looped::<u32> {
+            children: Vec::new(),
+            value: 7_u32,
+        };
+        assert_eq!(
+            serde_json::to_value(&number_node).unwrap()["value"],
+            serde_json::json!(7_u32)
         );
     }
 }
@@ -604,6 +699,27 @@ pub struct ArchiveBranch<IdType> {
 pub struct ArchiveTrunk<IdType> {
     pub branches: Vec<ArchiveBranch<IdType>>,
     pub id: IdType,
+}
+
+/// A recursive generic reached by two sibling fields at two different fillings — sequential rather
+/// than nested, so neither reference is ever in flight while the other runs and the in-flight
+/// filling comparison never sees the pair at all. Read by the JSON surface alone, which is the one
+/// that hoists a recursive type into a `$defs` entry a bare name could collide under.
+#[cfg(all(feature = "jsonschema", feature = "serde"))]
+#[model_schema(default_types(ValueType = String))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Looped<ValueType> {
+    pub children: Vec<Self>,
+    pub value: ValueType,
+}
+
+#[cfg(all(feature = "jsonschema", feature = "serde"))]
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TwoLoopedFillings {
+    pub also_strings: Looped<String>,
+    pub numbers: Looped<u32>,
+    pub strings: Looped<String>,
 }
 
 /// The declaration itself is the assertion in a build that reads no surface: an item that does not

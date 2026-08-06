@@ -1346,18 +1346,28 @@ mod jsonschema {
     }
 
     /// A cycle written at the filling it was entered at is the one a document holding a single
-    /// definition per name can describe, and it describes exactly as it always has: the definition
-    /// at that filling, and a reference into it wherever the name comes back around.
+    /// definition per name and filling can describe, and it describes exactly as it always has:
+    /// the definition at that filling, and a reference into it wherever the name comes back
+    /// around. The key itself now carries the filling — a readable label off the argument's own
+    /// `"type"` keyword, plus a digest that keeps two labels alike from colliding — so the pinned
+    /// string below gained that text, and no character in it is one a URI-reference forbids.
     #[test]
     fn a_cycle_that_keeps_its_filling_defers_through_the_one_definition() {
+        let document = super::Recurring::<String>::json_schema();
         assert_eq!(
-            serde_json::to_string(&super::Recurring::<String>::json_schema()).unwrap(),
-            "{\"$defs\":{\"Recurring\":{\"type\":\"object\",\"additionalProperties\":false,\
-             \"properties\":{\"next\":{\"anyOf\":[{\"$ref\":\"#/$defs/Recurring\"},\
-             {\"type\":\"null\"}]},\
-             \"value\":{\"type\":\"string\"}},\"required\":[\"value\"]}},\
-             \"$ref\":\"#/$defs/Recurring\"}"
+            serde_json::to_string(&document).unwrap(),
+            "{\"$defs\":{\"Recurring.string-1579594ac99678fa\":{\"type\":\"object\",\"additionalPr\
+             operties\":false,\"properties\":{\"next\":{\"anyOf\":[{\"$ref\":\"#/$defs/Recurring.s\
+             tring-1579594ac99678fa\"},{\"type\":\"null\"}]},\"value\":{\"type\":\"string\"}},\"req\
+             uired\":[\"value\"]}},\"$ref\":\"#/$defs/Recurring.string-1579594ac99678fa\"}"
         );
+        let reference = document["$ref"].as_str().unwrap();
+        for forbidden in ['"', '{', '}', '[', ']', ',', ':', ' '] {
+            assert!(
+                !reference.contains(forbidden),
+                "$ref carries a character a URI-reference forbids: {forbidden:?} in {reference}"
+            );
+        }
     }
 
     /// A reference that comes back around to a name at a filling the document is not being written

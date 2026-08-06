@@ -2,7 +2,12 @@
 //!
 //! This module handles JSON schema generation when the "jsonschema" feature is enabled.
 
-/// What every pointer the crate writes opens with; what follows it is the name being deferred.
+/// What every pointer the crate writes opens with; what follows it is the key a definition is
+/// hoisted under — a bare name, or a name discriminated by the filling that built it.
+///
+/// The crate writes draft 2020-12 (`prefixItems` with `"items": false` is that draft's fixed-arity
+/// array, and the draft before it spells the same array with `items`/`additionalItems`), whose
+/// deferred schema is a `$ref` into the document's own `$defs`.
 const DEFS_PREFIX: &str = "#/$defs/";
 
 /// How a merge that cannot proceed names itself in the diagnostic it raises.
@@ -46,15 +51,6 @@ pub struct SchemaParameter {
     pub default: proc_macro2::TokenStream,
 }
 
-/// Where a document holds the definition of `def_name`.
-///
-/// The crate writes draft 2020-12 (`prefixItems` with `"items": false` is that draft's fixed-arity
-/// array, and the draft before it spells the same array with `items`/`additionalItems`), whose
-/// deferred schema is a `$ref` into the document's own `$defs`.
-fn defs_pointer(def_name: &str) -> String {
-    format!("{DEFS_PREFIX}{def_name}")
-}
-
 /// The JSON-schema methods a schema module publishes.
 pub fn json_schema_methods(
     def_name: &str,
@@ -63,7 +59,7 @@ pub fn json_schema_methods(
 ) -> proc_macro2::TokenStream {
     let in_flight_type = in_flight_type();
     if parameters.is_empty() {
-        let described = guarded_description(def_name, body, &quote::quote! { Vec::new() });
+        let described = guarded_description(def_name, body, &quote::quote! { Vec::new() }, false);
         let rooted = rooted_document(
             &quote::quote! { Self::json_schema_within(&mut in_flight, &mut hoisted_defs) },
         );
@@ -80,7 +76,7 @@ pub fn json_schema_methods(
             }
         };
     }
-    let described = guarded_description(def_name, body, &bound_filling(parameters));
+    let described = guarded_description(def_name, body, &bound_filling(parameters), true);
     let rooted = rooted_document(
         &quote::quote! { Self::json_schema_within(&mut in_flight, &mut hoisted_defs) },
     );
@@ -139,31 +135,102 @@ fn bound_filling(parameters: &[SchemaParameter]) -> proc_macro2::TokenStream {
 ///
 /// `filling` is the documents this frame's parameters were filled with, which is what the guard
 /// reads the re-entry against: the same filling is the cycle the pointer describes, a different one
-/// the body the document cannot hold.
+/// the body the document cannot hold. It is also what the hoisted key is built from: a generic name
+/// can be reached at more than one filling across a document, sequentially rather than nested — two
+/// sibling fields naming it at different fillings, neither ever in flight while the other runs — so
+/// a bare name would let the second write silently clobber the first's definition.
+///
+/// `discriminate_by_filling` is decided by the caller, not read off `filling` at runtime: a name
+/// declaring no parameter always fills at `Vec::new()`, and a name declaring one or more always
+/// fills at a `vec![...]` of that many arguments, so which of the two this frame is is already
+/// known at expansion time. Keying every call the same way — reading each argument's `"type"`
+/// keyword — would plant that literal text in the parameterless form's own source too, breaking a
+/// caller that reads the generated tokens rather than running them; picking the tokens to emit
+/// instead of the value to compute keeps a parameterless name keyed the bare, undiscriminated way
+/// it always has been, byte-identical down to the source text and not only the runtime value.
+///
+/// A non-empty filling's key must also be a legal `$ref` URI-reference, which the canonical JSON
+/// text of the filling is not — it carries quotes, braces and colons a URI-reference forbids
+/// outright, RFC 6901's `~0`/`~1` escaping being answerable only for what a *pointer* forbids. The
+/// discriminator built here instead reads each argument's own recognizable name where the argument
+/// carries one — a sibling reference's own key (already URI-safe, by the same rule applied one
+/// level down), or a primitive's `"type"` keyword — and joins those into a readable label. Two
+/// fillings a label cannot tell apart (`u32` and `i64` both read `"integer"`) still cannot collide,
+/// because a digest of the filling's canonical text is appended regardless of whether a label was
+/// found; a filling with no labeled argument at all (a bare type parameter's opaque `{}`) keys off
+/// that digest alone.
 fn guarded_description(
     def_name: &str,
     body: &proc_macro2::TokenStream,
     filling: &proc_macro2::TokenStream,
+    discriminate_by_filling: bool,
 ) -> proc_macro2::TokenStream {
-    let pointer = defs_pointer(def_name);
     let refusal = refilled_cycle_refusal(def_name);
+    let defs_prefix = DEFS_PREFIX;
+    let key_binding = if discriminate_by_filling {
+        quote::quote! {
+            let key = {
+                // The FNV-1a offset basis and prime: an algorithm spelled out here rather than
+                // reached for from `std::hash::Hasher`, whose documented internals are free to
+                // change between compiler versions and would make the key of an identical filling
+                // drift across builds.
+                fn digest(bytes: &[u8]) -> u64 {
+                    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+                    for byte in bytes {
+                        hash ^= u64::from(*byte);
+                        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+                    }
+                    hash
+                }
+                // An argument's own recognizable name: another hoisted key, read back off its
+                // `$ref`, or a primitive's `"type"` keyword. An inlined struct or a bare type
+                // parameter's `{}` has neither, and contributes nothing to the label — the digest
+                // is what tells its filling apart from another's regardless.
+                fn argument_label(argument: &serde_json::Value) -> Option<String> {
+                    if let Some(reference) =
+                        argument.get("$ref").and_then(serde_json::Value::as_str)
+                    {
+                        return reference.rsplit('/').next().map(str::to_string);
+                    }
+                    argument
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                }
+                let canonical = serde_json::to_string(&filling).unwrap_or_default();
+                let fingerprint = digest(canonical.as_bytes());
+                let labels: Vec<String> = filling.iter().filter_map(argument_label).collect();
+                if labels.is_empty() {
+                    format!("{}.{fingerprint:016x}", #def_name)
+                } else {
+                    format!("{}.{}-{fingerprint:016x}", #def_name, labels.join("_"))
+                }
+            };
+        }
+    } else {
+        quote::quote! {
+            let key = #def_name.to_string();
+        }
+    };
     quote::quote! {
         let filling: Vec<serde_json::Value> = #filling;
+        #key_binding
+        let pointer = format!("{}{key}", #defs_prefix);
         if let Some((_, in_flight_filling)) =
             in_flight.iter().find(|(named, _)| *named == #def_name)
         {
             #refusal
             // Reserved rather than written: the frame that put this name in flight is still
             // writing the body, and fills the entry in once it has one.
-            hoisted_defs.entry(#def_name).or_insert(serde_json::Value::Null);
-            return serde_json::json!({ "$ref": #pointer });
+            hoisted_defs.entry(key).or_insert(serde_json::Value::Null);
+            return serde_json::json!({ "$ref": pointer });
         }
         in_flight.push((#def_name, filling));
         let described = #body;
         in_flight.pop();
-        if hoisted_defs.contains_key(#def_name) {
-            hoisted_defs.insert(#def_name.to_string(), described);
-            return serde_json::json!({ "$ref": #pointer });
+        if hoisted_defs.contains_key(&key) {
+            hoisted_defs.insert(key, described);
+            return serde_json::json!({ "$ref": pointer });
         }
         described
     }
