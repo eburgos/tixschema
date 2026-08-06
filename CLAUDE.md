@@ -200,18 +200,33 @@ pub struct MyType { ... }
 
 ### 3. HashMap Key Restriction
 
-**ONLY `HashMap<String, T>` is supported**. Non-string keys cause compilation errors.
+A map key must be one serde can write as a JSON object key. `String` is the open case: any string
+is a key. `bool`, the numeric types, `char`, and the chrono date/time types are accepted too —
+serde stringifies each one (`7` → `"7"`, `true` → `"true"`) — so the map describes as an open
+object while TypeScript and Zod keep the key's own type (`HashMap<u32, T>` →
+`Partial<Record<number, T>>`). A plain `#[model_schema()]` enum key narrows the object to its
+members. A key serde does not stringify — a struct, tuple, `Vec`/array, `Option`, nested map, or
+`ObjectId` — is refused at expansion:
 
 ```rust
-// ✅ Supported
+// ✅ Supported — string, and any key serde stringifies (bool/numeric/char/chrono)
 pub struct Config {
     pub settings: HashMap<String, String>,
+    pub counts: HashMap<u32, String>,
 }
 
-// ❌ NOT supported - will fail
-pub struct BadConfig {
-    pub settings: HashMap<i32, String>,
+// ❌ NOT supported - refused at expansion
+#[model_schema()]
+pub struct KeyStruct {
+    pub value: String,
 }
+
+#[model_schema()]
+pub struct BadMapKey {
+    pub m: HashMap<KeyStruct, u32>,
+}
+// error: field `m`: a map key must be a plain `#[model_schema()]` enum, whose members
+// become the object's keys — `KeyStruct` resolves to a type with no `enum_members()`
 ```
 
 ### 4. Type Mappings (Rust → TypeScript)
@@ -363,31 +378,78 @@ constraints.
 
 Single-field tuple structs with `#[serde(transparent)]` are treated as branded/opaque types. If the Rust name has a `Json` suffix, it is stripped from the TypeScript name.
 
+A non-generic brand publishes a `$RawSchema`/`$Schema` const pair:
+
 ```rust
-#[model_schema(default_types(ID_TYPE = String))]
+#[model_schema()]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct UserId<ID_TYPE>(pub ID_TYPE);
+pub struct CorrelationId(pub String);
 ```
 
 With `zod` + `typescript` features:
 ```typescript
-export type UserId<ID_TYPE> = ID_TYPE & z.$brand<"UserId">;
-const UserId$RawSchema = z.string().brand<"UserId">();
-export const UserId$Schema: ZodType<UserId<string>> = UserId$RawSchema;
+export type CorrelationId = string & z.$brand<"CorrelationId">;
+const CorrelationId$RawSchema = z.string().brand<"CorrelationId">().meta({
+  description: "CorrelationId",
+});
+
+export const CorrelationId$Schema: $ZodBranded<ZodString, "CorrelationId"> = CorrelationId$RawSchema;
+```
+
+A brand with a type parameter publishes `X$SchemaFactory` plus `X$SchemaDefault` instead, exactly
+like any other generic item — never a plain `const`:
+
+```rust
+#[model_schema(default_types(IdType = String))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct UserId<IdType>(pub IdType);
+```
+
+```typescript
+export type UserId<IdType> = IdType & z.$brand<"UserId">;
+const buildUserId$Schema = <IdType extends ZodType>(
+  idType: IdType,
+) =>
+  idType.meta({
+  description: "UserId",
+}).brand<"UserId">();
+
+type UserId$SchemaOf<IdType extends ZodType> = ReturnType<
+  typeof buildUserId$Schema<IdType>
+>;
+
+const UserId$SchemaFactoryCache = new WeakMap<ZodType, UserId$SchemaOf<ZodType>>();
+
+export function UserId$SchemaFactory<IdType extends ZodType>(
+  idType: IdType,
+): UserId$SchemaOf<IdType>;
+export function UserId$SchemaFactory(
+  idType: ZodType,
+): UserId$SchemaOf<ZodType> {
+  const hit = UserId$SchemaFactoryCache.get(idType);
+  if (hit) return hit;
+
+  const schema = buildUserId$Schema(idType);
+  UserId$SchemaFactoryCache.set(idType, schema);
+  return schema;
+}
+
+export const UserId$SchemaDefault: $ZodBranded<ZodString, "UserId"> = UserId$SchemaFactory(z.string());
 ```
 
 With `typescript` only (no `zod`):
 ```typescript
 declare const __brand_UserId: unique symbol;
-export type UserId<ID_TYPE> = ID_TYPE & { readonly [__brand_UserId]: true };
+export type UserId<IdType> = IdType & { readonly [__brand_UserId]: true };
 ```
 
 Rules:
-- Generic parameter names are preserved exactly (`ID_TYPE` stays `ID_TYPE` in TypeScript)
-- Non-generic: `struct CorrelationId(pub String)` generates `string & z.$brand<"CorrelationId">`
-- A brand publishes a `const`, so a parameter in its inner has no argument to name and renders as
-  the opaque `z.unknown()`
+- Generic parameter names are preserved exactly (`IdType` stays `IdType` in TypeScript)
+- A brand with no type parameter publishes the `$RawSchema`/`$Schema` const pair; a brand with a
+  type parameter publishes `$SchemaFactory`/`$SchemaDefault` instead — the parameter's inner
+  composes the factory's bound argument (`idType`), never the opaque `z.unknown()`
 - Serde transparent serialization works normally — the newtype is invisible in JSON
 
 ### Generic Types and Zod Factories

@@ -113,7 +113,7 @@ pub enum FieldDefType {
     ObjectId,
     /// Reference to another struct/enum type, potentially with generics
     /// First String is the type name (without Json suffix in TS)
-    /// Vec<FieldDef> holds generic parameters if any.
+    /// `Vec<FieldDef>` holds generic parameters if any.
     SiblingType(String, Vec<FieldDef>),
     /// String primitive - maps to string.
     String,
