@@ -182,16 +182,24 @@ fn test_json_schema_methods_pair_an_entry_point_with_a_guarded_body() {
 }
 
 /// The pointer and the `$defs` key are two spellings of one name; a document whose reference
-/// pointed anywhere but at the entry it hoists would resolve to nothing.
+/// pointed anywhere but at the entry it hoists would resolve to nothing. A name declaring no
+/// parameter always fills at an empty list, so the key it resolves to at runtime is the bare
+/// name — but the pointer is built from that runtime `key`, not from a literal embedding the name
+/// carries at macro-expansion time, since a generic name's key also carries the filling that
+/// built it (see the filling-keyed tests in the whole-type generic fixtures).
 #[test]
 fn test_the_deferred_reference_points_at_the_hoisted_defs_entry() {
     let methods = json_schema_methods("Node", &quote::quote! { body }, &[]).to_string();
 
     assert!(
-        methods.contains("\"#/$defs/Node\""),
-        "no pointer: {methods}"
+        methods.contains("\"#/$defs/\""),
+        "no pointer prefix: {methods}"
     );
     assert!(methods.contains("\"Node\""), "not keyed by name: {methods}");
+    assert!(
+        methods.contains("format ! (\"{}{key}\""),
+        "the pointer is not built off the same key the entry is hoisted under: {methods}"
+    );
 }
 
 /// A plain enum names nothing, but a type that names it reaches it through the guarded method
