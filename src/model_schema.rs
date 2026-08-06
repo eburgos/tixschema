@@ -4432,18 +4432,20 @@ fn branded_zod_type_name(inner: &FieldDef) -> String {
 /// to the class every Zod schema is an instance of rather than guess one that might not be it.
 #[cfg(all(feature = "zod", feature = "typescript"))]
 fn branded_zod_instantiated_type_name(name: &str, args: &[FieldDef]) -> String {
-    let Some(PublishedShape::Parameter(position)) =
-        lookup_alias_info(name).map(|info| info.value_shape)
-    else {
-        return "ZodType".to_owned();
-    };
-    match args.get(position) {
-        Some(argument)
-            if argument.is_array()
-                || !matches!(argument.field_type, FieldDefType::TypeParam(_)) =>
-        {
-            branded_zod_type_name(argument)
-        }
+    match lookup_alias_info(name).map(|info| info.value_shape) {
+        Some(PublishedShape::Parameter(position)) => match args.get(position) {
+            Some(argument)
+                if argument.is_array()
+                    || !matches!(argument.field_type, FieldDefType::TypeParam(_)) =>
+            {
+                branded_zod_type_name(argument)
+            }
+            _ => "ZodType".to_owned(),
+        },
+        // A plain struct's own object shape is produced by exactly one registration site
+        // (`Surface::object()` — see its own doc comment), so unlike `union`/`container`/the
+        // bare-string bucket, the word alone already proves the Zod class.
+        Some(PublishedShape::Flat(Some("object"))) => "ZodObject".to_owned(),
         _ => "ZodType".to_owned(),
     }
 }
@@ -4665,9 +4667,14 @@ fn build_branded_delegate_items(
 
 /// Builds the `Display` impl for a branded newtype, delegating to the inner field's `Display`.
 ///
-/// The delegating call carries the inner field's span, so the method-resolution failure it raises
-/// on a non-`Display` inner is reported at the field rather than at `#[model_schema()]`. Only the
-/// span changes; the emitted tokens are the same either way.
+/// The `where` clause bounds the inner field's own type rather than only the brand's own type
+/// parameters, so a non-generic brand over a non-`Display` inner is bounded too and raises one
+/// `E0277` naming the trait, instead of leaving `self.0.fmt(f)` to raise a second, unbounded
+/// `E0599` beside it.
+///
+/// The predicate carries the field's location through `resolved_at(Span::call_site())`, which
+/// reports the refusal at the field while leaving the tokens hygienically the macro's own — the
+/// same split the doc-comment example spans rely on.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn build_branded_display_impl(
     generics: &syn::Generics,
@@ -4676,11 +4683,15 @@ fn build_branded_display_impl(
 ) -> proc_macro2::TokenStream {
     let (_, type_generics, _) = generics.split_for_impl();
     let mut display_generics = generics.clone();
-    for param in &mut display_generics.params {
-        if let syn::GenericParam::Type(tp) = param {
-            tp.bounds.push(syn::parse_quote!(std::fmt::Display));
-        }
-    }
+    let inner_ty = &inner_field.ty;
+    let bound_span = inner_field
+        .ty
+        .span()
+        .resolved_at(proc_macro2::Span::call_site());
+    display_generics
+        .make_where_clause()
+        .predicates
+        .push(syn::parse_quote_spanned!(bound_span=> #inner_ty: std::fmt::Display));
     let (display_impl_generics, _, display_where_clause) = display_generics.split_for_impl();
     let delegate = quote_spanned! {inner_field.ty.span()=> self.0.fmt(f) };
     quote! {
@@ -4711,15 +4722,14 @@ fn build_branded_display_tokens(
     if args.no_display && !validation_needs_display {
         return quote! {};
     }
-    let display_assertion = build_branded_display_assertion(inner_field, generics);
     if args.no_display {
-        return display_assertion;
+        // No impl is emitted in this branch, so nothing else asserts `Display` on the inner.
+        return build_branded_display_assertion(inner_field, generics);
     }
-    let display_impl = build_branded_display_impl(generics, name, inner_field);
-    quote! {
-        #display_assertion
-        #display_impl
-    }
+    // The impl's own `where` clause (built from the field's type, not just the brand's own
+    // generic params) now performs this exact check, spanned on the field — a separate
+    // assertion here would only double the diagnostic.
+    build_branded_display_impl(generics, name, inner_field)
 }
 
 /// Builds a static assertion that the branded newtype's inner type implements `Display`, spanned

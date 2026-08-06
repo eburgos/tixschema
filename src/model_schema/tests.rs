@@ -5406,17 +5406,20 @@ fn display_impl_delegates_from_the_inner_field_span() {
     let tokens = super::build_branded_display_impl(&item.generics, &item.ident, field);
     assert_eq!(
         tokens.to_string(),
-        "impl std :: fmt :: Display for UserId { fn fmt (& self , f : & mut std :: fmt :: Formatter < '_ >) -> std :: fmt :: Result { self . 0 . fmt (f) } }"
+        "impl std :: fmt :: Display for UserId where String : std :: fmt :: Display { fn fmt (& self , f : & mut std :: fmt :: Formatter < '_ >) -> std :: fmt :: Result { self . 0 . fmt (f) } }"
     );
     assert_eq!(
         located_source_texts(&tokens).join(" "),
-        "UserId String String String String String String",
-        "the interpolated type name, then `self . 0 . fmt (f)` on the inner field"
+        "UserId String String String String String String String String String String String \
+         String String String String",
+        "the interpolated type name, then every token of the where-clause predicate (the bound is \
+         spanned on the field, so a non-`Display` inner is blamed there rather than at the \
+         attribute), then `self . 0 . fmt (f)` on the inner field"
     );
 }
 
-/// The generic impl keeps its own `Display` bound on every type parameter; that bound, not the
-/// skipped assertion, is what carries the requirement.
+/// The generic impl's own `where`-clause bound on the field's type — here, the bare type
+/// parameter itself — not the skipped assertion, is what carries the requirement.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn generic_display_impl_bounds_every_type_parameter() {
@@ -5426,7 +5429,7 @@ fn generic_display_impl_bounds_every_type_parameter() {
     let tokens = super::build_branded_display_impl(&item.generics, &item.ident, field);
     assert_eq!(
         tokens.to_string(),
-        "impl < IdType : std :: fmt :: Display > std :: fmt :: Display for DocumentId < IdType > { fn fmt (& self , f : & mut std :: fmt :: Formatter < '_ >) -> std :: fmt :: Result { self . 0 . fmt (f) } }"
+        "impl < IdType > std :: fmt :: Display for DocumentId < IdType > where IdType : std :: fmt :: Display { fn fmt (& self , f : & mut std :: fmt :: Formatter < '_ >) -> std :: fmt :: Result { self . 0 . fmt (f) } }"
     );
 }
 
@@ -5467,22 +5470,25 @@ fn constraints_keep_the_display_assertion_when_the_brand_opts_out_of_the_impl() 
     );
 }
 
-/// The three combinations that predate the constrained-path assertion keep their exact tokens.
+/// Where the impl is emitted, its own `where`-clause bound now performs the check the separate
+/// assertion used to — so that assertion no longer appears alongside it, only the impl. The
+/// opt-out combination is untouched: it still emits neither half.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
-fn the_display_block_is_unchanged_for_every_pre_existing_combination() {
-    let assertion_and_impl = display_tokens("pub struct UserId(pub String);", &quote::quote! {});
+fn the_display_block_carries_only_the_impl_once_the_impl_is_emitted() {
+    let impl_only = display_tokens("pub struct UserId(pub String);", &quote::quote! {});
     assert!(
-        assertion_and_impl.contains("assert_display :: < String > ()")
-            && assertion_and_impl.contains("impl std :: fmt :: Display for UserId"),
-        "got: {assertion_and_impl}"
+        !impl_only.contains("assert_display")
+            && impl_only.contains("impl std :: fmt :: Display for UserId")
+            && impl_only.contains("where String : std :: fmt :: Display"),
+        "got: {impl_only}"
     );
     assert_eq!(
         display_tokens(
             "pub struct SlugId(pub String);",
             &quote::quote! { pattern = "^[a-z]+$" }
         ),
-        assertion_and_impl.replace("UserId", "SlugId"),
+        impl_only.replace("UserId", "SlugId"),
         "a constrained brand that kept its impl emits what an unconstrained one does"
     );
     assert_eq!(
