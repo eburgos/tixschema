@@ -93,11 +93,16 @@ struct UserWithSerde {
 }
 
 #[model_schema()]
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(untagged)]
 enum Body {
-    Fresh { subject: String },
-    Reply { reply_to: String },
+    Fresh {
+        subject: String,
+    },
+    Reply {
+        #[serde(rename = "reply-to")]
+        reply_to: String,
+    },
 }
 
 #[model_schema()]
@@ -496,22 +501,111 @@ fn test_a_hyphenated_variant_field_key_is_written_as_a_string() {
     );
 }
 
-/// The flatten-operand seam and the sibling exclusion beside it, both written from keys an
-/// identifier can hold: the whole intersection is spelled as it always was.
-///
-/// The quoted half of this seam is held in the unit tests, against the closer directly. It cannot be
-/// reached from here: a key on this path is the field's own name whatever serde was told to rename
-/// it to, so no rename spells one an identifier cannot hold.
+/// The untagged-member seam: a renamed field inside a `Named` untagged variant is written as the key
+/// serde writes it as, not the Rust ident it never reaches the wire under. `Fresh`'s untouched field
+/// stays exactly as it was.
 #[test]
 #[cfg(feature = "typescript")]
-fn test_a_flatten_operand_and_its_sibling_exclusions_stay_bare_for_identifier_keys() {
+fn test_a_renamed_untagged_member_field_is_written_as_a_string() {
+    let ts = Body::ts_definition();
+
+    assert!(
+        ts.contains(r#"export type Body = { subject: string } | { "reply-to": string };"#),
+        "expected the renamed member key quoted, the untouched one bare:\n{ts}"
+    );
+}
+
+/// The same key on the Zod surface.
+#[test]
+#[cfg(feature = "zod")]
+fn test_a_renamed_untagged_member_field_is_written_as_a_string_in_zod() {
+    let zod = Body::zod_schema();
+
+    assert!(
+        zod.contains(r#""reply-to": z.string()"#),
+        "expected the key as a string member:\n{zod}"
+    );
+    assert!(
+        zod.contains("subject: z.string()"),
+        "an identifier-legal key stays bare:\n{zod}"
+    );
+}
+
+/// The same key in the JSON schema, where quoting is moot — a property name is a plain string either
+/// way — but the key itself must still be the one serde writes.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_a_renamed_untagged_member_field_reaches_the_json_schema() {
+    let schema = Body::json_schema();
+    let any_of = schema["anyOf"].as_array().unwrap();
+    let reply_branch = any_of
+        .iter()
+        .find(|branch| {
+            branch["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("reply-to")
+        })
+        .unwrap();
+    assert_eq!(reply_branch["required"], serde_json::json!(["reply-to"]));
+    assert!(
+        !reply_branch["properties"]
+            .as_object()
+            .unwrap()
+            .contains_key("reply_to"),
+        "the Rust ident leaked into the schema:\n{schema}"
+    );
+}
+
+/// serde's own wire, beside the schema above: the closed document — every leaf `additionalProperties:
+/// false` — accepts exactly the payload serde writes for the renamed member, and the value round-trips
+/// through it.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_a_renamed_untagged_member_round_trips_through_its_closed_schema() {
+    let value = Body::Reply {
+        reply_to: "x".to_owned(),
+    };
+    let payload = serde_json::to_value(&value).unwrap();
+    assert_eq!(payload, serde_json::json!({ "reply-to": "x" }));
+
+    let schema = Body::json_schema();
+    let any_of = schema["anyOf"].as_array().unwrap();
+    let reply_branch = any_of
+        .iter()
+        .find(|branch| {
+            branch["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("reply-to")
+        })
+        .unwrap();
+    let named = reply_branch["properties"].as_object().unwrap();
+    let required = reply_branch["required"].as_array().unwrap();
+    let written = payload.as_object().unwrap();
+    assert!(written.keys().all(|key| named.contains_key(key)));
+    assert!(
+        required
+            .iter()
+            .all(|key| written.contains_key(key.as_str().unwrap()))
+    );
+
+    let back: Body = serde_json::from_value(payload).unwrap();
+    assert_eq!(back, value);
+}
+
+/// The flatten-operand seam and the sibling exclusion beside it: `Reply`'s renamed field reaches
+/// both as the key serde writes, quoted, while `Fresh`'s untouched field stays bare in both.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_a_flatten_operand_and_its_sibling_exclusions_carry_a_renamed_key() {
     let ts = Envelope::ts_definition();
 
     assert!(
         ts.contains(
-            "} & ({ subject: string; reply_to?: never } | { reply_to: string; subject?: never });"
+            "} & ({ subject: string; \"reply-to\"?: never } | { \"reply-to\": string; subject?: never });"
         ),
-        "expected the intersection unchanged:\n{ts}"
+        "expected the renamed key quoted on both sides of the union:\n{ts}"
     );
 }
 

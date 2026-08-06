@@ -7224,9 +7224,14 @@ fn untagged_member_field_defs(
 }
 /// The [`FieldContext`] one untagged variant hands each of its members: the variant is the
 /// container the omission is read against, and the enum is the type the names resolve in.
+///
+/// `rename_all` is the variant's own `#[serde(rename_all = "...")]`, not the enum's: serde treats a
+/// struct variant as the container for its own fields, and the enum's container-level `rename_all`
+/// reaches variant names only, never the fields inside one.
 #[cfg(feature = "serde")]
 const fn untagged_variant_context<'ctx>(
     variant_defaulted: bool,
+    rename_all: Option<&'ctx str>,
     schema_module_name: Option<&'ctx str>,
     enum_type_name: &'ctx str,
     type_parameters: &'ctx [String],
@@ -7234,7 +7239,7 @@ const fn untagged_variant_context<'ctx>(
 ) -> FieldContext<'ctx> {
     FieldContext {
         container_defaulted: variant_defaulted,
-        rename_all: None,
+        rename_all,
         schema_module_name,
         type_name: enum_type_name,
         type_parameters,
@@ -7257,8 +7262,16 @@ fn untagged_member_field_def(
     serde_field_meta: &SerdeFieldMeta,
     positional_constraint_error: Option<proc_macro2::TokenStream>,
 ) -> (FieldDef, Vec<proc_macro2::TokenStream>) {
+    // The wire key: field-level rename wins outright, otherwise the variant's own rename_all cases
+    // the Rust ident — the same resolution `process_field` runs for a struct field. Diagnostics
+    // below still name the field the author wrote it as, not the key it is rendered under.
+    let final_field_name = get_final_field_name(
+        field_name,
+        serde_field_meta.rename.as_deref(),
+        ctx.rename_all,
+    );
     let (mut field_def, written_def) =
-        untagged_member_field_defs(field, field_name, ctx.type_parameters);
+        untagged_member_field_defs(field, &final_field_name, ctx.type_parameters);
     apply_serde_key_omission(&mut field_def, field);
     let serde_guard_errors = field_guard_errors(
         field,
@@ -7278,7 +7291,7 @@ fn untagged_member_field_def(
         serde_guard_errors,
     );
     field_def.resolve_self_references(ctx.type_name, ctx.type_parameters);
-    apply_model_schema_prop_meta(&mut field_def, prop_meta, field_name);
+    apply_model_schema_prop_meta(&mut field_def, prop_meta, &final_field_name);
     (field_def, member_guard_errors)
 }
 
@@ -7295,6 +7308,7 @@ fn collect_untagged_variant_members(
 ) -> UntaggedVariantMembers {
     let variant_name = variant.ident.to_string();
     let variant_defaulted = has_serde_default(&variant.attrs);
+    let variant_rename_all = parse_serde_type_attributes(&variant.attrs).rename_all;
     let mut walked = UntaggedVariantMembers {
         bound: Vec::new(),
         checks: Vec::new(),
@@ -7340,6 +7354,7 @@ fn collect_untagged_variant_members(
 
         let member_ctx = untagged_variant_context(
             variant_defaulted,
+            variant_rename_all.as_deref(),
             schema_module_name,
             enum_type_name,
             type_parameters,
