@@ -7160,8 +7160,8 @@ fn string_field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
 }
 
 /// Builds a standalone `serde_json::Value` token expression for a single field, with `Vec<T>`
-/// array wrapping. Sibling type of [`flatten_field_json_schema_ref`]; used by untagged enum
-/// members where the JSON value is consumed directly (not inserted under a property name).
+/// array wrapping; used by untagged enum members where the JSON value is consumed directly (not
+/// inserted under a property name).
 #[cfg(all(feature = "serde", feature = "jsonschema"))]
 fn field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
     // A covered sequence wrapper writes the JSON array of its element, so the member is dispatched

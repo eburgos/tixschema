@@ -235,7 +235,7 @@ pub struct AliasInfo {
     #[cfg(all(feature = "serde", feature = "typescript"))]
     pub ts_union_members: Vec<String>,
     /// What the value surface written under this name is, in the vocabulary a constrained brand's
-    /// refusal names shapes by — and [`PublishedShape::Flat(None)`] both when that surface is one
+    /// refusal names shapes by — and `PublishedShape::Flat(None)` both when that surface is one
     /// string checks land on and when nothing has been recorded at all. Filled by
     /// [`record_value_shape`] as each item registers.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -721,9 +721,10 @@ pub fn publishes_zod_factory(rust_ident: &str) -> bool {
     ZOD_FACTORY_PUBLISHERS.with(|names| names.borrow().contains(rust_ident))
 }
 
-/// Records `rust_ident`'s own `$SchemaDefault` fold-comparison keys — the plain [`FieldDef::zod_type`]
-/// rendering of each declared-default field, one per parameter in declaration order, computed
-/// before deferral and before a constrained brand's `.min`/`.max`/`.check` chain is appended.
+/// Records `rust_ident`'s own `$SchemaDefault` fold-comparison keys — the plain
+/// [`FieldDef::zod_type`](crate::field_type::FieldDef::zod_type) rendering of each declared-default
+/// field, one per parameter in declaration order, computed before deferral and before a
+/// constrained brand's `.min`/`.max`/`.check` chain is appended.
 #[cfg(feature = "zod")]
 pub fn record_zod_default_arguments(rust_ident: &str, arguments: Vec<String>) {
     ZOD_DEFAULT_ARGUMENTS.with(|map| {

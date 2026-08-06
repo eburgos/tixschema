@@ -228,8 +228,8 @@ fn numeric_bound(nested: &ParseNestedMeta, key: &str) -> syn::Result<f64> {
 }
 
 /// The [`LiteralValue`] a `literal` key was written as, kept in whichever of the four kinds the
-/// author wrote — the kind [`crate::model_schema`]'s own guard then measures against the field's
-/// declared Rust type.
+/// author wrote — the kind [`crate::model_schema`](macro@crate::model_schema)'s own guard then
+/// measures against the field's declared Rust type.
 fn literal_prop_value(nested: &ParseNestedMeta) -> syn::Result<LiteralValue> {
     let lit: Lit = nested.value()?.parse()?;
     if let Lit::Str(str_lit) = &lit {
