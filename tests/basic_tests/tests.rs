@@ -193,9 +193,15 @@ fn test_optional_fields_ts_definition() {
 fn test_optional_fields_zod_schema() {
     let zod_schema = UserWithOptionals::zod_schema();
 
-    assert!(zod_schema.contains("email: z.union([z.string(), z.undefined()])"));
-    assert!(zod_schema.contains("age: z.union([z.number().int(), z.undefined()])"));
-    assert!(zod_schema.contains("nickname: z.union([z.string(), z.undefined()])"));
+    assert!(zod_schema.contains(
+        "email: z.union([z.null().transform(() => undefined), z.string(), z.undefined()])"
+    ));
+    assert!(zod_schema.contains(
+        "age: z.union([z.null().transform(() => undefined), z.number().int(), z.undefined()])"
+    ));
+    assert!(zod_schema.contains(
+        "nickname: z.union([z.null().transform(() => undefined), z.string(), z.undefined()])"
+    ));
 
     assert!(!zod_schema.contains("email: string | undefined;"));
     assert!(!zod_schema.contains("age: number | undefined;"));

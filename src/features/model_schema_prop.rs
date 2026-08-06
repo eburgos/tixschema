@@ -23,6 +23,7 @@ const KNOWN_KEYS: &[&str] = &[
     "preprocess",
     "ts_optional",
     "as_number",
+    "nullable",
 ];
 
 /// Metadata for `model_schema_prop` attributes applied to a field.
@@ -118,6 +119,7 @@ pub struct ModelSchemaPropMeta {
     pub maximum: Option<f64>,    // e.g., 100.0 from maximum = 100
     pub min_length: Option<usize>, // e.g., 1 from minLength = 1
     pub minimum: Option<f64>,    // e.g., 0.0 from minimum = 0
+    pub nullable: bool, // Option<T> at object-key position renders `T | null` with the key required
     /// `pattern` in the spelling every surface reads the same way, or as it was written when it
     /// earned a [`Self::pattern_rejection`].
     pub pattern: Option<String>, // e.g., "^[0-9a-fA-F]{24}$" from pattern = "^[0-9a-fA-F]{24}$"
@@ -187,6 +189,8 @@ fn parse_prop_key(nested: &ParseNestedMeta, meta: &mut ModelSchemaPropMeta) -> s
         meta.ts_optional = true;
     } else if nested.path.is_ident("as_number") {
         meta.as_number = true;
+    } else if nested.path.is_ident("nullable") {
+        meta.nullable = true;
     } else {
         return Err(unknown_key_rejection(nested));
     }

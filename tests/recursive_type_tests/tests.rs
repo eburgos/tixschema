@@ -158,7 +158,7 @@ mod describes {
         let body = &document["$defs"]["ChainNode"];
         assert_eq!(
             body["properties"]["next"],
-            json!({ "$ref": "#/$defs/ChainNode" })
+            json!({ "anyOf": [{ "$ref": "#/$defs/ChainNode" }, { "type": "null" }] })
         );
         assert_eq!(body["properties"]["label"], json!({ "type": "string" }));
         assert_eq!(body["required"], json!(["label"]));

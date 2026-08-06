@@ -406,6 +406,16 @@ impl FieldDef {
             .is_some_and(|m| m.as_number)
     }
 
+    /// Whether `#[model_schema_prop(nullable)]` was written on this field — an `Option<T>` at
+    /// object-key position rendering `T | null` with the key required, instead of the coercing
+    /// default. Validated elsewhere to sit only on an `Option<T>` field, so a caller reading it
+    /// under [`Self::is_optional`] never needs to ask twice.
+    fn has_nullable(&self) -> bool {
+        self.model_schema_prop_meta
+            .as_ref()
+            .is_some_and(|m| m.nullable)
+    }
+
     /// Whether the field describes an array at all — the question every surface asked of the
     /// boolean this depth replaced. Asked only where a schema is generated.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -431,10 +441,15 @@ impl FieldDef {
 
     /// Whether every payload serde writes carries a key for this field — what the JSON surface's
     /// `required` names, and the one question there that a field's `Option`-ness alone cannot
-    /// answer.
+    /// answer. A `nullable` `Option<T>` is the one case where both hold at once: the key is always
+    /// written and `null` is its empty value.
     #[cfg(feature = "jsonschema")]
     pub fn key_is_required(&self) -> bool {
-        !self.is_optional() && !self.omits_value
+        if self.is_optional() {
+            self.has_nullable()
+        } else {
+            !self.omits_value
+        }
     }
 
     /// Whether the object key this field writes may be absent — `field?: T` admits the payload
@@ -895,10 +910,12 @@ impl FieldDef {
     pub fn typescript_typename(&self) -> String {
         let pre_result = self.typescript_base();
         if self.is_optional() {
-            // An absent-able key renders as `field?: T`, so the `| undefined` is redundant — and
-            // under `exactOptionalPropertyTypes` it would claim an explicit `undefined` the key's
-            // omission is exactly what serde writes instead.
-            if self.key_may_be_absent() {
+            if self.has_nullable() {
+                format!("{pre_result} | null")
+            } else if self.key_may_be_absent() {
+                // An absent-able key renders as `field?: T`, so the `| undefined` is redundant —
+                // and under `exactOptionalPropertyTypes` it would claim an explicit `undefined`
+                // the key's omission is exactly what serde writes instead.
                 pre_result
             } else {
                 format!("{pre_result} | undefined")
@@ -1021,20 +1038,7 @@ impl FieldDef {
     /// `z.union([…, z.undefined()]).prefault(undefined)` wrap lives in `zod_type`.
     #[cfg(feature = "zod")]
     fn zod_base(&self) -> String {
-        let array_result = self.zod_array_base();
-
-        // Wrap with preprocess if specified
-        if let Some(meta) = &self.model_schema_prop_meta
-            && !meta.preprocess.is_empty()
-        {
-            let mut wrapped = array_result;
-            for fn_name in meta.preprocess.iter().rev() {
-                wrapped = format!("z.preprocess({fn_name}, {wrapped})");
-            }
-            wrapped
-        } else {
-            array_result
-        }
+        self.zod_preprocess_wrap(self.zod_array_base())
     }
 
     /// The key schema a `z.record(…)` is written with: the key's own, except where the key is one
@@ -1068,6 +1072,23 @@ impl FieldDef {
             }
         }
         result
+    }
+
+    /// Wraps `schema` in one `z.preprocess(fn, …)` per function named by `preprocess`, innermost
+    /// function first, or returns it unwrapped where none was written. Held apart from
+    /// [`Self::zod_base`] so [`Self::zod_type`] can also wrap the whole `nullable` union rather
+    /// than only the type match beneath it — coerce, then validate.
+    #[cfg(feature = "zod")]
+    fn zod_preprocess_wrap(&self, schema: String) -> String {
+        let Some(meta) = &self.model_schema_prop_meta else {
+            return schema;
+        };
+        meta.preprocess
+            .iter()
+            .rev()
+            .fold(schema, |wrapped, fn_name| {
+                format!("z.preprocess({fn_name}, {wrapped})")
+            })
     }
 
     /// The Zod schema for a value in a slot that cannot be dropped — a tuple element, a map entry,
@@ -1111,13 +1132,23 @@ impl FieldDef {
     #[cfg(feature = "zod")]
     /// Generates the Zod schema string for this field (requires "zod" feature).
     pub fn zod_type(&self) -> String {
-        let pre_result = self.zod_base();
         if self.is_optional() {
-            format!("z.union([{pre_result}, z.undefined()]).prefault(undefined)")
-        } else if self.key_may_be_absent() {
-            format!("{pre_result}.optional()")
+            if self.has_nullable() {
+                let union = format!("z.union([{}, z.null()])", self.zod_array_base());
+                self.zod_preprocess_wrap(union)
+            } else {
+                let pre_result = self.zod_base();
+                format!(
+                    "z.union([z.null().transform(() => undefined), {pre_result}, z.undefined()]).prefault(undefined)"
+                )
+            }
         } else {
-            pre_result
+            let pre_result = self.zod_base();
+            if self.key_may_be_absent() {
+                format!("{pre_result}.optional()")
+            } else {
+                pre_result
+            }
         }
     }
 

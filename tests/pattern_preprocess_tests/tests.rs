@@ -231,7 +231,9 @@ fn test_pattern_optional_field_zod() {
 
     let schema = PatternOptional::zod_schema();
     assert!(
-        schema.contains("z.union([z.string().check(z.regex(/^[0-9]+$/)), z.undefined()])"),
+        schema.contains(
+            "z.union([z.null().transform(() => undefined), z.string().check(z.regex(/^[0-9]+$/)), z.undefined()])"
+        ),
         "Expected optional pattern union in Zod schema: {schema}"
     );
 }
@@ -295,9 +297,11 @@ fn test_preprocess_optional_field_zod() {
     }
 
     let schema = PreprocessOptional::zod_schema();
-    // Preprocess wraps the inner schema, then union with undefined wraps that
+    // Preprocess wraps the inner schema, then union with null/undefined wraps that
     assert!(
-        schema.contains("z.union([z.preprocess(trim, z.string()), z.undefined()])"),
+        schema.contains(
+            "z.union([z.null().transform(() => undefined), z.preprocess(trim, z.string()), z.undefined()])"
+        ),
         "Expected preprocess inside optional union in Zod schema: {schema}"
     );
 }

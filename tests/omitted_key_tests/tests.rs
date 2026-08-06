@@ -135,7 +135,9 @@ fn zod_keeps_the_undefined_union_that_already_admits_the_absent_key() {
     let zod = OmittedKeyFields::zod_schema();
 
     assert!(
-        zod.contains("age: z.union([z.number().int(), z.undefined()]).prefault(undefined),"),
+        zod.contains(
+            "age: z.union([z.null().transform(() => undefined), z.number().int(), z.undefined()]).prefault(undefined),"
+        ),
         "Got: {zod}"
     );
     assert!(zod.contains("id: z.string(),"), "Got: {zod}");

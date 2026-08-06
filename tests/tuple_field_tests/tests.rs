@@ -208,7 +208,7 @@ fn test_optional_tuple_field_zod() {
     let zod = OptionalPair::zod_schema();
     assert!(
         zod.contains(
-            "values: z.union([z.tuple([z.string(), z.string()]), z.undefined()]).prefault(undefined)"
+            "values: z.union([z.null().transform(() => undefined), z.tuple([z.string(), z.string()]), z.undefined()]).prefault(undefined)"
         ),
         "Expected optional tuple wrapping. Got: {zod}"
     );

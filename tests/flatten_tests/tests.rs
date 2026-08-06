@@ -1866,7 +1866,7 @@ fn test_the_overlapping_payload_is_admitted_by_two_branches() {
 fn test_an_overlapping_untagged_flatten_keeps_the_any_of_spelling() {
     assert_eq!(
         serde_json::to_string(&FlatOverOverlap::json_schema()).unwrap(),
-        r#"{"type":"object","anyOf":[{"type":"object","properties":{"own":{"type":"string"},"a":{"type":"string"}},"required":["own","a"],"additionalProperties":false},{"type":"object","properties":{"own":{"type":"string"},"a":{"type":"string"},"b":{"type":"string"}},"required":["own","a"],"additionalProperties":false}]}"#
+        r#"{"type":"object","anyOf":[{"type":"object","properties":{"own":{"type":"string"},"a":{"type":"string"}},"required":["own","a"],"additionalProperties":false},{"type":"object","properties":{"own":{"type":"string"},"a":{"type":"string"},"b":{"anyOf":[{"type":"string"},{"type":"null"}]}},"required":["own","a"],"additionalProperties":false}]}"#
     );
 }
 

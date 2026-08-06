@@ -559,7 +559,8 @@ mod zod {
         assert!(
             zod.contains(
                 "= SlottedDefault$SchemaFactory(z.lazy(() => \
-                 z.union([Tagged$SchemaFactory(z.string()), z.undefined()]).prefault(undefined)));"
+                 z.union([z.null().transform(() => undefined), Tagged$SchemaFactory(z.string()), \
+                 z.undefined()]).prefault(undefined)));"
             ),
             "Got: {zod}"
         );
@@ -1352,7 +1353,8 @@ mod jsonschema {
         assert_eq!(
             serde_json::to_string(&super::Recurring::<String>::json_schema()).unwrap(),
             "{\"$defs\":{\"Recurring\":{\"type\":\"object\",\"additionalProperties\":false,\
-             \"properties\":{\"next\":{\"$ref\":\"#/$defs/Recurring\"},\
+             \"properties\":{\"next\":{\"anyOf\":[{\"$ref\":\"#/$defs/Recurring\"},\
+             {\"type\":\"null\"}]},\
              \"value\":{\"type\":\"string\"}},\"required\":[\"value\"]}},\
              \"$ref\":\"#/$defs/Recurring\"}"
         );

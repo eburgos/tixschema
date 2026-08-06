@@ -2465,7 +2465,6 @@ fn test_wrapped_map_fields_write_arrays_of_their_map() {
 fn test_wrapped_map_fields_describe_as_arrays_of_their_map() {
     let properties = wrapped_map_fields_properties();
     for (wrapped, unwrapped) in [
-        ("optional_wrapped_labels", "labels"),
         ("wrapped_bucket_counts", "bucket_counts"),
         ("wrapped_labels", "labels"),
         ("wrapped_raw_keyed_counts", "raw_keyed_counts"),
@@ -2477,11 +2476,24 @@ fn test_wrapped_map_fields_describe_as_arrays_of_their_map() {
             properties[wrapped]
         );
     }
+    // The field's own `Option` widens the key position with `null`, on top of the array wrap the
+    // loop above already proves.
+    assert_eq!(
+        properties["optional_wrapped_labels"],
+        serde_json::json!({
+            "anyOf": [
+                { "type": "array", "items": properties["labels"] },
+                { "type": "null" }
+            ]
+        }),
+        "for optional_wrapped_labels, got: {}",
+        properties["optional_wrapped_labels"]
+    );
 }
 
 /// A map named without a sequence wrapper keeps the object it has always described as, on every key
-/// path — including behind an `Option`, which field position spells by leaving the name out of
-/// `required` rather than by admitting a `null`.
+/// path — including behind an `Option`, which field position now widens with `anyOf [<base>, null]`
+/// just as every other optional key does, on top of the name staying out of `required`.
 #[test]
 #[cfg(feature = "jsonschema")]
 fn test_unwrapped_map_fields_keep_the_object_they_describe_as() {
@@ -2495,7 +2507,10 @@ fn test_unwrapped_map_fields_keep_the_object_they_describe_as() {
         serde_json::json!({ "type": "object", "additionalProperties": true })
     );
     assert_eq!(properties["bucket_counts"], bucket_keyed_count_map());
-    assert_eq!(properties["optional_labels"], properties["labels"]);
+    assert_eq!(
+        properties["optional_labels"],
+        serde_json::json!({ "anyOf": [properties["labels"], { "type": "null" }] })
+    );
 
     let required = WrappedMapFields::json_schema()["required"]
         .as_array()
@@ -3182,10 +3197,16 @@ fn test_nested_sequences_describe_at_the_depth_they_are_written() {
         "items": { "type": "array", "items": { "type": "integer" } }
     });
 
-    for field in ["optional_rows", "set_of_rows", "small_ids"] {
+    for field in ["set_of_rows", "small_ids"] {
         assert_eq!(properties[field], integer_rows, "for: {field}");
     }
     assert_eq!(properties["vec_of_sets"], integer_rows);
+    // The field's own `Option` widens the key position with the null the outer wrap now admits, on
+    // top of the array nesting every other field in this loop shares.
+    assert_eq!(
+        properties["optional_rows"],
+        serde_json::json!({ "anyOf": [integer_rows, { "type": "null" }] })
+    );
     // Every level of a fixed-size array is the same array of arrays, bounded at each level by the
     // length it was written with.
     assert_eq!(

@@ -20,9 +20,9 @@ struct ElementNullFields {
     vec_items: Vec<Option<u32>>,
 }
 
-/// The `Option` around the wrapper. In field position a `None` writes a bare `null` under the key,
-/// which the generated contract does not admit — so this shape carries the omission the guard
-/// demands, and the key is dropped instead.
+/// The `Option` around the wrapper. In field position a `None` writes either an absent key or a bare
+/// `null` under it, and the generated contract now admits both — dropping the key still satisfies the
+/// guard, so this shape keeps the omission.
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct SlotNullFields {
@@ -162,13 +162,14 @@ fn test_an_element_null_field_describes_as_an_array_of_nullable_items() {
     }
 }
 
-/// The key is dropped rather than written `null`, so the field describes as the plain array and
-/// says nothing about `null` at all — it is the absence that the schema admits, by not requiring it.
+/// The key's own `Option` widens the plain array with `null`, the same as every other optional key,
+/// on top of the absence the schema already admits by leaving the key out of `required`.
 #[test]
 #[cfg(feature = "jsonschema")]
 fn test_a_slot_null_field_describes_as_the_array_it_writes_when_present() {
     let schema = SlotNullFields::json_schema();
-    let expected = array_of(&serde_json::json!({ "type": "integer" }));
+    let array = array_of(&serde_json::json!({ "type": "integer" }));
+    let expected = or_null(&array);
     for field in ["set_items", "vec_items"] {
         assert_eq!(schema["properties"][field], expected, "{field}");
         assert!(
@@ -285,8 +286,10 @@ fn test_the_zod_surface_puts_the_nullable_at_the_level_it_was_written() {
     }
     let slot_null = SlotNullFields::zod_schema();
     for spelling in [
-        "set_items: z.union([z.array(z.number().int()), z.undefined()]).prefault(undefined),",
-        "vec_items: z.union([z.array(z.number().int()), z.undefined()]).prefault(undefined),",
+        "set_items: z.union([z.null().transform(() => undefined), z.array(z.number().int()), \
+         z.undefined()]).prefault(undefined),",
+        "vec_items: z.union([z.null().transform(() => undefined), z.array(z.number().int()), \
+         z.undefined()]).prefault(undefined),",
     ] {
         assert!(slot_null.contains(spelling), "Got: {slot_null}");
     }

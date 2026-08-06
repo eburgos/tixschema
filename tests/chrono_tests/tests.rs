@@ -412,8 +412,11 @@ fn test_datetime_local_zod() {
 fn test_optional_datetime_zod() {
     let zod = OptionalTimestamp::zod_schema();
     assert!(
-        zod.contains("updated_at: z.union([z.coerce.date(), z.undefined()]).prefault(undefined),"),
-        "Option<DateTime<Utc>> should use z.union([z.coerce.date(), z.undefined()]). Got: {zod}"
+        zod.contains(
+            "updated_at: z.union([z.null().transform(() => undefined), z.coerce.date(), z.undefined()]).prefault(undefined),"
+        ),
+        "Option<DateTime<Utc>> should use z.union([z.null().transform(() => undefined), \
+         z.coerce.date(), z.undefined()]). Got: {zod}"
     );
 }
 

@@ -57,6 +57,19 @@ struct CompliantOptionals {
     tag: Option<String>,
 }
 
+/// The two `Option` flavors side by side: `generation_token` drops its key for a `None` (the
+/// default), `template_id` writes `null` instead (`nullable`).
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct IndexEntry {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation_token: Option<String>,
+    pub name: String,
+    #[model_schema_prop(nullable)]
+    pub template_id: Option<String>,
+}
+
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "lowercase")]
@@ -257,8 +270,12 @@ fn test_serde_with_optional_fields_zod() {
     let zod = OptionalFields::zod_schema();
 
     assert!(zod.contains("requiredField: z.string()"));
-    assert!(zod.contains("optionalField: z.union([z.string(), z.undefined()])"));
-    assert!(zod.contains("customOptional: z.union([z.number().int(), z.undefined()])"));
+    assert!(zod.contains(
+        "optionalField: z.union([z.null().transform(() => undefined), z.string(), z.undefined()])"
+    ));
+    assert!(zod.contains(
+        "customOptional: z.union([z.null().transform(() => undefined), z.number().int(), z.undefined()])"
+    ));
 }
 
 #[test]
@@ -356,7 +373,9 @@ fn test_compliant_optionals_zod_keeps_undefined_union() {
     let zod = CompliantOptionals::zod_schema();
 
     assert!(zod.contains("z.strictObject"));
-    assert!(zod.contains("z.union([z.string(), z.undefined()]).prefault(undefined)"));
+    assert!(zod.contains(
+        "z.union([z.null().transform(() => undefined), z.string(), z.undefined()]).prefault(undefined)"
+    ));
     assert!(!zod.contains("z.nullable"));
 }
 
@@ -383,6 +402,46 @@ fn test_compliant_optionals_serialize_absent_and_parse_absent() {
         serde_json::to_string(&some).unwrap(),
         r#"{"name":"n","note":"here"}"#
     );
+}
+
+/// Each `Option` flavor writes exactly one shape for a `None`: the default drops the key, `nullable`
+/// writes `null` and keeps it. Both read every shape either flavor writes, plus the one it does not.
+#[test]
+fn test_each_option_flavor_writes_one_shape_and_reads_both() {
+    let entry = IndexEntry {
+        name: "invoice.pdf".to_owned(),
+        generation_token: None,
+        template_id: None,
+    };
+    assert_eq!(
+        serde_json::to_string(&entry).unwrap(),
+        r#"{"name":"invoice.pdf","templateId":null}"#
+    );
+
+    let from_absent: IndexEntry =
+        serde_json::from_str(r#"{"name":"invoice.pdf","templateId":null}"#).unwrap();
+    assert_eq!(from_absent, entry);
+
+    let from_null: IndexEntry =
+        serde_json::from_str(r#"{"name":"invoice.pdf","generationToken":null,"templateId":null}"#)
+            .unwrap();
+    assert_eq!(from_null, entry);
+
+    let both_keys_absent: IndexEntry = serde_json::from_str(r#"{"name":"invoice.pdf"}"#).unwrap();
+    assert_eq!(both_keys_absent, entry);
+
+    let both_some = IndexEntry {
+        name: "invoice.pdf".to_owned(),
+        generation_token: Some("tok".to_owned()),
+        template_id: Some("tmpl-1".to_owned()),
+    };
+    assert_eq!(
+        serde_json::to_string(&both_some).unwrap(),
+        r#"{"generationToken":"tok","name":"invoice.pdf","templateId":"tmpl-1"}"#
+    );
+    let round_tripped: IndexEntry =
+        serde_json::from_str(&serde_json::to_string(&both_some).unwrap()).unwrap();
+    assert_eq!(round_tripped, both_some);
 }
 
 /// The struct-field seam: a renamed key is the string serde writes, which is what the object needs

@@ -1976,7 +1976,9 @@ mod branded_sibling_inner_tests {
                         "additionalProperties": false,
                         "properties": {
                             "name": { "type": "string" },
-                            "next": { "$ref": "#/$defs/ChainRef" }
+                            "next": {
+                                "anyOf": [{ "$ref": "#/$defs/ChainRef" }, { "type": "null" }]
+                            }
                         },
                         "required": ["name"]
                     }
