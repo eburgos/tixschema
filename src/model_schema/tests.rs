@@ -5526,26 +5526,31 @@ fn constrained_brand_inner_spanned_tokens(source: &str, inner: &str) -> (usize, 
     (count(&validation.deserialize_fn), count(&validate_method))
 }
 
-/// Neither `to_string()` the constrained path emits may carry the inner field's span. Spanned
-/// tokens are judged by the consumer's lints as if hand-written, and on a `String` inner
-/// `self.0.to_string()` is a redundant clone — the whole test suite fails on it. The `Display`
-/// requirement is blamed by the static assertion instead, whose tokens are inert wherever they
-/// land. Only the interpolated `#inner_ty` may point at the field here.
+/// Both `to_string()` calls the constrained path emits now carry the inner field's location — via
+/// `resolved_at`, not a bare respan — so a non-`Display` inner's `E0599` lands beside the field's
+/// own `E0277` instead of on the attribute. `deserializer` counts the two pre-existing interpolated
+/// `#inner_ty` occurrences plus the three literal tokens (`&`, `.`, `to_string`) `quote_spanned!`
+/// respans around `checked_v`; `validate_method` interpolates no inner type, so its three come from
+/// `checked_inner`'s own `&`, `.`, `to_string` alone. The `#receiver` tokens themselves (`v`, or
+/// `self` `.` `0`) are interpolated rather than written by the `quote_spanned!` template, so they
+/// keep their own unlocated span — this location-count alone cannot see whether the *hygiene*
+/// context also carried over; that is measured by the crate's own deny-heavy clippy run staying
+/// clean on the `String`-inner brands the existing suite already declares.
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
 ))]
 #[test]
-fn neither_constrained_to_string_call_carries_the_inner_fields_span() {
+fn constrained_to_string_calls_carry_the_inner_fields_location() {
     let (deserializer, validate_method) =
         constrained_brand_inner_spanned_tokens("pub struct SlugId(pub Tags);", "Tags");
     assert_eq!(
-        deserializer, 2,
-        "the two interpolated type names and nothing else"
+        deserializer, 5,
+        "two interpolated type names plus the three respanned to_string() tokens"
     );
     assert_eq!(
-        validate_method, 0,
-        "`validate()` interpolates no inner type"
+        validate_method, 3,
+        "the three respanned to_string() tokens alone"
     );
 }
 
