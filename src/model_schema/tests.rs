@@ -2719,8 +2719,9 @@ fn the_cfg_probe_sees_an_emitted_cfg_attribute() {
 fn struct_schema_example_carries_no_cfg_attribute() {
     let name: syn::Ident = syn::parse_quote!(Report);
     let generics = syn::Generics::default();
+    let example: proc_macro2::TokenStream = "Report { id: 1 }".parse().unwrap();
     let tokens = super::item_schema_example_method(
-        Some(&"Report { id: 1 }".to_owned()),
+        Some(&example),
         &name,
         &generics,
         &super::ModelSchemaArgs::default(),
@@ -2737,7 +2738,7 @@ fn struct_schema_example_carries_no_cfg_attribute() {
 #[test]
 fn struct_schema_example_instantiates_every_type_parameter() {
     let name: syn::Ident = syn::parse_quote!(Report);
-    let example = "Report { id: 1 }".to_owned();
+    let example: proc_macro2::TokenStream = "Report { id: 1 }".parse().unwrap();
     for (generics, expected) in [
         (syn::Generics::default(), "let value : Report ="),
         (syn::parse_quote!(<A>), "let value : Report < String > ="),
@@ -2767,7 +2768,7 @@ fn struct_schema_example_instantiates_every_type_parameter() {
 #[test]
 fn struct_schema_example_instantiates_each_parameter_at_its_declared_filling() {
     let name: syn::Ident = syn::parse_quote!(Report);
-    let example = "Report { id: 1 }".to_owned();
+    let example: proc_macro2::TokenStream = "Report { id: 1 }".parse().unwrap();
     let generics: syn::Generics = syn::parse_quote!(<A, B>);
     let count: (syn::Ident, syn::Type) = (syn::parse_quote!(A), syn::parse_quote!(u32));
     let held: (syn::Ident, syn::Type) = (syn::parse_quote!(B), syn::parse_quote!(Vec<u8>));
@@ -2800,7 +2801,7 @@ fn struct_schema_example_instantiates_each_parameter_at_its_declared_filling() {
 #[test]
 fn a_string_filling_annotates_the_example_as_no_filling_does() {
     let name: syn::Ident = syn::parse_quote!(Report);
-    let example = "Report { id: 1 }".to_owned();
+    let example: proc_macro2::TokenStream = "Report { id: 1 }".parse().unwrap();
     let generics: syn::Generics = syn::parse_quote!(<A>);
     let filled = super::ModelSchemaArgs {
         default_types: vec![(syn::parse_quote!(A), syn::parse_quote!(String))],
@@ -2981,7 +2982,7 @@ fn branded_json_inners() -> Vec<super::BrandedJsonInner> {
 #[test]
 fn branded_schema_example_carries_no_cfg_attribute() {
     let name: syn::Ident = syn::parse_quote!(DocumentId);
-    let example = "DocumentId(\"abc\".to_string())".to_owned();
+    let example: proc_macro2::TokenStream = "DocumentId(\"abc\".to_string())".parse().unwrap();
     for generic_params in [
         Vec::new(),
         vec!["A".to_owned()],
@@ -3003,7 +3004,7 @@ fn branded_schema_example_carries_no_cfg_attribute() {
 #[test]
 fn branded_schema_example_instantiates_every_parameter() {
     let name: syn::Ident = syn::parse_quote!(DocumentId);
-    let example = "DocumentId(\"abc\".to_string())".to_owned();
+    let example: proc_macro2::TokenStream = "DocumentId(\"abc\".to_string())".parse().unwrap();
     for (generic_params, expected) in [
         (Vec::new(), "let value : DocumentId ="),
         (vec!["A".to_owned()], "let value : DocumentId < String > ="),
@@ -3029,7 +3030,7 @@ fn branded_schema_example_instantiates_every_parameter() {
 #[test]
 fn branded_schema_example_instantiates_each_parameter_at_its_declared_filling() {
     let name: syn::Ident = syn::parse_quote!(DocumentId);
-    let example = "DocumentId(\"abc\".to_string())".to_owned();
+    let example: proc_macro2::TokenStream = "DocumentId(\"abc\".to_string())".parse().unwrap();
     let args = super::ModelSchemaArgs {
         default_types: vec![(syn::parse_quote!(A), syn::parse_quote!(u32))],
         ..Default::default()

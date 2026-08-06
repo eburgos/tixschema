@@ -37,7 +37,7 @@ use crate::utils::written_type;
 
 #[cfg(feature = "zod")]
 use crate::utils::{
-    escape_js_regex_literal, extract_example_from_docs, publishes_zod_factory,
+    escape_js_regex_literal, extract_example_tokens, publishes_zod_factory,
     record_zod_default_arguments, record_zod_factory, zod_default_arguments, zod_factory_argument,
 };
 
@@ -97,7 +97,11 @@ use crate::utils::json_argument_binding;
 #[cfg(all(feature = "serde", feature = "jsonschema"))]
 use crate::features::jsonschema::{MergeDiagnostic, merged_object_value};
 
-#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[cfg(any(
+    feature = "typescript",
+    feature = "zod",
+    all(feature = "serde", feature = "jsonschema")
+))]
 use crate::utils::get_enum_docs;
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::get_struct_docs;
@@ -107,7 +111,7 @@ use crate::utils::{compute_alias_export_name, ident_schema_module_name};
 
 use crate::utils::compute_item_export_name;
 
-#[cfg(any(feature = "typescript", feature = "zod"))]
+#[cfg(feature = "typescript")]
 use crate::utils::get_item_docs;
 #[cfg(feature = "typescript")]
 use crate::utils::ident_reexport_ts;
@@ -1264,17 +1268,12 @@ fn build_jsdoc_body(docs_vec: Option<&[String]>, fallback_name: &str) -> String 
 /// exposes.
 #[cfg(feature = "zod")]
 fn enum_schema_example_method(
-    docs_vec: Option<&[String]>,
+    attrs: &[syn::Attribute],
     name: &syn::Ident,
     generics: &syn::Generics,
     args: &ModelSchemaArgs,
 ) -> Option<proc_macro2::TokenStream> {
-    item_schema_example_method(
-        docs_vec.and_then(extract_example_from_docs).as_ref(),
-        name,
-        generics,
-        args,
-    )
+    item_schema_example_method(extract_example_tokens(attrs).as_ref(), name, generics, args)
 }
 
 #[cfg(all(
@@ -1282,7 +1281,7 @@ fn enum_schema_example_method(
     any(feature = "typescript", feature = "jsonschema")
 ))]
 const fn enum_schema_example_method(
-    _docs_vec: Option<&[String]>,
+    _attrs: &[syn::Attribute],
     _name: &syn::Ident,
     _generics: &syn::Generics,
     _args: &ModelSchemaArgs,
@@ -1319,13 +1318,12 @@ fn schema_example_value_type(
 /// every enum shape reach it the same way instead of repeating the feature pair at the call site.
 #[cfg(feature = "zod")]
 fn item_schema_example_method(
-    example_code: Option<&String>,
+    example_tokens: Option<&proc_macro2::TokenStream>,
     name: &syn::Ident,
     generics: &syn::Generics,
     args: &ModelSchemaArgs,
 ) -> Option<proc_macro2::TokenStream> {
-    let code = example_code?;
-    let code_tokens: proc_macro2::TokenStream = code.parse().unwrap();
+    let code_tokens = example_tokens?;
     let value_ty = schema_example_value_type(
         name,
         &type_parameters_in_scope(generics),
@@ -1346,7 +1344,7 @@ fn item_schema_example_method(
     any(feature = "typescript", feature = "jsonschema")
 ))]
 const fn item_schema_example_method(
-    _example_code: Option<&String>,
+    _example_tokens: Option<&proc_macro2::TokenStream>,
     _name: &syn::Ident,
     _generics: &syn::Generics,
     _args: &ModelSchemaArgs,
@@ -2369,10 +2367,7 @@ fn const_parameter_example_errors(item: &Item) -> Vec<proc_macro2::TokenStream> 
     let Some(first) = consts.first() else {
         return Vec::new();
     };
-    if get_item_docs(attrs)
-        .and_then(|docs| extract_example_from_docs(&docs))
-        .is_none()
-    {
+    if extract_example_tokens(attrs).is_none() {
         return Vec::new();
     }
     vec![attr_guard_error(
@@ -3436,15 +3431,15 @@ fn enum_module_idents(
 /// halves: what the author wrote is a fact about the declaration, and the example half already
 /// answers `None` where `zod` — the only surface that reads one — is off.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-fn struct_docs_and_example(item_struct: &syn::ItemStruct) -> (Option<Vec<String>>, Option<String>) {
+fn struct_docs_and_example(
+    item_struct: &syn::ItemStruct,
+) -> (Option<Vec<String>>, Option<proc_macro2::TokenStream>) {
     let docs_vec = get_struct_docs(item_struct);
     #[cfg(feature = "zod")]
-    let example_code = docs_vec
-        .as_ref()
-        .and_then(|docs| extract_example_from_docs(docs));
+    let example_tokens = extract_example_tokens(&item_struct.attrs);
     #[cfg(not(feature = "zod"))]
-    let example_code = None;
-    (docs_vec, example_code)
+    let example_tokens = None;
+    (docs_vec, example_tokens)
 }
 
 /// The output a struct carrying a `cfg_attr`-wrapped serde attribute on the type is refused with,
@@ -4781,15 +4776,14 @@ fn tokens_name_any(tokens: &proc_macro2::TokenStream, names: &[String]) -> bool 
 /// Builds the `schema_example()` method for a branded newtype from extracted example code.
 #[cfg(feature = "zod")]
 fn build_branded_schema_example(
-    example_code: Option<&String>,
+    example_tokens: Option<&proc_macro2::TokenStream>,
     name: &Ident,
     generic_params: &[String],
     args: &ModelSchemaArgs,
 ) -> proc_macro2::TokenStream {
-    let Some(code) = example_code else {
+    let Some(code_tokens) = example_tokens else {
         return quote! {};
     };
-    let code_tokens: proc_macro2::TokenStream = code.parse().unwrap();
     let value_ty = schema_example_value_type(name, generic_params, &args.default_types);
     quote! {
         pub fn schema_example() -> serde_json::Value {
@@ -5002,9 +4996,7 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
     let docs_vec = get_struct_docs(&item_struct);
 
     #[cfg(feature = "zod")]
-    let example_code = docs_vec
-        .as_ref()
-        .and_then(|docs| extract_example_from_docs(docs));
+    let example_tokens = extract_example_tokens(&item_struct.attrs);
 
     #[cfg(feature = "zod")]
     let plain_description = item_description(docs_vec.as_deref(), &item_name);
@@ -5067,13 +5059,13 @@ fn process_branded_newtype(item_struct: syn::ItemStruct, args: &ModelSchemaArgs)
 
     // --- Generate schema_example method (goes on the type impl, not the module) ---
     #[cfg(feature = "zod")]
-    let has_example = example_code.is_some();
+    let has_example = example_tokens.is_some();
     #[cfg(not(feature = "zod"))]
     let has_example = false;
 
     #[cfg(feature = "zod")]
     let schema_example_tokens =
-        build_branded_schema_example(example_code.as_ref(), &name, &generic_params, args);
+        build_branded_schema_example(example_tokens.as_ref(), &name, &generic_params, args);
     #[cfg(not(feature = "zod"))]
     let schema_example_tokens = quote! {};
 
@@ -5469,8 +5461,7 @@ fn process_plain_enum(
     #[cfg(any(feature = "typescript", feature = "zod"))]
     let rust_ident = name.to_string();
 
-    // Extract docs early for example extraction
-    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+    #[cfg(any(feature = "typescript", feature = "zod"))]
     let docs_vec = get_enum_docs(&item_enum);
 
     let (enum_options, enum_variant_docs) = collect_plain_enum_options(&mut item_enum, rename_all);
@@ -5527,7 +5518,7 @@ fn process_plain_enum(
 
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     let schema_example_method =
-        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics, args);
+        enum_schema_example_method(&item_enum.attrs, name, &item_enum.generics, args);
 
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![
@@ -5888,8 +5879,7 @@ fn process_discriminated_enum(
     let (module_name, module_ident) =
         enum_module_idents(name, item_name, AliasKind::NoEnumMembers, Surface::union());
 
-    // Extract docs early for example extraction
-    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+    #[cfg(feature = "typescript")]
     let docs_vec = get_enum_docs(&item_enum);
 
     // Process each variant in the enum.
@@ -5963,7 +5953,7 @@ fn process_discriminated_enum(
     // uses type names that may not be accessible from the nested module.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     let schema_example_method =
-        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics, args);
+        enum_schema_example_method(&item_enum.attrs, name, &item_enum.generics, args);
 
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![
@@ -6389,7 +6379,7 @@ fn process_externally_tagged_enum(
         Surface::externally_tagged(&item_enum.variants),
     );
 
-    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+    #[cfg(feature = "typescript")]
     let docs_vec = get_enum_docs(&item_enum);
 
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -6454,7 +6444,7 @@ fn process_externally_tagged_enum(
 
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     let schema_example_method =
-        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics, args);
+        enum_schema_example_method(&item_enum.attrs, name, &item_enum.generics, args);
 
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![
@@ -6784,7 +6774,7 @@ fn process_internally_tagged_enum(
     let (module_name, module_ident) =
         enum_module_idents(name, item_name, AliasKind::NoEnumMembers, Surface::union());
 
-    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+    #[cfg(feature = "typescript")]
     let docs_vec = get_enum_docs(&item_enum);
 
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -6851,7 +6841,7 @@ fn process_internally_tagged_enum(
 
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     let schema_example_method =
-        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics, args);
+        enum_schema_example_method(&item_enum.attrs, name, &item_enum.generics, args);
 
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     let schema_impl_items: Vec<proc_macro2::TokenStream> = vec![
@@ -7816,7 +7806,7 @@ fn process_untagged_enum(
 
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     let schema_example_method =
-        enum_schema_example_method(docs_vec.as_deref(), name, &item_enum.generics, args);
+        enum_schema_example_method(&item_enum.attrs, name, &item_enum.generics, args);
 
     #[cfg(any(feature = "zod", feature = "typescript", feature = "jsonschema"))]
     let schema_impl_items = build_untagged_schema_impl_items(
