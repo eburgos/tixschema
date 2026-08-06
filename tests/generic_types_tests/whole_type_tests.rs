@@ -58,14 +58,14 @@ mod typescript {
     /// binds its parameter and spends it in the intersection — and the type holding one names the
     /// brand with the argument it forwards, two levels from where the parameter was declared.
     ///
-    /// Which marker is written is the value surface's business — `$brand<"Name">` is Zod's — so the
+    /// Which marker is written is the value surface's business — `z.$brand<"Name">` is Zod's — so the
     /// intersection is read where that surface compiles.
     #[cfg(feature = "zod")]
     #[test]
     fn a_generic_brand_is_named_with_the_argument_forwarded_to_it() {
         let brand = ArchiveId::<String>::ts_definition();
         assert!(
-            brand.contains("export type ArchiveId<IdType> = IdType & $brand<\"ArchiveId\">;"),
+            brand.contains("export type ArchiveId<IdType> = IdType & z.$brand<\"ArchiveId\">;"),
             "Got: {brand}"
         );
         let holder = ArchiveStamp::<String>::ts_definition();

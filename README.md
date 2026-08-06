@@ -1032,7 +1032,7 @@ pub struct CorrelationId(pub String);
 Generated TypeScript (with `zod` feature):
 
 ```typescript
-export type UserId<IdType> = IdType & $brand<"UserId">;
+export type UserId<IdType> = IdType & z.$brand<"UserId">;
 const buildUserId$Schema = <IdType extends ZodType>(
   idType: IdType,
 ) =>
@@ -1062,7 +1062,7 @@ export function UserId$SchemaFactory(
 
 export const UserId$SchemaDefault: $ZodBranded<ZodString, "UserId"> = UserId$SchemaFactory(z.string());
 
-export type CorrelationId = string & $brand<"CorrelationId">;
+export type CorrelationId = string & z.$brand<"CorrelationId">;
 const CorrelationId$RawSchema = z.string().brand<"CorrelationId">().meta({
   description: "CorrelationId",
 });
