@@ -307,3 +307,65 @@ fn test_type_attributes_without_unread_values_are_unchanged() {
     assert!(!meta.untagged);
     assert!(meta.cfg_attr_rejection.is_none());
 }
+
+/// `bound(...)` has no dedicated branch, so it was always meant to fall through to
+/// `consume_unread_value` — but the helper only knew how to step over `key = value`, not a
+/// parenthesised list, so the tag written after it was lost.
+#[test]
+fn test_tag_after_a_list_form_bound_is_still_read() {
+    let item: syn::ItemEnum = syn::parse_quote! {
+        #[serde(bound(serialize = "T: Clone", deserialize = "T: Clone"), tag = "kind")]
+        enum E<T> {
+            A(T),
+        }
+    };
+    let meta = parse_serde_type_attributes(&item.attrs);
+    assert_eq!(
+        meta.tag.as_deref(),
+        Some("kind"),
+        "tag is written after a list-form bound(...)"
+    );
+}
+
+/// `rename_all` has a dedicated branch, but list-form syntax leaves this crate nothing to read —
+/// only the tag written after it must survive, the same as the `bound(...)` case above.
+#[test]
+fn test_tag_after_a_list_form_rename_all_is_still_read() {
+    let item: syn::ItemEnum = syn::parse_quote! {
+        #[serde(rename_all(serialize = "camelCase"), tag = "kind")]
+        enum E {
+            A(String),
+        }
+    };
+    let meta = parse_serde_type_attributes(&item.attrs);
+    assert_eq!(
+        meta.rename_all, None,
+        "list-form rename_all carries a value this crate does not read"
+    );
+    assert_eq!(
+        meta.tag.as_deref(),
+        Some("kind"),
+        "tag is written after a list-form rename_all(...)"
+    );
+}
+
+/// `rename` has a dedicated branch too, and its list form must not swallow `flatten` written
+/// after it.
+#[test]
+fn test_flatten_after_a_list_form_rename_is_still_read() {
+    let item: syn::ItemStruct = syn::parse_quote! {
+        struct S {
+            #[serde(rename(serialize = "ser", deserialize = "de"), flatten)]
+            foo: String,
+        }
+    };
+    let meta = field_meta(&item);
+    assert_eq!(
+        meta.rename, None,
+        "list-form rename carries a value this crate does not read"
+    );
+    assert!(
+        meta.flatten,
+        "flatten is written after a list-form rename(...)"
+    );
+}

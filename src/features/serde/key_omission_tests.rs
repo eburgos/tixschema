@@ -110,3 +110,21 @@ fn test_omission_keys_after_an_unread_value_are_still_read() {
         "default is written after an unread value"
     );
 }
+
+/// `rename(...)` is a documented serde list form this walk has no dedicated branch for, so it
+/// falls to the same unread-value path as `skip_serializing_if = "..."` above — but a
+/// parenthesised list was left uncounted for, so `skip` written after it was never seen.
+#[test]
+fn test_skip_after_a_list_form_rename_is_still_read() {
+    let item: syn::ItemStruct = syn::parse_quote! {
+        struct S {
+            #[serde(rename(serialize = "ser", deserialize = "de"), skip)]
+            foo: String,
+        }
+    };
+    assert!(
+        omission(&item).omits_key,
+        "skip is written after a list-form rename(...)"
+    );
+    assert!(omission(&item).skips_deserializing);
+}
