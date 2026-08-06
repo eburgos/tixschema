@@ -163,7 +163,7 @@ fn test_optional_sequence_field_keeps_the_field_level_optionality() {
     #[cfg(feature = "zod")]
     assert_eq!(
         optional.zod_type(),
-        "z.union([z.array(z.string()), z.undefined()]).prefault(undefined)"
+        "z.union([z.null().transform(() => undefined), z.array(z.string()), z.undefined()]).prefault(undefined)"
     );
 }
 

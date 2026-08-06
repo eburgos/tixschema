@@ -7027,7 +7027,7 @@ fn close_untagged_flatten_member(member: &str, excluded: &[String]) -> String {
 fn untagged_named_json_value(field_defs: &[FieldDef]) -> proc_macro2::TokenStream {
     let property_inserts = field_defs.iter().map(|fld| {
         let name_str = fld.name.clone();
-        let value = field_json_schema_value(fld);
+        let value = nullable_slot_json_schema_value(fld, field_json_schema_value(fld));
         let required_insert = if fld.key_is_required() {
             quote! {
                 required.push(serde_json::Value::String(#name_str.to_string()));
@@ -7249,6 +7249,7 @@ fn untagged_member_field_def(
         field,
         field_name,
         field_def.is_optional(),
+        prop_meta.nullable,
         serde_field_meta,
         ctx.container_defaulted,
         positional_constraint_error,
@@ -7802,7 +7803,10 @@ fn generate_type_schema(
     field_name_str: &str,
     type_json_schema: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
-    let schema = arrayed_json_schema_value(fld, type_json_schema.clone());
+    let schema = nullable_slot_json_schema_value(
+        fld,
+        arrayed_json_schema_value(fld, type_json_schema.clone()),
+    );
     quote! {
         properties.insert(#field_name_str.to_string(), #schema);
     }
@@ -8310,10 +8314,10 @@ fn build_tuple_element_base_json_schema(
     Ok(arrayed_json_schema_value(&value, item.into_value()))
 }
 
-/// The `anyOf [<base>, null]` form for a value in a slot that cannot be dropped — a tuple element
-/// or a map entry — or `None` when the value is not an `Option`. Only an object key can be
-/// omitted; in either of these positions serde writes a `None` as JSON `null`, so the schema has
-/// to admit it.
+/// The `anyOf [<base>, null]` form for a value that is an `Option`, or `None` when it is not. A
+/// slot that cannot be dropped — a tuple element or a map entry — needs it because there is no
+/// other way to write a `None` there; an object key needs it too, because serde reads an explicit
+/// `null` into `None` exactly as readily as an absent key.
 #[cfg(feature = "jsonschema")]
 fn nullable_slot_json_schema(
     fld: &FieldDef,
@@ -9002,7 +9006,8 @@ fn build_map_field_schema(
 
     match map_json_schema_value(key, value) {
         Ok(map_schema) => {
-            let field_schema = arrayed_json_schema_value(fld, map_schema);
+            let field_schema =
+                nullable_slot_json_schema_value(fld, arrayed_json_schema_value(fld, map_schema));
             quote! {
                 properties.insert(#field_name_str.to_string(), #field_schema);
             }
@@ -9038,7 +9043,10 @@ fn build_string_field_schema(fld: &FieldDef, field_name_str: &str) -> proc_macro
         quote! { schema_obj.insert("pattern".to_string(), serde_json::json!(#pattern)); }
     });
 
-    let schema = arrayed_json_schema_value(fld, quote! { serde_json::Value::Object(schema_obj) });
+    let schema = nullable_slot_json_schema_value(
+        fld,
+        arrayed_json_schema_value(fld, quote! { serde_json::Value::Object(schema_obj) }),
+    );
     quote! {
         properties.insert(#field_name_str.to_string(), {
             let mut schema_obj = serde_json::Map::new();
@@ -9058,9 +9066,12 @@ fn build_string_literal_field_schema(
     field_name_str: &str,
     literal: &str,
 ) -> proc_macro2::TokenStream {
-    let schema = arrayed_json_schema_value(
+    let schema = nullable_slot_json_schema_value(
         fld,
-        quote! { serde_json::json!({ "type": "string", "const": #literal }) },
+        arrayed_json_schema_value(
+            fld,
+            quote! { serde_json::json!({ "type": "string", "const": #literal }) },
+        ),
     );
     quote! {
         properties.insert(#field_name_str.to_string(), { #schema });
@@ -9083,7 +9094,10 @@ fn build_numeric_field_schema(
         quote! { schema_obj.insert("maximum".to_string(), serde_json::json!(#max)); }
     });
 
-    let schema = arrayed_json_schema_value(fld, quote! { serde_json::Value::Object(schema_obj) });
+    let schema = nullable_slot_json_schema_value(
+        fld,
+        arrayed_json_schema_value(fld, quote! { serde_json::Value::Object(schema_obj) }),
+    );
     quote! {
         properties.insert(#field_name_str.to_string(), {
             let mut schema_obj = serde_json::Map::new();
@@ -9098,8 +9112,10 @@ fn build_numeric_field_schema(
 /// Builds the JSON schema for a `bool` field.
 #[cfg(feature = "jsonschema")]
 fn build_boolean_field_schema(fld: &FieldDef, field_name_str: &str) -> proc_macro2::TokenStream {
-    let schema =
-        arrayed_json_schema_value(fld, quote! { serde_json::json!({ "type": "boolean" }) });
+    let schema = nullable_slot_json_schema_value(
+        fld,
+        arrayed_json_schema_value(fld, quote! { serde_json::json!({ "type": "boolean" }) }),
+    );
     quote! {
         properties.insert(#field_name_str.to_string(), { #schema });
     }
@@ -9110,9 +9126,12 @@ fn build_boolean_field_schema(fld: &FieldDef, field_name_str: &str) -> proc_macr
 /// carries none of those constraints.
 #[cfg(feature = "jsonschema")]
 fn build_char_field_schema(fld: &FieldDef, field_name_str: &str) -> proc_macro2::TokenStream {
-    let schema = arrayed_json_schema_value(
+    let schema = nullable_slot_json_schema_value(
         fld,
-        quote! { serde_json::json!({ "type": "string", "minLength": 1, "maxLength": 1 }) },
+        arrayed_json_schema_value(
+            fld,
+            quote! { serde_json::json!({ "type": "string", "minLength": 1, "maxLength": 1 }) },
+        ),
     );
     quote! {
         properties.insert(#field_name_str.to_string(), { #schema });
@@ -9181,9 +9200,12 @@ fn object_id_hex_json_schema() -> proc_macro2::TokenStream {
 /// Builds the JSON schema for a `MongoDB` `ObjectId` field (`{ "$oid": string }`).
 #[cfg(all(feature = "jsonschema", feature = "object_id"))]
 fn build_object_id_field_schema(fld: &FieldDef, field_name_str: &str) -> proc_macro2::TokenStream {
-    let schema = arrayed_json_schema_value(
+    let schema = nullable_slot_json_schema_value(
         fld,
-        object_id_json_schema_value(&object_id_hex_json_schema()),
+        arrayed_json_schema_value(
+            fld,
+            object_id_json_schema_value(&object_id_hex_json_schema()),
+        ),
     );
     quote! {
         properties.insert(#field_name_str.to_string(), { #schema });
@@ -9197,9 +9219,12 @@ fn build_string_format_field_schema(
     field_name_str: &str,
     format: &str,
 ) -> proc_macro2::TokenStream {
-    let schema = arrayed_json_schema_value(
+    let schema = nullable_slot_json_schema_value(
         fld,
-        quote! { serde_json::json!({ "type": "string", "format": #format }) },
+        arrayed_json_schema_value(
+            fld,
+            quote! { serde_json::json!({ "type": "string", "format": #format }) },
+        ),
     );
     quote! {
         properties.insert(#field_name_str.to_string(), { #schema });
@@ -9218,7 +9243,7 @@ fn build_tuple_field_schema(
         Err(rejection) => return map_member_rejection_error(field_name_str, &rejection),
     };
 
-    let schema = arrayed_json_schema_value(fld, tuple_schema);
+    let schema = nullable_slot_json_schema_value(fld, arrayed_json_schema_value(fld, tuple_schema));
     quote! {
         properties.insert(#field_name_str.to_string(), #schema);
     }
@@ -9231,7 +9256,10 @@ fn build_tuple_field_schema(
 fn build_unknown_field_schema(fld: &FieldDef, field_name_str: &str) -> proc_macro2::TokenStream {
     log::trace!("Unknown => field_name: {field_name_str}, fld: {fld:?}");
 
-    let schema = arrayed_json_schema_value(fld, opaque_json_schema_value(fld));
+    let schema = nullable_slot_json_schema_value(
+        fld,
+        arrayed_json_schema_value(fld, opaque_json_schema_value(fld)),
+    );
     quote! {
         properties.insert(#field_name_str.to_string(), #schema);
     }
@@ -9941,6 +9969,28 @@ fn validate_ts_optional_flag(field_optional: bool, flag_set: bool) -> Result<(),
     Ok(())
 }
 
+fn validate_nullable_flag(field_optional: bool, flag_set: bool) -> Result<(), String> {
+    if flag_set && !field_optional {
+        return Err("#[model_schema_prop(nullable)] requires an Option<T> field".into());
+    }
+    Ok(())
+}
+
+/// Rejects `nullable` written beside `ts_optional`: the two disagree about the key.
+/// `nullable` keeps it and writes `null` for a `None`; `ts_optional` drops it entirely. Together
+/// they would spell `field?: T | null`, a third state neither flag models.
+fn check_nullable_ts_optional_conflict(flags: &ModelSchemaPropMeta) -> Result<(), String> {
+    if flags.nullable && flags.ts_optional {
+        return Err(
+            "#[model_schema_prop(nullable)] and ts_optional cannot be written together: nullable \
+             keeps the key and writes `null` for a `None`, ts_optional drops the key entirely. \
+             Pick the one the wire actually carries."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 /// The field's ident as a string, empty for a positional slot that has none.
 fn field_ident_string(field: &Field) -> String {
     field
@@ -9967,22 +10017,49 @@ fn push_described_field(field_defs: &mut Vec<FieldDef>, field_def: FieldDef) {
     }
 }
 
-/// Rejects a named `Option` field whose serde attributes let a `None` reach the wire as `null`.
+/// Rejects a named `Option` field whose serde attributes let a `None` reach the wire as `null`,
+/// unless `nullable` already declares that shape on the author's word.
 #[cfg(feature = "serde")]
-fn check_optional_field_serialization(field: &Field, is_optional: bool) -> Result<(), syn::Error> {
+fn check_optional_field_serialization(
+    field: &Field,
+    is_optional: bool,
+    is_nullable: bool,
+) -> Result<(), syn::Error> {
     let Some(ident) = field.ident.as_ref() else {
         return Ok(());
     };
-    if !is_optional || parse_serde_key_omission(&field.attrs).omits_key {
+    if !is_optional || is_nullable || parse_serde_key_omission(&field.attrs).omits_key {
         return Ok(());
     }
     Err(syn::Error::new_spanned(
         field,
         format!(
-            "model_schema: field `{ident}` is `Option` but is serialized as `null` when `None`, \
-             while the generated schema only accepts the key being absent. Add \
-             #[serde(skip_serializing_if = \"Option::is_none\")] (plus `default` if the type \
-             derives Deserialize), or `skip` / `skip_serializing`."
+            "model_schema: field `{ident}` is `Option`, so its declared shape is `{ident}: T | \
+             undefined` — the key is dropped for a `None`, not written as `null`. serde writes \
+             `null` unless told otherwise. Add #[serde(skip_serializing_if = \"Option::is_none\")] \
+             (plus `default` if the type derives Deserialize), or `skip` / `skip_serializing` — or \
+             declare #[model_schema_prop(nullable)] if the wire really does carry `null` here."
+        ),
+    ))
+}
+
+/// Rejects a `nullable` field whose serde attributes drop the key the flag says is always
+/// written.
+#[cfg(feature = "serde")]
+fn check_nullable_field_serialization(field: &Field, is_nullable: bool) -> Result<(), syn::Error> {
+    let Some(ident) = field.ident.as_ref() else {
+        return Ok(());
+    };
+    if !is_nullable || !parse_serde_key_omission(&field.attrs).omits_key {
+        return Ok(());
+    }
+    Err(syn::Error::new_spanned(
+        field,
+        format!(
+            "model_schema: field `{ident}` is declared #[model_schema_prop(nullable)], so its key \
+             is always written and a `None` reaches the wire as `null` — but its serde attribute \
+             drops the key instead, and the generated schema requires it. Remove the key-dropping \
+             attribute, or drop the `nullable` flag."
         ),
     ))
 }
@@ -10020,14 +10097,16 @@ fn check_omitted_key_is_readable(
 
 /// The serde-read guard errors the field violates.
 ///
-/// A hidden serde attribute leaves every serde-read diagnostic unreliable — the `Option`-null guard
-/// included, since the wrapper is exactly what kept its evidence out of the meta. The
-/// positional-constraint guard reads no serde attribute, so it stands whatever the wrapper hid.
+/// A hidden serde attribute leaves every serde-read diagnostic unreliable — the `Option`-null and
+/// `nullable`-key guards included, since the wrapper is exactly what kept its evidence out of the
+/// meta. The positional-constraint guard reads no serde attribute, so it stands whatever the
+/// wrapper hid.
 #[cfg(feature = "serde")]
 fn field_guard_errors(
     field: &Field,
     raw_field_ident: &str,
     is_optional: bool,
+    is_nullable: bool,
     serde_field_meta: &SerdeFieldMeta,
     container_defaulted: bool,
     positional_constraint_error: Option<proc_macro2::TokenStream>,
@@ -10036,7 +10115,8 @@ fn field_guard_errors(
         .into_iter()
         .chain(serde_field_meta.cfg_attr_rejection.as_ref().map_or_else(
             || {
-                check_optional_field_serialization(field, is_optional)
+                check_optional_field_serialization(field, is_optional, is_nullable)
+                    .and_then(|()| check_nullable_field_serialization(field, is_nullable))
                     .and_then(|()| {
                         check_omitted_key_is_readable(field, is_optional, container_defaulted)
                     })
@@ -10091,7 +10171,7 @@ fn collect_field_guard_errors(
 
 /// Every guard the field's `model_schema_prop` attribute earns: what the parser refused, then an
 /// unparseable `pattern`, then a bound written where the type renders none, an `as` naming a type
-/// the field is not written as, and the three misuses the flag validators answer for.
+/// the field is not written as, and the misuses the flag validators answer for.
 fn model_schema_prop_guard_errors(
     field: &Field,
     field_def: &FieldDef,
@@ -10113,6 +10193,12 @@ fn model_schema_prop_guard_errors(
             label,
             validate_as_number_flag(&field_def.field_type, prop_meta.as_number),
         ),
+        flag_guard_error(
+            field,
+            label,
+            validate_nullable_flag(field_def.is_optional(), prop_meta.nullable),
+        ),
+        flag_guard_error(field, label, check_nullable_ts_optional_conflict(prop_meta)),
     ];
 
     prop_meta
@@ -10379,6 +10465,7 @@ fn process_field(
         field,
         &raw_field_ident,
         field_def.is_optional(),
+        model_schema_prop_meta.nullable,
         &serde_field_meta,
         ctx.container_defaulted,
         positional_constraint_error,
@@ -10540,6 +10627,7 @@ fn apply_model_schema_prop_meta(
         || prop_meta.maximum.is_some()
         || prop_meta.ts_optional
         || prop_meta.as_number
+        || prop_meta.nullable
         || !prop_meta.preprocess.is_empty())
     .then_some(prop_meta);
 

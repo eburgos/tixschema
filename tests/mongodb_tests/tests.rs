@@ -233,9 +233,9 @@ fn test_basic_object_id_types() {
     let zod_schema = User::zod_schema();
     assert!(zod_schema.contains("id: z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: \"Invalid ObjectId\" }) }),"));
     assert!(zod_schema.contains("name: z.string(),"));
-    assert!(
-        zod_schema.contains("email: z.union([z.string(), z.undefined()]).prefault(undefined),")
-    );
+    assert!(zod_schema.contains(
+        "email: z.union([z.null().transform(() => undefined), z.string(), z.undefined()]).prefault(undefined),"
+    ));
 }
 
 #[test]
@@ -263,7 +263,7 @@ fn test_complex_nested_object_id_structures() {
         "metadata: z.record(z.string(), z.object({{ $oid: {regex_pattern} }})),"
     )));
     assert!(zod_schema.contains(&format!(
-        "parent_id: z.union([z.object({{ $oid: {regex_pattern} }}), z.undefined()]).prefault(undefined),"
+        "parent_id: z.union([z.null().transform(() => undefined), z.object({{ $oid: {regex_pattern} }}), z.undefined()]).prefault(undefined),"
     )));
     assert!(zod_schema.contains(&format!(
         "nested_refs: z.record(z.string(), z.array(z.object({{ $oid: {regex_pattern} }}))),"
@@ -361,10 +361,12 @@ fn test_json_schema_optional_parent() {
     assert!(!required.contains(&serde_json::Value::String("parent_id".to_owned())));
 
     let parent_id_prop = &properties["parent_id"];
-    assert_eq!(parent_id_prop["type"], "object");
-    assert_eq!(parent_id_prop["properties"]["$oid"]["type"], "string");
-    assert_eq!(parent_id_prop["required"][0], "$oid");
-    assert_eq!(parent_id_prop["additionalProperties"], false);
+    let parent_id_base = &parent_id_prop["anyOf"][0];
+    assert_eq!(parent_id_base["type"], "object");
+    assert_eq!(parent_id_base["properties"]["$oid"]["type"], "string");
+    assert_eq!(parent_id_base["required"][0], "$oid");
+    assert_eq!(parent_id_base["additionalProperties"], false);
+    assert_eq!(parent_id_prop["anyOf"][1]["type"], "null");
 }
 
 #[test]
@@ -437,7 +439,7 @@ fn test_object_id_json_schema() {
 fn test_object_id_zod_schema() {
     let zod_schema = Post::zod_schema();
 
-    assert!(zod_schema.contains("parent_id: z.union([z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: \"Invalid ObjectId\" }) }), z.undefined()]).prefault(undefined),"));
+    assert!(zod_schema.contains("parent_id: z.union([z.null().transform(() => undefined), z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: \"Invalid ObjectId\" }) }), z.undefined()]).prefault(undefined),"));
 }
 
 #[test]
@@ -450,7 +452,7 @@ fn test_optional_object_id() {
     assert!(ts_definition.contains("email: string;"));
 
     let zod_schema = UserWithOptionalId::zod_schema();
-    assert!(zod_schema.contains("id: z.union([z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: \"Invalid ObjectId\" }) }), z.undefined()]).prefault(undefined),"));
+    assert!(zod_schema.contains("id: z.union([z.null().transform(() => undefined), z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: \"Invalid ObjectId\" }) }), z.undefined()]).prefault(undefined),"));
     assert!(zod_schema.contains("name: z.string(),"));
     assert!(zod_schema.contains("email: z.string(),"));
 }
@@ -460,7 +462,7 @@ fn test_optional_object_id() {
 fn test_optional_object_id_zod_schema() {
     let zod_schema = UserWithOptionalId::zod_schema();
 
-    assert!(zod_schema.contains("id: z.union([z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: \"Invalid ObjectId\" }) }), z.undefined()]).prefault(undefined),"));
+    assert!(zod_schema.contains("id: z.union([z.null().transform(() => undefined), z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: \"Invalid ObjectId\" }) }), z.undefined()]).prefault(undefined),"));
     assert!(zod_schema.contains("name: z.string(),"));
     assert!(zod_schema.contains("email: z.string(),"));
 }

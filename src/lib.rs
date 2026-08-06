@@ -61,7 +61,14 @@ use proc_macro::TokenStream;
  *   "additionalProperties": false,
  *   "properties": {
  *     "age": {
- *       "type": "integer"
+ *       "anyOf": [
+ *         {
+ *           "type": "integer"
+ *         },
+ *         {
+ *           "type": "null"
+ *         }
+ *       ]
  *     },
  *     "firstName": {
  *       "type": "string"
@@ -120,7 +127,7 @@ export type User = {
 ///
 #[doc = "```typescript
 const User$RawSchema = z.strictObject({
-  age: z.union([z.number().int(), z.undefined()]).prefault(undefined),
+  age: z.union([z.null().transform(() => undefined), z.number().int(), z.undefined()]).prefault(undefined),
   firstName: z.string(),
   id: z.string(),
   lastName: z.string(),
@@ -240,7 +247,14 @@ export const Status$Schema: ZodType<Status> = Status$RawSchema;
  *           "const": "userDeleted"
  *         },
  *         "reason": {
- *           "type": "string"
+ *           "anyOf": [
+ *             {
+ *               "type": "string"
+ *             },
+ *             {
+ *               "type": "null"
+ *             }
+ *           ]
  *         },
  *         "userId": {
  *           "type": "string"
@@ -298,7 +312,7 @@ const Event$RawSchema = z.discriminatedUnion("type", [z.strictObject({
   userId: z.string(),
 }), z.strictObject({
   type: z.literal("userDeleted"),
-  reason: z.union([z.string(), z.undefined()]).prefault(undefined),
+  reason: z.union([z.null().transform(() => undefined), z.string(), z.undefined()]).prefault(undefined),
   userId: z.string(),
 })]);
 
@@ -388,17 +402,24 @@ pub struct Document {
  *       }
  *     },
  *     "parent_id": {
- *       "type": "object",
- *       "properties": {
- *         "$oid": {
- *           "type": "string",
- *           "pattern": "^[a-f0-9]{24}$"
+ *       "anyOf": [
+ *         {
+ *           "type": "object",
+ *           "properties": {
+ *             "$oid": {
+ *               "type": "string",
+ *               "pattern": "^[a-f0-9]{24}$"
+ *             }
+ *           },
+ *           "required": [
+ *             "$oid"
+ *           ],
+ *           "additionalProperties": false
+ *         },
+ *         {
+ *           "type": "null"
  *         }
- *       },
- *       "required": [
- *         "$oid"
- *       ],
- *       "additionalProperties": false
+ *       ]
  *     },
  *     "tags": {
  *       "type": "array",
@@ -470,7 +491,7 @@ const Document$RawSchema = z.strictObject({
   author_id: z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) }),
   id: z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) }),
   metadata: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) })),
-  parent_id: z.union([z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) }), z.undefined()]).prefault(undefined),
+  parent_id: z.union([z.null().transform(() => undefined), z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) }), z.undefined()]).prefault(undefined),
   tags: z.array(z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) })),
   title: z.string(),
 });
@@ -749,6 +770,25 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 ///     pub name: String,
 /// }
 /// ```
+///
+/// ## Flags
+///
+/// These take no value, and each is only valid on the field shape it names — applying one
+/// elsewhere is a compile error.
+///
+/// - `ts_optional` — on an `Option<T>` field, writes the optional TypeScript key `field?: T`
+///   instead of the default `field: T | undefined`. TypeScript-only; Zod and JSON Schema are
+///   unchanged.
+/// - `as_number` — on a `DateTime<Tz>` field, renders an epoch-millisecond `number` with an
+///   inline Zod coercer instead of the default `Date`.
+/// - `nullable` — on an `Option<T>` field, renders `T | null` with the key **required** on
+///   TypeScript, Zod and JSON Schema, instead of the default `T | undefined` with the key
+///   dropped for a `None`. Refused together with `ts_optional` — the two disagree about the key.
+///   With the `serde` feature on, the field must never carry a key-dropping serde attribute
+///   (`skip_serializing_if`, `skip_serializing`, `skip`): `nullable` declares the key always
+///   written, so serde has to write `null` for a `None` rather than omit the key, and the guard
+///   naming that pairing is the mirror of the one that requires such an attribute on a bare
+///   `Option<T>` field with no `nullable`.
 #[proc_macro_attribute]
 pub fn model_schema_prop(_args: TokenStream, input: TokenStream) -> TokenStream {
     // For now, simply pass through the input

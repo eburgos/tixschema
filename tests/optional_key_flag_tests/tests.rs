@@ -137,11 +137,15 @@ mod without_the_serde_feature {
         let zod = Profile::zod_schema();
 
         assert!(
-            zod.contains("nickname: z.union([z.string(), z.undefined()]).prefault(undefined),"),
+            zod.contains(
+                "nickname: z.union([z.null().transform(() => undefined), z.string(), z.undefined()]).prefault(undefined),"
+            ),
             "Got: {zod}"
         );
         assert!(
-            zod.contains("nick_handle: z.union([z.string(), z.undefined()]).prefault(undefined),"),
+            zod.contains(
+                "nick_handle: z.union([z.null().transform(() => undefined), z.string(), z.undefined()]).prefault(undefined),"
+            ),
             "Got: {zod}"
         );
     }

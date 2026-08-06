@@ -1,13 +1,13 @@
 use super::{
-    FieldDefType, check_os_string_field, collect_discriminated_variants, field_label,
-    get_field_def, render_discriminated_variants, validate_as_number_flag,
-    validate_ts_optional_flag,
+    FieldDefType, ModelSchemaPropMeta, check_nullable_ts_optional_conflict, check_os_string_field,
+    collect_discriminated_variants, field_label, get_field_def, render_discriminated_variants,
+    validate_as_number_flag, validate_nullable_flag, validate_ts_optional_flag,
 };
 
 #[cfg(feature = "serde")]
 use super::{
-    ConstraintLeaf, MemberAccess, ModelSchemaPropMeta, adjacent_collapsed_slot_guard_errors,
-    build_field_validation, cfg_attr_guard_error, check_omitted_key_is_readable,
+    ConstraintLeaf, MemberAccess, adjacent_collapsed_slot_guard_errors, build_field_validation,
+    cfg_attr_guard_error, check_nullable_field_serialization, check_omitted_key_is_readable,
     check_optional_field_serialization, collect_untagged_members, constrained_shape,
     enum_cfg_attr_guard_errors, generate_field_validation, generate_numeric_validation_code,
     generate_string_validation_code, has_serde_default, helper_name_stem,
@@ -152,8 +152,53 @@ fn as_number_err_on_non_datetime_field() {
     assert!(err.contains("DateTime<Tz>"));
 }
 
-/// Runs the guard over the sole field of `item`, deriving `is_optional` the way the generator
-/// does rather than re-sniffing the type.
+#[test]
+fn nullable_ok_on_option_field() {
+    validate_nullable_flag(true, true).unwrap();
+}
+
+#[test]
+fn nullable_ok_when_flag_unset() {
+    validate_nullable_flag(true, false).unwrap();
+    validate_nullable_flag(false, false).unwrap();
+}
+
+#[test]
+fn nullable_err_on_non_option_field() {
+    let err = validate_nullable_flag(false, true).unwrap_err();
+    assert!(err.contains("nullable"));
+    assert!(err.contains("Option<T>"));
+}
+
+#[test]
+fn nullable_ts_optional_conflict_err_when_both_set() {
+    let flags = ModelSchemaPropMeta {
+        nullable: true,
+        ts_optional: true,
+        ..ModelSchemaPropMeta::default()
+    };
+    let err = check_nullable_ts_optional_conflict(&flags).unwrap_err();
+    assert!(err.contains("nullable"));
+    assert!(err.contains("ts_optional"));
+}
+
+#[test]
+fn nullable_ts_optional_conflict_ok_when_only_one_set() {
+    check_nullable_ts_optional_conflict(&ModelSchemaPropMeta {
+        nullable: true,
+        ..ModelSchemaPropMeta::default()
+    })
+    .unwrap();
+    check_nullable_ts_optional_conflict(&ModelSchemaPropMeta {
+        ts_optional: true,
+        ..ModelSchemaPropMeta::default()
+    })
+    .unwrap();
+    check_nullable_ts_optional_conflict(&ModelSchemaPropMeta::default()).unwrap();
+}
+
+/// Runs the guard over the sole field of `item`, deriving `is_optional` and `is_nullable` the way
+/// the generator does rather than re-sniffing the type.
 #[cfg(feature = "serde")]
 fn guard_result(item: &syn::ItemStruct) -> Result<(), syn::Error> {
     let field = item.fields.iter().next().unwrap();
@@ -163,7 +208,17 @@ fn guard_result(item: &syn::ItemStruct) -> Result<(), syn::Error> {
         .map(ToString::to_string)
         .unwrap_or_default();
     let field_def = get_field_def(&field_name, &field.ty, "");
-    check_optional_field_serialization(field, field_def.is_optional())
+    let is_nullable = super::parse_model_schema_prop_attributes(&field.attrs).nullable;
+    check_optional_field_serialization(field, field_def.is_optional(), is_nullable)
+}
+
+/// Runs the `nullable`-key guard over the sole field of `item`, reading the flag off its
+/// `model_schema_prop` attribute the way the generator does.
+#[cfg(feature = "serde")]
+fn nullable_guard_result(item: &syn::ItemStruct) -> Result<(), syn::Error> {
+    let field = item.fields.iter().next().unwrap();
+    let is_nullable = super::parse_model_schema_prop_attributes(&field.attrs).nullable;
+    check_nullable_field_serialization(field, is_nullable)
 }
 
 /// Runs the omitted-key readability guard over the sole field of `item`, with the container's own
@@ -194,7 +249,69 @@ fn bare_option_field_is_rejected() {
     };
     let message = guard_result(&item).unwrap_err().to_string();
     assert!(message.contains("note"));
+    assert!(message.contains("T | undefined"));
     assert!(message.contains("skip_serializing_if = \"Option::is_none\""));
+    assert!(message.contains("nullable"));
+    assert!(!message.contains("only accepts the key being absent"));
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn bare_nullable_option_field_is_accepted() {
+    let item: syn::ItemStruct = syn::parse_quote! {
+        struct Report {
+            #[model_schema_prop(nullable)]
+            note: Option<String>,
+        }
+    };
+    guard_result(&item).unwrap();
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn nullable_field_with_a_key_dropping_attribute_is_rejected() {
+    for spelling in [
+        "skip_serializing_if = \"Option::is_none\"",
+        "skip_serializing",
+        "skip",
+    ] {
+        let item: syn::ItemStruct = syn::parse_str(&format!(
+            "struct Report {{ #[model_schema_prop(nullable)] #[serde({spelling})] note: \
+             Option<String> }}"
+        ))
+        .unwrap();
+        let message = nullable_guard_result(&item).unwrap_err().to_string();
+        assert!(message.contains("note"), "{spelling}: {message}");
+        assert!(message.contains("nullable"), "{spelling}: {message}");
+        assert!(
+            message.contains("key-dropping attribute"),
+            "{spelling}: {message}"
+        );
+    }
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn nullable_field_with_no_key_dropping_attribute_is_accepted() {
+    let item: syn::ItemStruct = syn::parse_quote! {
+        struct Report {
+            #[model_schema_prop(nullable)]
+            note: Option<String>,
+        }
+    };
+    nullable_guard_result(&item).unwrap();
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn non_nullable_field_with_a_key_dropping_attribute_passes_the_nullable_guard() {
+    let item: syn::ItemStruct = syn::parse_quote! {
+        struct Report {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            note: Option<String>,
+        }
+    };
+    nullable_guard_result(&item).unwrap();
 }
 
 /// Read off serde itself: a `Vec` behind a `skip_serializing_if` and nothing else serializes to
@@ -2687,7 +2804,7 @@ fn declared_default_renders_each_wrapped_shape_the_table_describes() {
             "IdType",
             quote::quote! { Option<DocumentId<String>> },
             "z.lazy(() => \
-             z.union([DocumentId$SchemaFactory(z.string()), z.undefined()]).prefault(undefined))",
+             z.union([z.null().transform(() => undefined), DocumentId$SchemaFactory(z.string()), z.undefined()]).prefault(undefined))",
         ),
         (
             "IdType",
@@ -7063,7 +7180,6 @@ fn a_sequence_wrapped_map_field_describes_as_the_array_of_the_map_it_holds() {
     for (map_type, wrapped_type) in [
         ("HashMap<String, u64>", "Vec<HashMap<String, u64>>"),
         ("HashMap<String, u64>", "VecDeque<HashMap<String, u64>>"),
-        ("HashMap<String, u64>", "Option<Vec<HashMap<String, u64>>>"),
         ("HashMap<Slot, u64>", "Vec<HashMap<Slot, u64>>"),
         (
             "HashMap<Slot, Vec<u64>>",
@@ -7084,6 +7200,22 @@ fn a_sequence_wrapped_map_field_describes_as_the_array_of_the_map_it_holds() {
     }
 }
 
+/// An `Option` around the wrapper is the field's own key-position optionality, which now widens the
+/// array with the same `anyOf [<base>, null]` every other optional key gets, on top of the wrap this
+/// test's unwrapped cases already prove.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_optional_sequence_wrapped_map_field_widens_the_array_with_null() {
+    let array = format!(
+        r#"serde_json :: json ! ({{ "type" : "array" , "items" : {} }})"#,
+        inserted_field_value("HashMap<String, u64>")
+    );
+    assert_eq!(
+        inserted_field_value("Option<Vec<HashMap<String, u64>>>"),
+        format!(r#"serde_json :: json ! ({{ "anyOf" : [{array} , {{ "type" : "null" }}] }})"#)
+    );
+}
+
 /// An `Option` the sequence holds is not the field's: the array is written either way, and the
 /// `None` lands among its items — so the map's own rendering is what admits the `null`, one level
 /// inside the array wrap rather than around it.
@@ -7100,8 +7232,6 @@ fn a_sequence_of_optional_maps_admits_the_null_among_its_items() {
 }
 
 /// A map named without a sequence wrapper describes exactly as it always has, on every key path.
-/// An `Option` around one is not such a wrapper: field position spells optionality by leaving the
-/// name out of `required`, as it does for every other field type, so the map itself is untouched.
 #[cfg(feature = "jsonschema")]
 #[test]
 fn an_unwrapped_map_field_keeps_the_object_it_has_always_described_as() {
@@ -7109,21 +7239,43 @@ fn an_unwrapped_map_field_keeps_the_object_it_has_always_described_as() {
     for (map_type, expected) in [
         ("HashMap<String, u64>", string_keyed),
         ("BTreeMap<String, u64>", string_keyed),
-        ("Option<HashMap<String, u64>>", string_keyed),
         (
             "HashMap<u32, u64>",
             r#"serde_json :: json ! ({ "type" : "object" , "additionalProperties" : true })"#,
+        ),
+    ] {
+        assert_eq!(inserted_field_value(map_type), expected, "for {map_type}");
+    }
+}
+
+/// An `Option` around an unwrapped map is not a sequence wrapper, but it is still the field's own
+/// key-position optionality — so, like every other optional key, it widens the map's own rendering
+/// with `anyOf [<base>, null]` rather than leaving it untouched.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_optional_unwrapped_map_field_widens_the_object_with_null() {
+    for (map_type, base) in [
+        (
+            "Option<HashMap<String, u64>>",
+            r#"serde_json :: json ! ({ "type" : "object" , "additionalProperties" : { "type" : "integer" } })"#,
         ),
         (
             "Option<HashMap<u32, u64>>",
             r#"serde_json :: json ! ({ "type" : "object" , "additionalProperties" : true })"#,
         ),
     ] {
-        assert_eq!(inserted_field_value(map_type), expected, "for {map_type}");
+        assert_eq!(
+            inserted_field_value(map_type),
+            format!(r#"serde_json :: json ! ({{ "anyOf" : [{base} , {{ "type" : "null" }}] }})"#),
+            "for {map_type}"
+        );
     }
     assert_eq!(
         inserted_field_value("Option<HashMap<Slot, u64>>"),
-        inserted_field_value("HashMap<Slot, u64>")
+        format!(
+            r#"serde_json :: json ! ({{ "anyOf" : [{} , {{ "type" : "null" }}] }})"#,
+            inserted_field_value("HashMap<Slot, u64>")
+        )
     );
 }
 

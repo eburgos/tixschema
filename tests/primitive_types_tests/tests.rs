@@ -264,7 +264,9 @@ fn test_char_types_typescript_and_zod() {
         "Got: {zod_schema}"
     );
     assert!(
-        zod_schema.contains("opt_char: z.union([z.string().length(1), z.undefined()])"),
+        zod_schema.contains(
+            "opt_char: z.union([z.null().transform(() => undefined), z.string().length(1), z.undefined()])"
+        ),
         "Got: {zod_schema}"
     );
     assert!(
@@ -290,7 +292,10 @@ fn test_char_types_json_schema() {
         properties["map_to_char"],
         serde_json::json!({ "type": "object", "additionalProperties": one_character_string })
     );
-    assert_eq!(properties["opt_char"], one_character_string);
+    assert_eq!(
+        properties["opt_char"],
+        serde_json::json!({ "anyOf": [one_character_string, { "type": "null" }] })
+    );
     assert_eq!(
         properties["pair"],
         serde_json::json!({
@@ -439,12 +444,12 @@ fn test_64bit_integers_ts_definition() {
     let zod_schema = LargeNumbers::zod_schema();
     assert!(zod_schema.contains("large_unsigned: z.number().int()"));
     assert!(zod_schema.contains("large_signed: z.number().int()"));
-    assert!(
-        zod_schema.contains("optional_large_unsigned: z.union([z.number().int(), z.undefined()])")
-    );
-    assert!(
-        zod_schema.contains("optional_large_signed: z.union([z.number().int(), z.undefined()])")
-    );
+    assert!(zod_schema.contains(
+        "optional_large_unsigned: z.union([z.null().transform(() => undefined), z.number().int(), z.undefined()])"
+    ));
+    assert!(zod_schema.contains(
+        "optional_large_signed: z.union([z.null().transform(() => undefined), z.number().int(), z.undefined()])"
+    ));
     assert!(zod_schema.contains("array_of_u64: z.array(z.number().int())"));
     assert!(zod_schema.contains("array_of_i64: z.array(z.number().int())"));
 }
@@ -605,9 +610,11 @@ fn test_primitive_types_typescript_generation_details() {
     assert_zod_fields_contain(
         &zod_schema,
         &["opt_i8", "opt_u64"],
-        "z.union([z.number().int(), z.undefined()])",
+        "z.union([z.null().transform(() => undefined), z.number().int(), z.undefined()])",
     );
-    assert!(zod_schema.contains("opt_f64: z.union([z.number(), z.undefined()])"));
+    assert!(zod_schema.contains(
+        "opt_f64: z.union([z.null().transform(() => undefined), z.number(), z.undefined()])"
+    ));
 
     assert_zod_fields_contain(
         &zod_schema,

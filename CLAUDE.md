@@ -219,7 +219,7 @@ pub struct BadConfig {
 - `String` → `string`
 - `bool` → `boolean`
 - Numeric types → `number`
-- `Option<T>` → `T | undefined` (Zod: `z.union([T, z.undefined()]).prefault(undefined)`); with `#[model_schema_prop(ts_optional)]` the TypeScript key becomes optional instead: `field?: T`
+- `Option<T>` → `T | undefined` (Zod: `z.union([z.null().transform(() => undefined), T, z.undefined()]).prefault(undefined)`, accepting an explicit `null` and coercing it to `undefined`; JSON Schema `anyOf: [T, {"type": "null"}]`, key left out of `required`); with `#[model_schema_prop(ts_optional)]` the TypeScript key becomes optional instead: `field?: T`; with `#[model_schema_prop(nullable)]` all three surfaces render `T | null` with the key **required** instead: Zod `z.union([T, z.null()])`, JSON Schema `anyOf: [T, {"type": "null"}]` with the key in `required`
 - `Vec<T>` → `Array<T>`
 - `HashMap<String, T>` → `Partial<Record<string, T>>`
 - Custom types → Reference by name (Json suffix stripped if present)
@@ -246,8 +246,8 @@ Generated schemas use Zod v4's modern syntax:
 export const User$Schema = z.strictObject({
   id: z.string(),
   name: z.string(),
-  email: z.union([z.string(), z.undefined()]).prefault(undefined),      // Modern v4 syntax
-  age: z.union([z.number().int(), z.undefined()]).prefault(undefined),  // Works with JSON schema generation
+  email: z.union([z.null().transform(() => undefined), z.string(), z.undefined()]).prefault(undefined),      // Modern v4 syntax, null coerced to undefined
+  age: z.union([z.null().transform(() => undefined), z.number().int(), z.undefined()]).prefault(undefined),  // Works with JSON schema generation
 });
 
 // ❌ OLD FORMAT (no longer generated)
@@ -297,6 +297,7 @@ All validation constraints generate checks in **Zod (frontend), JSON Schema, and
 | `preprocess = ["fn"]` | any | `z.preprocess(fn, ...)` | — | — (Zod-only) |
 | `ts_optional` | `Option<T>` | — | — | — (TypeScript-only) |
 | `as_number` | `DateTime<Tz>` | inline `z.preprocess(..., z.number())` | — | — (TS+Zod) |
+| `nullable` | `Option<T>` | `z.union([T, z.null()])`, key required | `anyOf: [T, {"type":"null"}]`, key required | guard: refuses a key-dropping serde attr |
 
 Multiple constraints on one field are combined. Multiple `preprocess` functions nest:
 `z.preprocess(fn1, z.preprocess(fn2, innerSchema))`.
@@ -304,6 +305,8 @@ Multiple constraints on one field are combined. Multiple `preprocess` functions 
 `ts_optional` is a bare flag (no value): it renders an `Option<T>` field as the optional TypeScript key `field?: T` instead of the default `field: T | undefined`. Zod and JSON Schema output are unchanged. It is only valid on `Option<T>` fields (non-`Option` is a compile error) and composes with `as = Type`.
 
 `as_number` is a bare flag (no value): it renders a `DateTime<Tz>` field as a `number` (epoch milliseconds) with an inline self-contained Zod coercer, instead of the default native `Date` (`z.coerce.date()`). It is only valid on `DateTime<Tz>` fields (anything else is a compile error) and is honored on a tuple-variant `DateTime<Tz>` enum payload.
+
+`nullable` is a bare flag (no value): on an `Option<T>` field it renders `T | null` with the key **required** on TypeScript, Zod and JSON Schema, instead of the default coercing `T | undefined` with the key left optional. It is only valid on `Option<T>` fields (non-`Option` is a compile error), is refused together with `ts_optional` (the two disagree about the key), and composes with `preprocess` — the preprocess wrap goes around the whole nullable union. With the `serde` feature on, it is also refused together with a key-dropping serde attribute (`skip_serializing_if`, `skip_serializing`, `skip`) — the flag declares the key always written, so dropping it would let serde write a payload the generated schema does not admit. The mirror guard, `check_optional_field_serialization`, requires that same attribute on a bare `Option<T>` field carrying no `nullable`.
 
 ```rust
 #[model_schema()]
@@ -650,7 +653,7 @@ The macro transforms Rust types to TypeScript following these rules:
 
 1. **Type Name Transformation**: If the Rust type name ends with `Json`, the suffix is stripped (e.g., `UserJson` → `User`). Otherwise, the name is used as-is (e.g., `User` → `User`).
 2. **Field Names**: Respect serde rename attributes (`#[serde(rename = "...")]`, `#[serde(rename_all = "...")]`)
-3. **Optional Fields**: `Option<T>` becomes `T | undefined` in TypeScript and `z.union([type, z.undefined()]).prefault(undefined)` in Zod
+3. **Optional Fields**: `Option<T>` becomes `T | undefined` in TypeScript and `z.union([z.null().transform(() => undefined), type, z.undefined()]).prefault(undefined)` in Zod, accepting both an absent key and an explicit `null`
 4. **Arrays**: `Vec<T>` becomes `Array<T>` in TypeScript
 5. **Maps**: `HashMap<String, T>` becomes `Partial<Record<string, T>>` in TypeScript
 6. **Nested Types**: Reference other types by name (Json suffix stripped if present)
@@ -805,7 +808,7 @@ export const Document$Schema = z.strictObject({
   author_id: z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) }),
   tags: z.array(z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) })),
   metadata: z.record(z.string(), z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) })),
-  parent_id: z.union([z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) }), z.undefined()]).prefault(undefined),
+  parent_id: z.union([z.null().transform(() => undefined), z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) }), z.undefined()]).prefault(undefined),
   related: z.record(z.string(), z.array(z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: "Invalid ObjectId" }) }))),
 });
 ```

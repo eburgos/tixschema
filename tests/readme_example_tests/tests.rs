@@ -295,7 +295,7 @@ fn test_the_object_id_example_is_declarable_and_shows_what_it_emits() {
         "pub struct Document {",
         &Document::zod_schema(),
         &[
-            "  parent_id: z.union([z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: \"Invalid ObjectId\" }) }), z.undefined()]).prefault(undefined),",
+            "  parent_id: z.union([z.null().transform(() => undefined), z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: \"Invalid ObjectId\" }) }), z.undefined()]).prefault(undefined),",
         ],
     );
 }
@@ -343,7 +343,7 @@ fn test_the_chrono_example_is_declarable_and_shows_what_it_emits() {
         &Event::zod_schema(),
         &[
             "  created_at: z.coerce.date(),",
-            "  updated_at: z.union([z.coerce.date(), z.undefined()]).prefault(undefined),",
+            "  updated_at: z.union([z.null().transform(() => undefined), z.coerce.date(), z.undefined()]).prefault(undefined),",
         ],
     );
 }

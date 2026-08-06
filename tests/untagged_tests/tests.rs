@@ -371,7 +371,7 @@ fn test_compliant_union_zod() {
     assert!(
         zod.contains(
             "z.strictObject({ id: z.string(), \
-             note: z.union([z.string(), z.undefined()]).prefault(undefined), })"
+             note: z.union([z.null().transform(() => undefined), z.string(), z.undefined()]).prefault(undefined), })"
         ),
         "Got:\n{zod}"
     );
@@ -425,6 +425,13 @@ fn test_compliant_union_json_schema() {
     );
     assert!(
         !required.contains(&serde_json::json!("note")),
+        "Got:\n{schema}"
+    );
+
+    let properties = any_of[1]["properties"].as_object().unwrap();
+    assert_eq!(
+        properties["note"],
+        serde_json::json!({ "anyOf": [{ "type": "string" }, { "type": "null" }] }),
         "Got:\n{schema}"
     );
 }

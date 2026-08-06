@@ -170,15 +170,21 @@ fn test_optional_fields_use_union_with_undefined() {
         "Required fields should not be wrapped. Got: {zod}"
     );
     assert!(
-        zod.contains("optional_string: z.union([z.string(), z.undefined()])"),
+        zod.contains(
+            "optional_string: z.union([z.null().transform(() => undefined), z.string(), z.undefined()])"
+        ),
         "Optional strings should use z.union with undefined. Got: {zod}"
     );
     assert!(
-        zod.contains("optional_number: z.union([z.number().int(), z.undefined()])"),
+        zod.contains(
+            "optional_number: z.union([z.null().transform(() => undefined), z.number().int(), z.undefined()])"
+        ),
         "Optional numbers should use z.union with undefined. Got: {zod}"
     );
     assert!(
-        zod.contains("optional_bool: z.union([z.boolean(), z.undefined()])"),
+        zod.contains(
+            "optional_bool: z.union([z.null().transform(() => undefined), z.boolean(), z.undefined()])"
+        ),
         "Optional booleans should use z.union with undefined. Got: {zod}"
     );
 }
@@ -196,7 +202,9 @@ fn test_vec_fields_use_z_array() {
         "Vec<i32> should use z.array(z.number().int()). Got: {zod}"
     );
     assert!(
-        zod.contains("optional_array: z.union([z.array(z.string()), z.undefined()])"),
+        zod.contains(
+            "optional_array: z.union([z.null().transform(() => undefined), z.array(z.string()), z.undefined()])"
+        ),
         "Optional arrays should wrap array in union. Got: {zod}"
     );
 }
@@ -360,7 +368,7 @@ fn test_complex_nested_collections() {
     );
     assert!(
         zod.contains(
-            "optional_map: z.union([z.record(z.string(), z.number().int()), z.undefined()])"
+            "optional_map: z.union([z.null().transform(() => undefined), z.record(z.string(), z.number().int()), z.undefined()])"
         ),
         "Optional HashMap should wrap in union. Got: {zod}"
     );
@@ -399,7 +407,9 @@ fn test_objectid_generates_proper_validation() {
         "Vec<ObjectId> should work. Got: {zod}"
     );
     assert!(
-        zod.contains("author_id: z.union([z.object({ $oid: z.string().regex("),
+        zod.contains(
+            "author_id: z.union([z.null().transform(() => undefined), z.object({ $oid: z.string().regex("
+        ),
         "Option<ObjectId> should work. Got: {zod}"
     );
 }

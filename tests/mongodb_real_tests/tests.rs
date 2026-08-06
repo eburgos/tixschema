@@ -88,9 +88,9 @@ fn test_real_objectid_basic_types() {
     let zod_schema = RealUser::zod_schema();
     assert!(zod_schema.contains("id: z.object({ $oid: z.string().regex(/^[a-f0-9]{24}$/, { message: \"Invalid ObjectId\" }) }),"));
     assert!(zod_schema.contains("name: z.string(),"));
-    assert!(
-        zod_schema.contains("email: z.union([z.string(), z.undefined()]).prefault(undefined),")
-    );
+    assert!(zod_schema.contains(
+        "email: z.union([z.null().transform(() => undefined), z.string(), z.undefined()]).prefault(undefined),"
+    ));
 }
 
 #[test]
@@ -182,7 +182,7 @@ fn test_real_objectid_complex_structures() {
         "metadata: z.record(z.string(), z.object({{ $oid: {regex_pattern} }})),"
     )));
     assert!(zod_schema.contains(&format!(
-        "parent_id: z.union([z.object({{ $oid: {regex_pattern} }}), z.undefined()]).prefault(undefined),"
+        "parent_id: z.union([z.null().transform(() => undefined), z.object({{ $oid: {regex_pattern} }}), z.undefined()]).prefault(undefined),"
     )));
     assert!(zod_schema.contains(&format!(
         "nested_refs: z.record(z.string(), z.array(z.object({{ $oid: {regex_pattern} }}))),"

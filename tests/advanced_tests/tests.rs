@@ -351,7 +351,9 @@ fn test_complex_nested_ts_definition() {
     assert!(company_zod_schema.contains("department_names: z.array(z.string())"));
     assert!(company_zod_schema.contains("headquarters: Address$Schema"));
     assert!(company_zod_schema.contains("get settings() { return CompanySettings$Schema; },"));
-    assert!(employee_zod_schema.contains("manager: z.union([z.string(), z.undefined()])"));
+    assert!(employee_zod_schema.contains(
+        "manager: z.union([z.null().transform(() => undefined), z.string(), z.undefined()])"
+    ));
 }
 
 #[test]
@@ -454,21 +456,21 @@ fn test_edge_cases_ts_definition() {
             ("booleans", "z.array(z.boolean())"),
             (
                 "optional_strings",
-                "z.union([z.array(z.string()), z.undefined()])",
+                "z.union([z.null().transform(() => undefined), z.array(z.string()), z.undefined()])",
             ),
             (
                 "optional_numbers",
-                "z.union([z.array(z.number().int()), z.undefined()])",
+                "z.union([z.null().transform(() => undefined), z.array(z.number().int()), z.undefined()])",
             ),
             ("string_map", "z.record(z.string(), z.string())"),
             (
                 "nested_optional",
-                "z.union([ContactInfo$Schema, z.undefined()])",
+                "z.union([z.null().transform(() => undefined), ContactInfo$Schema, z.undefined()])",
             ),
             ("nested_array", "z.array(ContactInfo$Schema)"),
             (
                 "optional_nested_array",
-                "z.union([z.array(ContactInfo$Schema), z.undefined()])",
+                "z.union([z.null().transform(() => undefined), z.array(ContactInfo$Schema), z.undefined()])",
             ),
         ],
     );

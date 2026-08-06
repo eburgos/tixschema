@@ -103,9 +103,12 @@ fn test_a_fixed_array_describes_its_length_at_the_level_it_bounds() {
     });
     let open_integers = serde_json::json!({ "type": "array", "items": { "type": "integer" } });
 
-    for field in ["ids", "optional_ids"] {
-        assert_eq!(properties[field], three_integers, "for: {field}");
-    }
+    assert_eq!(properties["ids"], three_integers);
+    // The field's own `Option` widens the bounded array with `null` rather than replacing its bound.
+    assert_eq!(
+        properties["optional_ids"],
+        serde_json::json!({ "anyOf": [three_integers, { "type": "null" }] })
+    );
     for field in ["const_ids", "slice_ids"] {
         assert_eq!(properties[field], open_integers, "for: {field}");
     }
@@ -187,7 +190,8 @@ fn test_a_fixed_array_validates_its_length_in_zod() {
     // The field's own optionality wraps the bounded array rather than replacing its bound.
     assert!(
         zod_schema.contains(
-            "optional_ids: z.union([z.array(z.number().int()).length(3), z.undefined()])"
+            "optional_ids: z.union([z.null().transform(() => undefined), \
+             z.array(z.number().int()).length(3), z.undefined()])"
         ),
         "Got: {zod_schema}"
     );

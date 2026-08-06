@@ -162,9 +162,18 @@ fn test_optional_fields_not_in_required() {
     assert!(properties.contains_key("optional_number"));
     assert!(properties.contains_key("optional_bool"));
 
-    assert_eq!(properties["optional_string"]["type"], "string");
-    assert_eq!(properties["optional_number"]["type"], "integer");
-    assert_eq!(properties["optional_bool"]["type"], "boolean");
+    assert_eq!(
+        properties["optional_string"],
+        serde_json::json!({ "anyOf": [{ "type": "string" }, { "type": "null" }] })
+    );
+    assert_eq!(
+        properties["optional_number"],
+        serde_json::json!({ "anyOf": [{ "type": "integer" }, { "type": "null" }] })
+    );
+    assert_eq!(
+        properties["optional_bool"],
+        serde_json::json!({ "anyOf": [{ "type": "boolean" }, { "type": "null" }] })
+    );
 
     let required = schema["required"].as_array().unwrap();
     assert_eq!(required.len(), 1);
@@ -186,8 +195,15 @@ fn test_vec_fields_generate_array_schemas() {
     assert_eq!(properties["numbers"]["type"], "array");
     assert_eq!(properties["numbers"]["items"]["type"], "integer");
 
-    assert_eq!(properties["optional_array"]["type"], "array");
-    assert_eq!(properties["optional_array"]["items"]["type"], "string");
+    assert_eq!(
+        properties["optional_array"],
+        serde_json::json!({
+            "anyOf": [
+                { "type": "array", "items": { "type": "string" } },
+                { "type": "null" }
+            ]
+        })
+    );
 
     let required = schema["required"].as_array().unwrap();
     assert!(required.contains(&Value::String("tags".to_owned())));
@@ -222,7 +238,10 @@ fn test_opaque_value_fields_generate_permissive_schemas() {
 
     // An opaque field carries no type name, so it admits any value.
     assert_eq!(properties["payload"], serde_json::json!({}));
-    assert_eq!(properties["optional_payload"], serde_json::json!({}));
+    assert_eq!(
+        properties["optional_payload"],
+        serde_json::json!({ "anyOf": [{}, { "type": "null" }] })
+    );
 
     assert_eq!(properties["payloads"]["type"], "array");
     assert_eq!(properties["payloads"]["items"], serde_json::json!({}));
@@ -358,11 +377,12 @@ fn test_complex_nested_collections() {
     assert_eq!(map_of_arrays_additional["items"]["type"], "string");
 
     // Option<HashMap<String, i32>>
-    assert_eq!(properties["optional_map"]["type"], "object");
+    assert_eq!(properties["optional_map"]["anyOf"][0]["type"], "object");
     assert_eq!(
-        properties["optional_map"]["additionalProperties"]["type"],
+        properties["optional_map"]["anyOf"][0]["additionalProperties"]["type"],
         "integer"
     );
+    assert_eq!(properties["optional_map"]["anyOf"][1]["type"], "null");
 
     let required = schema["required"].as_array().unwrap();
     assert!(required.contains(&Value::String("map_of_arrays".to_owned())));
@@ -394,8 +414,12 @@ fn test_objectid_generates_proper_schema() {
     assert_eq!(id_prop["additionalProperties"], false);
 
     let author_prop = &properties["author_id"];
-    assert_eq!(author_prop["type"], "object");
-    assert_eq!(author_prop["properties"]["$oid"]["type"], "string");
+    assert_eq!(author_prop["anyOf"][0]["type"], "object");
+    assert_eq!(
+        author_prop["anyOf"][0]["properties"]["$oid"]["type"],
+        "string"
+    );
+    assert_eq!(author_prop["anyOf"][1]["type"], "null");
 
     // Vec<ObjectId>
     let tags_prop = &properties["tag_ids"];

@@ -88,6 +88,22 @@ fn test_parse_no_ts_optional_by_default() {
 }
 
 #[test]
+fn test_parse_nullable() {
+    let attr: Attribute = parse_quote! { #[model_schema_prop(nullable)] };
+    let meta = parse_model_schema_prop_attributes(&[attr]);
+    assert!(meta.nullable);
+    assert!(meta.as_type.is_none());
+    assert!(meta.literal.is_none());
+}
+
+#[test]
+fn test_parse_no_nullable_by_default() {
+    let attr: Attribute = parse_quote! { #[model_schema_prop(minLength = 1)] };
+    let meta = parse_model_schema_prop_attributes(&[attr]);
+    assert!(!meta.nullable);
+}
+
+#[test]
 fn test_parse_all_attributes() {
     let attr: Attribute =
         parse_quote! { #[model_schema_prop(as = String, literal = "test", minLength = 3)] };
@@ -129,7 +145,7 @@ fn a_misspelled_length_constraint_key_is_refused_by_the_name_as_written() {
 /// one it actually reads — the list and the arms cannot drift apart while both hold.
 #[test]
 fn no_key_the_parser_reads_is_rejected() {
-    let attrs: [Attribute; 10] = [
+    let attrs: [Attribute; 11] = [
         parse_quote! { #[model_schema_prop(as = String)] },
         parse_quote! { #[model_schema_prop(literal = "Tixena")] },
         parse_quote! { #[model_schema_prop(minLength = 1)] },
@@ -140,6 +156,7 @@ fn no_key_the_parser_reads_is_rejected() {
         parse_quote! { #[model_schema_prop(preprocess = ["trim"])] },
         parse_quote! { #[model_schema_prop(ts_optional)] },
         parse_quote! { #[model_schema_prop(as_number)] },
+        parse_quote! { #[model_schema_prop(nullable)] },
     ];
     assert_eq!(attrs.len(), KNOWN_KEYS.len());
 

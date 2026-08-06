@@ -157,7 +157,10 @@ mod zod {
         assert!(zod.contains("  createdAt: dateType,"), "Got: {zod}");
         assert!(zod.contains("  tags: z.array(tagType),"), "Got: {zod}");
         assert!(
-            zod.contains("  byteSize: z.union([sizeType, z.undefined()]).prefault(undefined),"),
+            zod.contains(
+                "  byteSize: z.union([z.null().transform(() => undefined), sizeType, \
+                 z.undefined()]).prefault(undefined),"
+            ),
             "Got: {zod}"
         );
         assert!(
@@ -294,8 +297,9 @@ mod json_schema {
         assert_eq!(
             serde_json::to_string(&ArchiveEntry::<String, f64, String, u32, String>::json_schema())
                 .unwrap(),
-            "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"byteSize\":{\"ty\
-             pe\":\"integer\"},\"createdAt\":{\"type\":\"number\"},\"ownersByRole\":{\"type\":\"obj\
+            "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"byteSize\":{\"an\
+             yOf\":[{\"type\":\"integer\"},{\"type\":\"null\"}]},\"createdAt\":{\"type\":\"number\"\
+             },\"ownersByRole\":{\"type\":\"obj\
              ect\",\"additionalProperties\":{\"type\":\"string\"}},\"stamp\":{\"type\":\"object\",\
              \"additionalProperties\":false,\"properties\":{\"archiveId\":{\"type\":\"string\"}},\"\
              required\":[\"archiveId\"]},\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"string\

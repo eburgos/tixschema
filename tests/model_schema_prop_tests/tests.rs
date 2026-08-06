@@ -199,6 +199,46 @@ enum TsOptionalVariant {
     },
 }
 
+/// `f` and `h` carry no key-dropping serde attribute: `nullable` requires the key always be
+/// written, so serde writes `null` for a `None` rather than omitting the key. `g` is the control,
+/// left in the default flavor with the key-dropping attribute the default guard requires.
+#[cfg(all(
+    test,
+    any(
+        feature = "typescript",
+        feature = "jsonschema",
+        feature = "zod",
+        feature = "serde"
+    )
+))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct NullableStruct {
+    #[model_schema_prop(nullable)]
+    pub f: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub g: Option<String>,
+    #[model_schema_prop(nullable, preprocess = ["trim"])]
+    pub h: Option<String>,
+}
+
+#[cfg(all(
+    test,
+    any(
+        feature = "typescript",
+        feature = "jsonschema",
+        feature = "zod",
+        feature = "serde"
+    )
+))]
+#[model_schema(default_types(IdType = String))]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct NullableGeneric<IdType> {
+    #[model_schema_prop(nullable)]
+    pub id: Option<IdType>,
+    pub name: String,
+}
+
 /// The member an `Option` field written with a `skip_serializing_if` renders as. The attribute
 /// decides the wire, not the spelling, and none of these fields carries `ts_optional`.
 #[cfg(feature = "typescript")]
@@ -268,6 +308,17 @@ fn test_model_schema_prop_structs_constructible() {
         h: None,
     };
     assert!(ts_optional.f.is_none());
+    let nullable = NullableStruct {
+        f: None,
+        g: None,
+        h: None,
+    };
+    assert!(nullable.f.is_none());
+    let nullable_generic = NullableGeneric {
+        name: String::new(),
+        id: None::<String>,
+    };
+    assert!(nullable_generic.id.is_none());
 }
 
 #[cfg(all(
@@ -379,10 +430,10 @@ fn test_optional_literal_typescript() {
 fn test_optional_literal_zod() {
     let zod_schema = OptionalLiteral::zod_schema();
 
-    assert!(
-        zod_schema
-            .contains("optional_type: z.union([z.literal(\"optional_literal\"), z.undefined()])")
-    );
+    assert!(zod_schema.contains(
+        "optional_type: z.union([z.null().transform(() => undefined), \
+         z.literal(\"optional_literal\"), z.undefined()])"
+    ));
     assert!(zod_schema.contains("id: z.string()"));
 }
 
@@ -447,7 +498,9 @@ fn test_min_length_zod() {
 
     assert!(zod_schema.contains("description: z.string(),"));
 
-    assert!(zod_schema.contains("nickname: z.union([z.string().min(3), z.undefined()])"));
+    assert!(zod_schema.contains(
+        "nickname: z.union([z.null().transform(() => undefined), z.string().min(3), z.undefined()])"
+    ));
 }
 
 #[test]
@@ -469,8 +522,9 @@ fn test_min_length_json_schema() {
     assert_eq!(password_prop["minLength"], 10_i32);
 
     let nickname_prop = &properties["nickname"];
-    assert_eq!(nickname_prop["type"], "string");
-    assert_eq!(nickname_prop["minLength"], 3_i32);
+    assert_eq!(nickname_prop["anyOf"][0]["type"], "string");
+    assert_eq!(nickname_prop["anyOf"][0]["minLength"], 3_i32);
+    assert_eq!(nickname_prop["anyOf"][1]["type"], "null");
 
     let description_prop = &properties["description"];
     assert_eq!(description_prop["type"], "string");
@@ -542,11 +596,15 @@ fn test_ts_optional_struct_zod_unchanged() {
     let zod = TsOptionalStruct::zod_schema();
 
     assert!(
-        zod.contains("f: z.union([Inner$Schema, z.undefined()]).prefault(undefined)"),
+        zod.contains(
+            "f: z.union([z.null().transform(() => undefined), Inner$Schema, z.undefined()]).prefault(undefined)"
+        ),
         "expected unchanged Zod for `f` in:\n{zod}"
     );
     assert!(
-        zod.contains("g: z.union([Inner$Schema, z.undefined()]).prefault(undefined)"),
+        zod.contains(
+            "g: z.union([z.null().transform(() => undefined), Inner$Schema, z.undefined()]).prefault(undefined)"
+        ),
         "expected unchanged Zod for `g` in:\n{zod}"
     );
 }
@@ -581,5 +639,100 @@ fn test_ts_optional_variant_typescript() {
     assert!(
         !ts.contains("filter: Inner | undefined"),
         "did not expect required-key form for variant `filter` in:\n{ts}"
+    );
+}
+
+#[test]
+#[cfg(feature = "typescript")]
+fn test_nullable_struct_typescript() {
+    let ts = NullableStruct::ts_definition();
+
+    assert!(ts.contains("f: string | null;"), "Got: {ts}");
+    assert!(
+        !ts.contains("f: string | undefined"),
+        "nullable should not fall back to the coercing spelling: {ts}"
+    );
+
+    let g = omitted_member("g", "string");
+    assert!(ts.contains(&g), "expected control `{g}` in:\n{ts}");
+
+    assert!(
+        ts.contains("h: string | null;"),
+        "preprocess should not change the TypeScript type: {ts}"
+    );
+}
+
+#[test]
+#[cfg(feature = "zod")]
+fn test_nullable_struct_zod() {
+    let zod = NullableStruct::zod_schema();
+
+    assert!(
+        zod.contains("f: z.union([z.string(), z.null()])"),
+        "Got: {zod}"
+    );
+    assert!(
+        !zod.contains("f: z.union([z.null().transform"),
+        "nullable should not coerce null away: {zod}"
+    );
+
+    assert!(
+        zod.contains(
+            "g: z.union([z.null().transform(() => undefined), z.string(), z.undefined()]).prefault(undefined)"
+        ),
+        "expected unchanged Zod for control field `g` in:\n{zod}"
+    );
+
+    assert!(
+        zod.contains("h: z.preprocess(trim, z.union([z.string(), z.null()]))"),
+        "preprocess should wrap the whole nullable union: {zod}"
+    );
+}
+
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_nullable_struct_json_schema() {
+    let schema = NullableStruct::json_schema();
+    let required_arr = schema["required"].as_array().unwrap();
+    let required: Vec<&str> = required_arr.iter().filter_map(|v| v.as_str()).collect();
+
+    assert!(
+        required.contains(&"f"),
+        "`f` should be required: {required:?}"
+    );
+    assert!(
+        !required.contains(&"g"),
+        "`g` should not be required: {required:?}"
+    );
+    assert!(
+        required.contains(&"h"),
+        "`h` should be required: {required:?}"
+    );
+
+    let properties = schema["properties"].as_object().unwrap();
+    let f_prop = &properties["f"];
+    assert_eq!(f_prop["anyOf"][0]["type"], "string");
+    assert_eq!(f_prop["anyOf"][1]["type"], "null");
+}
+
+#[test]
+#[cfg(feature = "typescript")]
+fn test_nullable_generic_typescript() {
+    let ts = NullableGeneric::<String>::ts_definition();
+    assert!(ts.contains("id: IdType | null;"), "Got: {ts}");
+}
+
+#[test]
+#[cfg(feature = "zod")]
+fn test_nullable_generic_zod() {
+    let zod = NullableGeneric::<String>::zod_schema();
+
+    assert!(
+        zod.contains("export function NullableGeneric$SchemaFactory"),
+        "expected a factory for a generic type: {zod}"
+    );
+    assert!(
+        zod.contains("id: z.union([idType, z.null()])"),
+        "nullable should compose with the factory argument: {zod}"
     );
 }
