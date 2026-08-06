@@ -1,4 +1,6 @@
 use core::cell::RefCell;
+#[cfg(feature = "zod")]
+use core::mem;
 use core::ops::Range;
 #[cfg(feature = "serde")]
 use core::slice::from_ref;
@@ -14,7 +16,11 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use syn::{Attribute, Expr, Field, GenericParam, Generics, Lit, LitStr, Meta, Type, Variant};
 
-#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[cfg(any(
+    feature = "typescript",
+    feature = "zod",
+    all(feature = "serde", feature = "jsonschema")
+))]
 use syn::ItemEnum;
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use syn::ItemStruct;
@@ -253,6 +259,16 @@ struct JsSpelling {
     /// The byte span of each construct that is rewritten, beside what it is rewritten to.
     edits: Vec<(Range<usize>, &'static str)>,
     refusal: Option<Unportable>,
+}
+
+/// A doc-comment line paired with the span of the `#[doc = "..."]` literal it came from. Each
+/// `///` line lowers to its own doc attribute with a real source span; a block comment's
+/// embedded lines share the span of the one literal that carries all of them.
+#[cfg(feature = "zod")]
+#[derive(Clone)]
+struct DocLine {
+    span: proc_macro2::Span,
+    text: String,
 }
 
 /// A construct the `regex` crate reads that a JavaScript regex literal cannot be handed as written.
@@ -873,9 +889,15 @@ pub fn get_struct_docs(item_struct: &ItemStruct) -> Option<Vec<String>> {
     collect_doc_lines(&item_struct.attrs)
 }
 
-/// An enum's doc lines. Reachable in every schema build, not just the two that publish prose: the
-/// `schema_example()` an item's ` ```rust example ` block earns is read off these too.
-#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+/// An enum's doc lines, read for the prose two surfaces publish (a plain enum's `JSDoc`, every
+/// shape's item description) — not for its ` ```rust example ` block, which
+/// [`extract_example_tokens`] reads off the attributes directly so the tokens it builds keep their
+/// spans.
+#[cfg(any(
+    feature = "typescript",
+    feature = "zod",
+    all(feature = "serde", feature = "jsonschema")
+))]
 pub fn get_enum_docs(item_enum: &ItemEnum) -> Option<Vec<String>> {
     collect_doc_lines(&item_enum.attrs)
 }
@@ -888,10 +910,9 @@ pub fn get_field_docs(field: &Field) -> Option<Vec<String>> {
     collect_doc_lines(&field.attrs)
 }
 
-/// The doc lines of anything carrying attributes. Read by the `TypeScript` surface for the prose it
-/// publishes, and by the guard that answers for a ` ```rust example ` block written on an item no
-/// annotation can be spelled for.
-#[cfg(any(feature = "typescript", feature = "zod"))]
+/// The doc lines of anything carrying attributes, read by the `TypeScript` surface for the prose
+/// an alias publishes.
+#[cfg(feature = "typescript")]
 pub fn get_item_docs(attrs: &[Attribute]) -> Option<Vec<String>> {
     collect_doc_lines(attrs)
 }
@@ -947,21 +968,48 @@ pub fn to_snake_case(name: &str) -> String {
     result
 }
 
-/// The code inside the first ` ```rust example ` fence in these doc lines, or `None` where there is
-/// no such fence. Later fences are ignored.
+/// [`DocLine`]s for every doc attribute on `attrs`, one per physical line.
 #[cfg(feature = "zod")]
-pub fn extract_example_from_docs(docs: &[String]) -> Option<String> {
-    let mut in_example_block = false;
-    let mut example_lines = Vec::new();
+fn doc_lines_with_spans(attrs: &[Attribute]) -> Vec<DocLine> {
+    let mut lines = Vec::new();
+    for attr in attrs {
+        if attr.path().is_ident("doc")
+            && let Meta::NameValue(meta_name_value) = &attr.meta
+            && let Expr::Lit(syn::ExprLit {
+                lit: Lit::Str(lit_str),
+                ..
+            }) = &meta_name_value.value
+        {
+            // `resolved_at` keeps the doc line's location (what a diagnostic underlines) while
+            // giving the token the macro's own hygiene (what marks it as generated rather than
+            // user-written) — respanning bare would also make an ordinary lint pass (clippy's
+            // style lints, not just rustc's own type errors) treat the example as code the author
+            // typed at that doc line, rather than the illustrative snippet it is.
+            let span = lit_str.span().resolved_at(proc_macro2::Span::call_site());
+            for line in lit_str.value().lines() {
+                lines.push(DocLine {
+                    text: line.trim().to_owned(),
+                    span,
+                });
+            }
+        }
+    }
+    lines
+}
 
-    for line in docs {
-        let trimmed = line.trim();
-        // Strip leading asterisk from block-style comments
+/// The [`DocLine`]s inside the first ` ```rust example ` fence, or `None` where there is no such
+/// fence. Later fences are ignored.
+#[cfg(feature = "zod")]
+fn example_doc_lines(lines: &[DocLine]) -> Option<Vec<DocLine>> {
+    let mut in_example_block = false;
+    let mut example_lines: Vec<DocLine> = Vec::new();
+
+    for line in lines {
+        let trimmed = line.text.trim();
         let cleaned = trimmed.strip_prefix('*').unwrap_or(trimmed).trim();
 
         if cleaned == "```rust example" {
             if !example_lines.is_empty() {
-                // Already found one example, return it
                 break;
             }
             in_example_block = true;
@@ -969,11 +1017,9 @@ pub fn extract_example_from_docs(docs: &[String]) -> Option<String> {
         }
 
         if in_example_block && cleaned == "```" {
-            // Found complete example
             break;
         }
 
-        // Collect example lines
         if in_example_block {
             example_lines.push(line.clone());
         }
@@ -982,10 +1028,115 @@ pub fn extract_example_from_docs(docs: &[String]) -> Option<String> {
     if example_lines.is_empty() {
         None
     } else {
-        // Apply regex transformations to make doctest-compatible code work for schema_example
-        let code = example_lines.join("\n");
-        Some(transform_example_code(&code))
+        Some(example_lines)
     }
+}
+
+/// Whether `line` (already trimmed) is a bare `use` statement — the one pattern
+/// `transform_example_code` strips regardless of where it sits, so it is dropped line-by-line up
+/// front rather than through the whole-example regex.
+#[cfg(feature = "zod")]
+fn is_use_statement(line: &str) -> bool {
+    regex::Regex::new(r"^use\s+[^;]+;$").unwrap().is_match(line)
+}
+
+/// Recursively respans every token, and every group's own delimiter span, onto `span`.
+#[cfg(feature = "zod")]
+fn respan(tokens: proc_macro2::TokenStream, span: proc_macro2::Span) -> proc_macro2::TokenStream {
+    tokens
+        .into_iter()
+        .map(|tree| match tree {
+            proc_macro2::TokenTree::Group(group) => {
+                let mut respanned =
+                    proc_macro2::Group::new(group.delimiter(), respan(group.stream(), span));
+                respanned.set_span(span);
+                proc_macro2::TokenTree::Group(respanned)
+            }
+            mut other @ (proc_macro2::TokenTree::Ident(_)
+            | proc_macro2::TokenTree::Punct(_)
+            | proc_macro2::TokenTree::Literal(_)) => {
+                other.set_span(span);
+                other
+            }
+        })
+        .collect()
+}
+
+/// Groups `lines` into the smallest runs of consecutive lines that parse as balanced tokens on
+/// their own, pairing each run's source text with the span of the line it starts on. A single
+/// statement occupies its own run in the common case; a value split across lines (a multi-line
+/// struct literal, say) is the smallest run whose delimiters close.
+#[cfg(feature = "zod")]
+fn raw_statement_groups(lines: &[DocLine]) -> Vec<(String, proc_macro2::Span)> {
+    let mut groups = Vec::new();
+    let mut buffer = String::new();
+    let mut buffer_span: Option<proc_macro2::Span> = None;
+
+    for line in lines {
+        if buffer.is_empty() {
+            buffer_span = Some(line.span);
+        } else {
+            buffer.push('\n');
+        }
+        buffer.push_str(&line.text);
+
+        if buffer.parse::<proc_macro2::TokenStream>().is_ok() {
+            let span = buffer_span.take().unwrap();
+            groups.push((mem::take(&mut buffer), span));
+        }
+    }
+    if !buffer.is_empty() {
+        groups.push((buffer, buffer_span.unwrap()));
+    }
+    groups
+}
+
+/// The example's tokens, each respanned onto the `///` line — or, for a value split across
+/// lines, the first line of the run — it was written on.
+///
+/// `transform_example_code`'s `println!`/`let _` unwrapping only ever matches a whole example's
+/// trailing statement (its regexes anchor on the end of the input), so it is applied to the last
+/// group alone; every earlier group keeps its own raw tokens, respanned but otherwise untouched.
+#[cfg(feature = "zod")]
+fn respan_example_tokens(lines: &[DocLine]) -> proc_macro2::TokenStream {
+    let content: Vec<DocLine> = lines
+        .iter()
+        .filter(|line| {
+            let trimmed = line.text.trim();
+            !trimmed.is_empty() && !is_use_statement(trimmed)
+        })
+        .cloned()
+        .collect();
+
+    let groups = raw_statement_groups(&content);
+    let last_index = groups.len().saturating_sub(1);
+
+    let mut out = proc_macro2::TokenStream::new();
+    for (index, (source, span)) in groups.iter().enumerate() {
+        let candidate = if index == last_index {
+            transform_example_code(source)
+        } else {
+            source.clone()
+        };
+        let tokens: proc_macro2::TokenStream = candidate.parse().unwrap();
+        out.extend(respan(tokens, *span));
+    }
+    out
+}
+
+/// The example's tokens, respanned line-by-line onto the `///` lines that wrote them, or `None`
+/// where there is no ` ```rust example ` fence.
+///
+/// `str::parse::<TokenStream>()` alone stamps every token with `Span::call_site()` — for an
+/// attribute macro, the whole `#[model_schema(...)]` invocation — so a typo or a type mismatch
+/// inside the example used to be reported there instead of on the line the author wrote. Each
+/// `///` line lowers to its own `#[doc = "..."]` attribute with a real span, which is enough to
+/// point the diagnostic at that line (or, where a value spans several lines, the first of them).
+#[cfg(feature = "zod")]
+pub fn extract_example_tokens(attrs: &[Attribute]) -> Option<proc_macro2::TokenStream> {
+    let lines = doc_lines_with_spans(attrs);
+    let example_lines = example_doc_lines(&lines)?;
+    Some(respan_example_tokens(&example_lines))
 }
 
 /// Transforms doctest-compatible example code to be suitable for `schema_example()`.

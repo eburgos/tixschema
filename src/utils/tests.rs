@@ -401,92 +401,163 @@ fn accepts(trivial: &TrivialPattern, haystack: &str) -> bool {
     }
 }
 
+/// Parses `doc_lines` as consecutive `///` lines ahead of a minimal struct, so the resulting
+/// attributes carry the real source spans a `#[model_schema]`-annotated item's would.
+#[cfg(feature = "zod")]
+fn struct_attrs_with_docs(doc_lines: &[&str]) -> Vec<syn::Attribute> {
+    let doc_block = doc_lines.iter().fold(String::new(), |mut block, line| {
+        use core::fmt::Write as _;
+        writeln!(block, "/// {line}").unwrap();
+        block
+    });
+    let source = format!("{doc_block}struct Probe;");
+    let item: syn::ItemStruct = syn::parse_str(&source).unwrap();
+    item.attrs
+}
+
+/// The source text each top-level token's span reports, in order.
+#[cfg(feature = "zod")]
+fn top_level_source_texts(tokens: &proc_macro2::TokenStream) -> Vec<Option<String>> {
+    tokens
+        .clone()
+        .into_iter()
+        .map(|tree| tree.span().source_text())
+        .collect()
+}
+
 #[cfg(feature = "zod")]
 #[test]
 fn test_extract_example_simple() {
-    let docs = vec![
-        "User profile".to_owned(),
-        "```rust example".to_owned(),
-        "User { name: \"John\".to_string(), age: 25 }".to_owned(),
-        "```".to_owned(),
-    ];
-
-    let example = extract_example_from_docs(&docs);
-    assert!(example.is_some());
-    assert_eq!(
-        example.unwrap(),
-        "User { name: \"John\".to_string(), age: 25 }"
-    );
+    let attrs = struct_attrs_with_docs(&[
+        "User profile",
+        "```rust example",
+        "User { name: \"John\".to_string(), age: 25 }",
+        "```",
+    ]);
+    let tokens = extract_example_tokens(&attrs);
+    assert!(tokens.is_some());
+    let expected: proc_macro2::TokenStream = "User { name: \"John\".to_string(), age: 25 }"
+        .parse()
+        .unwrap();
+    assert_eq!(tokens.unwrap().to_string(), expected.to_string());
 }
 
 #[cfg(feature = "zod")]
 #[test]
 fn test_extract_example_multiline() {
-    let docs = vec![
-        "Complex example".to_owned(),
-        "```rust example".to_owned(),
-        "let x = 5;".to_owned(),
-        "let y = 10;".to_owned(),
-        "User { age: x + y }".to_owned(),
-        "```".to_owned(),
-    ];
-
-    let example = extract_example_from_docs(&docs);
-    assert!(example.is_some());
-    let code = example.unwrap();
-    assert!(code.contains("let x = 5;"));
-    assert!(code.contains("let y = 10;"));
-    assert!(code.contains("User { age: x + y }"));
+    let attrs = struct_attrs_with_docs(&[
+        "Complex example",
+        "```rust example",
+        "let x = 5;",
+        "let y = 10;",
+        "User { age: x + y }",
+        "```",
+    ]);
+    let tokens = extract_example_tokens(&attrs);
+    assert!(tokens.is_some());
+    let expected: proc_macro2::TokenStream = "let x = 5; let y = 10; User { age: x + y }"
+        .parse()
+        .unwrap();
+    assert_eq!(tokens.unwrap().to_string(), expected.to_string());
 }
 
 #[cfg(feature = "zod")]
 #[test]
 fn test_extract_example_first_only() {
-    let docs = vec![
-        "Multiple examples".to_owned(),
-        "```rust example".to_owned(),
-        "User { age: 25 }".to_owned(),
-        "```".to_owned(),
-        "Another description".to_owned(),
-        "```rust example".to_owned(),
-        "User { age: 30 }".to_owned(),
-        "```".to_owned(),
-    ];
-
-    let example = extract_example_from_docs(&docs);
-    assert!(example.is_some());
-    assert_eq!(example.unwrap(), "User { age: 25 }");
+    let attrs = struct_attrs_with_docs(&[
+        "Multiple examples",
+        "```rust example",
+        "User { age: 25 }",
+        "```",
+        "Another description",
+        "```rust example",
+        "User { age: 30 }",
+        "```",
+    ]);
+    let tokens = extract_example_tokens(&attrs);
+    assert!(tokens.is_some());
+    let expected: proc_macro2::TokenStream = "User { age: 25 }".parse().unwrap();
+    assert_eq!(tokens.unwrap().to_string(), expected.to_string());
 }
 
 #[cfg(feature = "zod")]
 #[test]
 fn test_extract_example_none() {
-    let docs = vec!["User profile".to_owned(), "No examples here".to_owned()];
-
-    let example = extract_example_from_docs(&docs);
-    assert!(example.is_none());
+    let attrs = struct_attrs_with_docs(&["User profile", "No examples here"]);
+    assert!(extract_example_tokens(&attrs).is_none());
 }
 
 #[cfg(feature = "zod")]
 #[test]
 fn test_extract_example_empty_docs() {
-    let docs: Vec<String> = vec![];
-    let example = extract_example_from_docs(&docs);
-    assert!(example.is_none());
+    let attrs = struct_attrs_with_docs(&[]);
+    assert!(extract_example_tokens(&attrs).is_none());
 }
 
 #[cfg(feature = "zod")]
 #[test]
 fn test_extract_example_regular_code_fence_ignored() {
-    let docs = vec![
-        "Example with regular fence".to_owned(),
-        "```rust".to_owned(),
-        "User { age: 25 }".to_owned(),
-        "```".to_owned(),
-    ];
+    let attrs = struct_attrs_with_docs(&[
+        "Example with regular fence",
+        "```rust",
+        "User { age: 25 }",
+        "```",
+    ]);
+    assert!(extract_example_tokens(&attrs).is_none());
+}
 
-    let example = extract_example_from_docs(&docs);
-    assert!(example.is_none());
+/// The bug this seam exists to fix: each line's tokens point at that line, not at the whole
+/// example or the enclosing attribute.
+#[cfg(feature = "zod")]
+#[test]
+fn extract_example_tokens_respans_each_line_onto_itself() {
+    let attrs = struct_attrs_with_docs(&[
+        "```rust example",
+        "let ok = 1;",
+        "Counted { count: ok }",
+        "```",
+    ]);
+    let tokens = extract_example_tokens(&attrs).unwrap();
+    let texts = top_level_source_texts(&tokens);
+
+    // `source_text()` reports the whole physical line the doc literal spans, `///` included.
+    assert_eq!(texts.first().unwrap().as_deref(), Some("/// let ok = 1;"));
+    assert_eq!(
+        texts.last().unwrap().as_deref(),
+        Some("/// Counted { count: ok }")
+    );
+}
+
+/// A value split across lines has no single line of its own to point at, so the whole run is
+/// spanned on the line it starts on — an ambiguous run take the first line's span, per design.
+#[cfg(feature = "zod")]
+#[test]
+fn extract_example_tokens_spans_a_multiline_value_on_its_first_line() {
+    let attrs = struct_attrs_with_docs(&["```rust example", "Counted {", "count: 1,", "}", "```"]);
+    let tokens = extract_example_tokens(&attrs).unwrap();
+    let texts = top_level_source_texts(&tokens);
+
+    assert!(
+        texts
+            .iter()
+            .all(|text| text.as_deref() == Some("/// Counted {")),
+        "{texts:?}"
+    );
+}
+
+/// The `println!`/`let _` unwrapping `transform_example_code` performs still applies — it is
+/// only the span that changed, not the emitted tokens.
+#[cfg(feature = "zod")]
+#[test]
+fn extract_example_tokens_still_unwraps_the_doctest_println_pattern() {
+    let attrs = struct_attrs_with_docs(&[
+        "```rust example",
+        "let data_type = 1;",
+        concat!("println!(\"{", ":?}\", data_type);"),
+        "```",
+    ]);
+    let tokens = extract_example_tokens(&attrs).unwrap();
+    assert_eq!(tokens.to_string(), "let data_type = 1 ; data_type");
 }
 
 #[cfg(feature = "zod")]
