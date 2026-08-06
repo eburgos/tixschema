@@ -74,6 +74,28 @@ struct ArrayLiteral {
 #[model_schema()]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq)]
+struct NonStringLiterals {
+    pub id: String,
+    #[model_schema_prop(literal = true)]
+    pub is_active: bool,
+    #[model_schema_prop(literal = false)]
+    pub is_disabled: bool,
+    #[model_schema_prop(literal = 214)]
+    pub priority: i32,
+}
+
+#[cfg(all(
+    test,
+    any(
+        feature = "typescript",
+        feature = "jsonschema",
+        feature = "zod",
+        feature = "serde"
+    )
+))]
+#[model_schema()]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq)]
 struct CombinedTest {
     #[model_schema_prop(as = String, literal = "fixed", minLength = 10)]
     pub fixed_field: String,
@@ -272,6 +294,13 @@ fn test_model_schema_prop_structs_constructible() {
         literal_array: Vec::new(),
     };
     assert!(array_literal.id.is_empty());
+    let non_string_literals = NonStringLiterals {
+        id: String::new(),
+        is_active: true,
+        is_disabled: false,
+        priority: 214,
+    };
+    assert!(non_string_literals.is_active);
     let combined = CombinedTest {
         fixed_field: String::new(),
         normal_field: String::new(),
@@ -465,6 +494,49 @@ fn test_array_literal_json_schema() {
     assert_eq!(literal_array_prop["type"], "array");
     assert_eq!(literal_array_prop["items"]["type"], "string");
     assert_eq!(literal_array_prop["items"]["const"], "array_item");
+}
+
+#[test]
+#[cfg(feature = "typescript")]
+fn test_boolean_and_number_literal_typescript() {
+    let ts_definition = NonStringLiterals::ts_definition();
+
+    assert!(ts_definition.contains("is_active: true;"));
+    assert!(ts_definition.contains("is_disabled: false;"));
+    assert!(ts_definition.contains("priority: 214;"));
+
+    assert!(ts_definition.contains("id: string;"));
+}
+
+#[test]
+#[cfg(feature = "zod")]
+fn test_boolean_and_number_literal_zod() {
+    let zod_schema = NonStringLiterals::zod_schema();
+
+    assert!(zod_schema.contains("is_active: z.literal(true)"));
+    assert!(zod_schema.contains("is_disabled: z.literal(false)"));
+    assert!(zod_schema.contains("priority: z.literal(214)"));
+
+    assert!(zod_schema.contains("id: z.string()"));
+}
+
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_boolean_and_number_literal_json_schema() {
+    let schema = NonStringLiterals::json_schema();
+    let properties = schema["properties"].as_object().unwrap();
+
+    let is_active_prop = &properties["is_active"];
+    assert_eq!(is_active_prop["type"], "boolean");
+    assert_eq!(is_active_prop["const"], true);
+
+    let is_disabled_prop = &properties["is_disabled"];
+    assert_eq!(is_disabled_prop["type"], "boolean");
+    assert_eq!(is_disabled_prop["const"], false);
+
+    let priority_prop = &properties["priority"];
+    assert_eq!(priority_prop["type"], "number");
+    assert_eq!(priority_prop["const"], 214.0_f64);
 }
 
 #[test]

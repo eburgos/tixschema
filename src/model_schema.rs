@@ -20,7 +20,8 @@ use syn::Ident;
 
 use crate::{
     field_type::{
-        FieldDef, FieldDefType, VariantKind, classify_variant, get_field_def, is_plain_enum,
+        FieldDef, FieldDefType, VariantKind, classify_variant, format_number_literal,
+        get_field_def, is_plain_enum,
     },
     utils::{get_field_docs, get_variant_docs, strip_examples_from_docs},
 };
@@ -79,7 +80,9 @@ use crate::field_type::is_sequence_wrapper;
 #[cfg(feature = "serde")]
 use crate::field_type::is_transparent_wrapper;
 
-use crate::features::model_schema_prop::{ModelSchemaPropMeta, parse_model_schema_prop_attributes};
+use crate::features::model_schema_prop::{
+    LiteralValue, ModelSchemaPropMeta, parse_model_schema_prop_attributes,
+};
 
 #[cfg(feature = "jsonschema")]
 use crate::features::jsonschema::{
@@ -2931,7 +2934,7 @@ fn non_string_inner_shape(inner: &FieldDef) -> Option<&'static str> {
             instantiated_value_shape(inner_name, arguments)
         }
         FieldDefType::Map(..) | FieldDefType::Tuple(..) => Some("container"),
-        FieldDefType::Boolean => Some("boolean"),
+        FieldDefType::Boolean | FieldDefType::BooleanLiteral(_) => Some("boolean"),
         FieldDefType::U8
         | FieldDefType::U16
         | FieldDefType::U32
@@ -2943,7 +2946,8 @@ fn non_string_inner_shape(inner: &FieldDef) -> Option<&'static str> {
         | FieldDefType::Usize
         | FieldDefType::Isize
         | FieldDefType::F32
-        | FieldDefType::F64 => Some("numeric"),
+        | FieldDefType::F64
+        | FieldDefType::NumberLiteral(_) => Some("numeric"),
         FieldDefType::TypeParam(_) | FieldDefType::Unknown => Some("opaque"),
         // A `char` writes the one-character string every other string-shaped arm here does, and
         // `validate()` reaches it the same way it reaches a numeric or boolean inner: through
@@ -2989,8 +2993,8 @@ fn registered_non_object_wire(rust_ident: &str) -> Option<&'static str> {
 ))]
 const fn scalar_json_type_keyword(field_type: &FieldDefType) -> Option<&'static str> {
     match *field_type {
-        FieldDefType::Boolean => Some("boolean"),
-        FieldDefType::F32 | FieldDefType::F64 => Some("number"),
+        FieldDefType::Boolean | FieldDefType::BooleanLiteral(_) => Some("boolean"),
+        FieldDefType::F32 | FieldDefType::F64 | FieldDefType::NumberLiteral(_) => Some("number"),
         FieldDefType::I8
         | FieldDefType::I16
         | FieldDefType::I32
@@ -4341,6 +4345,7 @@ fn branded_inner_composite(inner: &FieldDef) -> Option<BrandedComposite> {
         FieldDefType::Tuple(..) => Some(BrandedComposite::Tuple),
         FieldDefType::TypeParam(_) | FieldDefType::Unknown => Some(BrandedComposite::Opaque),
         FieldDefType::Boolean
+        | FieldDefType::BooleanLiteral(_)
         | FieldDefType::Char
         | FieldDefType::F32
         | FieldDefType::F64
@@ -4349,6 +4354,7 @@ fn branded_inner_composite(inner: &FieldDef) -> Option<BrandedComposite> {
         | FieldDefType::I32
         | FieldDefType::I64
         | FieldDefType::Isize
+        | FieldDefType::NumberLiteral(_)
         | FieldDefType::SiblingType(..)
         | FieldDefType::String
         | FieldDefType::StringLiteral(_)
@@ -6463,8 +6469,11 @@ fn tagged_content(inner: &FieldDef) -> TaggedContent {
     }
     match inner.field_type {
         FieldDefType::SiblingType(..) => TaggedContent::Flattened,
-        FieldDefType::Boolean => TaggedContent::Refused("a boolean"),
+        FieldDefType::Boolean | FieldDefType::BooleanLiteral(_) => {
+            TaggedContent::Refused("a boolean")
+        }
         FieldDefType::F32 | FieldDefType::F64 => TaggedContent::Refused("a float"),
+        FieldDefType::NumberLiteral(_) => TaggedContent::Refused("a number"),
         FieldDefType::I8
         | FieldDefType::I16
         | FieldDefType::I32
@@ -7136,6 +7145,12 @@ fn field_json_schema_value(fld: &FieldDef) -> proc_macro2::TokenStream {
         }
         FieldDefType::StringLiteral(literal) => {
             quote! { serde_json::json!({ "type": "string", "const": #literal }) }
+        }
+        FieldDefType::BooleanLiteral(value) => {
+            quote! { serde_json::json!({ "type": "boolean", "const": #value }) }
+        }
+        FieldDefType::NumberLiteral(value) => {
+            quote! { serde_json::json!({ "type": "number", "const": #value }) }
         }
         FieldDefType::U8
         | FieldDefType::U16
@@ -8209,6 +8224,7 @@ const fn chrono_json_schema_format(field_type: &FieldDefType) -> Option<&'static
         FieldDefType::NaiveTime => Some("time"),
         FieldDefType::NaiveDateTime | FieldDefType::DateTime => Some("date-time"),
         FieldDefType::Boolean
+        | FieldDefType::BooleanLiteral(_)
         | FieldDefType::Char
         | FieldDefType::F32
         | FieldDefType::F64
@@ -8218,6 +8234,7 @@ const fn chrono_json_schema_format(field_type: &FieldDefType) -> Option<&'static
         | FieldDefType::I64
         | FieldDefType::Isize
         | FieldDefType::Map(..)
+        | FieldDefType::NumberLiteral(_)
         | FieldDefType::SiblingType(..)
         | FieldDefType::String
         | FieldDefType::StringLiteral(_)
@@ -8256,6 +8273,12 @@ fn scalar_field_json_schema_item(fld: &FieldDef) -> Option<proc_macro2::TokenStr
         FieldDefType::Char => quote! { { "type": "string", "minLength": 1, "maxLength": 1 } },
         FieldDefType::StringLiteral(literal) => {
             quote! { { "type": "string", "const": #literal } }
+        }
+        FieldDefType::BooleanLiteral(value) => {
+            quote! { { "type": "boolean", "const": #value } }
+        }
+        FieldDefType::NumberLiteral(value) => {
+            quote! { { "type": "number", "const": #value } }
         }
         FieldDefType::U8
         | FieldDefType::U16
@@ -8535,8 +8558,10 @@ fn map_key_path(key: &FieldDef) -> MapKeyPath<'_> {
         FieldDefType::SiblingType(..)
         | FieldDefType::Unknown
         | FieldDefType::Boolean
+        | FieldDefType::BooleanLiteral(_)
         | FieldDefType::Char
         | FieldDefType::StringLiteral(_)
+        | FieldDefType::NumberLiteral(_)
         | FieldDefType::U8
         | FieldDefType::U16
         | FieldDefType::U32
@@ -8594,7 +8619,8 @@ fn map_key_element_name(key: &FieldDef) -> String {
             key_type_name.clone()
         }
         FieldDefType::String | FieldDefType::StringLiteral(_) => "String".to_owned(),
-        FieldDefType::Boolean => "bool".to_owned(),
+        FieldDefType::Boolean | FieldDefType::BooleanLiteral(_) => "bool".to_owned(),
+        FieldDefType::NumberLiteral(_) => "f64".to_owned(),
         FieldDefType::Char => "char".to_owned(),
         FieldDefType::U8 => "u8".to_owned(),
         FieldDefType::U16 => "u16".to_owned(),
@@ -8658,6 +8684,8 @@ fn map_key_rejection(fld: &FieldDef) -> Option<MapKeyRejection> {
         FieldDefType::TypeParam(_)
         | FieldDefType::Unknown
         | FieldDefType::StringLiteral(_)
+        | FieldDefType::BooleanLiteral(_)
+        | FieldDefType::NumberLiteral(_)
         | FieldDefType::Boolean
         | FieldDefType::Char
         | FieldDefType::String
@@ -8857,6 +8885,7 @@ fn build_map_member_item(value: &FieldDef) -> Result<MapMemberItem, MapMemberRej
         // `None`. Named exhaustively rather than caught by a wildcard: a new variant must be given
         // a member schema, not silently widened into an open object.
         FieldDefType::Boolean
+        | FieldDefType::BooleanLiteral(_)
         | FieldDefType::Char
         | FieldDefType::F32
         | FieldDefType::F64
@@ -8865,6 +8894,7 @@ fn build_map_member_item(value: &FieldDef) -> Result<MapMemberItem, MapMemberRej
         | FieldDefType::I32
         | FieldDefType::I64
         | FieldDefType::Isize
+        | FieldDefType::NumberLiteral(_)
         | FieldDefType::String
         | FieldDefType::StringLiteral(_)
         | FieldDefType::Tuple(..)
@@ -9078,6 +9108,44 @@ fn build_string_literal_field_schema(
     }
 }
 
+/// Builds the JSON schema for a boolean literal field (`const` value).
+#[cfg(feature = "jsonschema")]
+fn build_boolean_literal_field_schema(
+    fld: &FieldDef,
+    field_name_str: &str,
+    value: bool,
+) -> proc_macro2::TokenStream {
+    let schema = nullable_slot_json_schema_value(
+        fld,
+        arrayed_json_schema_value(
+            fld,
+            quote! { serde_json::json!({ "type": "boolean", "const": #value }) },
+        ),
+    );
+    quote! {
+        properties.insert(#field_name_str.to_string(), { #schema });
+    }
+}
+
+/// Builds the JSON schema for a numeric literal field (`const` value).
+#[cfg(feature = "jsonschema")]
+fn build_number_literal_field_schema(
+    fld: &FieldDef,
+    field_name_str: &str,
+    value: f64,
+) -> proc_macro2::TokenStream {
+    let schema = nullable_slot_json_schema_value(
+        fld,
+        arrayed_json_schema_value(
+            fld,
+            quote! { serde_json::json!({ "type": "number", "const": #value }) },
+        ),
+    );
+    quote! {
+        properties.insert(#field_name_str.to_string(), { #schema });
+    }
+}
+
 /// Builds the JSON schema for a numeric field (`integer` or `number`), applying min/max constraints.
 #[cfg(feature = "jsonschema")]
 fn build_numeric_field_schema(
@@ -9277,6 +9345,12 @@ fn build_field_type_schema(fld: &FieldDef, field_name_str: &str) -> proc_macro2:
         FieldDefType::String => build_string_field_schema(fld, field_name_str),
         FieldDefType::StringLiteral(literal) => {
             build_string_literal_field_schema(fld, field_name_str, literal)
+        }
+        FieldDefType::BooleanLiteral(value) => {
+            build_boolean_literal_field_schema(fld, field_name_str, *value)
+        }
+        FieldDefType::NumberLiteral(value) => {
+            build_number_literal_field_schema(fld, field_name_str, *value)
         }
         FieldDefType::U32
         | FieldDefType::U16
@@ -10181,6 +10255,7 @@ fn model_schema_prop_guard_errors(
 ) -> Vec<proc_macro2::TokenStream> {
     let refusals = [
         check_fixed_shape_constraints(field, field_def, prop_meta, label).err(),
+        check_literal_kind_match(field, field_def, prop_meta, label).err(),
         check_as_type_override(field, written_def, prop_meta, label).err(),
         check_as_preprocess_conflict(field, prop_meta, label).err(),
         flag_guard_error(
@@ -10298,6 +10373,70 @@ fn check_fixed_shape_constraints(
              holds it to anything written here, so the constraint would reach none of them. \
              Constrain the argument instead — declare the type the instantiation supplies as a \
              branded newtype carrying the bound — or drop it."
+        ),
+    ))
+}
+
+/// The `FieldDefType` a `literal` collapses the field to, or `None` when its own kind and the
+/// field's declared Rust type disagree — the pair [`check_literal_kind_match`] already refused, with
+/// nothing left to render.
+fn literal_field_type(literal: &LiteralValue, field_type: &FieldDefType) -> Option<FieldDefType> {
+    match literal {
+        LiteralValue::Bool(value) => matches!(field_type, FieldDefType::Boolean)
+            .then_some(FieldDefType::BooleanLiteral(*value)),
+        LiteralValue::Number(value) => field_type
+            .is_numeric()
+            .then_some(FieldDefType::NumberLiteral(*value)),
+        LiteralValue::Str(value) => matches!(field_type, FieldDefType::String)
+            .then(|| FieldDefType::StringLiteral(value.clone())),
+    }
+}
+
+/// The `literal = …` value as the author wrote it, for the mismatch message to name.
+fn literal_written(literal: &LiteralValue) -> String {
+    match literal {
+        LiteralValue::Str(value) => format!("\"{value}\""),
+        LiteralValue::Bool(value) => value.to_string(),
+        LiteralValue::Number(value) => format_number_literal(*value),
+    }
+}
+
+/// The adjective a `literal`'s own kind reads as ("a boolean literal…"), and the Rust type that
+/// carries it — what [`check_literal_kind_match`] names on either side of the refusal.
+const fn literal_kind_words(literal: &LiteralValue) -> (&'static str, &'static str) {
+    match literal {
+        LiteralValue::Str(_) => ("a string", "a `String`"),
+        LiteralValue::Bool(_) => ("a boolean", "a `bool`"),
+        LiteralValue::Number(_) => ("a numeric", "a numeric type"),
+    }
+}
+
+/// Rejects a `literal` whose own kind the field's declared Rust type cannot carry — a boolean
+/// literal on a `String` field, a string literal on a `bool` field, and so on: every surface renders
+/// the literal in the field's own kind, so a kind neither side agrees on has nothing to render.
+fn check_literal_kind_match(
+    field: &Field,
+    field_def: &FieldDef,
+    prop_meta: &ModelSchemaPropMeta,
+    label: &str,
+) -> Result<(), syn::Error> {
+    let Some(literal) = &prop_meta.literal else {
+        return Ok(());
+    };
+    if literal_field_type(literal, &field_def.field_type).is_some() {
+        return Ok(());
+    }
+    let declared_type = &field.ty;
+    let declared = quote!(#declared_type).to_string();
+    let written = literal_written(literal);
+    let (adjective, carrier) = literal_kind_words(literal);
+    Err(syn::Error::new_spanned(
+        field,
+        format!(
+            "model_schema: {label}: `literal = {written}` cannot apply to a `{declared}` field — \
+             {adjective} literal is carried by {carrier}, and the generated TypeScript, Zod and \
+             JSON schema all render the literal in the field's own kind. Declare the field as \
+             {carrier}, or write the literal as a value the field's own type can carry."
         ),
     ))
 }
@@ -10633,8 +10772,9 @@ fn apply_model_schema_prop_meta(
 
     if let Some(meta) = &field_def.model_schema_prop_meta
         && let Some(literal) = &meta.literal
+        && let Some(collapsed) = literal_field_type(literal, &field_def.field_type)
     {
-        field_def.field_type = FieldDefType::StringLiteral(literal.clone());
+        field_def.field_type = collapsed;
     }
 
     apply_constraint_docs(field_def, final_name);

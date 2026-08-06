@@ -1595,6 +1595,36 @@ export const Action$Schema = z.discriminatedUnion("type", [
 ]);
 ```
 
+`literal` also accepts a boolean or a numeric value, provided the field's own Rust type can carry it: `literal = true`/`literal = false` on a `bool` field, `literal = 214` on any numeric field. Every surface renders the literal in the field's own kind, so the kind written must match the field's declared type — `literal = true` on a `String` field, or `literal = "x"` on a `bool` field, is a compile error naming both sides.
+
+```rust
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminUser {
+    pub id: String,
+    #[model_schema_prop(literal = true)]
+    pub is_system_admin: bool,
+    pub email: String,
+}
+```
+
+Generated:
+
+```typescript
+export type AdminUser = {
+  id: string;
+  isSystemAdmin: true;
+  email: string;
+};
+
+export const AdminUser$Schema = z.strictObject({
+  id: z.string(),
+  isSystemAdmin: z.literal(true),
+  email: z.string(),
+});
+```
+
 **Recommended: Single-value enums over literal strings.** While `model_schema_prop(literal = ...)` works, a single-value enum provides type safety in Rust -- the field can only hold the correct value at compile time, whereas a `String` with a literal annotation can hold any string in Rust (the constraint only applies in the generated TypeScript/Zod output).
 
 ```rust

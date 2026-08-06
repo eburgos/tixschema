@@ -4,7 +4,7 @@
 //! of TypeScript type and Zod schema generation.
 
 use syn::meta::ParseNestedMeta;
-use syn::{Attribute, LitStr, Type};
+use syn::{Attribute, Lit, LitStr, Type};
 
 use crate::utils::{constraining_pattern, portable_pattern};
 
@@ -25,6 +25,16 @@ const KNOWN_KEYS: &[&str] = &[
     "as_number",
     "nullable",
 ];
+
+/// The value a `literal` key was written with, kept in the kind it was written as. The kind decides
+/// which [`crate::field_type::FieldDefType`] the field collapses to and which Rust type may carry
+/// it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LiteralValue {
+    Bool(bool),
+    Number(f64),
+    Str(String),
+}
 
 /// Metadata for `model_schema_prop` attributes applied to a field.
 ///
@@ -73,7 +83,10 @@ const KNOWN_KEYS: &[&str] = &[
 /// - `as = Type` — name the type emitted for this field. The target must be the field's own type
 ///   or the value under its wrappers (`as = String` on a `Vec<String>`); any other target is a
 ///   compile error. Cannot be written beside `preprocess`.
-/// - `literal = "value"` — emit as a string literal type instead of `string`.
+/// - `literal = "value"` — emit as a literal type instead of the field's own primitive. Takes a
+///   string, boolean, integer or float literal; the kind written must match what the field's Rust
+///   type can carry (a boolean literal on a `bool` field, a numeric literal on a numeric field, a
+///   string literal on a `String` field) or the attribute is a compile error naming the mismatch.
 /// - `ts_optional` — for an `Option<T>` field, emit `field?: T` instead of `field: T | undefined`
 ///   (TypeScript only; a non-`Option` field is a compile error). It decides the key only on a field
 ///   no serde key-omission attribute speaks for, since such an attribute already writes the
@@ -114,11 +127,11 @@ pub struct ModelSchemaPropMeta {
     /// The parser's refusal of the attribute — a key it does not read, or a value it cannot read —
     /// spanned on the tokens that earned it.
     pub attr_rejection: Option<syn::Error>,
-    pub literal: Option<String>, // e.g., "Tixena" from literal = "Tixena"
-    pub max_length: Option<usize>, // e.g., 50 from maxLength = 50
-    pub maximum: Option<f64>,    // e.g., 100.0 from maximum = 100
-    pub min_length: Option<usize>, // e.g., 1 from minLength = 1
-    pub minimum: Option<f64>,    // e.g., 0.0 from minimum = 0
+    pub literal: Option<LiteralValue>, // e.g., Str("Tixena") from literal = "Tixena"
+    pub max_length: Option<usize>,     // e.g., 50 from maxLength = 50
+    pub maximum: Option<f64>,          // e.g., 100.0 from maximum = 100
+    pub min_length: Option<usize>,     // e.g., 1 from minLength = 1
+    pub minimum: Option<f64>,          // e.g., 0.0 from minimum = 0
     pub nullable: bool, // Option<T> at object-key position renders `T | null` with the key required
     /// `pattern` in the spelling every surface reads the same way, or as it was written when it
     /// earned a [`Self::pattern_rejection`].
@@ -157,8 +170,7 @@ fn parse_prop_key(nested: &ParseNestedMeta, meta: &mut ModelSchemaPropMeta) -> s
     if nested.path.is_ident("as") {
         meta.as_type = Some(nested.value()?.parse::<Type>()?);
     } else if nested.path.is_ident("literal") {
-        let lit: LitStr = nested.value()?.parse()?;
-        meta.literal = Some(lit.value());
+        meta.literal = Some(literal_prop_value(nested)?);
     } else if nested.path.is_ident("minLength") {
         meta.min_length = Some(nested.value()?.parse::<syn::LitInt>()?.base10_parse()?);
     } else if nested.path.is_ident("maxLength") {
@@ -211,6 +223,27 @@ fn numeric_bound(nested: &ParseNestedMeta, key: &str) -> syn::Result<f64> {
         Err(syn::Error::new_spanned(
             &lit,
             format!("`model_schema_prop` key `{key}` takes an integer or float literal"),
+        ))
+    }
+}
+
+/// The [`LiteralValue`] a `literal` key was written as, kept in whichever of the four kinds the
+/// author wrote — the kind [`crate::model_schema`]'s own guard then measures against the field's
+/// declared Rust type.
+fn literal_prop_value(nested: &ParseNestedMeta) -> syn::Result<LiteralValue> {
+    let lit: Lit = nested.value()?.parse()?;
+    if let Lit::Str(str_lit) = &lit {
+        Ok(LiteralValue::Str(str_lit.value()))
+    } else if let Lit::Bool(bool_lit) = &lit {
+        Ok(LiteralValue::Bool(bool_lit.value()))
+    } else if let Lit::Int(int_lit) = &lit {
+        Ok(LiteralValue::Number(int_lit.base10_parse()?))
+    } else if let Lit::Float(float_lit) = &lit {
+        Ok(LiteralValue::Number(float_lit.base10_parse()?))
+    } else {
+        Err(syn::Error::new_spanned(
+            &lit,
+            "`model_schema_prop` key `literal` takes a string, boolean, integer or float literal",
         ))
     }
 }
