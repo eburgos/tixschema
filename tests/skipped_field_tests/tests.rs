@@ -261,11 +261,16 @@ fn the_json_schema_neither_describes_nor_requires_the_field_serde_never_carries(
 #[cfg(feature = "jsonschema")]
 fn the_json_schema_drops_the_variant_member_too() {
     let tagged = SkippedVariantField::json_schema();
-    assert!(
-        tagged["oneOf"][0]["properties"]["internal"].is_null(),
-        "Got: {tagged}"
-    );
-    let required = tagged["oneOf"][0]["required"].as_array().unwrap().clone();
+    // With `serde`, `kind` is read as the internal tag and the member sits beside it. Without
+    // `serde`, the tag attribute can't be read at all, so the type falls back to the adjacent
+    // form (`src/model_schema.rs:5178-5180`) and the member nests one level down, under `value`.
+    #[cfg(feature = "serde")]
+    let member = &tagged["oneOf"][0];
+    #[cfg(not(feature = "serde"))]
+    let member = &tagged["oneOf"][0]["properties"]["value"];
+
+    assert!(member["properties"]["internal"].is_null(), "Got: {tagged}");
+    let required = member["required"].as_array().unwrap().clone();
     assert!(
         !required.contains(&serde_json::json!("internal")),
         "Got: {tagged}"
@@ -273,8 +278,14 @@ fn the_json_schema_drops_the_variant_member_too() {
     assert!(required.contains(&serde_json::json!("id")), "Got: {tagged}");
 
     let untagged = SkippedUntaggedField::json_schema();
+    // Same split: with `serde` the variant is untagged and sits at the top of `anyOf`; without
+    // it, `untagged` is equally unreadable and the same adjacent fallback applies.
+    #[cfg(feature = "serde")]
+    let untagged_member = &untagged["anyOf"][0];
+    #[cfg(not(feature = "serde"))]
+    let untagged_member = &untagged["oneOf"][0]["properties"]["value"];
     assert!(
-        untagged["anyOf"][0]["properties"]["internal"].is_null(),
+        untagged_member["properties"]["internal"].is_null(),
         "Got: {untagged}"
     );
 }

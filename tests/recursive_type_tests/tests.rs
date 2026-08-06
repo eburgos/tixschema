@@ -524,6 +524,17 @@ pub enum TreeEnum {
     Leaf { text: String },
 }
 
+/// `TreeEnum`'s adjacent twin: the same recursive named variant, but nested under a content key
+/// rather than sitting beside the tag. The field-level getter has to keep deferring once nested, or
+/// the content object reads a binding at its own initializer.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "type", content = "value")]
+pub enum TreeEnumAdjacent {
+    Branch { nodes: Vec<Self> },
+    Leaf { text: String },
+}
+
 /// Recursive struct with `Vec` of self.
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -652,6 +663,27 @@ fn test_recursive_named_struct_variant() {
         zod.contains("text: z.string()"),
         "Non-recursive text field should use normal syntax. Got: {zod}"
     );
+}
+
+/// Test 8b: the same recursive field, now nested under an adjacent form's content key. The field's
+/// own getter still has to defer the reference; the content key itself needs none; wrapping it in a
+/// second getter would be wrong precedent (see `render_external_variant`'s `defer_key`, which never
+/// sets it for a `Named` variant either).
+#[test]
+fn test_recursive_named_struct_variant_adjacent() {
+    let zod = TreeEnumAdjacent::zod_schema();
+
+    assert!(
+        zod.contains("get nodes() { return z.array(TreeEnumAdjacent$Schema); },"),
+        "Got: {zod}"
+    );
+    assert!(zod.contains("text: z.string()"), "Got: {zod}");
+    assert!(
+        zod.contains("value: z.strictObject({"),
+        "The content key holds the field-level getter directly; it needs none of its own. Got: {zod}"
+    );
+    assert!(!zod.contains("get value()"), "Got: {zod}");
+    assert!(!zod.contains("get \"value\""), "Got: {zod}");
 }
 
 /// Test 9: Struct holding at most one of itself.

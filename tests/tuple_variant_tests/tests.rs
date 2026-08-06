@@ -39,6 +39,24 @@ pub enum SlotElements {
     Pair(String, Option<u32>),
 }
 
+/// A struct variant of an adjacently tagged enum: serde nests its fields in an object under the
+/// content key rather than splicing them beside the tag. `Named`'s optional `y` covers key
+/// optionality at the nested depth. The empty-content case (`Empty {}`) has no way to be declared
+/// here without tripping `clippy::empty_enum_variants_with_brackets`, so it is covered by
+/// `adjacently_tagged_empty_named_variant_nests_an_empty_content_object` in
+/// `src/model_schema/tests.rs` instead, built through `parse_quote!` rather than a real item.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "kind", content = "data")]
+pub enum AdjacentNamed {
+    Named {
+        x: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        y: Option<u32>,
+    },
+    Unit,
+}
+
 /// An enum carrying no `#[serde(tag = ..., content = ...)]` is externally tagged: serde writes the
 /// variant name as the sole key of an object holding the content, and a unit variant as the bare
 /// name. The four variants below are the four contents that key can hold, plus the one that has no
@@ -651,6 +669,88 @@ fn test_custom_content_field_zod() {
     assert!(
         zod.contains("data: z.number()"),
         "Should use 'data' as content field"
+    );
+}
+
+/// Test 6c: a struct variant of an adjacently tagged enum nests its fields under the content key on
+/// the wire — the bug this fixture exists to catch. The zero-field case (`Empty {}`) is covered
+/// separately in `src/model_schema/tests.rs`; see this file's `AdjacentNamed` doc comment.
+#[test]
+fn test_adjacent_named_variant_matches_the_serde_wire() {
+    let named = AdjacentNamed::Named {
+        x: "y".to_owned(),
+        y: Some(3),
+    };
+    let named_json = serde_json::to_value(&named).unwrap();
+    assert_eq!(
+        named_json,
+        serde_json::json!({ "kind": "Named", "data": { "x": "y", "y": 3_u32 } })
+    );
+    assert_eq!(
+        serde_json::from_value::<AdjacentNamed>(named_json).unwrap(),
+        named
+    );
+
+    assert_eq!(
+        serde_json::to_value(AdjacentNamed::Unit).unwrap(),
+        serde_json::json!({ "kind": "Unit" })
+    );
+}
+
+/// Test 6d: and the `TypeScript` surface holds the same nesting.
+#[test]
+fn test_adjacent_named_variant_typescript_nests_under_content_key() {
+    let ts = AdjacentNamed::ts_definition();
+    assert!(ts.contains("kind: \"Named\""), "Got: {ts}");
+    assert!(ts.contains("data: {"), "Got: {ts}");
+    assert!(ts.contains("x: string"), "Got: {ts}");
+    assert!(ts.contains("y: number | undefined"), "Got: {ts}");
+    assert!(ts.contains("kind: \"Unit\""), "Got: {ts}");
+}
+
+/// Test 6e: and the Zod surface, the recursive-field precedent's own reasoning applying here too —
+/// see `test_recursive_named_struct_variant_adjacent` in `recursive_type_tests`.
+#[cfg(feature = "zod")]
+#[test]
+fn test_adjacent_named_variant_zod_nests_under_content_key() {
+    let zod = AdjacentNamed::zod_schema();
+    assert!(zod.contains("data: z.strictObject({"), "Got: {zod}");
+    assert!(zod.contains("x: z.string()"), "Got: {zod}");
+    assert!(
+        zod.contains(
+            "y: z.union([z.null().transform(() => undefined), z.number().int(), z.undefined()])"
+        ),
+        "Got: {zod}"
+    );
+}
+
+/// Test 6f: and the JSON-schema surface — a closed object under `data`, `x` required and `y` not,
+/// `kind` and `data` both required on the branch itself.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn test_adjacent_named_variant_json_schema_nests_under_content_key() {
+    let schema = AdjacentNamed::json_schema();
+    let one_of = schema["oneOf"].as_array().unwrap();
+
+    let named_branch = one_of
+        .iter()
+        .find(|branch| branch["properties"]["kind"]["const"] == "Named")
+        .unwrap();
+    assert_eq!(
+        named_branch["required"],
+        serde_json::json!(["kind", "data"])
+    );
+    let data = &named_branch["properties"]["data"];
+    assert_eq!(data["type"], "object");
+    assert_eq!(data["additionalProperties"], false);
+    assert_eq!(data["required"], serde_json::json!(["x"]));
+    assert_eq!(
+        data["properties"]["x"],
+        serde_json::json!({ "type": "string" })
+    );
+    assert!(
+        data["properties"].as_object().unwrap().contains_key("y"),
+        "Got: {data}"
     );
 }
 

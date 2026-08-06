@@ -7463,6 +7463,39 @@ fn discriminated_union_rendering_is_stable_across_runs() {
     }
 }
 
+/// A struct variant with no fields is still `Named`, and the adjacent form nests its (empty)
+/// content under the content key rather than treating it as a unit: `Empty {}` writes
+/// `{"kind":"Empty","data":{}}` on the wire, not `{"kind":"Empty"}`.
+///
+/// Built through `parse_quote!` rather than a real item declaration: an empty-braced struct variant
+/// is exactly the shape `clippy::empty_enum_variants_with_brackets` (a `deny`d restriction lint
+/// here) refuses declared in source. Read as a value at run time, the shape never becomes an item
+/// in this crate's own AST, so the lint has nothing to see.
+#[test]
+fn adjacently_tagged_empty_named_variant_nests_an_empty_content_object() {
+    let mut item: syn::ItemEnum = syn::parse_quote! {
+        enum Probe {
+            Empty {},
+            Unit,
+        }
+    };
+    let variants = collect_discriminated_variants(&mut item, None, Some("probe_schema"));
+    let rendered = render_discriminated_variants("kind", "data", "Probe", &variants.0);
+
+    let ts = &rendered.0[0];
+    assert!(ts.contains("data: {\n};"), "Got: {ts}");
+
+    #[cfg(feature = "zod")]
+    let zod = &rendered.1[0].0;
+    #[cfg(feature = "zod")]
+    assert!(zod.contains("data: z.strictObject({\n}),"), "Got: {zod}");
+
+    #[cfg(feature = "jsonschema")]
+    let json = rendered.2[0].to_string();
+    #[cfg(feature = "jsonschema")]
+    assert!(json.contains("\"data\""), "Got: {json}");
+}
+
 /// The `validate()` contribution for a field spelled `spelling`, reached from `access`, as tokens.
 #[cfg(feature = "serde")]
 fn emitted_validation_from(spelling: &str, access: MemberAccess) -> String {

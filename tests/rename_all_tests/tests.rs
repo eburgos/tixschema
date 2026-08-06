@@ -469,31 +469,40 @@ fn externally_tagged_rename_all_json_schema_matches_serde_wire() {
     );
 }
 
-// The adjacently-tagged branch below asserts against `properties` directly rather than a
-// `data`-nested object: the content-key nesting the wire actually uses is a separate,
-// pre-existing gap the JSON Schema surface does not render yet. This test only pins the seam
-// this bug is about -- that the field key itself is untouched by the enum's own `rename_all`.
+// The adjacently-tagged branch below reads the field keys under `properties.data`, the object the
+// wire actually nests them in, the same depth `externally_tagged_rename_all_json_schema_matches_serde_wire`
+// reads its own content key at.
 #[cfg(feature = "jsonschema")]
 #[test]
 fn adjacently_tagged_rename_all_json_schema_matches_serde_wire() {
     let schema = AdjacentlyTaggedRename::json_schema();
     let one_of = schema["oneOf"].as_array().unwrap();
+
+    let unmarked = AdjacentlyTaggedRename::Unmarked {
+        field_one: "a".to_owned(),
+    };
     let unmarked_branch = one_of
         .iter()
         .find(|branch| branch["properties"]["kind"]["const"] == "unmarked")
         .unwrap();
+    assert_branch_accepts(unmarked_branch, &unmarked);
     assert!(
-        unmarked_branch["properties"]
+        unmarked_branch["properties"]["data"]["properties"]
             .as_object()
             .unwrap()
             .contains_key("field_one")
     );
+
+    let marked = AdjacentlyTaggedRename::Marked {
+        field_two: "b".to_owned(),
+    };
     let marked_branch = one_of
         .iter()
         .find(|branch| branch["properties"]["kind"]["const"] == "marked")
         .unwrap();
+    assert_branch_accepts(marked_branch, &marked);
     assert!(
-        marked_branch["properties"]
+        marked_branch["properties"]["data"]["properties"]
             .as_object()
             .unwrap()
             .contains_key("field-two")
