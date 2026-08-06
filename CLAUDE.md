@@ -293,7 +293,9 @@ All validation constraints generate checks in **Zod (frontend), JSON Schema, and
 | `maxLength = N` | `String` | `.max(N)` | `"maxLength"` | validator + deserializer |
 | `minimum = N` | numeric | `.min(N)` | `"minimum"` | validator + deserializer |
 | `maximum = N` | numeric | `.max(N)` | `"maximum"` | validator + deserializer |
-| `literal = "val"` | `String` | `z.literal("val")` | `"const"` | — |
+| `literal = "val"` | `String` | `z.literal("val")` | `{"type": "string", "const": "val"}` | — |
+| `literal = true` | `bool` | `z.literal(true)` | `{"type": "boolean", "const": true}` | — |
+| `literal = 214` | numeric | `z.literal(214)` | `{"type": "number", "const": 214}` | — |
 | `preprocess = ["fn"]` | any | `z.preprocess(fn, ...)` | — | — (Zod-only) |
 | `ts_optional` | `Option<T>` | — | — | — (TypeScript-only) |
 | `as_number` | `DateTime<Tz>` | inline `z.preprocess(..., z.number())` | — | — (TS+Zod) |
@@ -301,6 +303,13 @@ All validation constraints generate checks in **Zod (frontend), JSON Schema, and
 
 Multiple constraints on one field are combined. Multiple `preprocess` functions nest:
 `z.preprocess(fn1, z.preprocess(fn2, innerSchema))`.
+
+`literal` takes a string, boolean, integer or float literal. The kind written must match what the
+field's Rust type can carry — a boolean literal only on a `bool` field, a numeric literal only on a
+numeric field (`u8`–`f64`), a string literal only on a `String` field — or the attribute is a
+compile error naming both the literal's kind and the field's declared type. A numeric literal is
+stored as `f64` and rendered without a trailing `.0` on TypeScript and Zod; the JSON Schema `const`
+is always written under `"type": "number"`, never `"integer"`.
 
 `ts_optional` is a bare flag (no value): it renders an `Option<T>` field as the optional TypeScript key `field?: T` instead of the default `field: T | undefined`. Zod and JSON Schema output are unchanged. It is only valid on `Option<T>` fields (non-`Option` is a compile error) and composes with `as = Type`.
 

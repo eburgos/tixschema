@@ -25,9 +25,36 @@ fn test_parse_literal() {
     let attr: Attribute = parse_quote! { #[model_schema_prop(literal = "Tixena")] };
     let meta = parse_model_schema_prop_attributes(&[attr]);
     assert!(meta.as_type.is_none());
-    assert!(meta.literal.is_some());
-    assert_eq!(meta.literal.unwrap(), "Tixena");
+    assert_eq!(meta.literal, Some(LiteralValue::Str("Tixena".to_owned())));
     assert!(meta.min_length.is_none());
+}
+
+#[test]
+fn test_parse_literal_bool_true() {
+    let attr: Attribute = parse_quote! { #[model_schema_prop(literal = true)] };
+    let meta = parse_model_schema_prop_attributes(&[attr]);
+    assert_eq!(meta.literal, Some(LiteralValue::Bool(true)));
+}
+
+#[test]
+fn test_parse_literal_bool_false() {
+    let attr: Attribute = parse_quote! { #[model_schema_prop(literal = false)] };
+    let meta = parse_model_schema_prop_attributes(&[attr]);
+    assert_eq!(meta.literal, Some(LiteralValue::Bool(false)));
+}
+
+#[test]
+fn test_parse_literal_number_integer() {
+    let attr: Attribute = parse_quote! { #[model_schema_prop(literal = 214)] };
+    let meta = parse_model_schema_prop_attributes(&[attr]);
+    assert_eq!(meta.literal, Some(LiteralValue::Number(214.0)));
+}
+
+#[test]
+fn test_parse_literal_number_float() {
+    let attr: Attribute = parse_quote! { #[model_schema_prop(literal = 3.5)] };
+    let meta = parse_model_schema_prop_attributes(&[attr]);
+    assert_eq!(meta.literal, Some(LiteralValue::Number(3.5)));
 }
 
 #[test]
@@ -36,8 +63,7 @@ fn test_parse_both_as_and_literal() {
     let meta = parse_model_schema_prop_attributes(&[attr]);
     assert!(meta.as_type.is_some());
     assert_eq!(meta.as_type.unwrap(), parse_quote!(String));
-    assert!(meta.literal.is_some());
-    assert_eq!(meta.literal.unwrap(), "Tixena");
+    assert_eq!(meta.literal, Some(LiteralValue::Str("Tixena".to_owned())));
     assert!(meta.min_length.is_none());
 }
 
@@ -110,8 +136,7 @@ fn test_parse_all_attributes() {
     let meta = parse_model_schema_prop_attributes(&[attr]);
     assert!(meta.as_type.is_some());
     assert_eq!(meta.as_type.unwrap(), parse_quote!(String));
-    assert!(meta.literal.is_some());
-    assert_eq!(meta.literal.unwrap(), "test");
+    assert_eq!(meta.literal, Some(LiteralValue::Str("test".to_owned())));
     assert!(meta.min_length.is_some());
     assert_eq!(meta.min_length.unwrap(), 3);
 }

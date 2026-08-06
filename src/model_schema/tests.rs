@@ -2308,6 +2308,80 @@ fn a_map_or_tuple_field_without_a_bound_is_left_alone() {
     }
 }
 
+/// Every surface renders `literal` in the field's own kind, so a `literal` whose own kind the
+/// field's declared Rust type cannot carry has nothing to render and is refused where it is written,
+/// naming both the literal's kind and the field's declared type.
+#[test]
+fn a_literal_whose_kind_the_field_cannot_carry_is_refused() {
+    for (constraint, field_type, carrier) in [
+        (
+            quote::quote! { literal = true },
+            quote::quote! { String },
+            "bool",
+        ),
+        (
+            quote::quote! { literal = false },
+            quote::quote! { String },
+            "bool",
+        ),
+        (
+            quote::quote! { literal = "x" },
+            quote::quote! { bool },
+            "String",
+        ),
+        (
+            quote::quote! { literal = 214 },
+            quote::quote! { String },
+            "numeric",
+        ),
+        (
+            quote::quote! { literal = true },
+            quote::quote! { i32 },
+            "bool",
+        ),
+    ] {
+        let errors = field_prop_guard_errors(&syn::parse_quote! {
+            struct Report {
+                #[model_schema_prop(#constraint)]
+                flag: #field_type,
+            }
+        });
+        assert_eq!(
+            errors.len(),
+            1,
+            "for {constraint} on {field_type}: {errors:?}"
+        );
+        for needle in ["compile_error", "field `flag`", "literal", carrier] {
+            assert!(
+                errors[0].contains(needle),
+                "{needle} missing for {constraint} on {field_type}: {}",
+                errors[0]
+            );
+        }
+    }
+}
+
+/// A `literal` whose own kind the field's declared Rust type can carry earns none of these errors,
+/// under any wrapper the field's own optionality writes around it.
+#[test]
+fn a_literal_whose_kind_the_field_can_carry_is_left_alone() {
+    for field in [
+        quote::quote! { #[model_schema_prop(literal = true)] flag: bool },
+        quote::quote! { #[model_schema_prop(literal = false)] flag: bool },
+        quote::quote! { #[model_schema_prop(literal = "x")] flag: String },
+        quote::quote! { #[model_schema_prop(literal = 214)] flag: i32 },
+        quote::quote! { #[model_schema_prop(literal = 3.5)] flag: f64 },
+        quote::quote! { #[model_schema_prop(literal = true)] flag: Option<bool> },
+    ] {
+        let errors = field_prop_guard_errors(&syn::parse_quote! {
+            struct Report {
+                #field
+            }
+        });
+        assert!(errors.is_empty(), "for {field}: {errors:?}");
+    }
+}
+
 /// A parameter names no type until the item is instantiated, so a bound written on a field typed
 /// with one is held by nothing at all: the two validating surfaces describe the value as opaque,
 /// which takes no length, no pattern and no range, and the generated validator and serde read

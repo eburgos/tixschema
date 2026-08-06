@@ -58,6 +58,9 @@ pub enum VariantKind {
 pub enum FieldDefType {
     /// Boolean primitive - maps to boolean.
     Boolean,
+    /// Boolean literal type — added via `model_schema_prop(literal = true)`.
+    /// Maps to `true`/`false` in TS, `z.literal(true)`/`z.literal(false)` in Zod.
+    BooleanLiteral(bool),
     /// `char` primitive - serde writes it as a one-character string and reads only that back, so
     /// it is described as one: TypeScript `string`, Zod `z.string().length(1)`, JSON Schema
     /// `{"type": "string", "minLength": 1, "maxLength": 1}`.
@@ -97,6 +100,10 @@ pub enum FieldDefType {
     /// Zod: `z.string().time()`.
     /// JSON Schema: string with format "time".
     NaiveTime,
+    /// Numeric literal type — added via `model_schema_prop(literal = 214)`.
+    /// Maps to `214` in TS, `z.literal(214)` in Zod. Stored as `f64` regardless of the field's own
+    /// integer or float type, so a whole value renders without the trailing `.0` `f64` carries.
+    NumberLiteral(f64),
     #[cfg(feature = "object_id")]
     /// `MongoDB` `ObjectId` type - requires "`object_id`" feature.
     /// Maps to `ObjectId` interface in TS with `$oid: string`.
@@ -125,6 +132,28 @@ pub enum FieldDefType {
     /// Unknown or unsupported type - generates 'unknown' in TS/Zod.
     Unknown,
     Usize,
+}
+
+impl FieldDefType {
+    /// Whether this is one of the numeric primitives — every integer and float kind a
+    /// `literal = N` may collapse into a [`Self::NumberLiteral`].
+    pub const fn is_numeric(&self) -> bool {
+        matches!(
+            self,
+            Self::U8
+                | Self::U16
+                | Self::U32
+                | Self::U64
+                | Self::I8
+                | Self::I16
+                | Self::I32
+                | Self::I64
+                | Self::Usize
+                | Self::Isize
+                | Self::F32
+                | Self::F64
+        )
+    }
 }
 
 /// Struct representing a field's definition for schema generation.
@@ -176,6 +205,8 @@ impl FieldDef {
             FieldDefType::TypeParam(_)
             | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
+            | FieldDefType::BooleanLiteral(_)
+            | FieldDefType::NumberLiteral(_)
             | FieldDefType::Boolean
             | FieldDefType::Char
             | FieldDefType::String
@@ -238,6 +269,8 @@ impl FieldDef {
             | FieldDefType::TypeParam(_)
             | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
+            | FieldDefType::BooleanLiteral(_)
+            | FieldDefType::NumberLiteral(_)
             | FieldDefType::Boolean
             | FieldDefType::Char
             | FieldDefType::String
@@ -289,6 +322,8 @@ impl FieldDef {
             FieldDefType::TypeParam(_)
             | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
+            | FieldDefType::BooleanLiteral(_)
+            | FieldDefType::NumberLiteral(_)
             | FieldDefType::Boolean
             | FieldDefType::Char
             | FieldDefType::String
@@ -360,6 +395,8 @@ impl FieldDef {
             | FieldDefType::TypeParam(_)
             | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
+            | FieldDefType::BooleanLiteral(_)
+            | FieldDefType::NumberLiteral(_)
             | FieldDefType::Boolean
             | FieldDefType::Char
             | FieldDefType::String
@@ -496,6 +533,8 @@ impl FieldDef {
             FieldDefType::TypeParam(_)
             | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
+            | FieldDefType::BooleanLiteral(_)
+            | FieldDefType::NumberLiteral(_)
             | FieldDefType::Boolean
             | FieldDefType::Char
             | FieldDefType::String
@@ -536,6 +575,8 @@ impl FieldDef {
             FieldDefType::TypeParam(_)
             | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
+            | FieldDefType::BooleanLiteral(_)
+            | FieldDefType::NumberLiteral(_)
             | FieldDefType::Boolean
             | FieldDefType::Char
             | FieldDefType::String
@@ -583,6 +624,8 @@ impl FieldDef {
             FieldDefType::TypeParam(_)
             | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
+            | FieldDefType::BooleanLiteral(_)
+            | FieldDefType::NumberLiteral(_)
             | FieldDefType::Boolean
             | FieldDefType::Char
             | FieldDefType::String
@@ -626,6 +669,8 @@ impl FieldDef {
             | FieldDefType::Tuple(_)
             | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
+            | FieldDefType::BooleanLiteral(_)
+            | FieldDefType::NumberLiteral(_)
             | FieldDefType::Boolean
             | FieldDefType::Char
             | FieldDefType::String
@@ -670,6 +715,8 @@ impl FieldDef {
             FieldDefType::TypeParam(_)
             | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
+            | FieldDefType::BooleanLiteral(_)
+            | FieldDefType::NumberLiteral(_)
             | FieldDefType::Boolean
             | FieldDefType::Char
             | FieldDefType::String
@@ -733,6 +780,8 @@ impl FieldDef {
             FieldDefType::TypeParam(_)
             | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
+            | FieldDefType::BooleanLiteral(_)
+            | FieldDefType::NumberLiteral(_)
             | FieldDefType::Boolean
             | FieldDefType::Char
             | FieldDefType::String
@@ -837,6 +886,8 @@ impl FieldDef {
             FieldDefType::Boolean => "boolean".to_owned(),
             FieldDefType::Char | FieldDefType::String => "string".to_owned(),
             FieldDefType::StringLiteral(literal) => format!("\"{literal}\""),
+            FieldDefType::BooleanLiteral(value) => value.to_string(),
+            FieldDefType::NumberLiteral(value) => format_number_literal(*value),
             FieldDefType::U8
             | FieldDefType::U16
             | FieldDefType::U32
@@ -992,6 +1043,10 @@ impl FieldDef {
             FieldDefType::Char => "z.string().length(1)".to_owned(),
             FieldDefType::String => self.zod_string_type(),
             FieldDefType::StringLiteral(literal) => format!("z.literal(\"{literal}\")"),
+            FieldDefType::BooleanLiteral(value) => format!("z.literal({value})"),
+            FieldDefType::NumberLiteral(value) => {
+                format!("z.literal({})", format_number_literal(*value))
+            }
             FieldDefType::U8
             | FieldDefType::U16
             | FieldDefType::U32
@@ -1167,6 +1222,16 @@ impl FieldDef {
             return Vec::new();
         };
         lookup_alias_info(name).map_or_else(Vec::new, |info| info.zod_union_members)
+    }
+}
+
+/// The `f64` a `literal = N` was written with, formatted the way TypeScript and Zod read a numeric
+/// literal type: a whole value renders without the trailing `.0` `f64`'s own `Display` carries.
+pub fn format_number_literal(value: f64) -> String {
+    if value.is_finite() && value.fract() == 0.0 {
+        format!("{value:.0}")
+    } else {
+        value.to_string()
     }
 }
 

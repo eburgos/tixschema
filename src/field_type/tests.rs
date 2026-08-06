@@ -603,3 +603,59 @@ fn test_a_sequence_wrapper_name_is_never_itself_a_forward_reference() {
     ));
     assert!(wrapper_around_a_forward_element.reaches_a_type_declared_later());
 }
+
+#[test]
+fn test_boolean_literal_typescript() {
+    assert_eq!(
+        field(FieldDefType::BooleanLiteral(true)).typescript_typename(),
+        "true"
+    );
+    assert_eq!(
+        field(FieldDefType::BooleanLiteral(false)).typescript_typename(),
+        "false"
+    );
+}
+
+/// A whole value renders without the trailing `.0` `f64`'s own `Display` carries; a fractional one
+/// keeps its digits.
+#[test]
+fn test_number_literal_typescript_has_no_trailing_zero() {
+    assert_eq!(
+        field(FieldDefType::NumberLiteral(214.0)).typescript_typename(),
+        "214"
+    );
+    assert_eq!(
+        field(FieldDefType::NumberLiteral(-5.0)).typescript_typename(),
+        "-5"
+    );
+    assert_eq!(
+        field(FieldDefType::NumberLiteral(3.5)).typescript_typename(),
+        "3.5"
+    );
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn test_boolean_literal_zod() {
+    assert_eq!(
+        field(FieldDefType::BooleanLiteral(true)).zod_type(),
+        "z.literal(true)"
+    );
+    assert_eq!(
+        field(FieldDefType::BooleanLiteral(false)).zod_type(),
+        "z.literal(false)"
+    );
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn test_number_literal_zod_has_no_trailing_zero() {
+    assert_eq!(
+        field(FieldDefType::NumberLiteral(214.0)).zod_type(),
+        "z.literal(214)"
+    );
+    assert_eq!(
+        field(FieldDefType::NumberLiteral(3.5)).zod_type(),
+        "z.literal(3.5)"
+    );
+}
