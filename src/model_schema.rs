@@ -3933,7 +3933,12 @@ fn build_branded_validation(
     args.has_string_constraints().then(|| {
         let measures_path = branded_inner_measures_path(inner_ty);
         let (checked_param, rendering) = checked_value_parts(measures_path);
-        let checked_v = branded_checked_value(measures_path, &quote! { v });
+        // `resolved_at` keeps the inner field's location (what E0599 underlines on a non-`Display`
+        // inner) while giving the token the macro's own hygiene, so a consumer's lints still judge
+        // it as generated rather than hand-written — see `doc_lines_with_spans` in utils.rs for the
+        // same trade-off measured against the same clippy suite.
+        let to_string_span = inner_ty.span().resolved_at(proc_macro2::Span::call_site());
+        let checked_v = branded_checked_value(measures_path, to_string_span, &quote! { v });
         let mut checks: Vec<proc_macro2::TokenStream> = Vec::new();
 
         if let Some(min_len) = args.min_length {
@@ -3990,10 +3995,6 @@ fn build_branded_validation(
                 }
             }
         } else {
-            // Deliberately unspanned: a `to_string()` carrying the user's span is judged by the
-            // consumer's lints as hand-written, and on a `String` inner it is a redundant clone.
-            // The inner field's `Display` requirement is blamed by the static assertion instead,
-            // which is inert wherever it lands.
             quote! {
                 pub fn deserialize_value<'de, D>(deserializer: D) -> Result<#inner_ty, D::Error>
                 where
@@ -4008,7 +4009,7 @@ fn build_branded_validation(
         };
 
         BrandedValidation {
-            checked_inner: branded_checked_value(measures_path, &quote! { self.0 }),
+            checked_inner: branded_checked_value(measures_path, to_string_span, &quote! { self.0 }),
             deserialize_fn,
             validate_fn,
         }
@@ -4033,19 +4034,23 @@ fn branded_inner_measures_path(inner_ty: &syn::Type) -> bool {
 
 /// How a constrained brand hands `receiver` to `validate_value`: a path goes borrowed — deref
 /// coercion carries it through whatever transparent wrappers it was written under — since the
-/// validator renders it itself; every other inner is rendered through `Display` first.
+/// validator renders it itself; every other inner is rendered through `Display` first, the
+/// `to_string()` call carrying `to_string_span` so a non-`Display` inner's `E0599` lands beside the
+/// field's own `E0277` instead of on the attribute — `resolved_at(Span::call_site())`, the caller's
+/// only legal input, keeps the tokens hygienically the macro's own.
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
 ))]
 fn branded_checked_value(
     measures_path: bool,
+    to_string_span: proc_macro2::Span,
     receiver: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
     if measures_path {
         quote! { &#receiver }
     } else {
-        quote! { &#receiver.to_string() }
+        quote_spanned! {to_string_span=> &#receiver.to_string() }
     }
 }
 
