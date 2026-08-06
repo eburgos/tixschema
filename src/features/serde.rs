@@ -10,9 +10,11 @@
 
 #[cfg(all(test, feature = "serde"))]
 use crate::rename_rule::resolve_rename_rule;
+use proc_macro2::Group;
 #[cfg(feature = "serde")]
 use proc_macro2::{Delimiter, TokenTree};
 use syn::meta::ParseNestedMeta;
+use syn::token::Paren;
 use syn::{Attribute, Token};
 #[cfg(feature = "serde")]
 use syn::{Error, LitStr, Meta};
@@ -123,14 +125,24 @@ pub fn parse_serde_key_omission(attrs: &[Attribute]) -> SerdeKeyOmission {
     omission
 }
 
-/// Consumes the value of a `key = value` the walk had no use for.
+/// Consumes the value of a `key = value` or the group of a `key(...)` list the walk had no use
+/// for.
 ///
-/// An unread value ends the walk on the comma that follows it, taking every attribute written
-/// after it along — so which attributes a declaration is read by would otherwise depend on the
-/// order someone happened to write them in.
+/// An unread value or list ends the walk on the comma that follows it, taking every attribute
+/// written after it along — so which attributes a declaration is read by would otherwise depend
+/// on the order someone happened to write them in. The list is consumed whole, as a single
+/// `Group` token, rather than parsed: nothing here reads `serialize`/`deserialize` out of
+/// `bound(...)`/`rename(...)`/`rename_all(...)`, only steps past them. With both spellings
+/// swallowed, a walk that still fails is a `#[serde(...)]` attribute malformed in some other way
+/// — serde's own derive will refuse it too — so the trace-level swallow below stays as the walk's
+/// resilience against that, rather than a channel this fix needs to redesign.
 fn consume_unread_value(nested: &ParseNestedMeta<'_>) -> syn::Result<()> {
     if nested.input.peek(Token![=]) {
         nested.value()?.parse::<syn::Expr>()?;
+    } else if nested.input.peek(Paren) {
+        nested.input.parse::<Group>()?;
+    } else {
+        // Neither `= value` nor `(...)`: a bare key like `untagged`, nothing to step over.
     }
     Ok(())
 }
@@ -185,8 +197,10 @@ pub fn parse_serde_type_attributes(attrs: &[Attribute]) -> SerdeTypeMeta {
                     let lit: LitStr = value.parse()?;
                     meta.content = Some(lit.value());
                 }
-                // Handle `rename_all = "value"`
-                else if nested.path.is_ident("rename_all") {
+                // Handle `rename_all = "value"`. The list form `rename_all(serialize = "...",
+                // deserialize = "...")` is left to fall through to `consume_unread_value` below,
+                // the same as any other key this walk has no use for.
+                else if nested.path.is_ident("rename_all") && nested.input.peek(Token![=]) {
                     let value = nested.value()?;
                     let lit: LitStr = value.parse()?;
                     meta.rename_all = Some(lit.value());
@@ -221,8 +235,10 @@ pub fn parse_serde_field_attributes(attrs: &[Attribute]) -> SerdeFieldMeta {
             meta.cfg_attr_rejection = cfg_attr_serde_rejection(attr);
         } else if attr.path().is_ident("serde") {
             attr.parse_nested_meta(|nested| {
-                // Handle `rename = "value"`
-                if nested.path.is_ident("rename") {
+                // Handle `rename = "value"`. The list form `rename(serialize = "...",
+                // deserialize = "...")` is left to fall through to `consume_unread_value` below,
+                // the same as any other key this walk has no use for.
+                if nested.path.is_ident("rename") && nested.input.peek(Token![=]) {
                     let value = nested.value()?;
                     let lit: LitStr = value.parse()?;
                     meta.rename = Some(lit.value());
