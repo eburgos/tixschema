@@ -5639,6 +5639,13 @@ fn collect_discriminated_variants(
         let field_rename = parse_serde_field_attributes(&item.attrs).rename;
         #[cfg(not(feature = "serde"))]
         let field_rename: Option<String> = None;
+        // serde treats a struct variant as the container for its own fields: its own
+        // `rename_all` (if any) reaches them, the enum's container-level `rename_all` never does
+        // — that one renames variant names only.
+        #[cfg(feature = "serde")]
+        let variant_rename_all = parse_serde_type_attributes(&item.attrs).rename_all;
+        #[cfg(not(feature = "serde"))]
+        let variant_rename_all: Option<String> = None;
 
         let variant_ident = item.ident.to_string();
         let final_name =
@@ -5670,7 +5677,7 @@ fn collect_discriminated_variants(
             let (f_def, validation_fn, validate_body, field_guard_errors) = process_field(
                 &FieldContext {
                     container_defaulted: variant_defaulted,
-                    rename_all,
+                    rename_all: variant_rename_all.as_deref(),
                     schema_module_name: enum_module_name_opt,
                     type_name: &enum_type_name,
                     type_parameters: &type_parameters,

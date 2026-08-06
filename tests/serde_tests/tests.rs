@@ -339,8 +339,11 @@ fn test_discriminated_union_with_serde_typescript() {
     assert!(ts.contains("type: \"userDeleted\""));
     assert!(ts.contains("type: \"userUpdated\""));
 
-    assert!(ts.contains("userId: string;"));
-    assert!(ts.contains("userName: string;"));
+    // The enum's own rename_all cases the discriminator alone; `user_id`/`user_name` carry no
+    // rename of their own and stay as declared, while `email`'s own field-level rename still
+    // applies regardless of the container.
+    assert!(ts.contains("user_id: string;"));
+    assert!(ts.contains("user_name: string;"));
     assert!(ts.contains("newEmail: string;"));
 }
 
@@ -351,8 +354,8 @@ fn test_discriminated_union_with_serde_zod() {
 
     assert!(zod.contains("z.discriminatedUnion"));
     assert!(zod.contains("\"type\""));
-    assert!(zod.contains("userId"));
-    assert!(zod.contains("userName"));
+    assert!(zod.contains("user_id"));
+    assert!(zod.contains("user_name"));
     assert!(zod.contains("newEmail"));
 }
 

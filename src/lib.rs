@@ -229,14 +229,14 @@ export const Status$Schema: ZodType<Status> = Status$RawSchema;
  *         "timestamp": {
  *           "type": "string"
  *         },
- *         "userId": {
+ *         "user_id": {
  *           "type": "string"
  *         }
  *       },
  *       "required": [
  *         "type",
  *         "timestamp",
- *         "userId"
+ *         "user_id"
  *       ]
  *     },
  *     {
@@ -256,13 +256,13 @@ export const Status$Schema: ZodType<Status> = Status$RawSchema;
  *             }
  *           ]
  *         },
- *         "userId": {
+ *         "user_id": {
  *           "type": "string"
  *         }
  *       },
  *       "required": [
  *         "type",
- *         "userId"
+ *         "user_id"
  *       ]
  *     }
  *   ]
@@ -280,10 +280,10 @@ export type Event = {
    */
   timestamp: string;
   /**
-   * userId
+   * user_id
    * 
    */
-  userId: string;
+  user_id: string;
 } | {
   /**
    * userDeleted
@@ -296,10 +296,10 @@ export type Event = {
    */
   reason: string | undefined;
   /**
-   * userId
+   * user_id
    * 
    */
-  userId: string;
+  user_id: string;
 };
 ```"#]
 ///
@@ -309,11 +309,11 @@ export type Event = {
 const Event$RawSchema = z.discriminatedUnion("type", [z.strictObject({
   type: z.literal("userCreated"),
   timestamp: z.string(),
-  userId: z.string(),
+  user_id: z.string(),
 }), z.strictObject({
   type: z.literal("userDeleted"),
   reason: z.union([z.null().transform(() => undefined), z.string(), z.undefined()]).prefault(undefined),
-  userId: z.string(),
+  user_id: z.string(),
 })]);
 
 export const Event$Schema: ZodType<Event> = Event$RawSchema;

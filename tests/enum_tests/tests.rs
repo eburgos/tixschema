@@ -341,10 +341,12 @@ fn test_discriminated_union_ts_definition() {
     assert!(ts_definition.contains("type: \"bankTransfer\""));
     assert!(ts_definition.contains("type: \"payPal\""));
 
-    assert!(ts_definition.contains("cardNumber: string;"));
-    assert!(ts_definition.contains("expiryDate: string;"));
-    assert!(ts_definition.contains("accountNumber: string;"));
-    assert!(ts_definition.contains("routingNumber: string;"));
+    // The enum's own rename_all cases the discriminator value alone; PaymentMethod's fields carry
+    // no rename of their own, so they stay as declared, matching what serde writes on the wire.
+    assert!(ts_definition.contains("card_number: string;"));
+    assert!(ts_definition.contains("expiry_date: string;"));
+    assert!(ts_definition.contains("account_number: string;"));
+    assert!(ts_definition.contains("routing_number: string;"));
 
     let zod_schema = PaymentMethod::zod_schema();
     assert!(zod_schema.contains("z.discriminatedUnion(\"type\""));

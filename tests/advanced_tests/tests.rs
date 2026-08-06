@@ -340,9 +340,11 @@ fn test_complex_nested_ts_definition() {
     assert!(retirement_definition.contains("type: \"option401k\""));
     assert!(retirement_definition.contains("type: \"pension\""));
     assert!(retirement_definition.contains("type: \"roth\""));
-    assert!(retirement_definition.contains("employerMatchPercentage: number;"));
-    assert!(retirement_definition.contains("yearsOfServiceRequired: number;"));
-    assert!(retirement_definition.contains("contributionLimit: number;"));
+    // RetirementPlan's own rename_all cases its discriminator alone; its variants carry no rename
+    // of their own, so their fields stay as declared, matching what serde writes on the wire.
+    assert!(retirement_definition.contains("employer_match_percentage: number;"));
+    assert!(retirement_definition.contains("years_of_service_required: number;"));
+    assert!(retirement_definition.contains("contribution_limit: number;"));
 
     let company_zod_schema = Company::zod_schema();
     let employee_zod_schema = Employee::zod_schema();
@@ -503,16 +505,18 @@ fn test_complex_discriminated_union() {
     assert!(ts_definition.contains("eventType: \"purchaseCompleted\""));
     assert!(ts_definition.contains("eventType: \"systemMaintenance\""));
 
-    assert!(ts_definition.contains("userId: string;"));
-    assert!(ts_definition.contains("registrationSource: string;"));
-    assert!(ts_definition.contains("orderId: string;"));
-    assert!(ts_definition.contains("totalAmount: number;"));
-    assert!(ts_definition.contains("paymentMethod: string;"));
-    assert!(ts_definition.contains("shippingAddress: Address | undefined;"));
-    assert!(ts_definition.contains("scheduledStart: string;"));
-    assert!(ts_definition.contains("estimatedDuration: number;"));
-    assert!(ts_definition.contains("affectedServices: Array<string>;"));
-    assert!(ts_definition.contains("notificationSent: boolean;"));
+    // ComplexEvent's own rename_all cases eventType alone; its variants carry no rename of their
+    // own, so their fields stay as declared, matching what serde writes on the wire.
+    assert!(ts_definition.contains("user_id: string;"));
+    assert!(ts_definition.contains("registration_source: string;"));
+    assert!(ts_definition.contains("order_id: string;"));
+    assert!(ts_definition.contains("total_amount: number;"));
+    assert!(ts_definition.contains("payment_method: string;"));
+    assert!(ts_definition.contains("shipping_address: Address | undefined;"));
+    assert!(ts_definition.contains("scheduled_start: string;"));
+    assert!(ts_definition.contains("estimated_duration: number;"));
+    assert!(ts_definition.contains("affected_services: Array<string>;"));
+    assert!(ts_definition.contains("notification_sent: boolean;"));
 
     let zod_schema = ComplexEvent::zod_schema();
     assert!(zod_schema.contains("z.discriminatedUnion(\"eventType\""));

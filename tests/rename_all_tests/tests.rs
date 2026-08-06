@@ -46,6 +46,49 @@ enum SandboxKind {
     PlainAdd,
 }
 
+// One struct-variant enum per tagged representation, each carrying an enum-level `rename_all` and
+// two variants: `Unmarked` has no rename of its own, so its field must stay as declared — the
+// container-level rule cases the discriminator alone, never a variant's fields. `Marked` carries
+// its own `rename_all`, which serde treats as the container for its own fields and does apply.
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum InternallyTaggedRename {
+    #[serde(rename_all = "kebab-case")]
+    Marked {
+        field_two: String,
+    },
+    Unmarked {
+        field_one: String,
+    },
+}
+
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+enum ExternallyTaggedRename {
+    #[serde(rename_all = "kebab-case")]
+    Marked {
+        field_two: String,
+    },
+    Unmarked {
+        field_one: String,
+    },
+}
+
+#[model_schema()]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", content = "data", rename_all = "camelCase")]
+enum AdjacentlyTaggedRename {
+    #[serde(rename_all = "kebab-case")]
+    Marked {
+        field_two: String,
+    },
+    Unmarked {
+        field_one: String,
+    },
+}
+
 /// The string serde itself writes for a unit variant.
 fn serde_wire_name<T>(variant: &T) -> String
 where
@@ -173,5 +216,286 @@ fn snake_case_json_schema_matches_serde_wire() {
     assert_eq!(
         values.iter().map(ToString::to_string).collect::<Vec<_>>(),
         ["\"body_only\"", "\"noop\"", "\"verbatim\""]
+    );
+}
+
+// Struct-variant field renaming under each of serde's three tagged representations: the
+// container-level `rename_all` must not reach a variant's fields, and a variant's own
+// `rename_all` must.
+
+#[test]
+fn internally_tagged_rename_all_reaches_the_wire_correctly() {
+    let unmarked = InternallyTaggedRename::Unmarked {
+        field_one: "a".to_owned(),
+    };
+    let unmarked_json = serde_json::to_value(&unmarked).unwrap();
+    assert_eq!(
+        unmarked_json,
+        serde_json::json!({ "kind": "unmarked", "field_one": "a" })
+    );
+    assert_eq!(
+        serde_json::from_value::<InternallyTaggedRename>(unmarked_json).unwrap(),
+        unmarked
+    );
+
+    let marked = InternallyTaggedRename::Marked {
+        field_two: "b".to_owned(),
+    };
+    let marked_json = serde_json::to_value(&marked).unwrap();
+    assert_eq!(
+        marked_json,
+        serde_json::json!({ "kind": "marked", "field-two": "b" })
+    );
+    assert_eq!(
+        serde_json::from_value::<InternallyTaggedRename>(marked_json).unwrap(),
+        marked
+    );
+}
+
+#[test]
+fn externally_tagged_rename_all_reaches_the_wire_correctly() {
+    let unmarked = ExternallyTaggedRename::Unmarked {
+        field_one: "a".to_owned(),
+    };
+    let unmarked_json = serde_json::to_value(&unmarked).unwrap();
+    assert_eq!(
+        unmarked_json,
+        serde_json::json!({ "unmarked": { "field_one": "a" } })
+    );
+    assert_eq!(
+        serde_json::from_value::<ExternallyTaggedRename>(unmarked_json).unwrap(),
+        unmarked
+    );
+
+    let marked = ExternallyTaggedRename::Marked {
+        field_two: "b".to_owned(),
+    };
+    let marked_json = serde_json::to_value(&marked).unwrap();
+    assert_eq!(
+        marked_json,
+        serde_json::json!({ "marked": { "field-two": "b" } })
+    );
+    assert_eq!(
+        serde_json::from_value::<ExternallyTaggedRename>(marked_json).unwrap(),
+        marked
+    );
+}
+
+#[test]
+fn adjacently_tagged_rename_all_reaches_the_wire_correctly() {
+    let unmarked = AdjacentlyTaggedRename::Unmarked {
+        field_one: "a".to_owned(),
+    };
+    let unmarked_json = serde_json::to_value(&unmarked).unwrap();
+    assert_eq!(
+        unmarked_json,
+        serde_json::json!({ "kind": "unmarked", "data": { "field_one": "a" } })
+    );
+    assert_eq!(
+        serde_json::from_value::<AdjacentlyTaggedRename>(unmarked_json).unwrap(),
+        unmarked
+    );
+
+    let marked = AdjacentlyTaggedRename::Marked {
+        field_two: "b".to_owned(),
+    };
+    let marked_json = serde_json::to_value(&marked).unwrap();
+    assert_eq!(
+        marked_json,
+        serde_json::json!({ "kind": "marked", "data": { "field-two": "b" } })
+    );
+    assert_eq!(
+        serde_json::from_value::<AdjacentlyTaggedRename>(marked_json).unwrap(),
+        marked
+    );
+}
+
+#[cfg(feature = "typescript")]
+#[test]
+fn internally_tagged_rename_all_typescript_matches_serde_wire() {
+    let ts = InternallyTaggedRename::ts_definition();
+    assert!(ts.contains("kind: \"unmarked\""), "Got:\n{ts}");
+    assert!(ts.contains("field_one: string"), "Got:\n{ts}");
+    assert!(ts.contains("kind: \"marked\""), "Got:\n{ts}");
+    assert!(ts.contains("\"field-two\": string"), "Got:\n{ts}");
+}
+
+#[cfg(feature = "typescript")]
+#[test]
+fn externally_tagged_rename_all_typescript_matches_serde_wire() {
+    let ts = ExternallyTaggedRename::ts_definition();
+    assert!(ts.contains("\"unmarked\": {"), "Got:\n{ts}");
+    assert!(ts.contains("field_one: string"), "Got:\n{ts}");
+    assert!(ts.contains("\"marked\": {"), "Got:\n{ts}");
+    assert!(ts.contains("\"field-two\": string"), "Got:\n{ts}");
+}
+
+#[cfg(feature = "typescript")]
+#[test]
+fn adjacently_tagged_rename_all_typescript_matches_serde_wire() {
+    let ts = AdjacentlyTaggedRename::ts_definition();
+    assert!(ts.contains("kind: \"unmarked\""), "Got:\n{ts}");
+    assert!(ts.contains("field_one: string"), "Got:\n{ts}");
+    assert!(ts.contains("kind: \"marked\""), "Got:\n{ts}");
+    assert!(ts.contains("\"field-two\": string"), "Got:\n{ts}");
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn internally_tagged_rename_all_zod_matches_serde_wire() {
+    let zod = InternallyTaggedRename::zod_schema();
+    assert!(zod.contains("kind: z.literal(\"unmarked\")"), "Got:\n{zod}");
+    assert!(zod.contains("field_one: z.string()"), "Got:\n{zod}");
+    assert!(zod.contains("kind: z.literal(\"marked\")"), "Got:\n{zod}");
+    assert!(zod.contains("\"field-two\": z.string()"), "Got:\n{zod}");
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn externally_tagged_rename_all_zod_matches_serde_wire() {
+    let zod = ExternallyTaggedRename::zod_schema();
+    assert!(
+        zod.contains("\"unmarked\": z.strictObject({"),
+        "Got:\n{zod}"
+    );
+    assert!(zod.contains("field_one: z.string()"), "Got:\n{zod}");
+    assert!(zod.contains("\"marked\": z.strictObject({"), "Got:\n{zod}");
+    assert!(zod.contains("\"field-two\": z.string()"), "Got:\n{zod}");
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn adjacently_tagged_rename_all_zod_matches_serde_wire() {
+    let zod = AdjacentlyTaggedRename::zod_schema();
+    assert!(zod.contains("kind: z.literal(\"unmarked\")"), "Got:\n{zod}");
+    assert!(zod.contains("field_one: z.string()"), "Got:\n{zod}");
+    assert!(zod.contains("kind: z.literal(\"marked\")"), "Got:\n{zod}");
+    assert!(zod.contains("\"field-two\": z.string()"), "Got:\n{zod}");
+}
+
+/// A closed branch (`additionalProperties: false`) describes exactly the keys serde wrote for
+/// `value`: every key on the wire is named in `properties`, and every `required` key is on the
+/// wire.
+#[cfg(feature = "jsonschema")]
+fn assert_branch_accepts<T>(branch: &serde_json::Value, value: &T)
+where
+    T: serde::Serialize,
+{
+    let payload = serde_json::to_value(value).unwrap();
+    let named = branch["properties"].as_object().unwrap();
+    let required = branch["required"].as_array().unwrap();
+    let written = payload.as_object().unwrap();
+    assert!(
+        written.keys().all(|key| named.contains_key(key)),
+        "schema does not name a key serde wrote:\nwire: {payload}\nbranch: {branch}"
+    );
+    assert!(
+        required
+            .iter()
+            .all(|key| written.contains_key(key.as_str().unwrap())),
+        "schema requires a key serde did not write:\nwire: {payload}\nbranch: {branch}"
+    );
+}
+
+#[cfg(feature = "jsonschema")]
+#[test]
+fn internally_tagged_rename_all_json_schema_matches_serde_wire() {
+    let schema = InternallyTaggedRename::json_schema();
+    let one_of = schema["oneOf"].as_array().unwrap();
+
+    let unmarked = InternallyTaggedRename::Unmarked {
+        field_one: "a".to_owned(),
+    };
+    let unmarked_branch = one_of
+        .iter()
+        .find(|branch| branch["properties"]["kind"]["const"] == "unmarked")
+        .unwrap();
+    assert_branch_accepts(unmarked_branch, &unmarked);
+
+    let marked = InternallyTaggedRename::Marked {
+        field_two: "b".to_owned(),
+    };
+    let marked_branch = one_of
+        .iter()
+        .find(|branch| branch["properties"]["kind"]["const"] == "marked")
+        .unwrap();
+    assert_branch_accepts(marked_branch, &marked);
+}
+
+#[cfg(feature = "jsonschema")]
+#[test]
+fn externally_tagged_rename_all_json_schema_matches_serde_wire() {
+    let schema = ExternallyTaggedRename::json_schema();
+    let one_of = schema["oneOf"].as_array().unwrap();
+
+    let unmarked = ExternallyTaggedRename::Unmarked {
+        field_one: "a".to_owned(),
+    };
+    let unmarked_branch = one_of
+        .iter()
+        .find(|branch| {
+            branch["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("unmarked")
+        })
+        .unwrap();
+    assert_branch_accepts(unmarked_branch, &unmarked);
+    assert!(
+        unmarked_branch["properties"]["unmarked"]["properties"]
+            .as_object()
+            .unwrap()
+            .contains_key("field_one")
+    );
+
+    let marked = ExternallyTaggedRename::Marked {
+        field_two: "b".to_owned(),
+    };
+    let marked_branch = one_of
+        .iter()
+        .find(|branch| {
+            branch["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("marked")
+        })
+        .unwrap();
+    assert_branch_accepts(marked_branch, &marked);
+    assert!(
+        marked_branch["properties"]["marked"]["properties"]
+            .as_object()
+            .unwrap()
+            .contains_key("field-two")
+    );
+}
+
+// The adjacently-tagged branch below asserts against `properties` directly rather than a
+// `data`-nested object: the content-key nesting the wire actually uses is a separate,
+// pre-existing gap the JSON Schema surface does not render yet. This test only pins the seam
+// this bug is about -- that the field key itself is untouched by the enum's own `rename_all`.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn adjacently_tagged_rename_all_json_schema_matches_serde_wire() {
+    let schema = AdjacentlyTaggedRename::json_schema();
+    let one_of = schema["oneOf"].as_array().unwrap();
+    let unmarked_branch = one_of
+        .iter()
+        .find(|branch| branch["properties"]["kind"]["const"] == "unmarked")
+        .unwrap();
+    assert!(
+        unmarked_branch["properties"]
+            .as_object()
+            .unwrap()
+            .contains_key("field_one")
+    );
+    let marked_branch = one_of
+        .iter()
+        .find(|branch| branch["properties"]["kind"]["const"] == "marked")
+        .unwrap();
+    assert!(
+        marked_branch["properties"]
+            .as_object()
+            .unwrap()
+            .contains_key("field-two")
     );
 }
