@@ -7783,6 +7783,47 @@ fn a_constraint_on_a_positional_field_is_refused_before_a_name_is_spelled() {
     assert_eq!(unconstrained, (false, false, None, 0));
 }
 
+/// `RefCell`, `Cell`, `Mutex` and `RwLock` are on the wire-transparent list — the schema surfaces
+/// describe a field under one as the field it wraps — but none of the four is `Deref`, so a length
+/// or range constraint on one is refused by name instead of the validator silently going unwritten.
+/// An unconstrained field under the same wrapper is untouched, exactly like a positional slot.
+#[cfg(feature = "serde")]
+#[test]
+fn a_constraint_under_an_interior_mutability_wrapper_names_the_wrapper() {
+    for (spelling, wrapper) in [
+        ("RefCell<String>", "RefCell"),
+        ("Cell<u32>", "Cell"),
+        ("Mutex<String>", "Mutex"),
+        ("RwLock<String>", "RwLock"),
+    ] {
+        let ty: syn::Type = syn::parse_str(spelling).unwrap();
+        let item: syn::ItemStruct = syn::parse_quote! {
+            struct Probe { guarded: #ty }
+        };
+
+        let (module_items, validate_body, guard_error, injected_attrs) = generated_field_validation(
+            &item,
+            &ModelSchemaPropMeta {
+                min_length: Some(3),
+                ..ModelSchemaPropMeta::default()
+            },
+        );
+        let error = guard_error.unwrap();
+        assert!(error.contains("compile_error"), "for {spelling}: {error}");
+        assert!(error.contains(wrapper), "for {spelling}: {error}");
+        assert!(error.contains("Deref"), "for {spelling}: {error}");
+        assert!(!module_items, "a refused field generated helpers: {error}");
+        assert!(
+            !validate_body,
+            "a refused field reached validate(): {error}"
+        );
+        assert_eq!(injected_attrs, 0, "a refused field was given a serde hook");
+
+        let unconstrained = generated_field_validation(&item, &ModelSchemaPropMeta::default());
+        assert_eq!(unconstrained, (false, false, None, 0), "for {spelling}");
+    }
+}
+
 /// The whole expansion is what a panicking `Ident` cost, so the enum the bug was found on must
 /// come back as diagnostics — one per offending slot, and none for the slot that carries no
 /// constraint.

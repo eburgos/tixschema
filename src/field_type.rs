@@ -1272,9 +1272,26 @@ fn container_wire_arity(name: &str) -> Option<usize> {
     }
 }
 
-/// The one list of std wrappers the crate reads straight through to what they hold.
+/// The one list of std wrappers the crate reads straight through to what they hold: everything
+/// serde writes as the value alone, with no wrapper of its own on the wire.
 pub fn is_transparent_wrapper(name: &str) -> bool {
+    is_ownership_wrapper(name) || is_interior_mutability_wrapper(name)
+}
+
+/// The ownership and borrow wrappers: each implements `Deref`, so a constraint's generated
+/// validator reaches the inner value with a plain `&**value`.
+pub fn is_ownership_wrapper(name: &str) -> bool {
     matches!(name, "Arc" | "Box" | "Cow" | "Rc")
+}
+
+/// The interior-mutability wrappers: serde writes each as the value it guards, with `RefCell` and
+/// `Mutex`/`RwLock` returning a serialization error — not a panic — when the guard cannot be taken
+/// (an already-mutably-borrowed `RefCell`, a poisoned `Mutex`/`RwLock`), the same fallible path a
+/// schema does not describe for any other type. None of the four implements `Deref`, which is why a
+/// constraint's generated validator cannot reach through one the way it reaches through an
+/// ownership wrapper — see `generic_wrap` in `model_schema.rs`.
+pub fn is_interior_mutability_wrapper(name: &str) -> bool {
+    matches!(name, "Cell" | "Mutex" | "RefCell" | "RwLock")
 }
 
 /// Classifies a `syn::Variant` into its `VariantKind`.

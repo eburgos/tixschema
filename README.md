@@ -245,6 +245,8 @@ The key position is the one place TypeScript stops rendering a parameter as itse
 
 This is what lets a type hold itself: `Option<Box<Self>>` is the self-reference, deferred in the generated schema the way any self-reference is. An `Rc` or `Arc` field needs serde's `rc` feature, which is where serde's impls for those two live.
 
+`RefCell<T>`, `Cell<T>`, `Mutex<T>` and `RwLock<T>` describe as `T` on every surface the same way: serde writes each as the value it guards, returning a serialization error rather than panicking when the guard cannot be taken (an already-mutably-borrowed `RefCell`, a poisoned `Mutex`/`RwLock`) — the same fallible path a schema does not describe for any other type. What sets them apart from `Box`/`Rc`/`Arc`/`Cow` is `Deref`: none of the four implements it, so `#[model_schema_prop(pattern = ..., minLength = ..., maxLength = ..., minimum = ..., maximum = ...)]` cannot reach through one to the value it guards, and is refused at expansion, naming the wrapper, wherever it is combined with one.
+
 ```rust
 use std::borrow::Cow;
 use std::sync::Arc;

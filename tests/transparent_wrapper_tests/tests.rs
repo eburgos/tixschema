@@ -1,13 +1,17 @@
 use alloc::borrow::Cow;
 use alloc::rc::Rc;
 use alloc::sync::Arc;
+use core::cell::{Cell, RefCell};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::{Mutex, RwLock};
 use tixschema::model_schema;
 
 /// The covered wrappers by the name a generated surface could leak.
 #[cfg(any(feature = "typescript", feature = "zod"))]
-const TRANSPARENT_WRAPPERS: [&str; 4] = ["Arc", "Box", "Cow", "Rc"];
+const TRANSPARENT_WRAPPERS: [&str; 8] = [
+    "Arc", "Box", "Cell", "Cow", "Mutex", "Rc", "RefCell", "RwLock",
+];
 
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -81,6 +85,68 @@ struct CowFields {
     text: Cow<'static, str>,
 }
 
+// `RefCell::new` takes a `Sized` value, so unlike `Box`/`Rc`/`Arc`/`Cow` above it cannot hold an
+// unsized `[String]`/`str` directly — the owned `Vec<String>`/`String` spellings stand in, and
+// still collapse onto the same field `PlainFields` does.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct RefCellFields {
+    count: RefCell<u64>,
+    labels: RefCell<Vec<String>>,
+    #[serde(default, skip_serializing_if = "ref_cell_option_is_none")]
+    maybe_count: RefCell<Option<u64>>,
+    #[serde(default, skip_serializing_if = "ref_cell_option_is_none")]
+    maybe_tag: RefCell<Option<Tag>>,
+    tag: RefCell<Tag>,
+    text: RefCell<String>,
+}
+
+// `Mutex` implements neither `Clone` nor `PartialEq` regardless of what it holds, unlike the other
+// covered wrappers.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug)]
+struct MutexFields {
+    count: Mutex<u64>,
+    labels: Mutex<Vec<String>>,
+    #[serde(default, skip_serializing_if = "mutex_option_is_none")]
+    maybe_count: Mutex<Option<u64>>,
+    #[serde(default, skip_serializing_if = "mutex_option_is_none")]
+    maybe_tag: Mutex<Option<Tag>>,
+    tag: Mutex<Tag>,
+    text: Mutex<String>,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug)]
+struct RwLockFields {
+    count: RwLock<u64>,
+    labels: RwLock<Vec<String>>,
+    #[serde(default, skip_serializing_if = "rwlock_option_is_none")]
+    maybe_count: RwLock<Option<u64>>,
+    #[serde(default, skip_serializing_if = "rwlock_option_is_none")]
+    maybe_tag: RwLock<Option<Tag>>,
+    tag: RwLock<Tag>,
+    text: RwLock<String>,
+}
+
+// `Cell<T>` requires `T: Copy` for serde's own `Serialize` impl, so its fixture -- and the plain
+// spelling held against it -- are reduced to the `PlainFields` fields that are `Copy`.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct CellFields {
+    count: Cell<u64>,
+    #[serde(default, skip_serializing_if = "cell_option_is_none")]
+    maybe_count: Cell<Option<u64>>,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct PlainCopyFields {
+    count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    maybe_count: Option<u64>,
+}
+
 // A wrapper written under something else: inside an `Option`, inside a sequence, in a map's value
 // slot. Each position reads the collapsed field, so none of them sees a wrapper at all.
 #[model_schema()]
@@ -126,6 +192,28 @@ struct TreeNode {
     label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     next: Option<Box<Self>>,
+}
+
+// None of the four is `Deref`, so `skip_serializing_if = "Option::is_none"` -- which reaches an
+// `Option` field under `Box`/`Rc`/`Arc`/`Cow` by deref coercion -- has no field to coerce to here.
+// Each predicate reaches the guarded `Option` through the wrapper's own accessor instead.
+fn ref_cell_option_is_none<T>(value: &RefCell<Option<T>>) -> bool {
+    value.borrow().is_none()
+}
+
+fn mutex_option_is_none<T>(value: &Mutex<Option<T>>) -> bool {
+    value.lock().unwrap().is_none()
+}
+
+fn rwlock_option_is_none<T>(value: &RwLock<Option<T>>) -> bool {
+    value.read().unwrap().is_none()
+}
+
+fn cell_option_is_none<T>(value: &Cell<Option<T>>) -> bool
+where
+    T: Copy,
+{
+    value.get().is_none()
 }
 
 fn tag() -> Tag {
@@ -189,6 +277,53 @@ fn cow_fields() -> CowFields {
     }
 }
 
+fn ref_cell_fields() -> RefCellFields {
+    RefCellFields {
+        count: RefCell::new(7),
+        labels: RefCell::new(vec!["x".to_owned()]),
+        maybe_count: RefCell::new(Some(3)),
+        maybe_tag: RefCell::new(Some(tag())),
+        tag: RefCell::new(tag()),
+        text: RefCell::new("t".to_owned()),
+    }
+}
+
+fn mutex_fields() -> MutexFields {
+    MutexFields {
+        count: Mutex::new(7),
+        labels: Mutex::new(vec!["x".to_owned()]),
+        maybe_count: Mutex::new(Some(3)),
+        maybe_tag: Mutex::new(Some(tag())),
+        tag: Mutex::new(tag()),
+        text: Mutex::new("t".to_owned()),
+    }
+}
+
+fn rwlock_fields() -> RwLockFields {
+    RwLockFields {
+        count: RwLock::new(7),
+        labels: RwLock::new(vec!["x".to_owned()]),
+        maybe_count: RwLock::new(Some(3)),
+        maybe_tag: RwLock::new(Some(tag())),
+        tag: RwLock::new(tag()),
+        text: RwLock::new("t".to_owned()),
+    }
+}
+
+fn cell_fields() -> CellFields {
+    CellFields {
+        count: Cell::new(7),
+        maybe_count: Cell::new(Some(3)),
+    }
+}
+
+fn plain_copy_fields() -> PlainCopyFields {
+    PlainCopyFields {
+        count: 7,
+        maybe_count: Some(3),
+    }
+}
+
 /// The field declarations of a generated `TypeScript` definition, without the `JSDoc` around them.
 #[cfg(feature = "typescript")]
 fn ts_field_declarations(definition: &str) -> Vec<String> {
@@ -200,18 +335,24 @@ fn ts_field_declarations(definition: &str) -> Vec<String> {
 }
 
 /// One populated instance of every wrapper twin, serialized, beside the bare spelling's.
-fn covered_wrapper_payloads() -> [(&'static str, serde_json::Value); 4] {
+///
+/// `Cell` is not among them: its fixture holds a different, reduced field set (see
+/// `test_cell_field_writes_its_inner_value` and its neighbors below).
+fn covered_wrapper_payloads() -> [(&'static str, serde_json::Value); 7] {
     [
         ("Box", serde_json::to_value(boxed_fields()).unwrap()),
         ("Rc", serde_json::to_value(rc_fields()).unwrap()),
         ("Arc", serde_json::to_value(arc_fields()).unwrap()),
         ("Cow", serde_json::to_value(cow_fields()).unwrap()),
+        ("RefCell", serde_json::to_value(ref_cell_fields()).unwrap()),
+        ("Mutex", serde_json::to_value(mutex_fields()).unwrap()),
+        ("RwLock", serde_json::to_value(rwlock_fields()).unwrap()),
     ]
 }
 
 /// Every wrapper twin's generated `TypeScript`, under the bare spelling's type name.
 #[cfg(feature = "typescript")]
-fn covered_wrapper_ts_definitions() -> [(&'static str, String); 4] {
+fn covered_wrapper_ts_definitions() -> [(&'static str, String); 7] {
     [
         (
             "Box",
@@ -229,12 +370,24 @@ fn covered_wrapper_ts_definitions() -> [(&'static str, String); 4] {
             "Cow",
             CowFields::ts_definition().replace("CowFields", "PlainFields"),
         ),
+        (
+            "RefCell",
+            RefCellFields::ts_definition().replace("RefCellFields", "PlainFields"),
+        ),
+        (
+            "Mutex",
+            MutexFields::ts_definition().replace("MutexFields", "PlainFields"),
+        ),
+        (
+            "RwLock",
+            RwLockFields::ts_definition().replace("RwLockFields", "PlainFields"),
+        ),
     ]
 }
 
 /// The same for Zod.
 #[cfg(feature = "zod")]
-fn covered_wrapper_zod_schemas() -> [(&'static str, String); 4] {
+fn covered_wrapper_zod_schemas() -> [(&'static str, String); 7] {
     [
         (
             "Box",
@@ -252,16 +405,31 @@ fn covered_wrapper_zod_schemas() -> [(&'static str, String); 4] {
             "Cow",
             CowFields::zod_schema().replace("CowFields", "PlainFields"),
         ),
+        (
+            "RefCell",
+            RefCellFields::zod_schema().replace("RefCellFields", "PlainFields"),
+        ),
+        (
+            "Mutex",
+            MutexFields::zod_schema().replace("MutexFields", "PlainFields"),
+        ),
+        (
+            "RwLock",
+            RwLockFields::zod_schema().replace("RwLockFields", "PlainFields"),
+        ),
     ]
 }
 
 #[cfg(feature = "jsonschema")]
-fn covered_wrapper_json_schemas() -> [(&'static str, serde_json::Value); 4] {
+fn covered_wrapper_json_schemas() -> [(&'static str, serde_json::Value); 7] {
     [
         ("Box", BoxedFields::json_schema()),
         ("Rc", RcFields::json_schema()),
         ("Arc", ArcFields::json_schema()),
         ("Cow", CowFields::json_schema()),
+        ("RefCell", RefCellFields::json_schema()),
+        ("Mutex", MutexFields::json_schema()),
+        ("RwLock", RwLockFields::json_schema()),
     ]
 }
 
@@ -271,6 +439,17 @@ fn test_transparent_wrapper_structs_constructible() {
     assert_eq!(*rc_fields().count, plain_fields().count);
     assert_eq!(*arc_fields().count, plain_fields().count);
     assert_eq!(*cow_fields().count, plain_fields().count);
+    // Not `Deref`: each reads its guarded value through its own accessor instead of `*value`.
+    assert_eq!(*ref_cell_fields().count.borrow(), plain_fields().count);
+    assert_eq!(
+        mutex_fields().count.into_inner().unwrap(),
+        plain_fields().count
+    );
+    assert_eq!(
+        rwlock_fields().count.into_inner().unwrap(),
+        plain_fields().count
+    );
+    assert_eq!(cell_fields().count.get(), plain_copy_fields().count);
 
     let node = TreeNode {
         label: "root".to_owned(),
@@ -465,5 +644,61 @@ fn test_boxed_self_reference_validates_as_the_self_reference() {
     assert!(schema.contains("label: z.string()"), "Got: {schema}");
     for name in TRANSPARENT_WRAPPERS {
         assert!(!schema.contains(name), "Got: {schema}");
+    }
+}
+
+/// `Cell` writes its inner value exactly as the other covered wrappers do, over its own reduced
+/// (`Copy`-only) field set.
+#[test]
+fn test_cell_field_writes_its_inner_value() {
+    assert_eq!(
+        serde_json::to_value(cell_fields()).unwrap(),
+        serde_json::to_value(plain_copy_fields()).unwrap()
+    );
+}
+
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_cell_field_describes_as_the_inner_spelling() {
+    let cell_schema = CellFields::json_schema();
+    let plain_schema = PlainCopyFields::json_schema();
+    assert_eq!(cell_schema["properties"], plain_schema["properties"]);
+    assert_eq!(cell_schema["required"], plain_schema["required"]);
+}
+
+#[test]
+#[cfg(feature = "typescript")]
+fn test_cell_field_types_as_the_inner_spelling() {
+    assert_eq!(
+        CellFields::ts_definition().replace("CellFields", "PlainCopyFields"),
+        PlainCopyFields::ts_definition()
+    );
+}
+
+#[test]
+#[cfg(feature = "zod")]
+fn test_cell_field_validates_as_the_inner_spelling() {
+    assert_eq!(
+        CellFields::zod_schema().replace("CellFields", "PlainCopyFields"),
+        PlainCopyFields::zod_schema()
+    );
+}
+
+#[test]
+#[cfg(any(feature = "typescript", feature = "zod"))]
+fn test_no_cell_name_survives_into_generated_output() {
+    #[cfg(feature = "typescript")]
+    {
+        let ts = CellFields::ts_definition().replace("CellFields", "PlainCopyFields");
+        for name in TRANSPARENT_WRAPPERS {
+            assert!(!ts.contains(name), "Got: {ts}");
+        }
+    }
+    #[cfg(feature = "zod")]
+    {
+        let zod = CellFields::zod_schema().replace("CellFields", "PlainCopyFields");
+        for name in TRANSPARENT_WRAPPERS {
+            assert!(!zod.contains(name), "Got: {zod}");
+        }
     }
 }
