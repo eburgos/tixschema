@@ -78,7 +78,7 @@ use crate::field_type::{parse_serde_field_attributes, parse_serde_type_attribute
 use crate::field_type::is_sequence_wrapper;
 
 #[cfg(feature = "serde")]
-use crate::field_type::is_transparent_wrapper;
+use crate::field_type::{is_interior_mutability_wrapper, is_ownership_wrapper};
 
 use crate::features::model_schema_prop::{
     LiteralValue, ModelSchemaPropMeta, parse_model_schema_prop_attributes,
@@ -7297,7 +7297,7 @@ fn untagged_member_field_def(
     field_name: &str,
     prop_meta: ModelSchemaPropMeta,
     serde_field_meta: &SerdeFieldMeta,
-    positional_constraint_error: Option<proc_macro2::TokenStream>,
+    field_validation_guard_error: Option<proc_macro2::TokenStream>,
 ) -> (FieldDef, Vec<proc_macro2::TokenStream>) {
     // The wire key: field-level rename wins outright, otherwise the variant's own rename_all cases
     // the Rust ident — the same resolution `process_field` runs for a struct field. Diagnostics
@@ -7317,7 +7317,7 @@ fn untagged_member_field_def(
         prop_meta.nullable,
         serde_field_meta,
         ctx.container_defaulted,
-        positional_constraint_error,
+        field_validation_guard_error,
     );
     let member_guard_errors = collect_field_guard_errors(
         field,
@@ -7373,14 +7373,15 @@ fn collect_untagged_variant_members(
 
         let new_attrs = declaration_attrs(field);
         let mut injected_attrs: Vec<syn::Attribute> = Vec::new();
-        let (validation_fn, validate_body, positional_constraint_error) = generate_field_validation(
-            field,
-            schema_module_name,
-            &field_name,
-            Some(&variant_name),
-            &prop_meta,
-            &mut injected_attrs,
-        );
+        let (validation_fn, validate_body, field_validation_guard_error) =
+            generate_field_validation(
+                field,
+                schema_module_name,
+                &field_name,
+                Some(&variant_name),
+                &prop_meta,
+                &mut injected_attrs,
+            );
         field.attrs = new_attrs;
         walked.deferred_attrs.push(injected_attrs);
         walked.validation_fns.extend(validation_fn);
@@ -7403,7 +7404,7 @@ fn collect_untagged_variant_members(
             &field_name,
             prop_meta,
             &serde_field_meta,
-            positional_constraint_error,
+            field_validation_guard_error,
         );
         walked.guard_errors.extend(member_guard_errors);
         if positional && omission.absent_from_wire() {
@@ -10064,6 +10065,37 @@ fn constrained_shape(ty: &syn::Type) -> Option<ConstrainedShape> {
     }
 }
 
+/// The interior-mutability wrapper on a field's constrained path, when there is one.
+///
+/// `constrained_shape` cannot say *why* a shape failed to classify — a `HashMap` value and a
+/// `RefCell` both just stop the walk. This retraces the same path far enough to tell whether the
+/// stop was one of the four wrappers `generic_wrap` deliberately does not read through, so the
+/// caller can name it in a diagnostic instead of silently dropping the constraint.
+#[cfg(feature = "serde")]
+fn blocking_interior_mutability_wrapper(ty: &syn::Type) -> Option<String> {
+    let mut current = ty;
+    loop {
+        current = written_type(current);
+        if let syn::Type::Array(array) = current {
+            current = &array.elem;
+        } else if let syn::Type::Slice(slice) = current {
+            current = &slice.elem;
+        } else if let syn::Type::Path(path) = current {
+            let segment = path.path.segments.last()?;
+            let ident = segment.ident.to_string();
+            if is_interior_mutability_wrapper(&ident) {
+                return Some(ident);
+            }
+            let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+                return None;
+            };
+            current = sole_type_argument(args)?;
+        } else {
+            return None;
+        }
+    }
+}
+
 /// Adds the lifetimes a wrapper spells to the ones already collected, skipping `'static` — which
 /// needs no declaration — and any already there, since a lifetime can only be declared once.
 #[cfg(feature = "serde")]
@@ -10082,13 +10114,18 @@ fn collect_lifetimes(
 }
 
 /// The wrapper a generic type stands for, or `None` if it is not one the constraint reads through.
+///
+/// An interior-mutability wrapper is deliberately absent: it is on the wire-transparent list
+/// (`is_transparent_wrapper`) the schema surfaces read, but it does not implement `Deref`, so the
+/// walk below has no safe way to reach through one — see `blocking_interior_mutability_wrapper`,
+/// which turns that case into a named diagnostic instead of a silently dropped constraint.
 #[cfg(feature = "serde")]
 fn generic_wrap(ident: &str) -> Option<ConstraintWrap> {
     if ident == "Option" {
         Some(ConstraintWrap::Optional)
     } else if is_sequence_wrapper(ident) {
         Some(ConstraintWrap::Sequence)
-    } else if is_transparent_wrapper(ident) {
+    } else if is_ownership_wrapper(ident) {
         Some(ConstraintWrap::Transparent)
     } else {
         None
@@ -10286,8 +10323,9 @@ fn check_omitted_key_is_readable(
 ///
 /// A hidden serde attribute leaves every serde-read diagnostic unreliable — the `Option`-null and
 /// `nullable`-key guards included, since the wrapper is exactly what kept its evidence out of the
-/// meta. The positional-constraint guard reads no serde attribute, so it stands whatever the
-/// wrapper hid.
+/// meta. `field_validation_guard_error` — the positional-constraint guard, or the
+/// interior-mutability-wrapper guard — reads no serde attribute, so it stands whatever the wrapper
+/// hid.
 #[cfg(feature = "serde")]
 fn field_guard_errors(
     field: &Field,
@@ -10296,9 +10334,9 @@ fn field_guard_errors(
     is_nullable: bool,
     serde_field_meta: &SerdeFieldMeta,
     container_defaulted: bool,
-    positional_constraint_error: Option<proc_macro2::TokenStream>,
+    field_validation_guard_error: Option<proc_macro2::TokenStream>,
 ) -> Vec<proc_macro2::TokenStream> {
-    positional_constraint_error
+    field_validation_guard_error
         .into_iter()
         .chain(serde_field_meta.cfg_attr_rejection.as_ref().map_or_else(
             || {
@@ -10667,7 +10705,7 @@ fn process_field(
 
     // Generate validation code and hold back the serde attribute it hangs on the field
     #[cfg(feature = "serde")]
-    let (validation_fn, validate_body, positional_constraint_error) = generate_field_validation(
+    let (validation_fn, validate_body, field_validation_guard_error) = generate_field_validation(
         field,
         ctx.schema_module_name,
         &raw_field_ident,
@@ -10720,7 +10758,7 @@ fn process_field(
         model_schema_prop_meta.nullable,
         &serde_field_meta,
         ctx.container_defaulted,
-        positional_constraint_error,
+        field_validation_guard_error,
     );
     #[cfg(not(feature = "serde"))]
     let serde_guard_errors: Vec<proc_macro2::TokenStream> = {
@@ -10774,6 +10812,33 @@ fn positional_constraint_guard_error(
     .to_compile_error()
 }
 
+/// The `compile_error!` tokens for a length or range constraint written on a field reached through
+/// an interior-mutability wrapper.
+///
+/// Every other covered wrapper (`Box`, `Rc`, `Arc`, `Cow`) implements `Deref`, so the generated
+/// validator reaches its inner value with a plain `&**value`. `RefCell`, `Cell`, `Mutex` and
+/// `RwLock` do not: reaching one takes a runtime-checked borrow or lock, which the constraint
+/// walk has no way to fold into `validate(&self)` — so the combination is refused here instead of
+/// the constraint silently going unchecked.
+#[cfg(feature = "serde")]
+fn interior_mutability_constraint_guard_error(
+    field: &Field,
+    raw_field_ident: &str,
+    wrapper: &str,
+) -> proc_macro2::TokenStream {
+    syn::Error::new_spanned(
+        field,
+        format!(
+            "model_schema: {}: pattern, minLength, maxLength, minimum and maximum are unsupported \
+             on a field reached through `{wrapper}` — unlike `Box`, `Rc`, `Arc` and `Cow`, it does \
+             not implement `Deref`, so the generated validator has no safe way to reach its inner \
+             value. Drop the constraint, or move the value out from under `{wrapper}`.",
+            field_label(raw_field_ident)
+        ),
+    )
+    .to_compile_error()
+}
+
 /// Generates per-field serde validation code (static validator + `deserialize_with`) and, when
 /// constraints apply, collects the corresponding `#[serde(deserialize_with = ...)]` attribute into
 /// `injected_attrs` — plus the `#[serde(default)]` that keeps an optional key optional under one.
@@ -10806,6 +10871,19 @@ fn generate_field_validation(
 
     let (Some(module_name), Some(shape)) = (schema_module_name, constrained_shape(&field.ty))
     else {
+        if (has_string_constraints || has_numeric_constraints)
+            && let Some(wrapper) = blocking_interior_mutability_wrapper(&field.ty)
+        {
+            return (
+                None,
+                None,
+                Some(interior_mutability_constraint_guard_error(
+                    field,
+                    raw_field_ident,
+                    &wrapper,
+                )),
+            );
+        }
         return (None, None, None);
     };
 

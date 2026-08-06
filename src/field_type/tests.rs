@@ -261,7 +261,9 @@ fn test_a_fixed_array_keeps_its_bound_across_the_sequence_normalization() {
 /// in a way of its own.
 #[test]
 fn test_the_covered_transparent_wrappers_are_exactly_the_recorded_list() {
-    for name in ["Arc", "Box", "Cow", "Rc"] {
+    for name in [
+        "Arc", "Box", "Cell", "Cow", "Mutex", "Rc", "RefCell", "RwLock",
+    ] {
         assert!(super::is_transparent_wrapper(name), "for: {name}");
     }
     for name in ["BTreeMap", "HashMap", "Option", "Vec"] {
@@ -269,11 +271,35 @@ fn test_the_covered_transparent_wrappers_are_exactly_the_recorded_list() {
     }
 }
 
+/// The ownership/borrow split the covered list is built from: only the first four implement
+/// `Deref`, which is what a constraint's generated validator needs to reach through one.
+#[test]
+fn test_ownership_and_interior_mutability_partition_the_covered_list() {
+    for name in ["Arc", "Box", "Cow", "Rc"] {
+        assert!(super::is_ownership_wrapper(name), "for: {name}");
+        assert!(!super::is_interior_mutability_wrapper(name), "for: {name}");
+    }
+    for name in ["Cell", "Mutex", "RefCell", "RwLock"] {
+        assert!(!super::is_ownership_wrapper(name), "for: {name}");
+        assert!(super::is_interior_mutability_wrapper(name), "for: {name}");
+    }
+}
+
 /// A covered wrapper writes nothing of its own, so the field it wraps is the field the parser
 /// produces — name and docs included, both of which belong to where the field was written.
 #[test]
 fn test_a_transparent_wrapper_parses_as_the_field_it_wraps() {
-    for spelling in ["Arc<u32>", "Box<u32>", "Cow<'a, u32>", "Rc<u32>", "u32"] {
+    for spelling in [
+        "Arc<u32>",
+        "Box<u32>",
+        "Cell<u32>",
+        "Cow<'a, u32>",
+        "Mutex<u32>",
+        "Rc<u32>",
+        "RefCell<u32>",
+        "RwLock<u32>",
+        "u32",
+    ] {
         let ty: syn::Type = syn::parse_str(spelling).unwrap();
         let parsed = super::get_field_def("items", &ty, " * items");
         assert!(
