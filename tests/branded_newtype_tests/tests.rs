@@ -1109,6 +1109,7 @@ mod constrained_default_names_a_sibling_tests {
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 mod branded_display_tests {
     use super::*;
+    use core::fmt;
 
     #[model_schema(default_types(T = String))]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1119,6 +1120,26 @@ mod branded_display_tests {
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct SimpleDisplayId(pub String);
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct DisplayInner {
+        pub value: String,
+    }
+
+    impl fmt::Display for DisplayInner {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "inner:{}", self.value)
+        }
+    }
+
+    // A non-generic brand over a sibling inner that implements `Display` itself: the impl's own
+    // `where` clause (built from the field's type) is satisfied by the sibling's hand-written
+    // impl, same as it would be by a bound the brand's own generics happened to carry.
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct WrapsDisplay(pub DisplayInner);
 
     #[test]
     fn test_generic_branded_display() {
@@ -1136,6 +1157,14 @@ mod branded_display_tests {
     fn test_branded_display_to_string() {
         let id = DisplayId("hello".to_owned());
         assert_eq!(id.to_string(), "hello");
+    }
+
+    #[test]
+    fn test_branded_display_over_a_sibling_inner_with_its_own_display_impl() {
+        let wrapped = WrapsDisplay(DisplayInner {
+            value: "xyz".to_owned(),
+        });
+        assert_eq!(wrapped.to_string(), "inner:xyz");
     }
 }
 
@@ -1928,6 +1957,36 @@ mod branded_sibling_inner_tests {
     #[serde(transparent)]
     pub struct PlainCount(pub u64);
 
+    // A plain generic struct of named fields — the one shape `Surface::object()` registers, so a
+    // brand over its instantiation can be annotated the precise `ZodObject` rather than the
+    // widened `ZodType`.
+    #[model_schema(default_types(T = String))]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Wrapper<T> {
+        pub field: T,
+    }
+
+    #[model_schema(no_display)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct WrappedBrand(pub Wrapper<u32>);
+
+    // A generic, tag-discriminated enum — a union-shaped sibling, whose registered word stays
+    // genuinely ambiguous between a plain and a discriminated union, so a brand over it keeps
+    // widening to `ZodType`.
+    #[model_schema(default_types(T = String))]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(tag = "kind")]
+    pub enum Choice<T> {
+        First { value: T },
+        Second,
+    }
+
+    #[model_schema(no_display)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct WrappedChoice(pub Choice<u32>);
+
     #[test]
     fn a_sibling_brand_writes_the_object_its_inner_writes() {
         let part = Part {
@@ -2214,6 +2273,30 @@ mod branded_sibling_inner_tests {
         let zod = OpenTag::<String>::zod_schema();
         assert!(
             zod.contains(r#"OpenTag$SchemaDefault: $ZodBranded<ZodType, "OpenTag"> ="#),
+            "Got:\n{zod}"
+        );
+    }
+
+    /// A brand over a plain generic struct instantiation is annotated the precise `ZodObject`:
+    /// the sibling's registered shape (`Surface::object()`) is produced by exactly one site, used
+    /// for exactly one thing, so the word alone already proves the class.
+    #[test]
+    fn a_brand_over_a_plain_generic_struct_instantiation_is_annotated_zodobject() {
+        let zod = WrappedBrand::zod_schema();
+        assert!(
+            zod.contains(r#"WrappedBrand$Schema: $ZodBranded<ZodObject, "WrappedBrand">"#),
+            "Got:\n{zod}"
+        );
+    }
+
+    /// A brand over a union-shaped generic sibling instantiation keeps widening to `ZodType`: the
+    /// registered word covers more than one Zod class, so nothing proves which one without
+    /// guessing.
+    #[test]
+    fn a_brand_over_a_union_shaped_generic_instantiation_stays_widened() {
+        let zod = WrappedChoice::zod_schema();
+        assert!(
+            zod.contains(r#"WrappedChoice$Schema: $ZodBranded<ZodType, "WrappedChoice">"#),
             "Got:\n{zod}"
         );
     }
