@@ -4416,6 +4416,9 @@ fn branded_zod_type_name(inner: &FieldDef) -> String {
 }
 
 /// Builds the `ts_definition()` method for a branded newtype's schema module.
+///
+/// `$brand` is spelled off the `z` namespace: it is not a top-level export of `"zod"`, only
+/// reachable as `z.$brand` under the documented `import { z } from "zod";` line.
 #[cfg(feature = "typescript")]
 fn build_branded_ts_definition_method(
     item_name: &str,
@@ -4427,7 +4430,7 @@ fn build_branded_ts_definition_method(
     #[cfg(feature = "zod")]
     {
         let type_str = format!(
-            "export type {item_name}{ts_generics} = {ts_inner_type} & $brand<\"{item_name}\">;{reexport}"
+            "export type {item_name}{ts_generics} = {ts_inner_type} & z.$brand<\"{item_name}\">;{reexport}"
         );
         quote! {
             pub fn ts_definition() -> String {
