@@ -6006,7 +6006,11 @@ fn process_discriminated_enum(
 ///
 /// The per-field entries are the ones the adjacent form writes, so the two placements describe the
 /// same fields identically and only differ in where the object sits.
-#[cfg(all(feature = "serde", feature = "jsonschema"))]
+///
+/// Used both by the externally tagged form (behind `serde`, which is the only way that shape is
+/// reached) and by the adjacently tagged form's own struct variant, which is reached even without
+/// `serde` — the fallback "tag"/"value" shape `exec_model_schema` falls through to.
+#[cfg(feature = "jsonschema")]
 fn named_content_json_value(json_fields: &[proc_macro2::TokenStream]) -> proc_macro2::TokenStream {
     quote! {
         {
@@ -7962,7 +7966,12 @@ fn generate_variant_code(
             // Zod: { type: z.literal("Variant") }
         }
         VariantKind::Named => {
-            write_named_variant_fields(field_defs, Some(tag_name), self_type_name, &mut parts);
+            write_adjacent_named_variant_fields(
+                field_defs,
+                content_name,
+                self_type_name,
+                &mut parts,
+            );
         }
         VariantKind::TupleSingle => {
             write_tuple_single_variant_fields(field_defs, content_name, self_type_name, &mut parts);
@@ -7996,6 +8005,62 @@ fn generate_variant_code(
         parts.optional_fields,
         json_schema_variant,
     )
+}
+
+/// Writes an adjacently tagged struct variant's fields nested under the content key, the shape
+/// serde actually writes for it (`{"tag":"Variant","content":{...fields}}`).
+///
+/// Reuses [`write_named_variant_fields`]'s own `None`-tag rendering — the same "an object of its
+/// own" shape the externally tagged form already builds — rather than inventing a second nesting
+/// mechanism. A field reaching the enum being defined already defers through its own getter inside
+/// that object, so the content key itself never needs one: [`render_external_variant`]'s
+/// `defer_key` establishes the same thing for the externally tagged form.
+fn write_adjacent_named_variant_fields(
+    field_defs: &[FieldDef],
+    content_name: &str,
+    self_type_name: &str,
+    parts: &mut VariantParts,
+) {
+    let mut inner = VariantParts {
+        json_fields: Vec::new(),
+        optional_fields: Vec::new(),
+        schema_code: String::new(),
+        type_code: String::new(),
+    };
+    write_named_variant_fields(field_defs, None, self_type_name, &mut inner);
+
+    let content_key = ts_member_key(content_name);
+    let _ = writeln!(
+        parts.type_code,
+        "  {content_key}: {{\n{}}};",
+        inner.type_code
+    );
+
+    #[cfg(feature = "zod")]
+    let _ = writeln!(
+        parts.schema_code,
+        "  {content_key}: z.strictObject({{\n{}}}),",
+        inner.schema_code
+    );
+
+    #[cfg(feature = "jsonschema")]
+    push_named_content_json_field(&mut parts.json_fields, content_name, &inner.json_fields);
+}
+
+/// Pushes the JSON-schema property/required entries for an adjacently tagged struct variant's
+/// content key, mirroring [`push_single_tuple_json_field`] for the tuple-single case.
+#[cfg(feature = "jsonschema")]
+fn push_named_content_json_field(
+    json_schema_variant_fields: &mut Vec<proc_macro2::TokenStream>,
+    content_name: &str,
+    inner_json_fields: &[proc_macro2::TokenStream],
+) {
+    let content_name_str = content_name.to_owned();
+    let inner = named_content_json_value(inner_json_fields);
+    json_schema_variant_fields.push(quote! {
+        properties.insert(#content_name_str.to_string(), #inner);
+        required.push(serde_json::Value::String(#content_name_str.to_string()));
+    });
 }
 
 /// Writes the named-field portion of an enum variant (TypeScript, Zod, JSON Schema).
