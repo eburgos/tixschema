@@ -1,8 +1,8 @@
 //! `ts_optional` is the whole of what decides between `field?: T` and `field: T | undefined`.
 //!
-//! Every shape below carries a flagged member beside an unflagged control of the same type and the
-//! same serde attributes, so the flag is the only difference the two lines can come from. Held
-//! under both feature flavours, since only one of them reads an attribute at all.
+//! Every shape below carries a flagged member beside an unflagged control of the same type and
+//! attributes, so the flag is the only difference. Held under both feature flavours, since only
+//! one reads an attribute at all.
 
 #[cfg(feature = "serde")]
 mod under_the_serde_feature {
@@ -83,11 +83,9 @@ mod without_the_serde_feature {
     use tixschema::model_schema;
 
     /// An `Option<T>` no attribute says anything about. Declarable only here — under the `serde`
-    /// feature the `Option`-null guard refuses both of these fields.
-    ///
-    /// Declared with its fields alphabetically, as this crate's lints require of Rust source; the
-    /// README orders the same three for reading. Only the written order differs, so each member is
-    /// held as a whole line rather than as part of a block.
+    /// feature the `Option`-null guard refuses both of these fields. Fields are declared
+    /// alphabetically (this crate's lint requirement); the README orders them for reading, so
+    /// each member is held as a whole line.
     #[model_schema()]
     #[derive(Debug, Clone, PartialEq)]
     struct Profile {

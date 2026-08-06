@@ -1,12 +1,9 @@
-//! Serde integration feature module.
-//!
-//! This module handles serde attribute parsing and field name transformation.
+//! Serde integration feature module: attribute parsing and field name transformation.
 //!
 //! Most of it is gated on the "serde" feature: renaming, tagging, and the guards are all things
-//! the feature buys. The omission walk at the top is not. Whether a key reaches the serialized
-//! object is a fact about the wire, the attribute stating it is on the field under every toggle,
-//! and every build emits surfaces that claim to describe that wire — so a build that could not
-//! read the attribute would describe a different wire than the one serde writes.
+//! the feature buys. The omission walk at the top is not — whether a key reaches the serialized
+//! object is a fact about the wire under every toggle, and every build emits surfaces that claim
+//! to describe that wire.
 
 #[cfg(all(test, feature = "serde"))]
 use crate::rename_rule::resolve_rename_rule;
@@ -25,12 +22,9 @@ const CFG_ATTR_SERDE_REJECTION: &str = "cfg_attr-wrapped serde attribute is invi
      model_schema and will be silently ignored by the generator; write #[serde(...)] \
      unconditionally (serde attrs are inert without the serde derive)";
 
-/// What a field's serde attributes say about the key it writes.
-///
-/// Read in every build, unlike the rest of this module. The three questions are asked together
-/// because one walk answers all of them and because the guard that polices the combination needs
-/// them side by side: an attribute that drops the key while serde still insists on reading the
-/// field is only coherent when something writes the value the missing key does not carry.
+/// What a field's serde attributes say about the key it writes. Read in every build, unlike the
+/// rest of this module, since one walk answers all three questions together and the guard that
+/// polices their combination needs them side by side.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SerdeKeyOmission {
     /// A `default` in either spelling (`default` or `default = "path"`) — the field supplies a
@@ -45,10 +39,9 @@ pub struct SerdeKeyOmission {
 
 impl SerdeKeyOmission {
     /// Whether the attributes take the member out of both of serde's directions at once: nothing
-    /// serde writes carries it, and nothing serde reads keeps what a payload put there.
-    ///
-    /// The conjunction is what is read rather than the word `skip`, because `skip_serializing` and
-    /// `skip_deserializing` written side by side are that same wire spelled out.
+    /// serde writes carries it, and nothing serde reads keeps what a payload put there — the
+    /// conjunction, not the word `skip`, since `skip_serializing` + `skip_deserializing` side by
+    /// side is that same wire spelled out.
     pub const fn absent_from_wire(self) -> bool {
         self.omits_key && self.skips_deserializing
     }
@@ -72,11 +65,9 @@ pub struct SerdeTypeMeta {
     pub untagged: bool,          // Whether the enum is `#[serde(untagged)]`
 }
 
-/// Metadata for serde attributes applied to a field.
-///
-/// Whether the field's key is omitted is not here: [`parse_serde_key_omission`] answers that in
-/// every build, and one answer read from one place is what keeps the surfaces from disagreeing
-/// across the feature toggle.
+/// Metadata for serde attributes applied to a field. Whether the field's key is omitted is not
+/// here: [`parse_serde_key_omission`] answers that in every build, keeping the surfaces from
+/// disagreeing across the feature toggle.
 #[cfg(feature = "serde")]
 #[derive(Clone, Debug, Default)]
 pub struct SerdeFieldMeta {
@@ -88,10 +79,8 @@ pub struct SerdeFieldMeta {
 }
 
 /// Walks the serde attributes for exactly the keys [`SerdeKeyOmission`] names, ignoring every
-/// other one.
-///
-/// Attributes wrapped in a `cfg_attr` are not reached, the same way nothing else in this module
-/// reaches them — a predicate a proc macro cannot evaluate is not one this walk may guess at.
+/// other one. Attributes wrapped in a `cfg_attr` are not reached — a predicate a proc macro cannot
+/// evaluate is not one this walk may guess at.
 pub fn parse_serde_key_omission(attrs: &[Attribute]) -> SerdeKeyOmission {
     let mut omission = SerdeKeyOmission::default();
 
@@ -126,16 +115,9 @@ pub fn parse_serde_key_omission(attrs: &[Attribute]) -> SerdeKeyOmission {
 }
 
 /// Consumes the value of a `key = value` or the group of a `key(...)` list the walk had no use
-/// for.
-///
-/// An unread value or list ends the walk on the comma that follows it, taking every attribute
-/// written after it along — so which attributes a declaration is read by would otherwise depend
-/// on the order someone happened to write them in. The list is consumed whole, as a single
-/// `Group` token, rather than parsed: nothing here reads `serialize`/`deserialize` out of
-/// `bound(...)`/`rename(...)`/`rename_all(...)`, only steps past them. With both spellings
-/// swallowed, a walk that still fails is a `#[serde(...)]` attribute malformed in some other way
-/// — serde's own derive will refuse it too — so the trace-level swallow below stays as the walk's
-/// resilience against that, rather than a channel this fix needs to redesign.
+/// for, so an unread value doesn't end the walk early and drop every attribute written after it.
+/// The list is consumed whole rather than parsed — nothing here reads into `bound(...)`,
+/// `rename(...)`, or `rename_all(...)`, only steps past them.
 fn consume_unread_value(nested: &ParseNestedMeta<'_>) -> syn::Result<()> {
     if nested.input.peek(Token![=]) {
         nested.value()?.parse::<syn::Expr>()?;

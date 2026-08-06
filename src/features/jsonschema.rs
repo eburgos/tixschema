@@ -3,17 +3,13 @@
 //! This module handles JSON schema generation when the "jsonschema" feature is enabled.
 
 /// What every pointer the crate writes opens with; what follows it is the key a definition is
-/// hoisted under — a bare name, or a name discriminated by the filling that built it.
-///
-/// The crate writes draft 2020-12 (`prefixItems` with `"items": false` is that draft's fixed-arity
-/// array, and the draft before it spells the same array with `items`/`additionalItems`), whose
-/// deferred schema is a `$ref` into the document's own `$defs`.
+/// hoisted under — a bare name, or a name discriminated by the filling that built it. The crate
+/// writes draft 2020-12, whose deferred schema is a `$ref` into the document's own `$defs`.
 const DEFS_PREFIX: &str = "#/$defs/";
 
-/// How a merge that cannot proceed names itself in the diagnostic it raises.
-///
-/// `subject` is the frame that reads the merge, `edge` what the merged schema was reached through,
-/// and each remedy the way out in the spelling that applies where that edge was written.
+/// How a merge that cannot proceed names itself in the diagnostic it raises: `subject` is the
+/// frame that reads the merge, `edge` what the merged schema was reached through, and each remedy
+/// the way out in the spelling that applies where that edge was written.
 pub struct MergeDiagnostic<'msg> {
     /// The way out of a cycle: what makes the edge defer rather than merge.
     pub cycle_remedy: &'msg str,
@@ -24,11 +20,9 @@ pub struct MergeDiagnostic<'msg> {
     pub subject: &'msg str,
 }
 
-/// One schema merged into a base, together with how the author named it.
-///
-/// A merged schema is a `serde_json` expression by the time it reaches the merge and no longer
-/// carries the name it came from, so the label travels beside it — it is what a diagnostic points
-/// the author at.
+/// One schema merged into a base, together with how the author named it. A merged schema is a
+/// `serde_json` expression by the time it reaches the merge and no longer carries the name it came
+/// from, so the label travels beside it — it is what a diagnostic points the author at.
 pub struct MergedSource {
     pub label: String,
     /// Whether the value was reached through an `Option`. serde writes the members of a `Some` into
@@ -113,11 +107,9 @@ pub fn json_schema_methods(
 }
 
 /// The names whose descriptions are still being written, as the type every `within` form carries
-/// them in.
-///
-/// Each name travels with the documents its parameters were filled with, that being what says
-/// which body the definition the name is deferred to will hold. A name declaring no parameter
-/// carries an empty list, and compares equal to itself the way it always did.
+/// them in. Each name travels with the documents its parameters were filled with — what says which
+/// body the definition the name is deferred to will hold; a name declaring no parameter carries an
+/// empty list.
 pub fn in_flight_type() -> proc_macro2::TokenStream {
     quote::quote! { Vec<(&'static str, Vec<serde_json::Value>)> }
 }
@@ -131,34 +123,15 @@ fn bound_filling(parameters: &[SchemaParameter]) -> proc_macro2::TokenStream {
 }
 
 /// The description guarded against re-entering a name still being written, as the tokens the
-/// `within` form's body is.
-///
-/// `filling` is the documents this frame's parameters were filled with, which is what the guard
-/// reads the re-entry against: the same filling is the cycle the pointer describes, a different one
-/// the body the document cannot hold. It is also what the hoisted key is built from: a generic name
-/// can be reached at more than one filling across a document, sequentially rather than nested — two
-/// sibling fields naming it at different fillings, neither ever in flight while the other runs — so
-/// a bare name would let the second write silently clobber the first's definition.
-///
-/// `discriminate_by_filling` is decided by the caller, not read off `filling` at runtime: a name
-/// declaring no parameter always fills at `Vec::new()`, and a name declaring one or more always
-/// fills at a `vec![...]` of that many arguments, so which of the two this frame is is already
-/// known at expansion time. Keying every call the same way — reading each argument's `"type"`
-/// keyword — would plant that literal text in the parameterless form's own source too, breaking a
-/// caller that reads the generated tokens rather than running them; picking the tokens to emit
-/// instead of the value to compute keeps a parameterless name keyed the bare, undiscriminated way
-/// it always has been, byte-identical down to the source text and not only the runtime value.
-///
-/// A non-empty filling's key must also be a legal `$ref` URI-reference, which the canonical JSON
-/// text of the filling is not — it carries quotes, braces and colons a URI-reference forbids
-/// outright, RFC 6901's `~0`/`~1` escaping being answerable only for what a *pointer* forbids. The
-/// discriminator built here instead reads each argument's own recognizable name where the argument
-/// carries one — a sibling reference's own key (already URI-safe, by the same rule applied one
-/// level down), or a primitive's `"type"` keyword — and joins those into a readable label. Two
-/// fillings a label cannot tell apart (`u32` and `i64` both read `"integer"`) still cannot collide,
-/// because a digest of the filling's canonical text is appended regardless of whether a label was
-/// found; a filling with no labeled argument at all (a bare type parameter's opaque `{}`) keys off
-/// that digest alone.
+/// `within` form's body is. `filling` is the documents this frame's parameters were filled with —
+/// what the re-entry guard compares against, and what the hoisted key is built from, since a
+/// generic name reached at more than one filling across a document must not let the second write
+/// clobber the first's definition. `discriminate_by_filling` is fixed by the caller at expansion
+/// time rather than read off `filling` at runtime, so a parameterless name's generated source
+/// stays byte-identical. A filling's key reads each argument's own recognizable name (a sibling
+/// reference's key, or a primitive's `"type"` keyword) into a readable label, with a digest of the
+/// filling's canonical JSON always appended so fillings a label cannot tell apart still cannot
+/// collide.
 fn guarded_description(
     def_name: &str,
     body: &proc_macro2::TokenStream,
@@ -170,10 +143,9 @@ fn guarded_description(
     let key_binding = if discriminate_by_filling {
         quote::quote! {
             let key = {
-                // The FNV-1a offset basis and prime: an algorithm spelled out here rather than
-                // reached for from `std::hash::Hasher`, whose documented internals are free to
-                // change between compiler versions and would make the key of an identical filling
-                // drift across builds.
+                // The FNV-1a offset basis and prime, spelled out rather than reached for from
+                // `std::hash::Hasher`: its documented internals may change between compiler
+                // versions, which would make the key of an identical filling drift across builds.
                 fn digest(bytes: &[u8]) -> u64 {
                     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
                     for byte in bytes {
@@ -182,10 +154,9 @@ fn guarded_description(
                     }
                     hash
                 }
-                // An argument's own recognizable name: another hoisted key, read back off its
-                // `$ref`, or a primitive's `"type"` keyword. An inlined struct or a bare type
-                // parameter's `{}` has neither, and contributes nothing to the label — the digest
-                // is what tells its filling apart from another's regardless.
+                // An argument's own recognizable name: another hoisted key (off its `$ref`), or a
+                // primitive's `"type"` keyword. An inlined struct or bare type parameter's `{}`
+                // has neither and contributes nothing to the label — the digest tells those apart.
                 fn argument_label(argument: &serde_json::Value) -> Option<String> {
                     if let Some(reference) =
                         argument.get("$ref").and_then(serde_json::Value::as_str)
@@ -304,12 +275,9 @@ fn argument_bindings(parameters: &[SchemaParameter]) -> proc_macro2::TokenStream
     quote::quote! { #(#bound)* }
 }
 
-/// Generates the JSON schema method implementation for structs.
-///
-/// When the struct has `#[serde(flatten)]` fields, the base properties are
-/// distributed into each branch of the flattened types' schemas (cross-product
-/// over any `oneOf`), producing a strict closed schema that validates the base
-/// fields and the flattened union together.
+/// When the struct has `#[serde(flatten)]` fields, the base properties are distributed into each
+/// branch of the flattened types' schemas (cross-product over any `oneOf`), producing a strict
+/// closed schema that validates the base fields and the flattened union together.
 pub fn generate_struct_json_schema_method(
     json_schema_fields: &[proc_macro2::TokenStream],
     flatten_json_schemas: &[MergedSource],
@@ -385,10 +353,8 @@ fn merge_readers() -> proc_macro2::TokenStream {
         }
 
         // A merged schema that names itself describes as a reference into the definitions being
-        // hoisted, and a reference is the one thing with no properties to merge. The body it
-        // points at is written by then — the frame that deferred the name fills the entry in
-        // before it returns — so the merge reads it back. A union member defers the same way the
-        // whole merged body does, so both ends read it through here.
+        // hoisted — the body it points at is written by then, since the frame that deferred the
+        // name fills the entry in before it returns, so the merge reads it back.
         fn deferred_name(schema: &serde_json::Value) -> Option<&str> {
             schema.get("$ref")?.as_str()?.strip_prefix(#defs_prefix)
         }
@@ -400,14 +366,11 @@ fn merge_readers() -> proc_macro2::TokenStream {
             schema.get("type")?.as_str()
         }
 
-        // What serde picked one of, and how the source spelled the choice. A discriminated enum
-        // writes `oneOf` and an untagged one `anyOf`; the merge owes both the same branches — the
-        // value that reached it wrote whichever branch matched, so the branch is what the base
-        // joins — and owes each its own spelling, which is what says whether a payload two branches
-        // admit is an error or the ordinary case.
-        //
-        // A schema that offers no choice answers with none, which is what tells the expansion it has
-        // reached something the base can merge rather than descend into.
+        // What serde picked one of, and how the source spelled the choice: a discriminated enum
+        // writes `oneOf`, an untagged one `anyOf` — each spelling says whether a payload two
+        // branches admit is an error or the ordinary case. `None` means the schema offers no
+        // choice, so the expansion has reached something the base can merge rather than descend
+        // into.
         fn union_branches(schema: &serde_json::Value) -> Option<(&'static str, &[serde_json::Value])> {
             for keyword in ["oneOf", "anyOf"] {
                 if let Some(union) = schema.get(keyword).and_then(serde_json::Value::as_array) {
@@ -417,14 +380,11 @@ fn merge_readers() -> proc_macro2::TokenStream {
             None
         }
 
-        // The variant name a branch of an externally tagged enum's `oneOf` pins, and `None` for
-        // every branch that pins none.
-        //
-        // The two spellings a union is written under say which enum wrote it: `oneOf` is the
-        // exclusive choice a tagged enum publishes, where a branch describing a bare string is a
-        // unit variant and the description pins the name serde writes it as. `anyOf` is the
-        // first-match choice an untagged enum publishes and a nullable value's own, where a string
-        // branch is a value serde writes as that string and nothing tags.
+        // The variant name a branch of an externally tagged enum's `oneOf` pins, or `None` for
+        // every branch that pins none. `oneOf` is the exclusive choice a tagged enum publishes,
+        // where a bare-string branch is a unit variant pinning the name serde writes; `anyOf` is
+        // the first-match choice an untagged enum (or a nullable value) publishes, where a string
+        // branch is just a value and nothing tags.
         fn tagged_unit_variant(schema: &serde_json::Value) -> Option<&str> {
             (described_type(schema)? == "string").then_some(())?;
             schema.get("const")?.as_str()
@@ -499,16 +459,10 @@ fn merged_tree() -> proc_macro2::TokenStream {
                 }
             }
 
-            // The same source with its own absence offered beside it — what an `Option` makes of
-            // whatever it wraps. One object cannot say that a group of keys is written together or
-            // not at all: required of every payload rejects the absent one, and required of none
-            // admits a base written in part, which is a payload the source never writes. A choice
-            // between two key sets is exactly what the two forms are, so it is written as one.
-            //
-            // `anyOf` is the rule that choice was written under. A source whose own members are all
-            // optional writes nothing for some of its values, and that payload is the one its
-            // absence writes too — two branches admitting it is the ordinary case rather than the
-            // ambiguity `oneOf` would call it.
+            // What an `Option` makes of whatever it wraps: one object cannot say that a group of
+            // keys is written together or not at all, so the choice is written as `anyOf` between
+            // two key sets — the ordinary case for a source whose own members are all optional,
+            // not the ambiguity `oneOf` would call it.
             fn or_absent(self) -> Self {
                 Self::Union("anyOf", vec![self, Self::Absent])
             }
@@ -650,12 +604,10 @@ fn branch_expansion() -> proc_macro2::TokenStream {
 
             if let Some(named) = described_type(body) {
                 // A `null` among the choices the flatten edge itself offers is the absence rather
-                // than a refusal: the source is nullable, serde writes no member of it for that
-                // value, and the payload carrying none of them is the one serde reads back as that
-                // value — the same two key sets a source reached through an `Option` writes. A
-                // `null` below that level is a member of a choice serde matched by shape, where the
-                // absent form is one serde writes and then matches no member for, and the refusal
-                // stands.
+                // than a refusal: the source is nullable and the payload carrying none of its
+                // members is the one serde reads back as that value — the same two key sets an
+                // `Option` writes. A `null` below that level is a member of a choice serde matched
+                // by shape, and the refusal stands.
                 if named == "null" && position.len() == 1 {
                     return Some(Branches::Absent);
                 }
@@ -676,12 +628,10 @@ fn branch_expansion() -> proc_macro2::TokenStream {
             let mut expanded: Vec<Branches<'defs>> = Vec::new();
             for (index, branch) in branches.iter().enumerate() {
                 position.push(index + 1);
-                // A unit variant of the choice the flatten edge itself offers, which is the one
-                // depth at which the enum being flattened *is* the source. serde writes the
-                // variant's name into the object being merged there, so the branch is a key set
-                // like any other. One level down the enum is a member of a choice serde matched by
-                // shape, where the same value is the bare string it was written as and joins
-                // nothing — the refusal that position already carries.
+                // A unit variant of the choice the flatten edge itself offers is the one depth at
+                // which the enum being flattened *is* the source, so the branch is a key set like
+                // any other. One level down, the enum is a member of a choice matched by shape,
+                // where the same value joins nothing — the refusal that position already carries.
                 let tagged = (position.len() == 1 && spelling == "oneOf")
                     .then(|| tagged_unit_variant(branch))
                     .flatten();
@@ -743,10 +693,9 @@ pub fn merged_object_value(
     }
 }
 
-/// The struct's own fields distributed into each branch of the flattened types' schemas.
-///
-/// A flatten edge that closes a cycle is rejected where it is read rather than merged: `def_name`
-/// is the frame that reads it, and names one end of the closing edge in the diagnostic.
+/// The struct's own fields distributed into each branch of the flattened types' schemas. A flatten
+/// edge that closes a cycle is rejected where it is read rather than merged: `def_name` names one
+/// end of the closing edge in the diagnostic.
 fn flattened_object_body(
     json_schema_fields: &[proc_macro2::TokenStream],
     flatten_json_schemas: &[MergedSource],

@@ -214,21 +214,16 @@ fn test_optional_tuple_field_zod() {
     );
 }
 
-// The remargin compact-row shape is `Vec<(Option<String>, Vec<usize>, String,
-// Option<String>)>`. That exact struct field trips `clippy::type_complexity`
-// (the outer `Vec` + nested `Vec<usize>` + 4 elements together clear the
-// threshold), and factoring it into a `type` alias would make the macro treat it
-// as a sibling reference rather than a tuple — so the happy path is proven in two
-// composable halves: the exact inner tuple below (all four slots, including
-// `Vec<usize>` → `Array<number>` and both `Option` → null), and the outer
-// `Vec` → `Array<[...]>` wrap in `test_tuple_element_option_array_wrap`. The wire
-// round-trip exercises the full shape through a `type` alias, which serde reads
-// natively.
+// The remargin compact-row shape is `Vec<(Option<String>, Vec<usize>, String, Option<String>)>`,
+// which trips `clippy::type_complexity` as a struct field, and factoring it into a `type` alias
+// would make the macro treat it as a sibling reference rather than a tuple — so the happy path is
+// proven in two composable halves: the exact inner tuple below, and the outer `Vec` wrap in
+// `test_tuple_element_option_array_wrap`. The wire round-trip exercises the full shape through a
+// `type` alias, which serde reads natively.
 
-/// Null-flavor happy path (TS): each `Option` element inside a tuple renders as
-/// `T | null` — a positional slot serializes `None` as JSON `null`, unlike an
-/// omittable object key. Also the scenario-5 negative guard: a required tuple
-/// field emits no `undefined` at all.
+/// Null-flavor happy path (TS): each `Option` element inside a tuple renders as `T | null` — a
+/// positional slot serializes `None` as JSON `null`, unlike an omittable object key. Also the
+/// negative guard: a required tuple field emits no `undefined` at all.
 #[test]
 fn test_tuple_element_option_null_flavor_ts() {
     #[model_schema()]
@@ -315,10 +310,9 @@ fn test_tuple_element_option_null_flavor_json_schema() {
     assert_eq!(prefix[2], serde_json::json!({ "type": "string" }));
 }
 
-/// Array-wrap composition (TS): a `Vec<(Option<Vec<usize>>, String)>` field wraps
-/// the tuple in `Array<[...]>`, and the null flavor survives the wrap. The
-/// `Option<Vec<usize>>` slot proves the array wrap happens inside the base with
-/// `null` on top: `Array<number> | null`.
+/// Array-wrap composition (TS): a `Vec<(Option<Vec<usize>>, String)>` field wraps the tuple in
+/// `Array<[...]>`, and the null flavor survives the wrap — the `Option<Vec<usize>>` slot proves
+/// the array wrap happens inside the base with `null` on top: `Array<number> | null`.
 #[test]
 fn test_tuple_element_option_array_wrap_ts() {
     #[model_schema()]

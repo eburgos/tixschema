@@ -1,9 +1,9 @@
 /// What a self-referential type describes as on the JSON-schema and TypeScript surfaces.
 ///
-/// Each description is produced in a child copy of this test binary. A description that does not
-/// terminate overflows the stack, and a stack overflow aborts the process rather than unwinding —
-/// there is nothing to catch where it happens. Running it in a child turns that abort into an exit
-/// status the parent asserts on, so a regression fails one test instead of killing the suite.
+/// Each description runs in a child copy of this test binary: a description that doesn't
+/// terminate overflows the stack, and a stack overflow aborts the process with nothing to catch.
+/// Running it in a child turns that abort into an exit status the parent asserts on, so a
+/// regression fails one test instead of killing the suite.
 #[cfg(feature = "jsonschema")]
 mod describes {
     use super::{
@@ -28,11 +28,10 @@ mod describes {
     /// The libtest path of [`production`], which the parent names to run only it in the child.
     const CHILD_TEST: &str = "tests::describes::production";
 
-    /// The deepest object or array nesting anywhere in a description.
-    ///
-    /// A type that names itself has a description whose depth is set by its own fields. One that
-    /// terminated by unrolling itself a fixed number of times instead would be far deeper, which
-    /// is the difference this measures.
+    /// The deepest object or array nesting anywhere in a description. A type that names itself has
+    /// a description whose depth is set by its own fields — one that terminated by unrolling
+    /// itself a fixed number of times instead would be far deeper, which is the difference this
+    /// measures.
     fn depth(value: &Value) -> usize {
         match value {
             Value::Object(members) => 1 + members.values().map(depth).max().unwrap_or_default(),
@@ -463,7 +462,7 @@ pub struct Person {
 
 /// Two non-generic structs cycling through a `Vec` — `Chapter` names `Section` before `Section`
 /// is declared, and `Section` names `Chapter` back afterward. Legal Rust, no `Box` needed, since
-/// the cycle runs through a collection on both sides; this is the zero-argument counterpart of
+/// the cycle runs through a collection on both sides; the zero-argument counterpart of
 /// `CycleLeader`/`CycleFollower` in `generic_types_tests`.
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -666,9 +665,8 @@ fn test_recursive_named_struct_variant() {
 }
 
 /// Test 8b: the same recursive field, now nested under an adjacent form's content key. The field's
-/// own getter still has to defer the reference; the content key itself needs none; wrapping it in a
-/// second getter would be wrong precedent (see `render_external_variant`'s `defer_key`, which never
-/// sets it for a `Named` variant either).
+/// own getter still defers the reference; the content key needs none — a second getter would be
+/// wrong precedent (see `render_external_variant`'s `defer_key`, never set for a `Named` variant).
 #[test]
 fn test_recursive_named_struct_variant_adjacent() {
     let zod = TreeEnumAdjacent::zod_schema();
@@ -701,10 +699,10 @@ fn test_recursive_boxed_option_struct() {
     );
 }
 
-/// Test 10: A non-generic forward reference — a bare, zero-argument sibling declared BELOW the
-/// type naming it — has to defer exactly as a generic forward reference already does, or the
-/// module the pair is written into throws at import in every concatenation order: whichever half
-/// of the cycle lands first names a `const` the other half has not published yet.
+/// Test 10: a non-generic forward reference — a bare, zero-argument sibling declared BELOW the
+/// type naming it — has to defer exactly as a generic forward reference does, or the module
+/// throws at import in every concatenation order: whichever half lands first names a `const` the
+/// other has not published yet.
 #[test]
 fn test_non_generic_forward_reference_defers_through_a_getter() {
     let chapter_zod = Chapter::zod_schema();

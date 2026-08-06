@@ -17,9 +17,9 @@ pub enum Outer {
 }
 
 /// The content key of a single-element tuple variant is a slot: serde always writes the key, so a
-/// `None` at the outermost level reaches the wire as a `null` under it rather than dropping the
-/// key. The three variants below are the three answers the surfaces owe — the `Option` around the
-/// array, the `Option` among its items, and no `Option` at all.
+/// `None` at the outermost level reaches the wire as `null` rather than dropping the key. The
+/// three variants below cover the `Option` around the array, the `Option` among its items, and no
+/// `Option` at all.
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", content = "value")]
@@ -41,10 +41,10 @@ pub enum SlotElements {
 
 /// A struct variant of an adjacently tagged enum: serde nests its fields in an object under the
 /// content key rather than splicing them beside the tag. `Named`'s optional `y` covers key
-/// optionality at the nested depth. The empty-content case (`Empty {}`) has no way to be declared
-/// here without tripping `clippy::empty_enum_variants_with_brackets`, so it is covered by
+/// optionality at the nested depth. The empty-content case (`Empty {}`) trips
+/// `clippy::empty_enum_variants_with_brackets` here, so it's covered instead by
 /// `adjacently_tagged_empty_named_variant_nests_an_empty_content_object` in
-/// `src/model_schema/tests.rs` instead, built through `parse_quote!` rather than a real item.
+/// `src/model_schema/tests.rs`, built through `parse_quote!`.
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "kind", content = "data")]
@@ -57,10 +57,9 @@ pub enum AdjacentNamed {
     Unit,
 }
 
-/// An enum carrying no `#[serde(tag = ..., content = ...)]` is externally tagged: serde writes the
-/// variant name as the sole key of an object holding the content, and a unit variant as the bare
-/// name. The four variants below are the four contents that key can hold, plus the one that has no
-/// key at all.
+/// An externally tagged enum (no `#[serde(tag = ..., content = ...)]`): serde writes the variant
+/// name as the sole key of an object holding the content, or the bare name for a unit variant. The
+/// four variants below cover what that key can hold, plus the keyless case.
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum External {
@@ -103,10 +102,9 @@ pub struct TagPayload {
     pub b: bool,
 }
 
-/// An enum carrying `#[serde(tag = ...)]` and no `content` is internally tagged: there is no key
-/// for a variant's data, so what it writes are members of the object the tag is written in. The
-/// three variants are the three things that can be written there — nothing at all, a struct
-/// variant's own fields, and the members of a newtype variant's inner type.
+/// An internally tagged enum (`#[serde(tag = ...)]`, no `content`) writes a variant's data as
+/// members of the object the tag is written in. The three variants cover what can be written
+/// there: nothing, a struct variant's own fields, or a newtype variant's inner members.
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "type")]
@@ -221,10 +219,9 @@ pub enum RecursiveExternal {
     Txt(String),
 }
 
-/// The positions a dropped slot can sit in, beside the variant that drops none. A leading drop is
+/// The positions a dropped slot can sit in, beside the variant that drops none: a leading drop is
 /// the one the slots behind move up into, a trailing one only shortens the array, a middle one is
-/// where the renumbering shows, every slot dropped still writes an array, and a lone slot dropped
-/// leaves the variant a unit.
+/// where the renumbering shows, and a lone slot dropped leaves the variant a unit.
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ExternalDroppedSlots {
@@ -243,10 +240,10 @@ pub enum ExternalKeptOnly {
     Kept(u8, bool),
 }
 
-/// The same drops under a content key, where the array is written under `value` rather than under
-/// the variant's own name. `Lone` is declared as the unit it would have been written as: under this
-/// tagging alone the collapse has no payload to be described by and is refused, and this is the
-/// remedy that refusal names.
+/// The same drops under a content key, where the array is written under `value` rather than the
+/// variant's own name. `Lone` is declared as the unit it would have been written as — under this
+/// tagging alone the collapse has no payload to describe and is refused; this is the remedy that
+/// refusal names.
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "type", content = "value")]
@@ -1051,10 +1048,10 @@ fn test_empty_tuple_variant() {
     );
 }
 
-/// Test 16: enum tuple variant with an `Option` element gets null flavor in the
-/// generated JSON Schema, via the same shared element builder used by struct
-/// tuple fields. A positional tuple slot serializes `None` as `null`, so the
-/// optional element renders `anyOf [<base>, null]`; arity is unchanged.
+/// Test 16: an enum tuple variant with an `Option` element gets null flavor in the generated JSON
+/// Schema, via the same shared element builder struct tuple fields use — a positional tuple slot
+/// serializes `None` as `null`, so the optional element renders `anyOf [<base>, null]`, arity
+/// unchanged.
 #[cfg(feature = "jsonschema")]
 #[test]
 fn test_optional_tuple_variant_element_json_schema_null_flavor() {
@@ -1799,7 +1796,7 @@ fn test_bare_tag_zod_intersects_the_inner_schema() {
 
 /// Test 22c2: the inner type is a `const` of its own and nothing orders one type's emitted module
 /// against another's, so naming it straight into the member would read it while the enum's own
-/// `const` initializes — which fails for any inner type declared below. The read is deferred to
+/// `const` initializes — failing for any inner type declared below. The read is deferred to
 /// whenever something validates, the same way a `#[serde(flatten)]` base's is.
 #[cfg(feature = "zod")]
 #[test]

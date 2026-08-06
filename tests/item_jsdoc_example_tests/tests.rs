@@ -373,10 +373,9 @@ fn example_only_twins() -> Vec<(String, String, &'static str, &'static str)> {
     ]
 }
 
-/// The reported failure: an item and a member documented with nothing but an example emitted an
-/// empty `JSDoc` body, where an undocumented one names what it is documenting. The strip is what
-/// decides whether anything was said, so what it leaves empty is what falls back to the name — and
-/// the shape is then the undocumented one, byte for byte.
+/// The reported failure: an item or member documented with nothing but an example emitted an
+/// empty `JSDoc` body, where an undocumented one names what it's documenting. What the strip
+/// leaves empty falls back to the name, so the shape becomes the undocumented one, byte for byte.
 #[test]
 fn an_example_only_shape_writes_what_its_undocumented_twin_writes() {
     // The aliases publish `ts_definition` from their own modules rather than from the alias, so

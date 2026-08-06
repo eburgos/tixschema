@@ -194,10 +194,8 @@ fn test_untagged_default_is_false() {
     assert!(!meta.untagged);
 }
 
-/// The walk reads every attribute in the list, wherever it sits. A `key = value` this parser has
-/// no use for still has to be consumed: an unread value ends the walk on the comma after it, and
-/// everything written past that point would go unseen — which is a field diagnosed by the
-/// attributes someone happened to write first.
+/// An unread `key = value` this parser has no use for still has to be consumed: it ends the walk
+/// on the comma after it, and everything written past that point would go unseen.
 #[test]
 fn test_attributes_after_an_unread_value_are_still_read() {
     let item: syn::ItemStruct = syn::parse_quote! {
@@ -291,7 +289,6 @@ fn test_every_ignored_value_carrying_type_key_is_survived() {
     }
 }
 
-/// A list with nothing to step over is read exactly as it was, key for key.
 #[test]
 fn test_type_attributes_without_unread_values_are_unchanged() {
     let item: syn::ItemEnum = syn::parse_quote! {

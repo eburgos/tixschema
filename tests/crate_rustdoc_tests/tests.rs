@@ -1,10 +1,7 @@
 //! The crate rustdoc opens with four declarations and prints, beside each, what that declaration
-//! emits. A reader takes those blocks for the crate's output — so each one is expanded here as
-//! written and held to the run: the emission the generator answers with has to still appear in
-//! `src/lib.rs` verbatim. Drift on either side fails here rather than on the docs page.
-//!
-//! Field and variant order is load-bearing, every surface being written in declaration order, so
-//! each type is declared exactly as the rustdoc declares it.
+//! emits. Each is expanded here as written and held to the run: the emission the generator
+//! answers with has to still appear in `src/lib.rs` verbatim, field and variant order included,
+//! since every surface writes in declaration order. Drift fails here rather than on the docs page.
 
 #[cfg(all(
     feature = "jsonschema",

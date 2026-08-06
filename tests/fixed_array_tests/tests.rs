@@ -205,10 +205,10 @@ fn test_a_fixed_array_validates_its_length_in_zod() {
     }
 }
 
-/// TypeScript takes the other answer and stays `Array<T>` at every level. The fixed-length form its
-/// type system has is the N-element tuple, which has to be written out element by element and stops
-/// being readable long before `N` stops being legal; the two validating surfaces are where a
-/// wrong-length payload is caught.
+/// TypeScript takes the other answer and stays `Array<T>` at every level — its fixed-length form,
+/// the N-element tuple, has to be written out element by element and stops being readable long
+/// before `N` stops being legal. The two validating surfaces are where a wrong-length payload is
+/// caught.
 #[test]
 #[cfg(feature = "typescript")]
 fn test_a_fixed_array_types_as_an_unbounded_array_in_typescript() {

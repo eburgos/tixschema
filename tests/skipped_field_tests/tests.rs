@@ -1,20 +1,16 @@
-//! The wire is the arbiter, and it is read in both directions before any surface is asserted.
+//! The wire is the arbiter, read in both directions before any surface is asserted.
 //!
-//! Three spellings drop a field out of one direction or both, and the payloads they produce are
-//! three different payloads. A bare `skip` — and the two halves written side by side, which is what
-//! it abbreviates — takes the key out of everything serde writes *and* throws it away out of
-//! everything serde reads, so nothing on the wire ever carries it and no surface has a member to
-//! describe. `skip_serializing` alone drops the key on the way out but still reads a supplied one,
-//! so its member is described under an optional key. `skip_deserializing` alone writes the key in
-//! every payload, so its member keeps a required one.
+//! Three spellings drop a field out of one direction or both: a bare `skip` drops the key from
+//! both read and write, so no surface has a member to describe; `skip_serializing` alone drops
+//! the key on the way out but still reads a supplied one, so its member is described under an
+//! optional key; `skip_deserializing` alone writes the key in every payload, so its member keeps
+//! a required one.
 //!
-//! Dropping the member is stricter than serde on the read side, and deliberately so. Recorded
-//! against zod 4.4.3 under node v26.2.0: `z.strictObject({ id: z.string() })` accepts
-//! `{ id: "1" }` and rejects `{ id: "1", internal: ["x"] }` with `unrecognized_keys`
-//! (`Unrecognized key: "internal"`), while serde accepts that same payload and discards the value.
-//! The surfaces describe the payload serde *writes*, and serde writes that key in no payload at
-//! all; an optional member would claim the opposite — that the key is sometimes written — and would
-//! additionally describe a value the deserializer throws away.
+//! Dropping the member is stricter than serde on the read side, deliberately. Recorded against
+//! zod 4.4.3 under node v26.2.0: `z.strictObject({ id: z.string() })` rejects
+//! `{ id: "1", internal: ["x"] }` with `unrecognized_keys`, while serde accepts that same payload
+//! and discards the value — the surfaces describe the payload serde *writes*, and serde writes
+//! that key in no payload at all.
 
 use serde::{Deserialize, Serialize};
 use tixschema::model_schema;

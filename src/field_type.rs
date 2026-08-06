@@ -33,9 +33,7 @@ use crate::features::serde::{
 #[cfg(feature = "serde")]
 use crate::features::serde::{SerdeFieldMeta, SerdeTypeMeta};
 
-/// Classifies how an enum variant stores its data.
-///
-/// This is used to determine the correct TypeScript/Zod generation strategy
+/// Classifies how an enum variant stores its data, driving the TypeScript/Zod generation strategy
 /// for discriminated union variants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VariantKind {
@@ -173,11 +171,9 @@ pub struct FieldDef {
 }
 
 /// Two field defs are equal when they describe the same value on every surface: the same type, the
-/// same array levels, the same fixed lengths and the same nullable levels.
-///
-/// What the author wrote *around* the value is left out. A name, a doc comment and a
-/// `model_schema_prop` are the field's, not the type's, and two fields differing only in those
-/// render the same schema — which is exactly the question `as = Type` asks of its target.
+/// same array levels, the same fixed lengths and the same nullable levels. What the author wrote
+/// *around* the value — a name, a doc comment, a `model_schema_prop` — is left out, which is
+/// exactly the question `as = Type` asks of its target.
 impl PartialEq for FieldDef {
     fn eq(&self, other: &Self) -> bool {
         self.array_depth == other.array_depth
@@ -416,11 +412,9 @@ impl FieldDef {
     }
 
     /// What an object flattening this field joins for each variant of the externally tagged enum it
-    /// names, as that enum recorded them, and nothing for a field that names no such enum.
-    ///
-    /// Answered under the same bound [`Self::zod_union_members`] is answered under, and for the same
-    /// reason: what is spliced in the name's place has to be the whole of what the operand
-    /// validates.
+    /// names, as that enum recorded them, and nothing for a field that names no such enum. Answered
+    /// under the same bound [`Self::zod_union_members`] is, and for the same reason: what is
+    /// spliced in the name's place has to be the whole of what the operand validates.
     #[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod")))]
     pub fn flatten_variants(&self) -> Vec<FlattenVariant> {
         let wrapped = self
@@ -460,11 +454,10 @@ impl FieldDef {
         self.array_depth > 0
     }
 
-    /// Whether the value sitting at array level `level` was written as an `Option`.
-    ///
-    /// Levels count from the innermost value outward: level 0 is what `field_type` names, level
-    /// `array_depth` is the field as a whole. Below the outermost, a `None` reaches the wire as a
-    /// `null` among the items of the array one level up — the array itself is always written.
+    /// Whether the value sitting at array level `level` was written as an `Option`. Levels count
+    /// from the innermost value outward: level 0 is what `field_type` names, level `array_depth`
+    /// is the field as a whole. Below the outermost, a `None` reaches the wire as a `null` among
+    /// the items of the array one level up — the array itself is always written.
     pub fn is_nullable_at(&self, level: u8) -> bool {
         self.nullable_levels.contains(&level)
     }
@@ -489,12 +482,10 @@ impl FieldDef {
         }
     }
 
-    /// Whether the object key this field writes may be absent — `field?: T` admits the payload
-    /// with no such key, `field: T | undefined` demands it.
-    ///
-    /// The key-dropping serde attribute is deliberately not read for an `Option`: the
-    /// `Option`-null guard requires one of every named `Option` field, so reading it here would
-    /// leave `ts_optional` inert on every field that carries it.
+    /// Whether the object key this field writes may be absent — `field?: T` admits the payload with
+    /// no such key, `field: T | undefined` demands it. The key-dropping serde attribute is
+    /// deliberately not read for an `Option`, since the `Option`-null guard already requires one on
+    /// every named `Option` field.
     fn key_may_be_absent(&self) -> bool {
         if self.is_optional() {
             self.model_schema_prop_meta
@@ -560,12 +551,11 @@ impl FieldDef {
         }
     }
 
-    /// The defs written inside this one, which is every position a type parameter can be reached
-    /// at below the top: a `SiblingType`'s generic arguments, a `Map`'s key and value, a `Tuple`'s
-    /// elements. Every other variant names a type outright and holds no def.
-    ///
-    /// Listed exhaustively and in one place, so a variant that grows a nested position has to be
-    /// classified here rather than silently escaping every walk that reads a parameter.
+    /// The defs written inside this one, which is every position a type parameter can be reached at
+    /// below the top: a `SiblingType`'s generic arguments, a `Map`'s key and value, a `Tuple`'s
+    /// elements — every other variant names a type outright and holds no def. Listed exhaustively
+    /// so a variant that grows a nested position cannot silently escape a walk that reads a
+    /// parameter.
     fn nested_type_positions(&mut self) -> Vec<&mut Self> {
         match &mut self.field_type {
             FieldDefType::SiblingType(_, generics) => generics.iter_mut().collect(),
@@ -977,11 +967,10 @@ impl FieldDef {
     }
 
     /// The value this field's wrappers hold, as a field of its own: the same type with the
-    /// `Option`s and the array levels dropped.
-    ///
-    /// The wrappers are the field's to declare and the value under them is what a type name stands
-    /// for, so this is what an `as = Type` is compared against when the target names a bare type —
-    /// the spelling `as = String` on a `Vec<String>` uses.
+    /// `Option`s and the array levels dropped. The wrappers are the field's to declare and the
+    /// value under them is what a type name stands for, so this is what an `as = Type` is compared
+    /// against when the target names a bare type — the spelling `as = String` on a `Vec<String>`
+    /// uses.
     pub fn value_under_wrappers(&self) -> Self {
         let mut value = self.clone();
         value.array_depth = 0;
@@ -1235,11 +1224,10 @@ pub fn format_number_literal(value: f64) -> String {
     }
 }
 
-/// A reference to a type that publishes a factory, as the call it has to be.
-///
-/// Each argument is rendered by the renderer that renders the reference itself, so an argument that
-/// is a forwarded parameter, a primitive, a date, or another generic reference all reach the call
-/// the same way — and one that is itself generic composes at whatever depth it was written at.
+/// A reference to a type that publishes a factory, as the call it has to be. Each argument is
+/// rendered by the renderer that renders the reference itself, so an argument that is a forwarded
+/// parameter, a primitive, a date, or another generic reference all reach the call the same way —
+/// and one that is itself generic composes at whatever depth it was written at.
 #[cfg(feature = "zod")]
 fn zod_factory_call(name: &str, arguments: &[FieldDef]) -> String {
     format!(
@@ -1489,12 +1477,10 @@ fn collapsed_wrapper_def(
     Some(result)
 }
 
-/// The element count a fixed-size array was written with, when the expansion can read it.
-///
-/// A literal is the whole of that. A const generic parameter, a `const` item and any computed
-/// length each name a value only the compiler has, and the macro runs before there is one to ask
-/// for; each therefore describes as the unbounded array every other sequence spelling describes as,
-/// which is the honest answer when the count is unknown.
+/// The element count a fixed-size array was written with, when the expansion can read it — a
+/// literal is the whole of that. A const generic parameter, a `const` item and any computed length
+/// each name a value only the compiler has, and the macro runs before there is one to ask for, so
+/// each describes as the unbounded array every other sequence spelling describes as.
 fn literal_array_length(len: &syn::Expr) -> Option<usize> {
     let syn::Expr::Lit(syn::ExprLit {
         lit: syn::Lit::Int(literal),
@@ -1636,23 +1622,15 @@ pub fn is_undescribable_primitive(name: &str) -> bool {
     matches!(name, "i128" | "u128" | "f16" | "f128")
 }
 
-/// Parses serde attributes from struct/enum attributes (requires "serde" feature).
-///
-/// Delegates to features/serde.rs for actual parsing.
-/// Used in `model_schema.rs` to get type-level serde metadata like `rename_all`.
-///
-/// Without "serde" feature: No attribute processing, uses Rust names as-is.
+/// Delegates to [`crate::features::serde::parse_serde_type_attributes`] for the type-level serde
+/// metadata (`rename_all`, `tag`, …) `model_schema.rs` reads.
 #[cfg(feature = "serde")]
 pub fn parse_serde_type_attributes(attrs: &[Attribute]) -> SerdeTypeMeta {
     parse_serde_type_attributes_impl(attrs)
 }
 
-/// Parses serde attributes from field attributes (requires "serde" feature).
-///
-/// Similar to `parse_serde_type_attributes` but for individual fields.
-/// Handles field rename, `skip_serializing_if`, etc.
-///
-/// Integrates with FieldDef.name if rename present.
+/// Delegates to [`crate::features::serde::parse_serde_field_attributes`] for a field's rename and
+/// `flatten`.
 #[cfg(feature = "serde")]
 pub fn parse_serde_field_attributes(attrs: &[Attribute]) -> SerdeFieldMeta {
     parse_serde_field_attributes_impl(attrs)

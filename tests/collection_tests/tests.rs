@@ -222,11 +222,9 @@ struct TickRef(Tick);
 #[serde(transparent)]
 struct Enabled(bool);
 
-/// A brand over a plain enum. serde writes the variant name, which is a bare string, so the brand
-/// keys a map the way a string does — under its own name, and open, the brand publishing no
-/// `enum_members()` of its own for a schema to close the object with. `no_display` is the inner's
-/// business, not the key's: a plain enum carries no `Display`, and the brand's key path never
-/// consults one.
+/// A brand over a plain enum: serde writes the variant name — a bare string — so the brand keys a
+/// map like a string does, open, since the brand publishes no `enum_members()` to close the
+/// object with. `no_display` is the inner's business, not the key's.
 #[model_schema(no_display)]
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(transparent)]
@@ -380,10 +378,9 @@ struct OptionalMapValues {
     string_keyed: HashMap<String, Option<String>>,
 }
 
-// A sequence wrapper around a map is the field's array, not the map's, so each wrapped field
-// describes as the array of the map its unwrapped twin describes as — the wrap every other field
-// type applies, and the one the slot positions already apply to the same type. An `Option` is not
-// such a wrapper: field position spells optionality by leaving the name out of `required`.
+// A sequence wrapper around a map is the field's array, not the map's — each wrapped field
+// describes as the array of its unwrapped twin. An `Option` is not such a wrapper: field
+// position spells optionality by leaving the name out of `required`.
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct WrappedMapFields {
@@ -419,11 +416,10 @@ struct MetricTag {
 #[model_schema()]
 type MetricTagRef = MetricTag;
 
-// Every std wrapper serde writes as a JSON array of `T` — the criterion for covering one — puts
-// the element in charge of what the array holds. The twin structs below carry the same element
-// types under each covered spelling; the tests hold every field of one against its `Vec` twin.
-// `LinkedList` has no twin here, the crate's own lints forbidding it a value of one; it is covered
-// by name at the dispatch and in the renderers' unit tests instead.
+// Every std wrapper serde writes as a JSON array of `T` puts the element in charge of what the
+// array holds. The twin structs carry the same element types under each covered spelling.
+// `LinkedList` has no twin here — the crate's own lints forbid a value of one — so it's covered
+// by name at the dispatch instead.
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct SetElementFields {
@@ -496,9 +492,8 @@ struct VecElementFields {
 }
 
 /// A `BuildHasher` written where std implies one, so a field can name the hasher parameter both
-/// `HashMap` and `HashSet` carry past the types they write. What it hashes with is beside the
-/// point — serde writes the same bytes whichever hasher a container is built with, which is why the
-/// argument is not part of the wire form the surfaces render.
+/// `HashMap` and `HashSet` carry. serde writes the same bytes regardless, so the argument is not
+/// part of the wire form the surfaces render.
 #[derive(Clone, Default)]
 struct NamedHasher;
 
@@ -534,9 +529,8 @@ struct HasherImpliedFields {
 }
 
 // A slot — a map member, a tuple element — cannot be dropped the way an object key can, so it
-// holds whatever the value writes, and a covered wrapper writes the array its element decides. The
-// twin below carries the `Vec` spelling of the same slots, which is what each set slot is held
-// against: the key path, the element type and the nesting are the same on both.
+// holds whatever the value writes. The twin below carries the `Vec` spelling of the same slots,
+// held against each set slot with the same key path, element type, and nesting.
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct SetSlotValues {
@@ -586,10 +580,9 @@ struct SiblingSlotValues {
 #[model_schema()]
 type MetricGrid = Vec<Vec<u32>>;
 
-// A sequence holding a sequence writes an array of arrays, so it describes as one: every level the
-// field is written at is a level of the description, whichever covered wrapper spells each level.
-// A constraint still has only the innermost element to land on — the levels above hold arrays, not
-// values a `minLength` could reach.
+// A sequence holding a sequence writes an array of arrays, so it describes as one at every level,
+// whichever covered wrapper spells each level. A constraint still has only the innermost element
+// to land on — the levels above hold arrays, not values a `minLength` could reach.
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct NestedSequenceFields {
@@ -1194,12 +1187,10 @@ fn test_enum_keyed_sibling_array_member_matches_the_serialized_form() {
     );
 }
 
-/// What serde writes for a map whose key is wrapped in a sequence: nothing at all. A JSON object
-/// key is a string, a sequence has no string form, and `serde_json` refuses the whole value rather
-/// than falling back to an array of pairs — the refusal is the wrapper's, not the element's, so the
-/// fixed-size spelling earns it as squarely as the `Vec` one. The bare key beside them is the form
-/// that does write, and the one `#[model_schema()]` describes; a sequence-wrapped key describes no
-/// wire at all, which is why the expansion refuses the spelling instead of enumerating its element.
+/// What serde writes for a map whose key is wrapped in a sequence: nothing at all — `serde_json`
+/// refuses the whole value rather than falling back to an array of pairs, since a JSON object key
+/// must be a string. The refusal is the wrapper's, not the element's, so the expansion refuses the
+/// spelling instead of enumerating its element.
 #[test]
 fn test_a_sequence_wrapped_map_key_has_no_wire_form() {
     let vec_keyed = HashMap::from([(vec![MetricSlot::Daily], 1_u32)]);
@@ -2012,10 +2003,9 @@ fn test_scalar_brand_keyed_maps_match_the_serialized_form() {
     assert_eq!(read_back, maps);
 }
 
-/// A brand over a plain enum writes the variant name, which is a bare string — so it describes as
-/// the `String`-keyed twin does, keeping the value's own schema under `additionalProperties`. The
-/// enum-keyed spelling closes the object over `enum_members()`; the brand has no such method, and
-/// the object it describes is open rather than closed over members nothing can supply.
+/// A brand over a plain enum writes the variant name, a bare string — so it describes as the
+/// `String`-keyed twin does. The enum-keyed spelling closes the object over `enum_members()`; the
+/// brand has no such method, so its object stays open.
 #[test]
 #[cfg(feature = "jsonschema")]
 fn test_enum_brand_keyed_maps_describe_as_their_string_keyed_twin() {
@@ -2136,10 +2126,9 @@ fn test_scalar_alias_keyed_maps_constructible() {
     assert_eq!(twin.by_tick[&7], maps.by_tick[&tick]);
 }
 
-/// An alias is the type it names, so a map keyed by an alias of a value serde stringifies builds the
-/// object the bare target builds — field for field the bare-keyed twin's, at every depth and through
-/// either chain, the alias's name being spent on the nominal surfaces and having nothing to say on
-/// the structural one.
+/// An alias is the type it names, so a map keyed by an alias of a stringified value builds the
+/// same object the bare target builds — the alias's name is spent on the nominal surfaces and has
+/// nothing to say on the structural one.
 #[test]
 #[cfg(feature = "jsonschema")]
 fn test_scalar_alias_keyed_maps_describe_as_their_bare_target_twin() {
@@ -2735,10 +2724,9 @@ fn test_a_named_hasher_writes_what_the_implied_hasher_writes() {
     );
 }
 
-/// The reported failure: naming the hasher carried an argument more than the container arms claimed,
-/// so the type fell through to the sibling rendering and each surface published a name nothing
-/// emits — a `HashMap<…>` TypeScript type, the same string as a Zod schema, and a schema module the
-/// expansion never writes. Writing the same bytes, the two spellings describe the same.
+/// The reported failure: naming the hasher carried an argument more than the container arms
+/// claimed, so the type fell through to the sibling rendering and each surface published a name
+/// nothing emits.
 #[test]
 #[cfg(feature = "jsonschema")]
 fn test_hasher_named_fields_describe_as_the_implied_spelling() {
@@ -2832,10 +2820,8 @@ fn test_set_element_zod_generation() {
     }
 }
 
-/// Whatever a set field renders as, it is not the Rust wrapper's name: neither surface has any
-/// meaning for it, so the name surviving anywhere into the output is a syntax error in the output.
-/// The other covered wrappers name themselves in their own fixture's type name, so the equivalence
-/// with the `Vec` twin below is what says no wrapper name reached their output.
+/// Whatever a set field renders as, it is not the Rust wrapper's name — neither surface has any
+/// meaning for it, so the name surviving into the output would be a syntax error there.
 #[test]
 #[cfg(any(feature = "typescript", feature = "zod"))]
 fn test_no_sequence_wrapper_name_survives_into_generated_output() {
@@ -2902,10 +2888,9 @@ fn test_every_covered_wrapper_describes_as_the_vec_spelling() {
     }
 }
 
-/// The same holding on the TypeScript surface: with the fixture's own name set aside, a covered
-/// wrapper's field declarations are the `Vec` spelling's, so no wrapper name reached the output.
-/// Declarations rather than whole definitions, because the surrounding `JSDoc` differs for a reason
-/// of its own: a `Vec` field's doc comment is dropped where every other spelling keeps it.
+/// The same holding on TypeScript: a covered wrapper's field declarations are the `Vec` spelling's.
+/// Declarations rather than whole definitions, because the surrounding `JSDoc` differs — a `Vec`
+/// field's doc comment is dropped where every other spelling keeps it.
 #[test]
 #[cfg(feature = "typescript")]
 fn test_every_covered_wrapper_types_as_the_vec_spelling() {

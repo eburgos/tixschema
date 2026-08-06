@@ -1,10 +1,9 @@
 //! An `Option` inside a covered sequence wrapper and an `Option` around one are two different
 //! values on the wire, and each surface has to say which it describes.
 //!
-//! Every expectation here is read off what serde writes, asserted first in this file and then
-//! described by the three surfaces in the same order: a `None` the wrapper holds is a `null` among
-//! the array's items, so the items admit `null` and the array itself does not; a `None` around the
-//! wrapper replaces the whole array, so the array admits `null` and its items do not.
+//! Every expectation here is read off what serde writes: a `None` the wrapper holds is a `null`
+//! among the array's items (items admit `null`, the array does not); a `None` around the wrapper
+//! replaces the whole array (the array admits `null`, its items do not).
 
 use alloc::collections::BTreeSet;
 use serde::{Deserialize, Serialize};

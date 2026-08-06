@@ -1,21 +1,10 @@
-//! Whole generic types, read on every surface at once.
+//! Whole generic types, read on every surface at once — TypeScript declaration, Zod factory, and
+//! JSON document together, plus the wire where serde compiles, since a suite that asks one
+//! question at a time can pass while the answers disagree with each other.
 //!
-//! The fixtures beside this one each hold a single question still — what one parameter position
-//! renders as, what one cache level looks like, what one reference site supplies. A type an author
-//! actually writes holds all of them at the same time, and a suite that only ever asks one at a
-//! time passes while the answers disagree with each other: a member the TypeScript declaration
-//! binds a parameter for, whose Zod factory takes an argument the JSON document has no filling for.
-//!
-//! So each fixture here is read three times over — the TypeScript declaration, the Zod factory, the
-//! JSON document — and, where serde compiles, against the wire the value actually writes. What is
-//! asserted is that the three agree about one type, not that each is separately plausible.
-//!
-//! The recursive pair at the end is the shape none of the single-question fixtures can hold: a type
-//! that reaches itself while it is still being described. The two surfaces answer it differently
-//! and both answers are pinned — JSON writes one definition and points a `$ref` back at it, and Zod
-//! defers the read so that the factory reaches its own memo before the reference is followed. What
-//! the deferral is worth is that the emitted module loads and validates at depth; the pins below
-//! are the emitted spelling, and the depth was read off the real output under `tsc` and `zod`.
+//! The recursive pair at the end reaches itself while still being described: JSON writes one
+//! definition and points a `$ref` back at it, and Zod defers the read so the factory reaches its
+//! own memo first — pinned against the real output under `tsc` and `zod`.
 
 /// serde's `rename_all` is what turns the declared members into the keys every surface here spells,
 /// so these read the emitted declaration only where the attribute is parsed at all.
@@ -55,11 +44,9 @@ mod typescript {
     }
 
     /// A brand is a type parameter's own spelling intersected with the marker, so a generic brand
-    /// binds its parameter and spends it in the intersection — and the type holding one names the
-    /// brand with the argument it forwards, two levels from where the parameter was declared.
-    ///
-    /// Which marker is written is the value surface's business — `$brand<"Name">` is Zod's — so the
-    /// intersection is read where that surface compiles.
+    /// binds its parameter and spends it in the intersection. Which marker is written
+    /// (`$brand<"Name">`) is Zod's business, so the intersection is read only where that surface
+    /// compiles.
     #[cfg(feature = "zod")]
     #[test]
     fn a_generic_brand_is_named_with_the_argument_forwarded_to_it() {
@@ -241,11 +228,9 @@ mod zod {
     }
 
     /// A value is a value: one Zod schema cannot stand for every filling, so a recursive generic
-    /// reaches itself by calling its own factory with the argument it was handed — never by naming
-    /// a `$Schema` binding, which a generic type does not publish at all.
-    ///
-    /// The member is written as a getter so the call is made after the factory has reached its own
-    /// memo, which is what ends the recursion instead of running it to the bottom of the stack.
+    /// reaches itself by calling its own factory with the argument it was handed, never a
+    /// `$Schema` binding a generic type does not publish. Written as a getter so the call happens
+    /// after the factory reaches its own memo — what ends the recursion.
     #[test]
     fn a_self_recursive_generic_calls_its_own_factory_behind_a_deferred_read() {
         let zod = ArchiveNode::<String>::zod_schema();
@@ -258,10 +243,10 @@ mod zod {
         assert!(!zod.contains("ArchiveNode$Schema)"), "Got: {zod}");
     }
 
-    /// A cycle between two generic types is ended at the reference written *forward* — the one
-    /// naming a type declared below, which is the reference a cycle cannot be built without. That
-    /// one is deferred; the reference back at a type already declared is read as it stands, because
-    /// what is left once the forward ones are deferred cannot cycle.
+    /// A cycle between two generic types is ended at the reference written *forward* — naming a
+    /// type declared below, which a cycle cannot be built without. That one is deferred; the
+    /// backward reference is read as it stands, since what's left after deferring forward
+    /// references cannot cycle.
     #[test]
     fn a_generic_cycle_is_deferred_at_the_reference_written_forward() {
         let branch = ArchiveBranch::<String>::zod_schema();
@@ -348,8 +333,7 @@ mod json_schema {
     /// A document cannot be written to the bottom of a recursion, so the type is hoisted into
     /// `$defs` once and the recursive member points a `$ref` back at it. One definition per name
     /// *and filling* — the key carries a readable label off the filling's own `"type"` keyword
-    /// plus a digest, since a document can hold this same generic name again at a different
-    /// filling (see the sibling-fillings test below), and a bare name would let the two collide.
+    /// plus a digest, since a bare name would let two fillings of the same generic collide.
     #[test]
     fn a_recursive_generic_is_hoisted_once_and_pointed_back_at() {
         assert_eq!(
@@ -391,11 +375,10 @@ mod json_schema {
     }
 
     /// Two sibling fields naming the same recursive generic at different fillings are the shape
-    /// neither the in-flight cycle check nor a bare `$defs` key can tell apart: the frames are
-    /// sequential rather than nested, so neither reference is ever in flight while the other runs.
-    /// Each filling gets its own definition and its own `$ref`; a third field at the same filling
-    /// as the first still shares that one definition; and each definition's own recursive member
-    /// resolves back to its own filling rather than whichever filling was written last.
+    /// neither the in-flight cycle check nor a bare `$defs` key can tell apart — the frames are
+    /// sequential, not nested. Each filling gets its own definition and `$ref`; a third field at
+    /// the first filling shares that definition; each recursive member resolves back to its own
+    /// filling.
     #[test]
     fn siblings_at_different_fillings_of_one_recursive_generic_each_get_their_own_definition() {
         let document = TwoLoopedFillings::json_schema();
@@ -702,9 +685,9 @@ pub struct ArchiveTrunk<IdType> {
 }
 
 /// A recursive generic reached by two sibling fields at two different fillings — sequential rather
-/// than nested, so neither reference is ever in flight while the other runs and the in-flight
-/// filling comparison never sees the pair at all. Read by the JSON surface alone, which is the one
-/// that hoists a recursive type into a `$defs` entry a bare name could collide under.
+/// than nested, so neither reference is in flight while the other runs. Read by the JSON surface
+/// alone, the one that hoists a recursive type into a `$defs` entry a bare name could collide
+/// under.
 #[cfg(all(feature = "jsonschema", feature = "serde"))]
 #[model_schema(default_types(ValueType = String))]
 #[derive(Debug, Clone, Serialize, Deserialize)]

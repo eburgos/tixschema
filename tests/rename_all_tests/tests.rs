@@ -46,10 +46,10 @@ enum SandboxKind {
     PlainAdd,
 }
 
-// One struct-variant enum per tagged representation, each carrying an enum-level `rename_all` and
-// two variants: `Unmarked` has no rename of its own, so its field must stay as declared — the
+// One struct-variant enum per tagged representation, each carrying an enum-level `rename_all`
+// and two variants: `Unmarked` has no rename of its own, so its field stays as declared — the
 // container-level rule cases the discriminator alone, never a variant's fields. `Marked` carries
-// its own `rename_all`, which serde treats as the container for its own fields and does apply.
+// its own `rename_all`, which serde treats as the container for its own fields.
 #[model_schema()]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
