@@ -4403,15 +4403,48 @@ fn branded_zod_type_name(inner: &FieldDef) -> String {
             BrandedComposite::Tuple => "ZodTuple".to_owned(),
         };
     }
-    if let FieldDefType::SiblingType(_, args) = &inner.field_type
-        && args.is_empty()
-    {
-        return format!("typeof {}", inner.zod_type());
+    if let FieldDefType::SiblingType(name, args) = &inner.field_type {
+        return if args.is_empty() {
+            format!("typeof {}", inner.zod_type())
+        } else {
+            branded_zod_instantiated_type_name(name, args)
+        };
     }
     match inner.typescript_typename().as_str() {
         "number" => "ZodNumber".to_owned(),
         "boolean" => "ZodBoolean".to_owned(),
         _ => "ZodString".to_owned(),
+    }
+}
+
+/// The Zod class a reference to another registered generic name, filled with `args`, composes to —
+/// read off the same [`PublishedShape`] the constrained-brand guard's own
+/// [`instantiated_value_shape`] consults, but answered in this dispatch's own vocabulary of classes
+/// rather than that guard's coarse "numeric"/"container"/"opaque" words.
+///
+/// A family publisher — a generic item whose whole published value *is* one of its own parameters —
+/// composes to whatever class the written argument at that parameter's position does, peeling
+/// through the named item's own brand exactly the way `$ZodBranded<T, Brand>` is still assignable to
+/// plain `T`. Nothing else here has one class to prove: a fixed-shape publisher's class depends on
+/// how its shape is built (a plain union and a discriminated one share the same recorded shape but
+/// not a class), an unregistered name may not have expanded yet, and an argument that is itself an
+/// outer, not-yet-filled type parameter carries no class of its own to inherit — so all three widen
+/// to the class every Zod schema is an instance of rather than guess one that might not be it.
+#[cfg(all(feature = "zod", feature = "typescript"))]
+fn branded_zod_instantiated_type_name(name: &str, args: &[FieldDef]) -> String {
+    let Some(PublishedShape::Parameter(position)) =
+        lookup_alias_info(name).map(|info| info.value_shape)
+    else {
+        return "ZodType".to_owned();
+    };
+    match args.get(position) {
+        Some(argument)
+            if argument.is_array()
+                || !matches!(argument.field_type, FieldDefType::TypeParam(_)) =>
+        {
+            branded_zod_type_name(argument)
+        }
+        _ => "ZodType".to_owned(),
     }
 }
 

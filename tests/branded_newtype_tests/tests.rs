@@ -1905,6 +1905,29 @@ mod branded_sibling_inner_tests {
     #[serde(transparent)]
     pub struct TrailingFixedTag(pub LateTag<String>);
 
+    // A brand over a concrete instantiation of a generic sibling, at each scalar filling the
+    // constrained-brand guard's own vocabulary names — the shape a family publisher like `LateTag`
+    // resolves an argument to.
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct PlainNumTag(pub LateTag<u32>);
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct PlainBoolTag(pub LateTag<bool>);
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct PlainStrTag(pub LateTag<String>);
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct PlainCount(pub u64);
+
     #[test]
     fn a_sibling_brand_writes_the_object_its_inner_writes() {
         let part = Part {
@@ -2105,6 +2128,92 @@ mod branded_sibling_inner_tests {
         );
         assert!(
             zod.contains("export function OpenTag$SchemaFactory<TagType extends ZodType>("),
+            "Got:\n{zod}"
+        );
+    }
+
+    /// A brand's inner naming a family publisher — a generic item whose whole published value is
+    /// one of its own parameters, like `LateTag<TagType>(pub TagType)` — composes to the class the
+    /// written argument itself resolves to, not the class of the sibling's own (irrelevant) name.
+    /// Guessing `ZodString` here, as the annotation once did regardless of the argument, is what
+    /// left `tsc` unable to compile the module: the runtime value is
+    /// `$ZodBranded<$ZodBranded<ZodNumber, "LateTag">, "PlainNumTag">` for the numeric filling, and
+    /// no number-shaped value is a `ZodString`.
+    #[test]
+    fn a_brand_over_a_numeric_generic_instantiation_is_annotated_by_the_arguments_own_class() {
+        let zod = PlainNumTag::zod_schema();
+        assert!(
+            zod.contains(r#"PlainNumTag$Schema: $ZodBranded<ZodNumber, "PlainNumTag">"#),
+            "Got:\n{zod}"
+        );
+    }
+
+    /// The same guessed-`ZodString` defect, at the boolean filling.
+    #[test]
+    fn a_brand_over_a_boolean_generic_instantiation_is_annotated_by_the_arguments_own_class() {
+        let zod = PlainBoolTag::zod_schema();
+        assert!(
+            zod.contains(r#"PlainBoolTag$Schema: $ZodBranded<ZodBoolean, "PlainBoolTag">"#),
+            "Got:\n{zod}"
+        );
+    }
+
+    /// The filling `ZodString` already named by coincidence — pinned so the fix is proven to keep
+    /// the case it used to get right, not only the two it got wrong.
+    #[test]
+    fn a_brand_over_a_string_generic_instantiation_is_annotated_by_the_arguments_own_class() {
+        let zod = PlainStrTag::zod_schema();
+        assert!(
+            zod.contains(r#"PlainStrTag$Schema: $ZodBranded<ZodString, "PlainStrTag">"#),
+            "Got:\n{zod}"
+        );
+    }
+
+    /// A brand over a plain, non-generic inner takes the scalar arm it always has — untouched by
+    /// what a *generic* sibling's own argument resolves to, since this inner names no sibling at
+    /// all.
+    #[test]
+    fn a_brand_over_a_plain_concrete_inner_is_unchanged() {
+        let zod = PlainCount::zod_schema();
+        assert!(
+            zod.contains(r#"PlainCount$Schema: $ZodBranded<ZodNumber, "PlainCount">"#),
+            "Got:\n{zod}"
+        );
+    }
+
+    /// `FixedTag` reaches `LateTag` before it has registered (declared above it — see the comment
+    /// on `FixedTag` itself), so nothing proves what class its argument resolves to; widening to
+    /// the class every Zod schema is an instance of still compiles, where guessing would not.
+    #[test]
+    fn a_forward_declared_family_publisher_widens_its_annotation() {
+        let zod = FixedTag::zod_schema();
+        assert!(
+            zod.contains(r#"FixedTag$Schema: $ZodBranded<ZodType, "FixedTag">"#),
+            "Got:\n{zod}"
+        );
+    }
+
+    /// `TrailingFixedTag` reaches the same name `FixedTag` does, after it has registered, and gets
+    /// the precise class instead of the widened one — the same runtime value, two annotations, both
+    /// sound.
+    #[test]
+    fn a_trailing_family_publisher_reference_is_annotated_precisely() {
+        let zod = TrailingFixedTag::zod_schema();
+        assert!(
+            zod.contains(r#"TrailingFixedTag$Schema: $ZodBranded<ZodString, "TrailingFixedTag">"#),
+            "Got:\n{zod}"
+        );
+    }
+
+    /// A generic brand's own inner naming another generic sibling (`LateTag<TagType>`) leaves
+    /// `TagType` itself unresolved at the point `$SchemaDefault`'s annotation is built — there is no
+    /// argument class to read yet, only the outer parameter — so it widens rather than guessing off
+    /// the parameter's own written name.
+    #[test]
+    fn a_generic_brands_default_over_a_generic_sibling_widens_its_annotation() {
+        let zod = OpenTag::<String>::zod_schema();
+        assert!(
+            zod.contains(r#"OpenTag$SchemaDefault: $ZodBranded<ZodType, "OpenTag"> ="#),
             "Got:\n{zod}"
         );
     }
