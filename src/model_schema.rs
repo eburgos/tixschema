@@ -167,6 +167,14 @@ const FLATTENED_PLAIN_ENUM_SCOPE: &str = "Only a type the registry has already c
 /// is written at.
 const MEMBER_INDENT: &str = "  ";
 
+/// Why a `#[model_schema_prop]` on a brand's slot is refused: what a brand's schema is built from,
+/// and where the checks it does carry are written instead.
+const BRANDED_SLOT_PROP_MESSAGE: &str = "`#[model_schema_prop]` is unread on the slot of a \
+     `#[serde(transparent)]` newtype -- a brand publishes its inner's own schema with a `.brand()` \
+     written onto it, so no key written here reaches any surface. The checks a brand does carry \
+     are written on the type itself: #[model_schema(pattern = \"...\", minLength = N, maxLength = \
+     N)]. Move the check there, or drop the attribute.";
+
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 const WRITTEN_AS_ARRAY: &str = "a JSON array";
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -1083,6 +1091,20 @@ pub fn exec_model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
     ) {
         return output;
     }
+    // A brand publishes its inner's own schema, so no key written on its slot reaches a surface —
+    // refused here, at the seam every build shares, rather than in the brand path the surfaces
+    // gate. The item is re-emitted with the attribute taken off, a copy left on it being one rustc
+    // reports as an attribute that does not exist, stacked on top of this refusal.
+    let brand_slot_errors = branded_slot_prop_errors(&item);
+    if !brand_slot_errors.is_empty()
+        && let Some(output) = guard_failure_output(
+            &item_without_slot_props(&item),
+            item_schema_ident(&item),
+            &brand_slot_errors,
+        )
+    {
+        return output;
+    }
     // Which Zod binding this item publishes turns on whether it declares type parameters, and a
     // field written at the item's own name reads that answer back the way any other reference
     // does. Recorded here, ahead of every shape, because a self-reference is rendered while the
@@ -1246,7 +1268,6 @@ fn process_type_alias(item_type: ItemType, _args: &ModelSchemaArgs) -> TokenStre
     quote! { #alias }
 }
 
-#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn has_serde_transparent(attrs: &[syn::Attribute]) -> bool {
     for attr in attrs {
         if attr.path().is_ident("serde") {
@@ -2692,6 +2713,51 @@ fn const_parameter_argument_message(name: &str) -> String {
 #[cfg(not(any(feature = "typescript", feature = "jsonschema")))]
 const fn const_parameter_argument_errors(_item: &Item) -> Vec<proc_macro2::TokenStream> {
     Vec::new()
+}
+
+/// The `compile_error!` tokens an item earns for each `#[model_schema_prop]` written on the slot of
+/// a `#[serde(transparent)]` newtype, or none where nothing there carries one.
+///
+/// Asked at the ungated seam rather than inside the brand path, which is gated on the three
+/// surfaces: with all three off the same declaration is not a brand at all, so a refusal written
+/// there would decide one declaration two ways across the powerset. The pair asked here is the one
+/// `is_branded_newtype` asks, leaving a named-field transparent struct and a wider tuple struct to
+/// the slot reading they already get.
+fn branded_slot_prop_errors(item: &Item) -> Vec<proc_macro2::TokenStream> {
+    let Item::Struct(item_struct) = item else {
+        return Vec::new();
+    };
+    let syn::Fields::Unnamed(slots) = &item_struct.fields else {
+        return Vec::new();
+    };
+    if slots.unnamed.len() != 1 || !has_serde_transparent(&item_struct.attrs) {
+        return Vec::new();
+    }
+    slots
+        .unnamed
+        .iter()
+        .flat_map(|slot| &slot.attrs)
+        .filter(|attr| attr.path().is_ident("model_schema_prop"))
+        .map(|attr| {
+            attr_guard_error(
+                &syn::Error::new_spanned(attr, BRANDED_SLOT_PROP_MESSAGE),
+                &item_label(item),
+            )
+        })
+        .collect()
+}
+
+/// The item with every `#[model_schema_prop]` taken off its slots — what a refused brand is
+/// re-emitted as, the attribute being this crate's own and one rustc reports as nonexistent
+/// wherever a copy survives.
+fn item_without_slot_props(item: &Item) -> Item {
+    let mut stripped = item.clone();
+    if let Item::Struct(item_struct) = &mut stripped {
+        for slot in &mut item_struct.fields {
+            slot.attrs = declaration_attrs(slot);
+        }
+    }
+    stripped
 }
 
 /// The `compile_error!` tokens for every `cfg_attr`-wrapped serde attribute an enum carries: on the

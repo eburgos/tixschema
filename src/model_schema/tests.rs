@@ -116,6 +116,27 @@ const SEQUENCE_WRAPPERS: [&str; 6] = [
 #[cfg(feature = "serde")]
 const UNTAGGED_MODULE: Option<&str> = Some("choice_schema");
 
+/// The refusal a `#[model_schema_prop]` on a brand's slot earns, less the prefix `item_label`
+/// supplies in front of it.
+const BRANDED_SLOT_PROP_REFUSAL: &str = "`#[model_schema_prop]` is unread on the slot of a \
+     `#[serde(transparent)]` newtype -- a brand publishes its inner's own schema with a `.brand()` \
+     written onto it, so no key written here reaches any surface. The checks a brand does carry \
+     are written on the type itself: #[model_schema(pattern = \"...\", minLength = N, maxLength = \
+     N)]. Move the check there, or drop the attribute.";
+
+/// Every key a slot can be written with, read and unread alike.
+const SLOT_PROP_KEYS: [&str; 9] = [
+    "",
+    "pattern = \"^[a-z]+$\"",
+    "minLength = 2",
+    "as = String",
+    "preprocess = [\"trim\"]",
+    "literal = \"fixed\"",
+    "ts_optional",
+    "nullable",
+    "bogus_key = 3",
+];
+
 /// What an enum declaring neither container-level casing rule hands its variant walk.
 const UNCASED: EnumCasing<'static> = EnumCasing {
     variant_fields: None,
@@ -11064,5 +11085,150 @@ fn the_shapes_the_macro_expands_are_not_refused() {
             !tokens.to_string().contains("unsupported target"),
             "for {source}, got: {tokens}"
         );
+    }
+}
+
+/// The text of every string literal in `tokens`, which is where a `compile_error!` carries its
+/// message — read back unescaped, as against the escaped literal `to_string` renders.
+fn literal_texts(tokens: &proc_macro2::TokenStream) -> Vec<String> {
+    let mut texts = Vec::new();
+    for tree in tokens.clone() {
+        match &tree {
+            proc_macro2::TokenTree::Group(group) => {
+                texts.extend(literal_texts(&group.stream()));
+            }
+            proc_macro2::TokenTree::Literal(literal) => {
+                if let syn::Lit::Str(text) = syn::Lit::new(literal.clone()) {
+                    texts.push(text.value());
+                }
+            }
+            proc_macro2::TokenTree::Ident(_) | proc_macro2::TokenTree::Punct(_) => {}
+        }
+    }
+    texts
+}
+
+/// Whether `tokens` writes `#[model_schema_prop ...]` as an attribute. Read off the token trees
+/// rather than the rendered string, which carries the name inside the refusal's own message text.
+fn writes_a_prop_attribute(tokens: &proc_macro2::TokenStream) -> bool {
+    let mut hashed = false;
+    for tree in tokens.clone() {
+        match &tree {
+            proc_macro2::TokenTree::Group(group) => {
+                let named = group
+                    .stream()
+                    .into_iter()
+                    .next()
+                    .is_some_and(|first| matches!(&first, proc_macro2::TokenTree::Ident(ident) if ident == "model_schema_prop"));
+                if (hashed && named) || writes_a_prop_attribute(&group.stream()) {
+                    return true;
+                }
+                hashed = false;
+            }
+            proc_macro2::TokenTree::Punct(punct) => hashed = punct.as_char() == '#',
+            proc_macro2::TokenTree::Ident(_) | proc_macro2::TokenTree::Literal(_) => hashed = false,
+        }
+    }
+    false
+}
+
+/// A brand's slot carrying `keys`, as the declaration a consumer writes it.
+fn branded_slot_source(keys: &str) -> String {
+    format!("#[serde(transparent)] pub struct Branded(#[model_schema_prop({keys})] pub String);")
+}
+
+/// A brand publishes its inner's own schema with a `.brand()` written onto it, so no key written
+/// on its slot reaches any surface. Every key earns the same refusal — a read one, a flag, and one
+/// this crate has no key for alike, none of them being read there — and the refusal is the same in
+/// every build, this test running ungated in each of them.
+#[test]
+fn a_prop_on_a_branded_newtypes_slot_is_refused() {
+    for keys in SLOT_PROP_KEYS {
+        let tokens = expansion_over(&branded_slot_source(keys));
+        assert!(
+            tokens.to_string().contains("compile_error"),
+            "for `{keys}`, got: {tokens}"
+        );
+        assert!(
+            literal_texts(&tokens).contains(&format!(
+                "model_schema: type `Branded`: {BRANDED_SLOT_PROP_REFUSAL}"
+            )),
+            "for `{keys}`, got: {tokens}"
+        );
+    }
+}
+
+/// The refusal is the only diagnostic: a key this crate has no arm for is answered by the guard
+/// rather than by the key parser, whose own rejection would name the spelling instead of the
+/// position that makes every spelling inert.
+#[test]
+fn an_unknown_key_on_a_brand_slot_earns_the_position_refusal() {
+    let tokens = expansion_over(&branded_slot_source("bogus_key = 3"));
+    assert!(!tokens.to_string().contains("unknown"), "got: {tokens}");
+}
+
+/// The attribute is this crate's own and inert to every derive, so a copy left on the emitted item
+/// is one rustc reports as an attribute that does not exist — stacked on top of the refusal in a
+/// build with a surface, and newly introduced in one without.
+#[test]
+fn a_refused_brand_slot_keeps_no_prop_attribute_on_the_emitted_item() {
+    for keys in SLOT_PROP_KEYS {
+        let tokens = expansion_over(&branded_slot_source(keys));
+        assert!(
+            !writes_a_prop_attribute(&tokens),
+            "for `{keys}`, got: {tokens}"
+        );
+    }
+}
+
+/// Every attribute written on the slot earns its own refusal, so a slot carrying two is answered
+/// twice rather than once.
+#[test]
+fn each_prop_attribute_on_a_brand_slot_earns_its_own_refusal() {
+    let refusals = branded_slot_refusals(
+        "#[serde(transparent)] pub struct Branded(\
+         #[model_schema_prop(minLength = 2)] #[model_schema_prop(maxLength = 8)] pub String);",
+    );
+    assert_eq!(refusals.len(), 2, "got: {refusals:?}");
+}
+
+/// The `compile_error!` tokens `source` earns for a `#[model_schema_prop]` on a brand's slot.
+/// Parsed from text so the tokens carry file locations and the refusal's span can be read back as
+/// the source it points at.
+fn branded_slot_refusals(source: &str) -> Vec<proc_macro2::TokenStream> {
+    super::branded_slot_prop_errors(&syn::parse_str(source).unwrap())
+}
+
+/// The refusal points at the attribute as written, which is the one thing the author deletes — not
+/// at the slot, and not at the declaration around it.
+#[test]
+fn a_brand_slot_refusal_is_spanned_on_the_attribute() {
+    let refusals = branded_slot_refusals(&branded_slot_source("pattern = \"^[a-z]+$\""));
+    assert_eq!(refusals.len(), 1, "got: {refusals:?}");
+    let located = located_source_texts(&refusals[0]);
+    assert!(!located.is_empty(), "got: {refusals:?}");
+    for text in &located {
+        assert_eq!(text, "#[model_schema_prop(pattern = \"^[a-z]+$\")]");
+    }
+}
+
+/// The guard asks the pair that makes a declaration a brand, so a slot the brand path never takes
+/// keeps the attribute it reads today: an ordinary tuple struct's slot, a wider transparent tuple
+/// struct's, a transparent struct's named field, and every shape that is not a struct at all.
+#[test]
+fn a_prop_outside_a_brand_slot_earns_no_refusal() {
+    for source in [
+        "pub struct Plain(#[model_schema_prop(preprocess = [\"trim\"])] pub String);",
+        "pub struct Plain(#[model_schema_prop(literal = \"fixed\")] pub String);",
+        "#[serde(transparent)] pub struct Wide(\
+         #[model_schema_prop(minLength = 2)] pub String, pub u32);",
+        "#[serde(transparent)] pub struct Named { #[model_schema_prop(pattern = \"^a$\")] \
+         pub inner: String }",
+        "#[serde(transparent)] pub struct Bare(pub String);",
+        "pub enum Choice { Slug(#[model_schema_prop(minLength = 2)] String) }",
+        "pub type Alias = String;",
+    ] {
+        let refusals = branded_slot_refusals(source);
+        assert!(refusals.is_empty(), "for {source}, got: {refusals:?}");
     }
 }

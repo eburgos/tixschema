@@ -2,6 +2,11 @@
 //!
 //! This module handles parsing of model_schema_prop attributes for field-level customization
 //! of TypeScript type and Zod schema generation.
+//!
+//! The attribute sits on a named field or a tuple slot, of a struct or of an enum variant. The one
+//! position it may not sit on is the slot of a `#[serde(transparent)]` single-field tuple struct: a
+//! brand publishes its inner's own schema, so no key written there reaches a surface, and one
+//! written there is refused at expansion.
 
 use syn::meta::ParseNestedMeta;
 use syn::{Attribute, Lit, LitStr, Type};

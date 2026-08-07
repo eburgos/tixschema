@@ -614,6 +614,12 @@ export const Document$Schema: ZodType<Document> = Document$RawSchema;
 /// the same in either order. A brand over a type this crate never expands keeps the emission it has
 /// always had, its consult never answered.
 ///
+/// The brand's slot takes no `#[model_schema_prop(...)]` at all. A brand publishes its inner's own
+/// schema with a `.brand()` written onto it, so no key written on the slot reaches any surface, and
+/// one written there is refused. The three checks a brand does carry are the type-level ones above.
+/// A `#[serde(transparent)]` struct with a *named* field is no brand, and its field attributes are
+/// read as any other named field's are.
+///
 #[proc_macro_attribute]
 pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
     exec_model_schema(args.into(), input.into()).into()
