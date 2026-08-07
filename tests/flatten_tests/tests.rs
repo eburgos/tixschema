@@ -1038,6 +1038,58 @@ enum TwiceFlatVariant {
     },
 }
 
+/// The same source at an untagged enum's own member position: no discriminator stands over it, so
+/// serde writes the source's members beside the variant's own and nothing else.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum UntaggedFlatVariant {
+    Named {
+        #[serde(flatten)]
+        extra: VariantExtra,
+        x: String,
+    },
+    Plain {
+        y: String,
+    },
+}
+
+/// Two sources flattened into one untagged member.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum TwiceUntaggedFlatVariant {
+    Named {
+        #[serde(flatten)]
+        extra: VariantExtra,
+        #[serde(flatten)]
+        rank: VariantRank,
+        x: String,
+    },
+}
+
+/// An object that flattens such an enum. A member that flattens does not prove its own key list, so
+/// no member of this union is closed against keys the expansion cannot enumerate.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct UntaggedFlatVariantHolder {
+    #[serde(flatten)]
+    either: UntaggedFlatVariant,
+    own: String,
+}
+
+/// The branch of an untagged document that names `key`.
+#[cfg(feature = "jsonschema")]
+fn untagged_branch(document: &serde_json::Value, key: &str) -> serde_json::Value {
+    document["anyOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|branch| branch["properties"].as_object().unwrap().contains_key(key))
+        .unwrap()
+        .clone()
+}
+
 /// The content object of `variant` in `document`, whichever of the three taggings put it there.
 #[cfg(feature = "jsonschema")]
 fn variant_content(document: &serde_json::Value, variant: &str) -> serde_json::Value {
@@ -3613,4 +3665,240 @@ fn test_a_variant_without_a_flattened_field_keeps_its_zod_object() {
     let zod = AdjacentFlatVariant::zod_schema();
     let plain = &zod[zod.find("z.literal(\"Plain\")").unwrap()..];
     assert!(!plain.contains(".and("), "Got: {plain}");
+}
+
+/// What serde writes for a `#[serde(flatten)]` field of an *untagged* enum's own struct variant:
+/// the source's members sit beside the variant's own, under no key of their own and with no
+/// discriminator over them.
+#[test]
+fn test_a_flattened_untagged_variant_field_writes_its_members_beside_the_variants_own() {
+    assert_eq!(
+        serde_json::to_value(UntaggedFlatVariant::Named {
+            extra: VariantExtra {
+                note: "n".to_owned()
+            },
+            x: "y".to_owned(),
+        })
+        .unwrap(),
+        serde_json::json!({ "note": "n", "x": "y" })
+    );
+    assert_eq!(
+        serde_json::to_value(TwiceUntaggedFlatVariant::Named {
+            extra: VariantExtra {
+                note: "n".to_owned()
+            },
+            rank: VariantRank { rank: 3 },
+            x: "y".to_owned(),
+        })
+        .unwrap(),
+        serde_json::json!({ "note": "n", "rank": 3_i64, "x": "y" })
+    );
+}
+
+/// And reads them back the same way, for the flattening member and for the sibling beside it.
+#[test]
+fn test_a_flattened_untagged_variant_field_round_trips_both_members() {
+    for value in [
+        UntaggedFlatVariant::Named {
+            extra: VariantExtra {
+                note: "n".to_owned(),
+            },
+            x: "y".to_owned(),
+        },
+        UntaggedFlatVariant::Plain { y: "p".to_owned() },
+    ] {
+        let written = serde_json::to_value(&value).unwrap();
+        let back: UntaggedFlatVariant = serde_json::from_value(written).unwrap();
+        assert_eq!(back, value);
+    }
+}
+
+/// So the TypeScript the member describes as is an intersection at the member's own position, never
+/// a key holding the source.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_a_flattened_untagged_variant_field_is_a_typescript_intersection_inside_the_member() {
+    let ts = UntaggedFlatVariant::ts_definition();
+    let declared = &ts[ts.find("export type").unwrap()..];
+    assert_eq!(
+        declared,
+        "export type UntaggedFlatVariant = { x: string } & VariantExtra | { y: string };"
+    );
+}
+
+#[test]
+#[cfg(feature = "typescript")]
+fn test_two_flattened_untagged_variant_fields_join_the_same_member_object() {
+    let ts = TwiceUntaggedFlatVariant::ts_definition();
+    assert!(
+        ts.contains("{ x: string } & VariantExtra & VariantRank;"),
+        "Got: {ts}"
+    );
+    assert!(!ts.contains("rank:"), "Got: {ts}");
+}
+
+/// And the Zod schema joins the source through the same deferred operand the tagged forms join
+/// through, so a source declared below the enum is still read when something validates.
+#[test]
+#[cfg(feature = "zod")]
+fn test_a_flattened_untagged_variant_field_is_a_zod_intersection_inside_the_member() {
+    let zod = UntaggedFlatVariant::zod_schema();
+    assert!(
+        zod.contains("}).and(z.lazy(() => VariantExtra$Schema))"),
+        "Got: {zod}"
+    );
+    assert!(!zod.contains("extra:"), "Got: {zod}");
+    assert!(
+        !zod.contains(".and(VariantExtra$Schema)"),
+        "the source is read while the const initializes: {zod}"
+    );
+}
+
+#[test]
+#[cfg(feature = "zod")]
+fn test_two_flattened_untagged_variant_fields_chain_their_zod_operands() {
+    let zod = TwiceUntaggedFlatVariant::zod_schema();
+    assert!(
+        zod.contains(
+            "}).and(z.lazy(() => VariantExtra$Schema)).and(z.lazy(() => VariantRank$Schema))"
+        ),
+        "Got: {zod}"
+    );
+}
+
+/// The keys `payload` carries, sorted, beside the keys `branch` names and the keys it requires.
+#[cfg(feature = "jsonschema")]
+fn written_against_described(
+    branch: &serde_json::Value,
+    payload: &serde_json::Value,
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut written: Vec<String> = payload.as_object().unwrap().keys().cloned().collect();
+    written.sort();
+    let (mut named, mut required) = described_keys(branch);
+    named.sort();
+    required.sort();
+    (written, named, required)
+}
+
+/// The JSON document names exactly the keys serde writes for the member, and requires every one of
+/// them: the source's members sit where the variant's own are named, and no key stands for the
+/// flattened field itself.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_a_flattened_untagged_variant_field_merges_into_the_members_json_object() {
+    let payload = serde_json::to_value(UntaggedFlatVariant::Named {
+        extra: VariantExtra {
+            note: "n".to_owned(),
+        },
+        x: "y".to_owned(),
+    })
+    .unwrap();
+    let branch = untagged_branch(&UntaggedFlatVariant::json_schema(), "x");
+    let (written, named, required) = written_against_described(&branch, &payload);
+    assert_eq!(named, written, "Got: {branch}");
+    assert_eq!(required, written, "Got: {branch}");
+    assert_eq!(branch["additionalProperties"], serde_json::json!(false));
+}
+
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_two_flattened_untagged_variant_fields_merge_into_one_json_object() {
+    let payload = serde_json::to_value(TwiceUntaggedFlatVariant::Named {
+        extra: VariantExtra {
+            note: "n".to_owned(),
+        },
+        rank: VariantRank { rank: 3 },
+        x: "y".to_owned(),
+    })
+    .unwrap();
+    let branch = untagged_branch(&TwiceUntaggedFlatVariant::json_schema(), "x");
+    let (written, named, required) = written_against_described(&branch, &payload);
+    assert_eq!(named, written, "Got: {branch}");
+    assert_eq!(required, written, "Got: {branch}");
+}
+
+/// And exactly one branch of the union accepts each member's real payload: merging a source into
+/// one member leaves the others describing what they always described.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_the_flattened_untagged_variant_document_accepts_what_serde_writes() {
+    let document = UntaggedFlatVariant::json_schema();
+    for value in [
+        UntaggedFlatVariant::Named {
+            extra: VariantExtra {
+                note: "n".to_owned(),
+            },
+            x: "y".to_owned(),
+        },
+        UntaggedFlatVariant::Plain { y: "p".to_owned() },
+    ] {
+        let payload = serde_json::to_value(&value).unwrap();
+        assert_eq!(
+            accepting_branches(&document["anyOf"], &payload),
+            1,
+            "{document} on {payload}"
+        );
+    }
+}
+
+/// The nested shape the description named before the merge is one serde never writes, and the
+/// document turns it away.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_the_flattened_untagged_variant_document_rejects_the_stale_nested_shape() {
+    let document = UntaggedFlatVariant::json_schema();
+    assert!(
+        !closed_document_accepts(
+            &document,
+            &serde_json::json!({ "extra": { "note": "n" }, "x": "y" })
+        ),
+        "Got: {document}"
+    );
+}
+
+/// An object that flattens the enum writes the matched member's keys beside its own, in both
+/// directions.
+#[test]
+fn test_flattening_an_enum_whose_member_flattens_round_trips_every_member() {
+    let forms = [
+        (
+            UntaggedFlatVariant::Named {
+                extra: VariantExtra {
+                    note: "n".to_owned(),
+                },
+                x: "y".to_owned(),
+            },
+            serde_json::json!({ "note": "n", "x": "y", "own": "o" }),
+        ),
+        (
+            UntaggedFlatVariant::Plain { y: "p".to_owned() },
+            serde_json::json!({ "y": "p", "own": "o" }),
+        ),
+    ];
+    for (either, expected) in forms {
+        let holder = UntaggedFlatVariantHolder {
+            either,
+            own: "o".to_owned(),
+        };
+        let written = serde_json::to_value(&holder).unwrap();
+        assert_eq!(written, expected);
+        let back: UntaggedFlatVariantHolder = serde_json::from_value(written).unwrap();
+        assert_eq!(back, holder);
+    }
+}
+
+/// And no member of that union is closed against a key it cannot enumerate: the flattening member's
+/// own key list is not provable from one expansion, so its sibling is told to deny nothing and the
+/// merge falls back to the one operand the enum's name is.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_a_flattening_untagged_member_closes_no_sibling_against_unprovable_keys() {
+    let ts = UntaggedFlatVariantHolder::ts_definition();
+    assert!(!ts.contains("?: never"), "Got: {ts}");
+    assert!(ts.contains("} & UntaggedFlatVariant;"), "Got: {ts}");
+    assert!(
+        UntaggedFlatVariant::ts_definition().contains("| { y: string };"),
+        "Got: {}",
+        UntaggedFlatVariant::ts_definition()
+    );
 }

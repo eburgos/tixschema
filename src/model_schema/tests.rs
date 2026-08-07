@@ -8462,12 +8462,31 @@ fn the_adjacent_collapse_refusal_quotes_the_declared_keys() {
     );
 }
 
+/// The collected walk a renderer probe hands one variant, holding just the members it writes.
+#[cfg(feature = "serde")]
+fn walked_members(field_defs: &[super::FieldDef]) -> super::UntaggedVariantMembers {
+    super::UntaggedVariantMembers {
+        bound: Vec::new(),
+        checks: Vec::new(),
+        deferred_attrs: Vec::new(),
+        field_defs: field_defs.to_vec(),
+        flattened_fields: Vec::new(),
+        guard_errors: Vec::new(),
+        validation_fns: Vec::new(),
+    }
+}
+
 /// The member spelling an untagged variant is refused with, run over the kind it publishes.
 #[cfg(feature = "serde")]
 fn untagged_refusal(declaration: &str, members: &[super::FieldDef]) -> String {
     let variant = declared_variant(declaration);
-    render_untagged_variant(&variant_wire_kind(&variant), &variant, members, "Wire")
-        .map_or_else(|err| err.to_string(), |_| String::new())
+    render_untagged_variant(
+        &variant_wire_kind(&variant),
+        &variant,
+        &walked_members(members),
+        "Wire",
+    )
+    .map_or_else(|err| err.to_string(), |_| String::new())
 }
 
 /// Captured from serde: an untagged variant whose lone slot is off the wire writes and reads `null`
@@ -8498,8 +8517,13 @@ fn an_untagged_variant_whose_lone_slot_is_dropped_is_refused_for_the_collapse() 
 #[test]
 fn the_untagged_collapse_refusal_points_at_the_variant() {
     let variant = declared_variant("enum Wire { One(#[serde(skip)] String) }");
-    let error =
-        render_untagged_variant(&variant_wire_kind(&variant), &variant, &[], "Wire").unwrap_err();
+    let error = render_untagged_variant(
+        &variant_wire_kind(&variant),
+        &variant,
+        &walked_members(&[]),
+        "Wire",
+    )
+    .unwrap_err();
     assert_eq!(
         error.span().source_text().as_deref(),
         Some("One(#[serde(skip)] String)")
@@ -9850,5 +9874,164 @@ fn the_variant_flatten_refusal_names_the_remedy() {
             .contains("write the field as a named member so the value gets a key of its own"),
         "got: {}",
         refusals[0]
+    );
+}
+
+/// The members one untagged variant collected, beside the ones it flattens.
+#[cfg(feature = "serde")]
+fn collected_untagged_variant_fields(mut item: syn::ItemEnum) -> (Vec<String>, Vec<String>) {
+    let variant = item.variants.first_mut().unwrap();
+    let walked = super::collect_untagged_variant_members(variant, "Probe", UNTAGGED_MODULE, &[]);
+    (
+        walked.field_defs.iter().map(|f| f.name.clone()).collect(),
+        walked
+            .flattened_fields
+            .iter()
+            .map(|f| f.name.clone())
+            .collect(),
+    )
+}
+
+/// An untagged variant's `#[serde(flatten)]` field is held apart from the members that write a key,
+/// exactly as its tagged twin's is.
+#[cfg(feature = "serde")]
+#[test]
+fn a_flattened_untagged_variant_field_is_split_out_of_the_variants_members() {
+    let (written, flattened) = collected_untagged_variant_fields(syn::parse_quote! {
+        enum Probe {
+            Named {
+                #[serde(flatten)]
+                extra: PlainBase,
+                x: String,
+            },
+        }
+    });
+    assert_eq!(written, vec!["x".to_owned()]);
+    assert_eq!(flattened, vec!["extra".to_owned()]);
+}
+
+/// And such a member proves no key list of its own: the source's keys belong to another type, and
+/// one expansion sees one type. Listing only the variant's own keys would have a sibling deny a key
+/// the member does carry.
+#[cfg(all(feature = "serde", feature = "typescript"))]
+#[test]
+fn a_flattening_untagged_member_proves_no_key_list() {
+    let mut item: syn::ItemEnum = syn::parse_quote! {
+        enum Probe {
+            Named {
+                #[serde(flatten)]
+                extra: PlainBase,
+                x: String,
+            },
+        }
+    };
+    let variant = item.variants.first_mut().unwrap();
+    let walked = super::collect_untagged_variant_members(variant, "Probe", UNTAGGED_MODULE, &[]);
+    assert_eq!(
+        super::untagged_member_keys(
+            &VariantKind::Named,
+            &walked.field_defs,
+            &walked.flattened_fields
+        ),
+        None
+    );
+    assert_eq!(
+        super::untagged_member_keys(&VariantKind::Named, &walked.field_defs, &[]),
+        Some(vec!["x".to_owned()])
+    );
+}
+
+/// The guards a tagged variant's flattened field is read against reach an untagged variant's too: a
+/// plain enum writes its own variant name as a key holding null, which no closed object admits.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn a_flattened_untagged_variant_field_over_a_plain_enum_is_refused() {
+    register_alias_info(
+        "UntaggedVariantHue",
+        "UntaggedVariantHue",
+        &ident_schema_module_name("UntaggedVariantHue"),
+        AliasKind::EnumMembers,
+    );
+    let errors = untagged_guard_errors(syn::parse_quote! {
+        enum Probe {
+            Named {
+                #[serde(flatten)]
+                tone: UntaggedVariantHue,
+                x: String,
+            },
+        }
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(errors[0].contains("compile_error"), "got: {}", errors[0]);
+    assert!(
+        errors[0].contains("carries `#[serde(flatten)]` over `UntaggedVariantHue`"),
+        "got: {}",
+        errors[0]
+    );
+}
+
+/// And so does the branching an untagged variant's own position cannot compose, worded the way the
+/// tagged path words it.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_flattened_untagged_variant_field_over_a_multi_branch_source_is_refused() {
+    let mut choice: syn::ItemEnum = syn::parse_quote! {
+        enum UntaggedVariantChoice {
+            First(Holder),
+            Second(Other),
+        }
+    };
+    let (_, _, _, merge_parts, _, errors, _, _) =
+        collect_untagged_members(&mut choice, UNTAGGED_MODULE);
+    assert!(errors.is_empty(), "got: {errors:?}");
+    register_alias_info(
+        "UntaggedVariantChoice",
+        "UntaggedVariantChoice",
+        &ident_schema_module_name("UntaggedVariantChoice"),
+        AliasKind::NoEnumMembers,
+    );
+    record_zod_union_members("UntaggedVariantChoice", &merge_parts);
+
+    let refusals = untagged_guard_errors(syn::parse_quote! {
+        enum Probe {
+            Named {
+                #[serde(flatten)]
+                either: UntaggedVariantChoice,
+                x: String,
+            },
+        }
+    });
+    assert_eq!(refusals.len(), 1, "got: {refusals:?}");
+    assert!(
+        refusals[0].contains("writes one key set per branch of the choice it names"),
+        "got: {}",
+        refusals[0]
+    );
+    assert!(
+        refusals[0].contains("variant `Named` of `Probe`"),
+        "got: {}",
+        refusals[0]
+    );
+}
+
+/// A source that writes exactly one key set is what the merge composes, and neither guard fires on
+/// it.
+#[cfg(feature = "serde")]
+#[test]
+fn a_flattened_untagged_variant_field_over_a_single_key_set_source_is_not_refused() {
+    assert!(
+        untagged_guard_errors(syn::parse_quote! {
+            enum Probe {
+                Named {
+                    #[serde(flatten)]
+                    extra: PlainBase,
+                    x: String,
+                },
+            }
+        })
+        .is_empty()
     );
 }

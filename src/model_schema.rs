@@ -549,6 +549,9 @@ struct UntaggedVariantMembers {
     checks: Vec<proc_macro2::TokenStream>,
     deferred_attrs: Vec<Vec<syn::Attribute>>,
     field_defs: Vec<FieldDef>,
+    /// The variant's own `#[serde(flatten)]` sources, held apart from `field_defs`: they write no
+    /// key of their own, so every surface joins them onto the object the rest of the fields close.
+    flattened_fields: Vec<FieldDef>,
     guard_errors: Vec<proc_macro2::TokenStream>,
     validation_fns: Vec<proc_macro2::TokenStream>,
 }
@@ -6981,12 +6984,16 @@ fn process_internally_tagged_enum(
 fn render_untagged_variant(
     kind: &VariantKind,
     variant: &syn::Variant,
-    field_defs: &[FieldDef],
+    members: &UntaggedVariantMembers,
     self_type_name: &str,
 ) -> Result<(String, String, proc_macro2::TokenStream), syn::Error> {
-    match (kind, field_defs) {
+    match (kind, members.field_defs.as_slice()) {
         (VariantKind::TupleSingle, [fld]) => Ok(render_untagged_tuple_single(fld, self_type_name)),
-        (VariantKind::Named, _) => Ok(render_untagged_named(field_defs, self_type_name)),
+        (VariantKind::Named, _) => Ok(render_untagged_named(
+            members,
+            self_type_name,
+            &variant.ident.to_string(),
+        )),
         (VariantKind::Unit, _) if lone_slot_off_wire(variant) => {
             Err(collapsed_untagged_variant_error(variant))
         }
@@ -7063,12 +7070,19 @@ fn render_untagged_tuple_single(
 }
 
 /// Renders a `Named` (`{ a: A }`) untagged variant as a union member (object type / strictObject /
-/// object schema).
+/// object schema), with the members of every `#[serde(flatten)]` source it carries joined onto that
+/// object.
 #[cfg(feature = "serde")]
 fn render_untagged_named(
-    field_defs: &[FieldDef],
+    members: &UntaggedVariantMembers,
     self_type_name: &str,
+    variant_name: &str,
 ) -> (String, String, proc_macro2::TokenStream) {
+    let field_defs = &members.field_defs;
+    let flatten = variant_flatten_intersections(&members.flattened_fields);
+    #[cfg(not(feature = "jsonschema"))]
+    let _: &str = variant_name;
+
     let ts_fields = field_defs
         .iter()
         .map(|fld| {
@@ -7081,7 +7095,7 @@ fn render_untagged_named(
         })
         .collect::<Vec<_>>()
         .join("; ");
-    let ts = format!("{{ {ts_fields} }}");
+    let ts = format!("{{ {ts_fields} }}{}", flatten.0);
 
     #[cfg(feature = "zod")]
     let zod = {
@@ -7096,6 +7110,7 @@ fn render_untagged_named(
             }
         }
         body.push_str("})");
+        body.push_str(&flatten.1);
         body
     };
     #[cfg(not(feature = "zod"))]
@@ -7105,7 +7120,12 @@ fn render_untagged_named(
     };
 
     #[cfg(feature = "jsonschema")]
-    let json_val = untagged_named_json_value(field_defs);
+    let json_val = untagged_named_json_value(
+        field_defs,
+        &members.flattened_fields,
+        self_type_name,
+        variant_name,
+    );
     #[cfg(not(feature = "jsonschema"))]
     let json_val = quote! {};
 
@@ -7114,10 +7134,15 @@ fn render_untagged_named(
 
 /// The keys one untagged member names, and `None` where nothing here proves them. A `Named`
 /// variant's keys are the ones it already spells; every other member is written as the type it
-/// names, and its key list is not something a registry lookup can answer.
+/// names, and its key list is not something a registry lookup can answer — nor is a `Named`
+/// variant's once it flattens, since the source's keys belong to a type this expansion cannot read.
 #[cfg(all(feature = "serde", feature = "typescript"))]
-fn untagged_member_keys(kind: &VariantKind, field_defs: &[FieldDef]) -> Option<Vec<String>> {
-    matches!(kind, VariantKind::Named)
+fn untagged_member_keys(
+    kind: &VariantKind,
+    field_defs: &[FieldDef],
+    flattened_fields: &[FieldDef],
+) -> Option<Vec<String>> {
+    (matches!(kind, VariantKind::Named) && flattened_fields.is_empty())
         .then(|| field_defs.iter().map(|fld| fld.name.clone()).collect())
 }
 
@@ -7144,9 +7169,15 @@ fn close_untagged_flatten_member(member: &str, excluded: &[String]) -> String {
 }
 
 /// Builds the `{ type: object, properties, required, additionalProperties: false }` JSON-schema
-/// value token for a `Named` untagged variant.
+/// value token for a `Named` untagged variant, with the members of every `#[serde(flatten)]` source
+/// the variant carries merged beside its own.
 #[cfg(all(feature = "serde", feature = "jsonschema"))]
-fn untagged_named_json_value(field_defs: &[FieldDef]) -> proc_macro2::TokenStream {
+fn untagged_named_json_value(
+    field_defs: &[FieldDef],
+    flattened_fields: &[FieldDef],
+    self_type_name: &str,
+    variant_name: &str,
+) -> proc_macro2::TokenStream {
     let property_inserts = field_defs.iter().map(|fld| {
         let name_str = fld.name.clone();
         let value = nullable_slot_json_schema_value(fld, field_json_schema_value(fld));
@@ -7162,7 +7193,7 @@ fn untagged_named_json_value(field_defs: &[FieldDef]) -> proc_macro2::TokenStrea
             #required_insert
         }
     });
-    quote! {
+    let object = quote! {
         {
             let mut object_schema = serde_json::Map::new();
             object_schema.insert(
@@ -7184,9 +7215,10 @@ fn untagged_named_json_value(field_defs: &[FieldDef]) -> proc_macro2::TokenStrea
                 "additionalProperties".to_string(),
                 serde_json::Value::Bool(false),
             );
-            serde_json::Value::Object(object_schema)
+            object_schema
         }
-    }
+    };
+    variant_merged_json_value(&object, flattened_fields, self_type_name, variant_name)
 }
 
 /// Builds the `{ "type": "string", ... }` JSON-schema value token for a `String` field, including
@@ -7420,6 +7452,7 @@ fn collect_untagged_variant_members(
         checks: Vec::new(),
         deferred_attrs: Vec::new(),
         field_defs: Vec::new(),
+        flattened_fields: Vec::new(),
         guard_errors: Vec::new(),
         validation_fns: Vec::new(),
     };
@@ -7436,6 +7469,17 @@ fn collect_untagged_variant_members(
         ) {
             walked.guard_errors.push(rejection.to_compile_error());
         }
+
+        // Read before the field is processed, which strips the attributes the declaration carried.
+        let is_flatten = is_flattened_field(field);
+        if is_flatten {
+            walked.guard_errors.extend(variant_flatten_guard_errors(
+                field,
+                enum_type_name,
+                &variant_name,
+            ));
+        }
+
         let field_name = field_ident_string(field);
         let prop_meta = parse_model_schema_prop_attributes(&field.attrs);
         let serde_field_meta = parse_serde_field_attributes(&field.attrs);
@@ -7452,11 +7496,15 @@ fn collect_untagged_variant_members(
                 &mut injected_attrs,
             );
         field.attrs = new_attrs;
+        // Pushed for every field, flattened or not: `apply_deferred_field_attrs` zips this against
+        // the declaration's own fields, so a skipped push shifts every later field's attributes.
         walked.deferred_attrs.push(injected_attrs);
-        walked.validation_fns.extend(validation_fn);
-        if let (Some(body), Some(ident)) = (validate_body, field.ident.as_ref()) {
-            walked.bound.push((ident.clone(), member_binding(ident)));
-            walked.checks.push(body);
+        if !is_flatten {
+            walked.validation_fns.extend(validation_fn);
+            if let (Some(body), Some(ident)) = (validate_body, field.ident.as_ref()) {
+                walked.bound.push((ident.clone(), member_binding(ident)));
+                walked.checks.push(body);
+            }
         }
 
         let member_ctx = untagged_variant_context(
@@ -7476,6 +7524,10 @@ fn collect_untagged_variant_members(
             field_validation_guard_error,
         );
         walked.guard_errors.extend(member_guard_errors);
+        if is_flatten {
+            walked.flattened_fields.push(member_def);
+            continue;
+        }
         if positional && omission.absent_from_wire() {
             continue;
         }
@@ -7519,30 +7571,33 @@ fn collect_untagged_members(
         guard_errors.append(&mut walked.guard_errors);
         validation_fns.append(&mut walked.validation_fns);
         deferred_attrs.append(&mut walked.deferred_attrs);
-        let field_defs = walked.field_defs;
 
-        per_variant_checks.push((
-            variant_check_pattern(&variant.ident, &declared_kind, total_fields, &walked.bound),
-            walked.checks,
-        ));
-
-        match render_untagged_variant(&kind, variant, &field_defs, &enum_type_name) {
+        match render_untagged_variant(&kind, variant, &walked, &enum_type_name) {
             Ok((ts, zod, json_val)) => {
                 #[cfg(feature = "zod")]
                 zod_merge_parts.extend(zod_merge_branches(
                     &kind,
-                    &field_defs,
+                    &walked.field_defs,
                     &zod,
                     ts_parts.len() + 1,
                 ));
                 #[cfg(feature = "typescript")]
-                ts_member_keys.push(untagged_member_keys(&kind, &field_defs));
+                ts_member_keys.push(untagged_member_keys(
+                    &kind,
+                    &walked.field_defs,
+                    &walked.flattened_fields,
+                ));
                 ts_parts.push(ts);
                 zod_parts.push(zod);
                 json_parts.push(json_val);
             }
             Err(err) => guard_errors.push(err.to_compile_error()),
         }
+
+        per_variant_checks.push((
+            variant_check_pattern(&variant.ident, &declared_kind, total_fields, &walked.bound),
+            walked.checks,
+        ));
     }
 
     if guard_errors.is_empty() {
