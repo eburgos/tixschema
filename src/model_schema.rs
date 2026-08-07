@@ -421,6 +421,16 @@ enum MapKeyRejection {
     },
 }
 
+/// A std type serde has no wire form for that a written type reaches, at any depth. Every position
+/// that reads a written type asks this, and each spans and names its own subject.
+#[derive(Debug)]
+enum UndescribableStd<'name> {
+    /// `OsString`/`OsStr`: serde writes an externally tagged enum naming the target platform.
+    PlatformString(&'name str),
+    /// A cell/lock/lazy-init wrapper or borrow guard: serde implements neither direction.
+    Wrapper(&'name str),
+}
+
 /// What a newtype variant's inner value is when the tag is written beside it rather than around
 /// it.
 #[cfg(feature = "serde")]
@@ -1090,6 +1100,19 @@ fn alias_map_key_guard_error(
     Some(syn::Error::new_spanned(&alias.ty, message).to_compile_error())
 }
 
+/// The `compile_error!` tokens an alias whose target reaches a std type serde has no wire form for
+/// earns, or `None` when it reaches none. Spanned on the target, which is where it was written.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn alias_undescribable_std_error(
+    alias: &ItemType,
+    export_name: &str,
+    alias_field_def: &FieldDef,
+) -> Option<proc_macro2::TokenStream> {
+    let rejection = undescribable_std_rejection(alias_field_def)?;
+    let message = undescribable_std_message(&format!("type alias `{export_name}`"), &rejection);
+    Some(syn::Error::new_spanned(&alias.ty, message).to_compile_error())
+}
+
 /// The name of a flattened value's type when the registry proves that type is a plain enum.
 #[cfg(all(
     feature = "serde",
@@ -1136,9 +1159,16 @@ fn process_type_alias(item_type: ItemType, args: &ModelSchemaArgs) -> TokenStrea
 
     // Registered above whatever the outcome, so a type naming a refused alias still resolves to the
     // export name the author wrote and the alias's own diagnostic stays the one they act on.
-    if let Some(error) = alias_map_key_guard_error(&alias, &export_name, &alias_field_def)
-        && let Some(output) = guard_failure_output(&alias, Some(&alias.ident), &[error])
-    {
+    let alias_guard_errors: Vec<proc_macro2::TokenStream> =
+        alias_undescribable_std_error(&alias, &export_name, &alias_field_def)
+            .into_iter()
+            .chain(alias_map_key_guard_error(
+                &alias,
+                &export_name,
+                &alias_field_def,
+            ))
+            .collect();
+    if let Some(output) = guard_failure_output(&alias, Some(&alias.ident), &alias_guard_errors) {
         return output;
     }
 
@@ -2035,6 +2065,8 @@ fn default_types_guard_errors(
     rejections.extend(parameters_left_without_a_default(args, &declared));
     #[cfg(feature = "jsonschema")]
     rejections.extend(fillings_no_document_can_be_built_from(args));
+    #[cfg(feature = "jsonschema")]
+    rejections.extend(fillings_reaching_an_undescribable_std_type(args));
 
     rejections
         .iter()
@@ -2127,6 +2159,22 @@ fn fillings_no_document_can_be_built_from(args: &ModelSchemaArgs) -> Vec<syn::Er
             is_undescribable_primitive(&written).then(|| {
                 syn::Error::new_spanned(filling, undescribable_filling_message(name, &written))
             })
+        })
+        .collect()
+}
+
+/// The refusal every `default_types` entry earns whose filling reaches a std type serde has no wire
+/// form for, at any depth, spanned on the filling as written.
+#[cfg(feature = "jsonschema")]
+fn fillings_reaching_an_undescribable_std_type(args: &ModelSchemaArgs) -> Vec<syn::Error> {
+    args.default_types
+        .iter()
+        .filter_map(|(name, filling)| {
+            let written = get_field_def("_filling", filling, "");
+            let rejection = undescribable_std_rejection(&written)?;
+            let message =
+                undescribable_std_message(&format!("`default_types` entry `{name}`"), &rejection);
+            Some(syn::Error::new_spanned(filling, message))
         })
         .collect()
 }
@@ -3119,6 +3167,19 @@ fn branded_alias_kind(inner_field: &Field) -> AliasKind {
     }
 }
 
+/// The `compile_error!` tokens for a branded newtype whose inner reaches a std type serde has no
+/// wire form for, or `None` when it reaches none. Spanned on the inner as written.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn branded_undescribable_std_error(
+    name: &Ident,
+    inner_field: &Field,
+) -> Option<proc_macro2::TokenStream> {
+    let inner = get_field_def("", &inner_field.ty, "");
+    let rejection = undescribable_std_rejection(&inner)?;
+    let message = undescribable_std_message(&format!("type `{name}`"), &rejection);
+    Some(syn::Error::new_spanned(&inner_field.ty, message).to_compile_error())
+}
+
 /// The `compile_error!` tokens for a branded newtype whose inner reaches a map key no surface can
 /// write, or `None` when it reaches none.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -3131,8 +3192,9 @@ fn branded_map_key_error(name: &Ident, inner_field: &Field) -> Option<proc_macro
 
 /// The `compile_error!` tokens for every guard a branded newtype violates: a `cfg_attr`-wrapped
 /// serde attribute on the type or on its inner slot, an `Option` inner type, string constraints
-/// over an inner type that cannot carry them, a `pattern` that is not a regex, and a map key the
-/// inner reaches that no surface can write.
+/// over an inner type that cannot carry them, a `pattern` that is not a regex, a std type the inner
+/// reaches that serde has no wire form for, and a map key the inner reaches that no surface can
+/// write.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn branded_guard_errors(
     item_struct: &syn::ItemStruct,
@@ -3149,6 +3211,10 @@ fn branded_guard_errors(
             args,
         ))
         .chain(branded_pattern_error(&item_struct.ident, args))
+        .chain(branded_undescribable_std_error(
+            &item_struct.ident,
+            inner_field,
+        ))
         .chain(branded_map_key_error(&item_struct.ident, inner_field))
         .collect()
 }
@@ -10376,10 +10442,9 @@ fn field_guard_errors(
         .collect()
 }
 
-/// Every guard error the field violates: the three the type earns — the `OsString` guard, the
-/// unsupported-std-wrapper guard and the map-key guard, none of which any attribute can hide —
-/// then everything the `model_schema_prop` attribute earned, then the serde-side guards when any
-/// fired.
+/// Every guard error the field violates: the two the type earns — the undescribable-std guard and
+/// the map-key guard, neither of which any attribute can hide — then everything the
+/// `model_schema_prop` attribute earned, then the serde-side guards when any fired.
 fn collect_field_guard_errors(
     field: &Field,
     field_def: &FieldDef,
@@ -10397,15 +10462,10 @@ fn collect_field_guard_errors(
     #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
     let map_key_error: Option<proc_macro2::TokenStream> = None;
 
-    check_os_string_field(field, field_def, &label)
+    check_undescribable_std_field(field, field_def, &label)
         .err()
         .map(|err| err.to_compile_error())
         .into_iter()
-        .chain(
-            check_unsupported_std_wrapper_field(field, field_def, &label)
-                .err()
-                .map(|err| err.to_compile_error()),
-        )
         .chain(map_key_error)
         .chain(model_schema_prop_guard_errors(
             field,
@@ -10665,45 +10725,55 @@ fn check_as_preprocess_conflict(
     ))
 }
 
-/// Rejects a field that reaches an `OsString`/`OsStr`, at any depth: serde writes both as an
-/// externally tagged enum naming the target platform (`{"Unix":[u8, …]}` or
-/// `{"Windows":[u16, …]}`), so no schema describes both wire forms.
-fn check_os_string_field(
-    field: &Field,
-    field_def: &FieldDef,
-    label: &str,
-) -> Result<(), syn::Error> {
-    let Some(name) = field_def.os_string_name() else {
-        return Ok(());
-    };
-    Err(syn::Error::new_spanned(
-        field,
-        format!(
-            "model_schema: {label} reaches `{name}`, which serde writes as an externally tagged \
-             enum naming the target platform (`{{\"Unix\":[u8, ...]}}` or \
-             `{{\"Windows\":[u16, ...]}}`), not a string, so no schema can describe it portably. \
-             Use `String`, or `PathBuf` for a filesystem path."
-        ),
-    ))
+/// The std type `written` reaches that no schema can describe, and `None` when it reaches none.
+/// The platform string is answered first, so a type reaching both keeps the message that names its
+/// actual wire form.
+fn undescribable_std_rejection(written: &FieldDef) -> Option<UndescribableStd<'_>> {
+    written
+        .os_string_name()
+        .map(UndescribableStd::PlatformString)
+        .or_else(|| {
+            written
+                .unsupported_std_wrapper_name()
+                .map(UndescribableStd::Wrapper)
+        })
 }
 
-/// Rejects a field that reaches a std cell/lock/lazy-init wrapper or borrow guard, at any depth:
-/// left unrefused the name falls through to `FieldDefType::SiblingType`, and the expansion
-/// references a schema module nothing publishes rather than naming the unsupported type.
-fn check_unsupported_std_wrapper_field(
+/// What a written type reaching a std type serde cannot write is reported as. The `subject` names
+/// where it was written — a field, an alias, a brand, a `default_types` entry — which is all that
+/// differs between the positions.
+fn undescribable_std_message(subject: &str, rejection: &UndescribableStd<'_>) -> String {
+    match *rejection {
+        UndescribableStd::PlatformString(name) => format!(
+            "{subject} reaches `{name}`, which serde writes as an externally tagged enum naming \
+             the target platform (`{{\"Unix\":[u8, ...]}}` or `{{\"Windows\":[u16, ...]}}`), not a \
+             string, so no schema can describe it portably. Use `String`, or `PathBuf` for a \
+             filesystem path."
+        ),
+        UndescribableStd::Wrapper(name) => format!(
+            "{subject} reaches `{name}`, which serde implements neither `Serialize` nor \
+             `Deserialize` for, so there is no wire form for a schema to describe. Store the value \
+             `{name}` holds directly, or leave this field out of the serialized shape."
+        ),
+    }
+}
+
+/// Rejects a field that reaches a std type serde has no wire form for, at any depth: left unrefused
+/// the name falls through to `FieldDefType::SiblingType` and the expansion references a schema
+/// module nothing publishes rather than naming the type the author wrote.
+fn check_undescribable_std_field(
     field: &Field,
     field_def: &FieldDef,
     label: &str,
 ) -> Result<(), syn::Error> {
-    let Some(name) = field_def.unsupported_std_wrapper_name() else {
+    let Some(rejection) = undescribable_std_rejection(field_def) else {
         return Ok(());
     };
     Err(syn::Error::new_spanned(
         field,
         format!(
-            "model_schema: {label} reaches `{name}`, which serde implements neither `Serialize` \
-             nor `Deserialize` for, so there is no wire form for a schema to describe. Store the \
-             value `{name}` holds directly, or leave this field out of the serialized shape."
+            "model_schema: {}",
+            undescribable_std_message(label, &rejection)
         ),
     ))
 }

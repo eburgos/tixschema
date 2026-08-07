@@ -1,7 +1,7 @@
 use super::{
-    FieldDefType, ModelSchemaPropMeta, check_nullable_ts_optional_conflict, check_os_string_field,
-    check_unsupported_std_wrapper_field, collect_discriminated_variants, field_label,
-    get_field_def, render_discriminated_variants, validate_as_number_flag, validate_nullable_flag,
+    FieldDefType, ModelSchemaPropMeta, check_nullable_ts_optional_conflict,
+    check_undescribable_std_field, collect_discriminated_variants, field_label, get_field_def,
+    render_discriminated_variants, validate_as_number_flag, validate_nullable_flag,
     validate_ts_optional_flag,
 };
 
@@ -18,9 +18,9 @@ use super::{
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use super::{
-    AliasKind, PublishedShape, alias_map_key_guard_error, branded_guard_errors, check_map_key,
-    deferred_shape_question, deferred_shape_refusals, ident_schema_module_name,
-    record_shape_question, record_value_shape, register_alias_info,
+    AliasKind, PublishedShape, alias_map_key_guard_error, alias_undescribable_std_error,
+    branded_guard_errors, check_map_key, deferred_shape_question, deferred_shape_refusals,
+    ident_schema_module_name, record_shape_question, record_value_shape, register_alias_info,
 };
 
 #[cfg(all(feature = "serde", feature = "zod"))]
@@ -1406,8 +1406,9 @@ fn cfg_attr_wrapped_serde_on_a_field_is_rejected() {
     assert!(error.contains("#[serde(...)]"), "got: {error}");
 }
 
-/// Runs the field walk the way [`process_field`] does and renders the `OsString` guard failure.
-fn field_os_string_error(item: &syn::ItemStruct) -> Option<String> {
+/// Runs the field walk the way [`process_field`] does and returns the undescribable-std guard's
+/// refusal.
+fn field_undescribable_std_refusal(item: &syn::ItemStruct) -> Option<syn::Error> {
     let field = item.fields.iter().next()?;
     let name = field
         .ident
@@ -1415,14 +1416,23 @@ fn field_os_string_error(item: &syn::ItemStruct) -> Option<String> {
         .map(ToString::to_string)
         .unwrap_or_default();
     let field_def = get_field_def(&name, &field.ty, "");
-    check_os_string_field(field, &field_def, &field_label(&name))
-        .err()
-        .map(|err| err.to_compile_error().to_string())
+    check_undescribable_std_field(field, &field_def, &field_label(&name)).err()
+}
+
+/// [`field_undescribable_std_refusal`] rendered as the `compile_error!` tokens it becomes.
+fn field_undescribable_std_error(item: &syn::ItemStruct) -> Option<String> {
+    field_undescribable_std_refusal(item).map(|err| err.to_compile_error().to_string())
+}
+
+/// [`field_undescribable_std_refusal`]'s message, unrendered, so the wording can be pinned exactly
+/// rather than through token escaping.
+fn field_undescribable_std_message(item: &syn::ItemStruct) -> Option<String> {
+    field_undescribable_std_refusal(item).map(|err| err.to_string())
 }
 
 #[test]
 fn an_os_string_field_is_rejected_by_name() {
-    let error = field_os_string_error(&syn::parse_quote! {
+    let error = field_undescribable_std_error(&syn::parse_quote! {
         struct Report {
             location: OsString,
         }
@@ -1438,7 +1448,7 @@ fn an_os_string_field_is_rejected_by_name() {
 /// as itself rather than as the wrapper it was written behind.
 #[test]
 fn a_wrapped_os_str_field_is_rejected_by_its_own_name() {
-    let error = field_os_string_error(&syn::parse_quote! {
+    let error = field_undescribable_std_error(&syn::parse_quote! {
         struct Report {
             location: Box<OsStr>,
         }
@@ -1456,7 +1466,7 @@ fn a_path_field_is_left_alone() {
         quote::quote! { Cow<'static, Path> },
         quote::quote! { String },
     ] {
-        let error = field_os_string_error(&syn::parse_quote! {
+        let error = field_undescribable_std_error(&syn::parse_quote! {
             struct Report {
                 location: #ty,
             }
@@ -1465,23 +1475,9 @@ fn a_path_field_is_left_alone() {
     }
 }
 
-/// Runs the field walk the way [`process_field`] does and renders the std-wrapper guard failure.
-fn field_unsupported_std_wrapper_error(item: &syn::ItemStruct) -> Option<String> {
-    let field = item.fields.iter().next()?;
-    let name = field
-        .ident
-        .as_ref()
-        .map(ToString::to_string)
-        .unwrap_or_default();
-    let field_def = get_field_def(&name, &field.ty, "");
-    check_unsupported_std_wrapper_field(field, &field_def, &field_label(&name))
-        .err()
-        .map(|err| err.to_compile_error().to_string())
-}
-
 #[test]
 fn a_once_lock_field_is_rejected_by_name() {
-    let error = field_unsupported_std_wrapper_error(&syn::parse_quote! {
+    let error = field_undescribable_std_error(&syn::parse_quote! {
         struct Probe {
             guarded: OnceLock<u32>,
         }
@@ -1497,7 +1493,7 @@ fn a_once_lock_field_is_rejected_by_name() {
 /// unsupported type rather than the sequence or option it was written inside.
 #[test]
 fn a_wrapped_once_lock_field_is_rejected_by_its_own_name() {
-    let error = field_unsupported_std_wrapper_error(&syn::parse_quote! {
+    let error = field_undescribable_std_error(&syn::parse_quote! {
         struct Probe {
             guarded: Vec<Option<OnceLock<u32>>>,
         }
@@ -1519,7 +1515,7 @@ fn a_lifetime_parameterized_guard_field_is_rejected_by_name() {
             "`RwLockReadGuard`",
         ),
     ] {
-        let error = field_unsupported_std_wrapper_error(&syn::parse_quote! {
+        let error = field_undescribable_std_error(&syn::parse_quote! {
             struct Probe {
                 guarded: #spelling,
             }
@@ -1540,13 +1536,75 @@ fn a_schematizable_field_is_left_alone_by_the_std_wrapper_guard() {
         quote::quote! { Arc<Inner> },
         quote::quote! { String },
     ] {
-        let error = field_unsupported_std_wrapper_error(&syn::parse_quote! {
+        let error = field_undescribable_std_error(&syn::parse_quote! {
             struct Probe {
                 guarded: #ty,
             }
         });
         assert!(error.is_none(), "for {ty}, got: {error:?}");
     }
+}
+
+#[test]
+fn the_field_refusal_for_a_platform_string_reads_exactly_this() {
+    let message = field_undescribable_std_message(&syn::parse_quote! {
+        struct Report {
+            location: OsString,
+        }
+    })
+    .unwrap();
+    assert_eq!(
+        message,
+        "model_schema: field `location` reaches `OsString`, which serde writes as an externally \
+         tagged enum naming the target platform (`{\"Unix\":[u8, ...]}` or \
+         `{\"Windows\":[u16, ...]}`), not a string, so no schema can describe it portably. Use \
+         `String`, or `PathBuf` for a filesystem path."
+    );
+}
+
+#[test]
+fn the_field_refusal_for_an_unsupported_wrapper_reads_exactly_this() {
+    let message = field_undescribable_std_message(&syn::parse_quote! {
+        struct Probe {
+            guarded: OnceLock<u32>,
+        }
+    })
+    .unwrap();
+    assert_eq!(
+        message,
+        "model_schema: field `guarded` reaches `OnceLock`, which serde implements neither \
+         `Serialize` nor `Deserialize` for, so there is no wire form for a schema to describe. \
+         Store the value `OnceLock` holds directly, or leave this field out of the serialized \
+         shape."
+    );
+}
+
+/// A positional slot has no ident to name, and the label it is refused under is the one thing the
+/// collapse could have moved.
+#[test]
+fn the_slot_refusal_still_carries_the_label_a_slot_is_named_by() {
+    let message = field_undescribable_std_message(&syn::parse_quote! {
+        struct Probe(pub OnceLock<u32>);
+    })
+    .unwrap();
+    assert!(
+        message.starts_with("model_schema: tuple field reaches `OnceLock`,"),
+        "got: {message}"
+    );
+}
+
+/// A type reaching both is named by its platform string, whichever was written first: only that
+/// message states the wire form the author has to work around.
+#[test]
+fn a_field_reaching_both_is_named_by_its_platform_string() {
+    let message = field_undescribable_std_message(&syn::parse_quote! {
+        struct Probe {
+            held: (OnceLock<u32>, OsString),
+        }
+    })
+    .unwrap();
+    assert!(message.contains("`OsString`"), "got: {message}");
+    assert!(message.contains("externally tagged"), "got: {message}");
 }
 
 /// Runs the field walk the way [`super::process_field`] does and renders the map-key guard failure
@@ -1884,6 +1942,88 @@ fn an_alias_targeting_a_map_key_with_no_members_is_refused() {
     );
     assert!(error.contains("a map key must be a plain"), "got: {error}");
     assert!(error.contains("Doc"), "got: {error}");
+}
+
+/// The rendered `compile_error!` an alias target reaching a std type serde has no wire form for
+/// earns, or the empty string when it earns none.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn alias_undescribable_std_error_text(source: &str) -> String {
+    let alias: syn::ItemType = syn::parse_str(source).unwrap();
+    let field_def = get_field_def("Probe", &alias.ty, "");
+    alias_undescribable_std_error(&alias, "Probe", &field_def)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// An alias publishes its target's schema, so a target no schema can describe leaves every surface
+/// naming a module nothing publishes — the same refusal a field of that type earns, carrying the
+/// alias it was written on and reaching the same depth.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn an_alias_targeting_an_undescribable_std_type_is_refused() {
+    for (target, named, wire) in [
+        ("pub type Slot = OnceLock<u32>;", "`OnceLock`", "Serialize"),
+        ("pub type Location = OsString;", "`OsString`", "externally"),
+        (
+            "pub type Nested = Vec<OnceLock<u32>>;",
+            "`OnceLock`",
+            "Serialize",
+        ),
+        (
+            "pub type Keyed = HashMap<String, OsString>;",
+            "`OsString`",
+            "externally",
+        ),
+    ] {
+        let error = alias_undescribable_std_error_text(target);
+        for needle in ["compile_error", "type alias `Probe`", named, wire] {
+            assert!(
+                error.contains(needle),
+                "{needle} missing for {target}: {error}"
+            );
+        }
+    }
+}
+
+/// A target every surface describes earns nothing, including the wrappers the crate reads straight
+/// through to the value they hold.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn an_alias_targeting_a_describable_type_is_left_alone() {
+    for target in [
+        "pub type Slug = String;",
+        "pub type Slugs = Vec<String>;",
+        "pub type Held = RefCell<u32>;",
+        "pub type Located = PathBuf;",
+    ] {
+        let error = alias_undescribable_std_error_text(target);
+        assert!(error.is_empty(), "for {target}, got: {error}");
+    }
+}
+
+/// The two type-level alias guards answer independently, which is what the collected shape in
+/// `process_type_alias` spends: a target violating both is told about both.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn an_alias_violating_both_type_level_guards_earns_both_refusals() {
+    register_alias_info(
+        "Ledger",
+        "Ledger",
+        "ledger_schema",
+        AliasKind::NoEnumMembers,
+    );
+    let alias: syn::ItemType = syn::parse_quote! {
+        pub type Audited = HashMap<Ledger, OsString>;
+    };
+    let field_def = get_field_def("Audited", &alias.ty, "");
+    assert!(
+        alias_undescribable_std_error(&alias, "Audited", &field_def).is_some(),
+        "the std-type guard found nothing"
+    );
+    assert!(
+        alias_map_key_guard_error(&alias, "Audited", &field_def).is_some(),
+        "the map-key guard found nothing"
+    );
 }
 
 /// A refused item still publishes the schema module every reference to it addresses. The address
@@ -3403,6 +3543,52 @@ fn branded_errors_with(item: &syn::ItemStruct, args: &super::ModelSchemaArgs) ->
         .collect()
 }
 
+/// A brand's inner is what every surface renders it as, so an inner no schema can describe leaves
+/// the brand naming a module nothing publishes — refused where the inner was written.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_brand_over_an_undescribable_std_inner_is_refused() {
+    for (inner, named, wire) in [
+        (quote::quote! { OnceLock<u32> }, "`OnceLock`", "Serialize"),
+        (quote::quote! { OsString }, "`OsString`", "externally"),
+        (
+            quote::quote! { Vec<OnceLock<u32>> },
+            "`OnceLock`",
+            "Serialize",
+        ),
+    ] {
+        let errors = branded_errors(&syn::parse_quote! {
+            #[serde(transparent)]
+            struct SlotId(pub #inner);
+        });
+        assert_eq!(errors.len(), 1, "for {inner}, got: {errors:?}");
+        for needle in ["compile_error", "type `SlotId`", named, wire] {
+            assert!(
+                errors[0].contains(needle),
+                "{needle} missing for {inner}: {}",
+                errors[0]
+            );
+        }
+    }
+}
+
+/// A brand over an inner every surface describes earns nothing.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_brand_over_a_describable_inner_is_left_alone() {
+    for inner in [
+        quote::quote! { String },
+        quote::quote! { RefCell<u32> },
+        quote::quote! { PathBuf },
+    ] {
+        let errors = branded_errors(&syn::parse_quote! {
+            #[serde(transparent)]
+            struct SlotId(pub #inner);
+        });
+        assert!(errors.is_empty(), "for {inner}, got: {errors:?}");
+    }
+}
+
 /// The `model_schema` arguments of a brand carrying a lone `pattern`.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn pattern_args() -> super::ModelSchemaArgs {
@@ -4791,6 +4977,54 @@ fn a_filling_no_document_can_be_built_from_is_refused_at_the_entry() {
             );
         }
     }
+}
+
+/// The filling is rendered through the dispatch a field's type is, so one reaching a std type serde
+/// has no wire form for emits the same dangling module reference a field would have. Refused at the
+/// entry, at whatever depth it was written.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_filling_reaching_an_undescribable_std_type_is_refused_at_the_entry() {
+    for (written, named, wire) in [
+        ("OnceLock<u32>", "`OnceLock`", "Serialize"),
+        ("OsString", "`OsString`", "externally"),
+        ("Vec<OnceLock<u32>>", "`OnceLock`", "Serialize"),
+        ("HashMap<String, OsString>", "`OsString`", "externally"),
+    ] {
+        let messages = default_types_messages(
+            "pub struct Probe<ValueType> { pub held: ValueType }",
+            &format!("default_types(ValueType = {written})"),
+        );
+        assert_eq!(messages.len(), 1, "for {written}: {messages:?}");
+        for needle in [
+            "compile_error",
+            "`default_types` entry `ValueType`",
+            named,
+            wire,
+            "type `Probe`",
+        ] {
+            assert!(
+                messages[0].contains(needle),
+                "{needle} missing for {written}: {}",
+                messages[0]
+            );
+        }
+    }
+}
+
+/// The refusal points at the filling as written, the token the author can change.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_undescribable_std_filling_refusal_is_spanned_on_the_filling() {
+    let refusals = default_types_refusals(
+        "pub struct Probe<IdType, HeldType> { pub id: IdType, pub held: HeldType }",
+        "default_types(IdType = String, HeldType = OsString)",
+    );
+    assert_eq!(refusals.len(), 1, "got: {refusals:?}");
+    assert_eq!(
+        refusals[0].span().source_text().as_deref(),
+        Some("OsString")
+    );
 }
 
 /// The refusal points at the filling as written — the token the author can change — rather than at
