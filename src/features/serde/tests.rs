@@ -324,8 +324,9 @@ fn test_tag_after_a_list_form_bound_is_still_read() {
     );
 }
 
-/// `rename_all` has a dedicated branch, but list-form syntax leaves this crate nothing to read —
-/// only the tag written after it must survive, the same as the `bound(...)` case above.
+/// `rename_all` has a dedicated branch, and a list form only one direction is written in names no
+/// single rule — only the tag written after it must survive, the same as the `bound(...)` case
+/// above.
 #[test]
 fn test_tag_after_a_list_form_rename_all_is_still_read() {
     let item: syn::ItemEnum = syn::parse_quote! {
@@ -337,7 +338,7 @@ fn test_tag_after_a_list_form_rename_all_is_still_read() {
     let meta = parse_serde_type_attributes(&item.attrs);
     assert_eq!(
         meta.rename_all, None,
-        "list-form rename_all carries a value this crate does not read"
+        "one direction alone leaves the other at the name it would otherwise use"
     );
     assert_eq!(
         meta.tag.as_deref(),
@@ -359,10 +360,140 @@ fn test_flatten_after_a_list_form_rename_is_still_read() {
     let meta = field_meta(&item);
     assert_eq!(
         meta.rename, None,
-        "list-form rename carries a value this crate does not read"
+        "two directions naming two keys leave no single name to record"
     );
     assert!(
         meta.flatten,
         "flatten is written after a list-form rename(...)"
     );
+}
+
+#[test]
+fn test_list_form_rename_reads_the_name_both_directions_share() {
+    let item: syn::ItemStruct = syn::parse_quote! {
+        struct S {
+            #[serde(rename(serialize = "same_name", deserialize = "same_name"))]
+            value: u32,
+        }
+    };
+    assert_eq!(field_meta(&item).rename.as_deref(), Some("same_name"));
+}
+
+/// The two sub-keys are a set, not a sequence: the deserialize-first spelling names the same key.
+#[test]
+fn test_list_form_rename_reads_its_directions_in_either_order() {
+    let item: syn::ItemStruct = syn::parse_quote! {
+        struct S {
+            #[serde(rename(deserialize = "same_name", serialize = "same_name"))]
+            value: u32,
+        }
+    };
+    assert_eq!(field_meta(&item).rename.as_deref(), Some("same_name"));
+}
+
+#[test]
+fn test_list_form_rename_all_reads_the_rule_both_directions_share() {
+    let item: syn::ItemStruct = syn::parse_quote! {
+        #[serde(rename_all(serialize = "camelCase", deserialize = "camelCase"))]
+        struct S {
+            my_field: u32,
+        }
+    };
+    let meta = parse_serde_type_attributes(&item.attrs);
+    assert_eq!(meta.rename_all.as_deref(), Some("camelCase"));
+}
+
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn test_list_form_rename_naming_two_keys_is_refused() {
+    let item: syn::ItemStruct = syn::parse_quote! {
+        struct S {
+            #[serde(rename(serialize = "out_name", deserialize = "in_name"))]
+            value: u32,
+        }
+    };
+    let message = rename_direction_rejection(field_attrs(&item))
+        .unwrap()
+        .to_string();
+    assert!(message.contains("`out_name` when serializing"), "{message}");
+    assert!(
+        message.contains("`in_name` when deserializing"),
+        "{message}"
+    );
+    assert!(field_meta(&item).rename.is_none());
+}
+
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn test_list_form_rename_all_naming_two_rules_is_refused() {
+    let item: syn::ItemStruct = syn::parse_quote! {
+        #[serde(rename_all(serialize = "camelCase", deserialize = "snake_case"))]
+        struct S {
+            my_field: u32,
+        }
+    };
+    let message = rename_direction_rejection(&item.attrs).unwrap().to_string();
+    assert!(
+        message.contains("`camelCase` when serializing"),
+        "{message}"
+    );
+    assert!(
+        message.contains("`snake_case` when deserializing"),
+        "{message}"
+    );
+    assert!(
+        parse_serde_type_attributes(&item.attrs)
+            .rename_all
+            .is_none()
+    );
+}
+
+/// serde was measured to leave the unwritten direction at the name it would otherwise use, so one
+/// direction alone splits the two apart exactly as two different values do.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn test_list_form_rename_written_for_one_direction_only_is_refused() {
+    let serializing: syn::ItemStruct = syn::parse_quote! {
+        struct S {
+            #[serde(rename(serialize = "out_name"))]
+            value: u32,
+        }
+    };
+    let written_out = rename_direction_rejection(field_attrs(&serializing))
+        .unwrap()
+        .to_string();
+    assert!(
+        written_out.contains("`out_name` when serializing only"),
+        "{written_out}"
+    );
+
+    let deserializing: syn::ItemStruct = syn::parse_quote! {
+        struct S {
+            #[serde(rename(deserialize = "in_name"))]
+            value: u32,
+        }
+    };
+    let read_in = rename_direction_rejection(field_attrs(&deserializing))
+        .unwrap()
+        .to_string();
+    assert!(
+        read_in.contains("`in_name` when deserializing only"),
+        "{read_in}"
+    );
+}
+
+/// `bound(...)` writes the same two sub-keys and says nothing about the wire, so the walk that
+/// reads them out of a renaming must not read them out of it.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn test_list_form_bound_earns_no_rename_refusal() {
+    let item: syn::ItemStruct = syn::parse_quote! {
+        #[serde(bound(serialize = "T: Clone", deserialize = "T: Clone"))]
+        struct S<T> {
+            #[serde(bound(serialize = "T: Clone", deserialize = "T: Clone"))]
+            value: T,
+        }
+    };
+    assert!(rename_direction_rejection(&item.attrs).is_none());
+    assert!(rename_direction_rejection(field_attrs(&item)).is_none());
 }

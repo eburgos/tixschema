@@ -59,6 +59,11 @@ use crate::utils::{
 #[cfg(feature = "serde")]
 use crate::utils::{TrivialPattern, trivial_pattern};
 
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+use crate::features::serde::rename_direction_rejection;
 #[cfg(feature = "serde")]
 use crate::features::serde::{SerdeFieldMeta, SerdeTypeMeta};
 use crate::features::serde::{has_serde_default, parse_serde_key_omission};
@@ -1004,6 +1009,16 @@ pub fn exec_model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
     ) {
         return output;
     }
+    // A list-form serde rename whose two directions name two keys leaves what serde writes and
+    // what serde reads two different payloads, so it is refused here — ahead of every shape, and
+    // at the one seam a container, a variant and a member are all reachable from.
+    if let Some(output) = guard_failure_output(
+        &item,
+        item_schema_ident(&item),
+        &rename_direction_guard_errors(&item),
+    ) {
+        return output;
+    }
     // A doc example is compiled at one instantiation, and a const parameter takes no filling from
     // the convention that names one, so an item writing both is refused here — ahead of every
     // shape, and of the branded split inside the struct path.
@@ -1832,9 +1847,9 @@ fn pattern_guard_error(rejection: &syn::Error, subject: &str) -> proc_macro2::To
     .to_compile_error()
 }
 
-/// Turns this crate's own attribute parser's refusal — of a `model_schema` argument or of a
-/// `model_schema_prop` key — into `compile_error!` tokens naming what carries it, keeping the
-/// refusal's span so the diagnostic points at the argument, key or value as written.
+/// Turns an attribute parser's refusal — of a `model_schema` argument, a `model_schema_prop` key,
+/// or a serde renaming that names two keys — into `compile_error!` tokens naming what carries it,
+/// keeping the refusal's span so the diagnostic points at the argument, key or value as written.
 fn attr_guard_error(rejection: &syn::Error, subject: &str) -> proc_macro2::TokenStream {
     syn::Error::new(
         rejection.span(),
@@ -1912,6 +1927,89 @@ const fn item_generics(item: &Item) -> Option<&syn::Generics> {
     } else {
         None
     }
+}
+
+/// The attribute lists an item's own serde renames can be written on, each beside the name a guard
+/// message calls it by.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+fn renamable_attribute_lists(item: &Item) -> Vec<(String, &[syn::Attribute])> {
+    let mut lists: Vec<(String, &[syn::Attribute])> = vec![(item_label(item), item_attrs(item))];
+    if let Item::Struct(item_struct) = item {
+        lists.extend(field_attribute_lists(&item_struct.fields));
+    } else if let Item::Enum(item_enum) = item {
+        for variant in &item_enum.variants {
+            lists.push((format!("variant `{}`", variant.ident), &variant.attrs));
+            lists.extend(field_attribute_lists(&variant.fields));
+        }
+    } else {
+        // An alias declares no member of its own to rename.
+    }
+    lists
+}
+
+/// The attributes each of `fields` carries, beside the name a guard message calls the field by.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+fn field_attribute_lists(fields: &syn::Fields) -> Vec<(String, &[syn::Attribute])> {
+    fields
+        .iter()
+        .map(|field| {
+            let ident = field
+                .ident
+                .as_ref()
+                .map_or_else(String::new, ToString::to_string);
+            (field_label(&ident), field.attrs.as_slice())
+        })
+        .collect()
+}
+
+/// The attributes written on the item itself; a shape this macro does not expand carries none it
+/// reads.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+fn item_attrs(item: &Item) -> &[syn::Attribute] {
+    if let Item::Struct(item_struct) = item {
+        &item_struct.attrs
+    } else if let Item::Enum(item_enum) = item {
+        &item_enum.attrs
+    } else if let Item::Type(item_type) = item {
+        &item_type.attrs
+    } else {
+        &[]
+    }
+}
+
+/// The `compile_error!` tokens every list-form `rename(...)` / `rename_all(...)` the item carries
+/// earns whose two directions do not name one key.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+fn rename_direction_guard_errors(item: &Item) -> Vec<proc_macro2::TokenStream> {
+    renamable_attribute_lists(item)
+        .into_iter()
+        .filter_map(|(subject, attrs)| {
+            rename_direction_rejection(attrs)
+                .map(|rejection| attr_guard_error(&rejection, &subject))
+        })
+        .collect()
+}
+
+/// Nothing, where no rename is read at all: without the `serde` feature every surface writes the
+/// Rust ident, and without a schema feature there is no surface to write.
+#[cfg(not(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+)))]
+const fn rename_direction_guard_errors(_item: &Item) -> Vec<proc_macro2::TokenStream> {
+    Vec::new()
 }
 
 /// The `compile_error!` tokens a `default_types` declaration earns against the item it was written

@@ -141,6 +141,44 @@ struct PlainKeys {
     user_id: String,
 }
 
+/// The list form of `rename`, with one name in both of serde's directions.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct ListFormRename {
+    #[serde(rename(serialize = "same_name", deserialize = "same_name"))]
+    value: u32,
+}
+
+/// The list form of `rename_all`, with one rule in both of serde's directions.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "camelCase"))]
+struct ListFormRenameAll {
+    my_field: u32,
+}
+
+/// `bound(...)` in both places serde accepts it. It replaces the trait bounds serde's derive
+/// writes on its own impls, which no generated surface describes.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(bound(serialize = "", deserialize = ""))]
+struct BoundCarrying {
+    #[serde(bound(serialize = "", deserialize = ""))]
+    reading: u32,
+    writing: u32,
+}
+
+/// The rendered line naming `key`, with the key itself removed, so two members rendered the same
+/// way compare equal whatever they are called.
+#[cfg(any(feature = "typescript", feature = "zod"))]
+fn member_rendering(surface: &str, key: &str) -> String {
+    let member = surface
+        .lines()
+        .find(|line| line.trim_start().starts_with(&format!("{key}:")));
+    assert!(member.is_some(), "no member `{key}` in:\n{surface}");
+    member.unwrap().replacen(key, "", 1)
+}
+
 #[test]
 fn test_serde_types_constructible() {
     let color = Color::Red;
@@ -626,5 +664,190 @@ fn test_identifier_legal_renamed_keys_stay_bare() {
     assert!(
         ts.lines().any(|line| line == "  user_id2: string;"),
         "expected a bare `user_id2`:\n{ts}"
+    );
+}
+
+/// The key serde writes for a list-form `rename`, which the surfaces below all describe.
+#[test]
+fn test_a_list_form_rename_writes_the_name_both_directions_share() {
+    let value = ListFormRename { value: 5 };
+    let payload = serde_json::to_value(&value).unwrap();
+    assert_eq!(payload, serde_json::json!({ "same_name": 5_u32 }));
+
+    let back: ListFormRename = serde_json::from_value(payload).unwrap();
+    assert_eq!(back, value);
+}
+
+#[test]
+#[cfg(feature = "typescript")]
+fn test_a_list_form_rename_reaches_the_typescript_type() {
+    let ts = ListFormRename::ts_definition();
+
+    assert!(
+        ts.lines().any(|line| line == "  same_name: number;"),
+        "expected the renamed key:\n{ts}"
+    );
+    assert!(
+        !ts.contains("value:"),
+        "the Rust ident leaked into the type:\n{ts}"
+    );
+}
+
+#[test]
+#[cfg(feature = "zod")]
+fn test_a_list_form_rename_reaches_the_zod_schema() {
+    let zod = ListFormRename::zod_schema();
+
+    assert!(
+        zod.contains("same_name: z.number().int()"),
+        "expected the renamed key:\n{zod}"
+    );
+    assert!(
+        !zod.contains("value:"),
+        "the Rust ident leaked into the schema:\n{zod}"
+    );
+}
+
+/// The closed document, read against the payload serde actually writes: every key written is named,
+/// and every key required is written.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_a_list_form_rename_document_accepts_what_serde_writes() {
+    let payload = serde_json::to_value(ListFormRename { value: 5 }).unwrap();
+    let schema = ListFormRename::json_schema();
+    let named = schema["properties"].as_object().unwrap();
+    let required = schema["required"].as_array().unwrap();
+    let written = payload.as_object().unwrap();
+
+    assert!(named.contains_key("same_name"), "{schema}");
+    assert!(
+        written.keys().all(|key| named.contains_key(key)),
+        "{schema}"
+    );
+    assert!(
+        required
+            .iter()
+            .all(|key| written.contains_key(key.as_str().unwrap())),
+        "{schema}"
+    );
+}
+
+/// The same, for the rule a list-form `rename_all` names.
+#[test]
+fn test_a_list_form_rename_all_writes_the_rule_both_directions_share() {
+    let value = ListFormRenameAll { my_field: 5 };
+    let payload = serde_json::to_value(&value).unwrap();
+    assert_eq!(payload, serde_json::json!({ "myField": 5_u32 }));
+
+    let back: ListFormRenameAll = serde_json::from_value(payload).unwrap();
+    assert_eq!(back, value);
+}
+
+#[test]
+#[cfg(feature = "typescript")]
+fn test_a_list_form_rename_all_reaches_the_typescript_type() {
+    let ts = ListFormRenameAll::ts_definition();
+
+    assert!(
+        ts.lines().any(|line| line == "  myField: number;"),
+        "expected the transformed key:\n{ts}"
+    );
+    assert!(
+        !ts.contains("my_field"),
+        "the Rust ident leaked into the type:\n{ts}"
+    );
+}
+
+#[test]
+#[cfg(feature = "zod")]
+fn test_a_list_form_rename_all_reaches_the_zod_schema() {
+    let zod = ListFormRenameAll::zod_schema();
+
+    assert!(
+        zod.contains("myField: z.number().int()"),
+        "expected the transformed key:\n{zod}"
+    );
+    assert!(
+        !zod.contains("my_field"),
+        "the Rust ident leaked into the schema:\n{zod}"
+    );
+}
+
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_a_list_form_rename_all_document_accepts_what_serde_writes() {
+    let payload = serde_json::to_value(ListFormRenameAll { my_field: 5 }).unwrap();
+    let schema = ListFormRenameAll::json_schema();
+    let named = schema["properties"].as_object().unwrap();
+    let required = schema["required"].as_array().unwrap();
+    let written = payload.as_object().unwrap();
+
+    assert!(named.contains_key("myField"), "{schema}");
+    assert!(
+        written.keys().all(|key| named.contains_key(key)),
+        "{schema}"
+    );
+    assert!(
+        required
+            .iter()
+            .all(|key| written.contains_key(key.as_str().unwrap())),
+        "{schema}"
+    );
+}
+
+/// `bound(...)` names trait bounds, not keys, so the member carrying it is on the wire exactly as
+/// its plain sibling is.
+#[test]
+fn test_a_bound_carrying_member_is_on_the_wire_as_its_plain_sibling_is() {
+    let value = BoundCarrying {
+        reading: 1,
+        writing: 2,
+    };
+    let payload = serde_json::to_value(&value).unwrap();
+    assert_eq!(
+        payload,
+        serde_json::json!({ "reading": 1_u32, "writing": 2_u32 })
+    );
+
+    let back: BoundCarrying = serde_json::from_value(payload).unwrap();
+    assert_eq!(back, value);
+}
+
+#[test]
+#[cfg(feature = "typescript")]
+fn test_a_bound_carrying_member_is_typed_as_its_plain_sibling_is() {
+    let ts = BoundCarrying::ts_definition();
+
+    assert_eq!(
+        member_rendering(&ts, "reading"),
+        member_rendering(&ts, "writing"),
+        "{ts}"
+    );
+}
+
+#[test]
+#[cfg(feature = "zod")]
+fn test_a_bound_carrying_member_is_validated_as_its_plain_sibling_is() {
+    let zod = BoundCarrying::zod_schema();
+
+    assert_eq!(
+        member_rendering(&zod, "reading"),
+        member_rendering(&zod, "writing"),
+        "{zod}"
+    );
+}
+
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_a_bound_carrying_member_is_described_as_its_plain_sibling_is() {
+    let schema = BoundCarrying::json_schema();
+
+    assert_eq!(
+        schema["properties"]["reading"], schema["properties"]["writing"],
+        "{schema}"
+    );
+    assert_eq!(
+        schema["required"],
+        serde_json::json!(["reading", "writing"])
     );
 }
