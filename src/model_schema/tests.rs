@@ -5433,7 +5433,7 @@ fn a_default_types_refusal_is_spanned_on_what_earned_it() {
 /// The field-type dispatch takes a name it has no arm for to be another `#[model_schema]` item —
 /// right for `Foo`, gibberish for a reserved primitive, which emitted a call into a module nothing
 /// publishes. Refused at the entry instead, in words that name the type.
-#[cfg(feature = "jsonschema")]
+#[cfg(any(feature = "zod", feature = "jsonschema"))]
 #[test]
 fn a_filling_no_document_can_be_built_from_is_refused_at_the_entry() {
     for written in ["i128", "u128", "f16", "f128"] {
@@ -5447,7 +5447,8 @@ fn a_filling_no_document_can_be_built_from_is_refused_at_the_entry() {
             written,
             "ValueType",
             &format!("{}_schema", written.to_lowercase()),
-            "`jsonschema` feature",
+            &format!("{written}$Schema"),
+            "the `zod` and `jsonschema` features",
             "type `Probe`",
         ] {
             assert!(
@@ -5462,7 +5463,7 @@ fn a_filling_no_document_can_be_built_from_is_refused_at_the_entry() {
 /// The filling is rendered through the dispatch a field's type is, so one reaching a std type serde
 /// has no wire form for emits the same dangling module reference a field would have. Refused at the
 /// entry, at whatever depth it was written.
-#[cfg(feature = "jsonschema")]
+#[cfg(any(feature = "zod", feature = "jsonschema"))]
 #[test]
 fn a_filling_reaching_an_undescribable_std_type_is_refused_at_the_entry() {
     for (written, named, wire) in [
@@ -5493,7 +5494,7 @@ fn a_filling_reaching_an_undescribable_std_type_is_refused_at_the_entry() {
 }
 
 /// The refusal points at the filling as written, the token the author can change.
-#[cfg(feature = "jsonschema")]
+#[cfg(any(feature = "zod", feature = "jsonschema"))]
 #[test]
 fn an_undescribable_std_filling_refusal_is_spanned_on_the_filling() {
     let refusals = default_types_refusals(
@@ -5510,7 +5511,7 @@ fn an_undescribable_std_filling_refusal_is_spanned_on_the_filling() {
 /// A declared filling is the one map-key position no guard of its own covered, so a key no surface
 /// can write reached the rendering sink and drew its caret on whatever `get_field_def` had
 /// collapsed the key onto. Refused at the entry, at whatever depth it was written.
-#[cfg(feature = "jsonschema")]
+#[cfg(any(feature = "zod", feature = "jsonschema"))]
 #[test]
 fn a_filling_reaching_an_unwritable_map_key_is_refused_at_the_entry() {
     for (written, reason) in [
@@ -5552,7 +5553,7 @@ fn a_filling_reaching_an_unwritable_map_key_is_refused_at_the_entry() {
 /// element a sequence wrapper was collapsed onto, which is what the rendering sink underlined. Every
 /// collapsing spelling moves the same way, and the span is the one the entry's other filling guard
 /// already draws in this position.
-#[cfg(feature = "jsonschema")]
+#[cfg(any(feature = "zod", feature = "jsonschema"))]
 #[test]
 fn an_unwritable_map_key_filling_refusal_is_spanned_on_the_filling() {
     for written in [
@@ -5585,7 +5586,7 @@ fn an_unwritable_map_key_filling_refusal_is_spanned_on_the_filling() {
 
 /// The guard is a filter: a filling whose map key can be written, and one that is no map at all,
 /// earn nothing.
-#[cfg(feature = "jsonschema")]
+#[cfg(any(feature = "zod", feature = "jsonschema"))]
 #[test]
 fn a_filling_with_a_writable_map_key_clears_the_guard() {
     register_alias_info("Slot", "Slot", "slot_schema", AliasKind::EnumMembers);
@@ -5605,7 +5606,7 @@ fn a_filling_with_a_writable_map_key_clears_the_guard() {
 
 /// The refusal points at the filling as written — the token the author can change — rather than at
 /// the parameter it fills or the whole attribute.
-#[cfg(feature = "jsonschema")]
+#[cfg(any(feature = "zod", feature = "jsonschema"))]
 #[test]
 fn an_undescribable_filling_refusal_is_spanned_on_the_filling() {
     let refusals = default_types_refusals(
@@ -5619,7 +5620,7 @@ fn an_undescribable_filling_refusal_is_spanned_on_the_filling() {
 /// Only what is provably not a sibling is refused. A bare `Foo` is a legitimate forward reference
 /// to an item declared below, every primitive the dispatch has an arm for describes as it always
 /// did, and a name carrying arguments or a path qualifier is not a primitive at all.
-#[cfg(feature = "jsonschema")]
+#[cfg(any(feature = "zod", feature = "jsonschema"))]
 #[test]
 fn a_renderable_or_sibling_named_filling_is_left_alone() {
     for written in [
@@ -5637,6 +5638,30 @@ fn a_renderable_or_sibling_named_filling_is_left_alone() {
         "PathBuf",
         "Vec<char>",
         "some::path::char",
+    ] {
+        let messages = default_types_messages(
+            "pub struct Probe<ValueType> { pub held: ValueType }",
+            &format!("default_types(ValueType = {written})"),
+        );
+        assert!(messages.is_empty(), "for {written}: {messages:?}");
+    }
+}
+
+/// No surface in a build carrying neither reads a declared filling, and nothing emitted names one,
+/// so every filling the reading builds refuse is left alone here.
+#[cfg(not(any(feature = "zod", feature = "jsonschema")))]
+#[test]
+fn an_undescribable_filling_is_accepted_where_no_surface_reads_it() {
+    for written in [
+        "i128",
+        "u128",
+        "f16",
+        "f128",
+        "OsString",
+        "OnceLock<u32>",
+        "Vec<OnceLock<u32>>",
+        "HashMap<String, OsString>",
+        "HashMap<Vec<String>, u32>",
     ] {
         let messages = default_types_messages(
             "pub struct Probe<ValueType> { pub held: ValueType }",

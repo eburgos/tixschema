@@ -26,7 +26,7 @@ use crate::{
     utils::{get_field_docs, get_variant_docs, strip_examples_from_docs},
 };
 
-#[cfg(feature = "jsonschema")]
+#[cfg(any(feature = "zod", feature = "jsonschema"))]
 use crate::field_type::is_undescribable_primitive;
 
 #[cfg(feature = "typescript")]
@@ -2097,17 +2097,17 @@ fn default_types_guard_errors(
         })
         .collect();
 
-    #[cfg(feature = "jsonschema")]
+    #[cfg(any(feature = "zod", feature = "jsonschema"))]
     let mut rejections = entries_naming_no_parameter(args, &declared);
-    #[cfg(not(feature = "jsonschema"))]
+    #[cfg(not(any(feature = "zod", feature = "jsonschema")))]
     let rejections = entries_naming_no_parameter(args, &declared);
     #[cfg(feature = "jsonschema")]
     rejections.extend(parameters_left_without_a_default(args, &declared));
-    #[cfg(feature = "jsonschema")]
+    #[cfg(any(feature = "zod", feature = "jsonschema"))]
     rejections.extend(fillings_no_document_can_be_built_from(args));
-    #[cfg(feature = "jsonschema")]
+    #[cfg(any(feature = "zod", feature = "jsonschema"))]
     rejections.extend(fillings_reaching_an_undescribable_std_type(args));
-    #[cfg(feature = "jsonschema")]
+    #[cfg(any(feature = "zod", feature = "jsonschema"))]
     rejections.extend(fillings_reaching_an_unwritable_map_key(args));
 
     rejections
@@ -2190,9 +2190,9 @@ fn missing_default_message(name: &syn::Ident, declared: &[&syn::Ident]) -> Strin
     )
 }
 
-/// The refusal every `default_types` entry earns whose filling names a value no document can be
-/// built from, spanned on the filling as written.
-#[cfg(feature = "jsonschema")]
+/// The refusal every `default_types` entry earns whose filling names a value neither surface that
+/// reads one can build a schema from, spanned on the filling as written.
+#[cfg(any(feature = "zod", feature = "jsonschema"))]
 fn fillings_no_document_can_be_built_from(args: &ModelSchemaArgs) -> Vec<syn::Error> {
     args.default_types
         .iter()
@@ -2207,7 +2207,7 @@ fn fillings_no_document_can_be_built_from(args: &ModelSchemaArgs) -> Vec<syn::Er
 
 /// The refusal every `default_types` entry earns whose filling reaches a std type serde has no wire
 /// form for, at any depth, spanned on the filling as written.
-#[cfg(feature = "jsonschema")]
+#[cfg(any(feature = "zod", feature = "jsonschema"))]
 fn fillings_reaching_an_undescribable_std_type(args: &ModelSchemaArgs) -> Vec<syn::Error> {
     args.default_types
         .iter()
@@ -2222,9 +2222,9 @@ fn fillings_reaching_an_undescribable_std_type(args: &ModelSchemaArgs) -> Vec<sy
 }
 
 /// The refusal every `default_types` entry earns whose filling reaches a map key no surface can
-/// write, at any depth, spanned on the filling as written. Gated with the JSON surface because it
-/// is the only one that reads a declared filling at all.
-#[cfg(feature = "jsonschema")]
+/// write, at any depth, spanned on the filling as written. Gated with the two surfaces that read a
+/// declared filling at all.
+#[cfg(any(feature = "zod", feature = "jsonschema"))]
 fn fillings_reaching_an_unwritable_map_key(args: &ModelSchemaArgs) -> Vec<syn::Error> {
     args.default_types
         .iter()
@@ -2241,7 +2241,7 @@ fn fillings_reaching_an_unwritable_map_key(args: &ModelSchemaArgs) -> Vec<syn::E
 /// The name a type is written as when it is written as a bare name and nothing else — no
 /// qualifier, no path, no arguments — or `None` for every other spelling. Only that shape can be
 /// checked against reserved names: `some::path::char` names whatever the path resolves to.
-#[cfg(feature = "jsonschema")]
+#[cfg(any(feature = "zod", feature = "jsonschema"))]
 fn bare_type_name(filling: &syn::Type) -> Option<String> {
     let syn::Type::Path(type_path) = filling else {
         return None;
@@ -2255,20 +2255,20 @@ fn bare_type_name(filling: &syn::Type) -> Option<String> {
     matches!(segment.arguments, syn::PathArguments::None).then(|| segment.ident.to_string())
 }
 
-/// Why a filling the dispatch has no arm for is refused: what the filling is read for, what the
-/// emission would otherwise name, what the feature has to do with it, and the way out.
-#[cfg(feature = "jsonschema")]
+/// Why a filling the dispatch has no arm for is refused: what the filling is read for, what each
+/// surface would otherwise name, which features read it, and the way out.
+#[cfg(any(feature = "zod", feature = "jsonschema"))]
 fn undescribable_filling_message(name: &syn::Ident, written: &str) -> String {
     format!(
         "`default_types` entry `{name}` is filled at `{written}`, which `#[model_schema]` cannot \
-         build a JSON-schema document from. The filling is what the parameter's document is \
-         generated from, and it is rendered through the same dispatch a field's type is — a \
-         dispatch that has no arm for `{written}` and so takes it for another `#[model_schema]` \
-         item, emitting a call into a `{written}_schema` module that nothing publishes. This is \
-         refused because the `jsonschema` feature is enabled, the document being the only thing \
-         the filling is read for. Fill the parameter at a type the macro describes — a primitive it \
-         maps, or a `#[model_schema]` item — or model `{written}` as a newtype over one that \
-         carries what the wire holds."
+         build a schema from. The filling is what the parameter's schema is generated from, and it \
+         is rendered through the same dispatch a field's type is — a dispatch that has no arm for \
+         `{written}` and so takes it for another `#[model_schema]` item: the JSON document calls \
+         into a `{written}_schema` module that nothing publishes, and the zod `$SchemaDefault` \
+         names a `{written}$Schema` binding no generated module exports. This is refused wherever \
+         a filling is read, which is the `zod` and `jsonschema` features. Fill the parameter at a \
+         type the macro describes — a primitive it maps, or a `#[model_schema]` item — or model \
+         `{written}` as a newtype over one that carries what the wire holds."
     )
 }
 

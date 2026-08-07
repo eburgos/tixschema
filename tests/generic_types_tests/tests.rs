@@ -1604,12 +1604,13 @@ pub struct Undefaulted<IdType> {
     pub id: IdType,
 }
 
-/// A filling holding a map serde cannot key. Only the JSON surface reads a declared filling deeply
-/// enough to refuse one, so with `jsonschema` off the entry is declared and rendered as any other.
+/// A filling holding a map serde can key. The zod surface reads a declared filling as deeply as the
+/// JSON one, refusing a key serde cannot write with no document in the build at all, so the filling
+/// that renders here is the one written at a key it can.
 #[cfg(all(not(feature = "jsonschema"), feature = "zod"))]
-#[model_schema(default_types(HeldType = HashMap<Vec<String>, u32>))]
+#[model_schema(default_types(HeldType = HashMap<String, u32>))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SequenceKeyedHolder<HeldType> {
+pub struct StringKeyedHolder<HeldType> {
     pub held: HeldType,
 }
 
@@ -1923,10 +1924,10 @@ pub struct FlatDefaulted<HeldType> {
 
 #[cfg(all(not(feature = "jsonschema"), feature = "zod"))]
 #[test]
-fn a_sequence_keyed_map_filling_still_renders_its_default() {
-    let zod = SequenceKeyedHolder::<HashMap<Vec<String>, u32>>::zod_schema();
+fn a_writably_keyed_map_filling_still_renders_its_default() {
+    let zod = StringKeyedHolder::<HashMap<String, u32>>::zod_schema();
     assert!(
-        zod.contains("SequenceKeyedHolder$SchemaDefault"),
+        zod.contains("StringKeyedHolder$SchemaDefault"),
         "Got:\n{zod}"
     );
 }
