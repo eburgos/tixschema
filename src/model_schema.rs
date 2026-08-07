@@ -1077,9 +1077,12 @@ pub fn exec_model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
     } else if let Item::Type(item_type) = item {
         process_type_alias(item_type, &parsed_args)
     } else {
-        syn::Error::new_spanned(item, "Unsupported target for model_schema")
-            .to_compile_error()
-            .into()
+        syn::Error::new_spanned(
+            item,
+            prefixed_guard_message("unsupported target for this attribute"),
+        )
+        .to_compile_error()
+        .into()
     };
     let answered = with_prefixed_tokens(expanded, &deferred_shape_refusals(registering.as_ref()));
     with_prefixed_tokens(answered, &filling_bound_checks)
@@ -1108,7 +1111,7 @@ fn alias_map_key_guard_error(
 ) -> Option<proc_macro2::TokenStream> {
     let rejection = map_key_rejection(alias_field_def)?;
     let subject = format!("type alias `{}`", alias.ident);
-    let message = map_key_rejection_message(&subject, &rejection);
+    let message = prefixed_guard_message(&map_key_rejection_message(&subject, &rejection));
     Some(syn::Error::new_spanned(&alias.ty, message).to_compile_error())
 }
 
@@ -1121,7 +1124,7 @@ fn alias_undescribable_std_error(
 ) -> Option<proc_macro2::TokenStream> {
     let rejection = undescribable_std_rejection(alias_field_def)?;
     let subject = format!("type alias `{}`", alias.ident);
-    let message = undescribable_std_message(&subject, &rejection);
+    let message = prefixed_guard_message(&undescribable_std_message(&subject, &rejection));
     Some(syn::Error::new_spanned(&alias.ty, message).to_compile_error())
 }
 
@@ -1866,7 +1869,7 @@ where
 fn cfg_attr_guard_error(rejection: &syn::Error, item: &str) -> proc_macro2::TokenStream {
     syn::Error::new(
         rejection.span(),
-        format!("model_schema: {item}: {rejection}"),
+        prefixed_guard_message(&format!("{item}: {rejection}")),
     )
     .to_compile_error()
 }
@@ -1876,9 +1879,15 @@ fn cfg_attr_guard_error(rejection: &syn::Error, item: &str) -> proc_macro2::Toke
 fn pattern_guard_error(rejection: &syn::Error, subject: &str) -> proc_macro2::TokenStream {
     syn::Error::new(
         rejection.span(),
-        format!("model_schema: {subject}: {rejection}"),
+        prefixed_guard_message(&format!("{subject}: {rejection}")),
     )
     .to_compile_error()
+}
+
+/// The macro's own name, in front of every diagnostic it emits — the one thing that separates this
+/// crate's refusal from rustc's on a screen full of errors.
+fn prefixed_guard_message(message: &str) -> String {
+    format!("model_schema: {message}")
 }
 
 /// Turns an attribute parser's refusal — of a `model_schema` argument, a `model_schema_prop` key,
@@ -1887,7 +1896,7 @@ fn pattern_guard_error(rejection: &syn::Error, subject: &str) -> proc_macro2::To
 fn attr_guard_error(rejection: &syn::Error, subject: &str) -> proc_macro2::TokenStream {
     syn::Error::new(
         rejection.span(),
-        format!("model_schema: {subject}: {rejection}"),
+        prefixed_guard_message(&format!("{subject}: {rejection}")),
     )
     .to_compile_error()
 }
@@ -3184,7 +3193,10 @@ fn branded_undescribable_std_error(
 ) -> Option<proc_macro2::TokenStream> {
     let inner = get_field_def("", &inner_field.ty, "");
     let rejection = undescribable_std_rejection(&inner)?;
-    let message = undescribable_std_message(&format!("type `{name}`"), &rejection);
+    let message = prefixed_guard_message(&undescribable_std_message(
+        &format!("type `{name}`"),
+        &rejection,
+    ));
     Some(syn::Error::new_spanned(&inner_field.ty, message).to_compile_error())
 }
 
@@ -3194,7 +3206,10 @@ fn branded_undescribable_std_error(
 fn branded_map_key_error(name: &Ident, inner_field: &Field) -> Option<proc_macro2::TokenStream> {
     let inner = get_field_def("", &inner_field.ty, "");
     let rejection = map_key_rejection(&inner)?;
-    let message = map_key_rejection_message(&format!("type `{name}`"), &rejection);
+    let message = prefixed_guard_message(&map_key_rejection_message(
+        &format!("type `{name}`"),
+        &rejection,
+    ));
     Some(syn::Error::new_spanned(&inner_field.ty, message).to_compile_error())
 }
 
@@ -3855,7 +3870,10 @@ fn tuple_struct_json_body(item_name: &str, shape: &TupleStructShape) -> proc_mac
     match described {
         Ok(value) => value,
         Err(rejection) => {
-            let message = map_member_rejection_message(&format!("`{item_name}`"), &rejection);
+            let message = prefixed_guard_message(&map_member_rejection_message(
+                &format!("`{item_name}`"),
+                &rejection,
+            ));
             quote! { compile_error!(#message) }
         }
     }
@@ -4248,7 +4266,10 @@ fn branded_slot_json_schema(
     match build_tuple_element_json_schema(inner) {
         Ok(value) => branded_layered_over(args, &value),
         Err(rejection) => {
-            let message = map_member_rejection_message(&format!("`{def_name}`"), &rejection);
+            let message = prefixed_guard_message(&map_member_rejection_message(
+                &format!("`{def_name}`"),
+                &rejection,
+            ));
             quote! { compile_error!(#message) }
         }
     }
@@ -6195,8 +6216,10 @@ fn external_content_rejection_value(
     discriminator_value: &str,
     rejection: &MapMemberRejection,
 ) -> proc_macro2::TokenStream {
-    let message =
-        map_member_rejection_message(&format!("variant `{discriminator_value}`"), rejection);
+    let message = prefixed_guard_message(&map_member_rejection_message(
+        &format!("variant `{discriminator_value}`"),
+        rejection,
+    ));
     quote! { compile_error!(#message) }
 }
 
@@ -7426,7 +7449,10 @@ fn member_rejection_value(
     field_name: &str,
     rejection: &MapMemberRejection,
 ) -> proc_macro2::TokenStream {
-    let message = map_member_rejection_message(&field_label(field_name), rejection);
+    let message = prefixed_guard_message(&map_member_rejection_message(
+        &field_label(field_name),
+        rejection,
+    ));
     quote! { compile_error!(#message) }
 }
 
@@ -8702,7 +8728,10 @@ fn sibling_json_schema_value(
 #[cfg(feature = "jsonschema")]
 fn argument_json_schema_value(name: &str, argument: &FieldDef) -> proc_macro2::TokenStream {
     build_tuple_element_json_schema(argument).unwrap_or_else(|rejection| {
-        let message = map_member_rejection_message(&format!("`{name}`"), &rejection);
+        let message = prefixed_guard_message(&map_member_rejection_message(
+            &format!("`{name}`"),
+            &rejection,
+        ));
         quote! { compile_error!(#message) }
     })
 }
@@ -9062,7 +9091,7 @@ fn check_map_key(field: &Field, field_def: &FieldDef, label: &str) -> Result<(),
     };
     Err(syn::Error::new_spanned(
         field,
-        map_key_rejection_message(label, &rejection),
+        prefixed_guard_message(&map_key_rejection_message(label, &rejection)),
     ))
 }
 
@@ -9237,7 +9266,10 @@ fn map_member_rejection_error(
     field_name_str: &str,
     rejection: &MapMemberRejection,
 ) -> proc_macro2::TokenStream {
-    let message = map_member_rejection_message(&format!("field `{field_name_str}`"), rejection);
+    let message = prefixed_guard_message(&map_member_rejection_message(
+        &format!("field `{field_name_str}`"),
+        rejection,
+    ));
     quote! { compile_error!(#message); }
 }
 
@@ -10606,9 +10638,12 @@ fn model_schema_prop_guard_errors(
 /// validator keeps its message — the one place the misuse is spelled — so a caller doesn't
 /// maintain the same sentence twice.
 fn flag_guard_error(field: &Field, label: &str, result: Result<(), String>) -> Option<syn::Error> {
-    result
-        .err()
-        .map(|message| syn::Error::new_spanned(field, format!("model_schema: {label}: {message}")))
+    result.err().map(|message| {
+        syn::Error::new_spanned(
+            field,
+            prefixed_guard_message(&format!("{label}: {message}")),
+        )
+    })
 }
 
 /// The bound keys a `model_schema_prop` meta carries, named as they were written, so a guard
@@ -10842,10 +10877,7 @@ fn check_undescribable_std_field(
     };
     Err(syn::Error::new_spanned(
         field,
-        format!(
-            "model_schema: {}",
-            undescribable_std_message(label, &rejection)
-        ),
+        prefixed_guard_message(&undescribable_std_message(label, &rejection)),
     ))
 }
 
@@ -12181,15 +12213,15 @@ fn generate_ts_alias_method(
 }
 
 /// The diagnostic an alias whose target the dispatch cannot render emits, in place of the whole
-/// `json_schema()` body.
+/// `json_schema()` body. Spanned on the target, which is where the unrenderable value was written.
 #[cfg(feature = "jsonschema")]
 fn alias_json_schema_rejection(
-    rust_ident: &syn::Ident,
+    alias: &ItemType,
     rejection: &MapMemberRejection,
 ) -> proc_macro2::TokenStream {
-    let subject = format!("type alias `{rust_ident}`");
-    let message = map_member_rejection_message(&subject, rejection);
-    quote! { compile_error!(#message) }
+    let subject = format!("type alias `{}`", alias.ident);
+    let message = prefixed_guard_message(&map_member_rejection_message(&subject, rejection));
+    syn::Error::new_spanned(&alias.ty, message).to_compile_error()
 }
 
 /// Builds the alias module's `json_schema()`, or nothing when `jsonschema` is off.
@@ -12203,7 +12235,7 @@ fn generate_alias_json_schema_method(
     #[cfg(feature = "jsonschema")]
     {
         let body = build_tuple_element_json_schema(&surface_field_def(&alias.generics, field_def))
-            .unwrap_or_else(|rejection| alias_json_schema_rejection(&alias.ident, &rejection));
+            .unwrap_or_else(|rejection| alias_json_schema_rejection(alias, &rejection));
         json_schema_methods(
             export_name,
             &body,

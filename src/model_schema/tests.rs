@@ -1020,9 +1020,8 @@ fn untagged_member_holding_an_unsupported_map_value_emits_only_the_compile_error
         "got: {}",
         values[0]
     );
-    assert!(values[0].contains("field `rows`"), "got: {}", values[0]);
     assert!(
-        values[0].contains("a tuple is not supported as a map value"),
+        values[0].contains("model_schema: field `rows`: a tuple is not supported as a map value"),
         "got: {}",
         values[0]
     );
@@ -1030,6 +1029,21 @@ fn untagged_member_holding_an_unsupported_map_value_emits_only_the_compile_error
         !values[0].contains("additionalProperties\" :"),
         "got: {}",
         values[0]
+    );
+}
+
+/// An externally tagged variant whose content has no rendering puts the diagnostic where the
+/// content would have stood, naming the key serde writes the variant under.
+#[cfg(all(feature = "serde", feature = "jsonschema"))]
+#[test]
+fn an_external_variant_holding_an_unrenderable_content_is_refused() {
+    let rendered =
+        super::external_content_rejection_value("rows", &super::MapMemberRejection::Tuple)
+            .to_string();
+    assert!(rendered.starts_with("compile_error !"), "got: {rendered}");
+    assert!(
+        rendered.contains("model_schema: variant `rows`: a tuple is not supported as a map value"),
+        "got: {rendered}"
     );
 }
 
@@ -1650,11 +1664,7 @@ fn a_map_key_proved_to_lack_enum_members_is_refused_wherever_it_is_written() {
         let error = field_map_key_error(&field_type);
         assert!(error.contains("compile_error"), "for {field_type}: {error}");
         assert!(
-            error.contains("field `counts`"),
-            "for {field_type}: {error}"
-        );
-        assert!(
-            error.contains("a map key must be a plain"),
+            error.contains("model_schema: field `counts`: a map key must be a plain"),
             "for {field_type}: {error}"
         );
         assert!(error.contains("Doc"), "for {field_type}: {error}");
@@ -1692,11 +1702,9 @@ fn a_sequence_wrapped_map_key_is_refused_wherever_it_is_written() {
         let error = field_map_key_error(&field_type);
         assert!(error.contains("compile_error"), "for {field_type}: {error}");
         assert!(
-            error.contains("field `counts`"),
-            "for {field_type}: {error}"
-        );
-        assert!(
-            error.contains("a map key must be a value serde writes as a string"),
+            error.contains(
+                "model_schema: field `counts`: a map key must be a value serde writes as a string"
+            ),
             "for {field_type}: {error}"
         );
         assert!(error.contains(element), "for {field_type}: {error}");
@@ -1711,11 +1719,9 @@ fn assert_unwritable_map_key(field_type: &proc_macro2::TokenStream, key_name: &s
     let error = field_map_key_error(field_type);
     assert!(error.contains("compile_error"), "for {field_type}: {error}");
     assert!(
-        error.contains("field `counts`"),
-        "for {field_type}: {error}"
-    );
-    assert!(
-        error.contains("a map key must be a value serde writes as a string"),
+        error.contains(
+            "model_schema: field `counts`: a map key must be a value serde writes as a string"
+        ),
         "for {field_type}: {error}"
     );
     assert!(error.contains(key_name), "for {field_type}: {error}");
@@ -1820,11 +1826,9 @@ fn an_optional_map_key_is_refused_wherever_it_is_written() {
         let error = field_map_key_error(&field_type);
         assert!(error.contains("compile_error"), "for {field_type}: {error}");
         assert!(
-            error.contains("field `counts`"),
-            "for {field_type}: {error}"
-        );
-        assert!(
-            error.contains("a map key must be a value serde writes as a string"),
+            error.contains(
+                "model_schema: field `counts`: a map key must be a value serde writes as a string"
+            ),
             "for {field_type}: {error}"
         );
         assert!(
@@ -1942,9 +1946,11 @@ fn an_alias_targeting_a_map_key_with_no_members_is_refused() {
         .unwrap_or_default()
         .to_string();
     assert!(error.contains("compile_error"), "got: {error}");
-    assert!(error.contains("type alias `CountsByDoc`"), "got: {error}");
+    assert!(
+        error.contains("model_schema: type alias `CountsByDoc`: a map key must be a plain"),
+        "got: {error}"
+    );
     assert!(!error.contains("CountsByDocType"), "got: {error}");
-    assert!(error.contains("a map key must be a plain"), "got: {error}");
     assert!(error.contains("Doc"), "got: {error}");
 }
 
@@ -1968,25 +1974,25 @@ fn an_alias_targeting_an_undescribable_std_type_is_refused() {
     for (target, subject, named, wire) in [
         (
             "pub type Slot = OnceLock<u32>;",
-            "type alias `Slot`",
+            "model_schema: type alias `Slot`",
             "`OnceLock`",
             "Serialize",
         ),
         (
             "pub type Location = OsString;",
-            "type alias `Location`",
+            "model_schema: type alias `Location`",
             "`OsString`",
             "externally",
         ),
         (
             "pub type Nested = Vec<OnceLock<u32>>;",
-            "type alias `Nested`",
+            "model_schema: type alias `Nested`",
             "`OnceLock`",
             "Serialize",
         ),
         (
             "pub type Keyed = HashMap<String, OsString>;",
-            "type alias `Keyed`",
+            "model_schema: type alias `Keyed`",
             "`OsString`",
             "externally",
         ),
@@ -3312,6 +3318,26 @@ fn branded_json_schema_method_carries_no_cfg_attribute() {
     }
 }
 
+/// A brand publishes its inner's document, so an inner the dispatch cannot render replaces that
+/// document with the diagnostic, naming the brand as it is exported.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_brand_over_an_unrenderable_slot_is_refused() {
+    let inner = get_field_def(
+        "_inner",
+        &syn::parse_str("HashMap<String, (u32, u32)>").unwrap(),
+        "",
+    );
+    let rendered =
+        super::branded_slot_json_schema(&super::ModelSchemaArgs::default(), &inner, "DocumentId")
+            .to_string();
+    assert!(rendered.starts_with("compile_error !"), "got: {rendered}");
+    assert!(
+        rendered.contains("model_schema: `DocumentId`: a tuple is not supported as a map value"),
+        "got: {rendered}"
+    );
+}
+
 /// Every shape [`super::branded_json_inner`] resolves to, so the dispatch is covered whole. The
 /// `Slot` and `Chrono` shapes build their bodies through [`super::branded_slot_json_schema`] and
 /// [`super::branded_chrono_schema`], which is where a stray `cfg` attribute would land unseen.
@@ -3461,7 +3487,9 @@ fn an_alias_of_an_unrenderable_target_emits_only_the_compile_error() {
             "for {alias_source}, got: {tokens}"
         );
         assert!(
-            tokens.contains("type alias `Rows`"),
+            tokens.contains(
+                "model_schema: type alias `Rows`: a tuple is not supported as a map value"
+            ),
             "for {alias_source}, got: {tokens}"
         );
         assert!(
@@ -3469,11 +3497,7 @@ fn an_alias_of_an_unrenderable_target_emits_only_the_compile_error() {
             "for {alias_source}, got: {tokens}"
         );
         assert!(
-            tokens.contains("a tuple is not supported as a map value"),
-            "for {alias_source}, got: {tokens}"
-        );
-        assert!(
-            tokens.contains("= compile_error !"),
+            tokens.contains("= :: core :: compile_error !"),
             "the description is the diagnostic, not a schema: for {alias_source}, got: {tokens}"
         );
         assert!(
@@ -3482,6 +3506,28 @@ fn an_alias_of_an_unrenderable_target_emits_only_the_compile_error() {
              for {alias_source}, got: {tokens}"
         );
     }
+}
+
+/// The caret has to land on the tokens the author edits. The tuple sits inside the written target,
+/// and a diagnostic carrying no location of its own falls back to the attribute — a line no edit to
+/// it can fix.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_alias_rejection_points_at_the_written_target() {
+    let alias: syn::ItemType =
+        syn::parse_str("pub type Rows = HashMap<String, (u32, u32)>;").unwrap();
+    let field_def = super::get_field_def("RowsType", &alias.ty, "");
+    let tokens = super::generate_alias_json_schema_method(
+        &alias,
+        "RowsType",
+        &field_def,
+        &super::ModelSchemaArgs::default(),
+    );
+    let located = located_source_texts(&tokens);
+    assert!(
+        located.iter().any(|text| text == "HashMap"),
+        "got: {located:?}"
+    );
 }
 
 /// The rejection names the written ident, not the export name the alias publishes under: `RowsJson`
@@ -3640,7 +3686,7 @@ fn a_brand_over_an_undescribable_std_inner_is_refused() {
             struct SlotId(pub #inner);
         });
         assert_eq!(errors.len(), 1, "for {inner}, got: {errors:?}");
-        for needle in ["compile_error", "type `SlotId`", named, wire] {
+        for needle in ["compile_error", "model_schema: type `SlotId`", named, wire] {
             assert!(
                 errors[0].contains(needle),
                 "{needle} missing for {inner}: {}",
@@ -3814,7 +3860,7 @@ fn a_brand_over_a_map_with_an_unwritable_key_is_refused() {
             errors[0]
         );
         assert!(
-            errors[0].contains("type `Wrap`"),
+            errors[0].contains("model_schema: type `Wrap`"),
             "for {inner}: {}",
             errors[0]
         );
@@ -6151,11 +6197,7 @@ fn an_unsupported_enum_keyed_map_value_emits_only_the_compile_error() {
             "for {map_type}, got: {tokens}"
         );
         assert!(
-            tokens.contains("field `m`"),
-            "for {map_type}, got: {tokens}"
-        );
-        assert!(
-            tokens.contains("a tuple is not supported as a map value"),
+            tokens.contains("model_schema: field `m`: a tuple is not supported as a map value"),
             "for {map_type}, got: {tokens}"
         );
     }
@@ -6765,9 +6807,8 @@ fn an_unsupported_string_keyed_map_value_emits_only_the_compile_error() {
     let tokens = map_field_schema("HashMap<String, (String, u32)>").to_string();
     assert!(tokens.starts_with("compile_error !"), "got: {tokens}");
     assert!(!tokens.contains("properties . insert"), "got: {tokens}");
-    assert!(tokens.contains("field `m`"), "got: {tokens}");
     assert!(
-        tokens.contains("a tuple is not supported as a map value"),
+        tokens.contains("model_schema: field `m`: a tuple is not supported as a map value"),
         "got: {tokens}"
     );
 }
@@ -7174,7 +7215,7 @@ fn an_unsupported_nested_map_value_emits_only_the_compile_error() {
             "for {map_type}, got: {tokens}"
         );
         assert!(
-            tokens.contains("a tuple is not supported as a map value"),
+            tokens.contains("model_schema: field `m`: a tuple is not supported as a map value"),
             "for {map_type}, got: {tokens}"
         );
     }
@@ -7263,6 +7304,24 @@ fn a_generic_sibling_string_keyed_map_value_emits_the_sibling_schema() {
              :: Schema :: json_schema_within_with (in_flight , hoisted_defs , & arguments)"
         ),
         "got: {tokens}"
+    );
+}
+
+/// An argument the dispatch cannot render replaces the document filling the parameter, naming the
+/// parameter it stands at — the reference site is where the filling was written.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_reference_site_argument_the_dispatch_cannot_render_is_refused() {
+    let argument = get_field_def(
+        "",
+        &syn::parse_str("HashMap<String, (u32, u32)>").unwrap(),
+        "",
+    );
+    let rendered = super::argument_json_schema_value("IdType", &argument).to_string();
+    assert!(rendered.starts_with("compile_error !"), "got: {rendered}");
+    assert!(
+        rendered.contains("model_schema: `IdType`: a tuple is not supported as a map value"),
+        "got: {rendered}"
     );
 }
 
@@ -7672,11 +7731,7 @@ fn a_tuple_element_holding_an_unrenderable_map_emits_only_the_compile_error() {
             "for {field_type}, got: {tokens}"
         );
         assert!(
-            tokens.contains("field `t`"),
-            "for {field_type}, got: {tokens}"
-        );
-        assert!(
-            tokens.contains("a tuple is not supported as a map value"),
+            tokens.contains("model_schema: field `t`: a tuple is not supported as a map value"),
             "for {field_type}, got: {tokens}"
         );
     }
@@ -8488,6 +8543,26 @@ fn a_tuple_struct_describes_as_its_arity_in_json_schema() {
     let pair = tuple_struct_json_body("Pair", &whole_tuple(&["String", "u32"])).to_string();
     assert!(pair.contains("prefixItems"), "Got: {pair}");
     assert!(pair.contains("maxItems"), "Got: {pair}");
+}
+
+/// A slot the dispatch cannot render replaces the whole body with the diagnostic, at either arity:
+/// the bare value a one-slot struct writes and the fixed array every other arity writes reach the
+/// same rejection, and both name the type the author declared.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_tuple_struct_slot_the_dispatch_cannot_render_is_refused() {
+    for shape in [
+        whole_tuple(&["HashMap<String, (u32, u32)>"]),
+        whole_tuple(&["String", "HashMap<String, (u32, u32)>"]),
+    ] {
+        let rendered = tuple_struct_json_body("Pair", &shape).to_string();
+        assert!(rendered.starts_with("compile_error !"), "Got: {rendered}");
+        assert!(
+            rendered.contains("model_schema: `Pair`: a tuple is not supported as a map value"),
+            "Got: {rendered}"
+        );
+        assert!(!rendered.contains("prefixItems"), "Got: {rendered}");
+    }
 }
 
 /// The bare value is the *declared* arity's, not the described list's. Captured from serde: a
