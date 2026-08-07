@@ -1104,11 +1104,11 @@ fn alias_target_kind(alias_field_def: &FieldDef) -> AliasKind {
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn alias_map_key_guard_error(
     alias: &ItemType,
-    export_name: &str,
     alias_field_def: &FieldDef,
 ) -> Option<proc_macro2::TokenStream> {
     let rejection = map_key_rejection(alias_field_def)?;
-    let message = map_key_rejection_message(&format!("type alias `{export_name}`"), &rejection);
+    let subject = format!("type alias `{}`", alias.ident);
+    let message = map_key_rejection_message(&subject, &rejection);
     Some(syn::Error::new_spanned(&alias.ty, message).to_compile_error())
 }
 
@@ -1117,11 +1117,11 @@ fn alias_map_key_guard_error(
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn alias_undescribable_std_error(
     alias: &ItemType,
-    export_name: &str,
     alias_field_def: &FieldDef,
 ) -> Option<proc_macro2::TokenStream> {
     let rejection = undescribable_std_rejection(alias_field_def)?;
-    let message = undescribable_std_message(&format!("type alias `{export_name}`"), &rejection);
+    let subject = format!("type alias `{}`", alias.ident);
+    let message = undescribable_std_message(&subject, &rejection);
     Some(syn::Error::new_spanned(&alias.ty, message).to_compile_error())
 }
 
@@ -1172,13 +1172,9 @@ fn process_type_alias(item_type: ItemType, args: &ModelSchemaArgs) -> TokenStrea
     // Registered above whatever the outcome, so a type naming a refused alias still resolves to the
     // export name the author wrote and the alias's own diagnostic stays the one they act on.
     let alias_guard_errors: Vec<proc_macro2::TokenStream> =
-        alias_undescribable_std_error(&alias, &export_name, &alias_field_def)
+        alias_undescribable_std_error(&alias, &alias_field_def)
             .into_iter()
-            .chain(alias_map_key_guard_error(
-                &alias,
-                &export_name,
-                &alias_field_def,
-            ))
+            .chain(alias_map_key_guard_error(&alias, &alias_field_def))
             .collect();
     if let Some(output) = guard_failure_output(&alias, Some(&alias.ident), &alias_guard_errors) {
         return output;
@@ -12188,10 +12184,11 @@ fn generate_ts_alias_method(
 /// `json_schema()` body.
 #[cfg(feature = "jsonschema")]
 fn alias_json_schema_rejection(
-    export_name: &str,
+    rust_ident: &syn::Ident,
     rejection: &MapMemberRejection,
 ) -> proc_macro2::TokenStream {
-    let message = map_member_rejection_message(&format!("type alias `{export_name}`"), rejection);
+    let subject = format!("type alias `{rust_ident}`");
+    let message = map_member_rejection_message(&subject, rejection);
     quote! { compile_error!(#message) }
 }
 
@@ -12206,7 +12203,7 @@ fn generate_alias_json_schema_method(
     #[cfg(feature = "jsonschema")]
     {
         let body = build_tuple_element_json_schema(&surface_field_def(&alias.generics, field_def))
-            .unwrap_or_else(|rejection| alias_json_schema_rejection(export_name, &rejection));
+            .unwrap_or_else(|rejection| alias_json_schema_rejection(&alias.ident, &rejection));
         json_schema_methods(
             export_name,
             &body,
