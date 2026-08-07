@@ -1718,7 +1718,9 @@ pub struct Event {
 
 The bare `ts_optional` flag asks for the optional key (`field?: T` rather than `field: T | undefined`) on the author's word. It is the only thing that writes that spelling.
 
-**Read the condition before reaching for it.** An `Option<T>` field whose serde attributes drop the key for a `None` already renders as an optional key, off the wire and in every build ([Optional Fields](#optional-fields)) — on such a field the flag changes nothing, because the attribute has already said it. What is left over is an `Option<T>` carrying no key-dropping attribute at all, and with the `serde` feature on that field does not compile: the field's declared shape is `T | undefined`, so its key has to be dropped for a `None`, not written as `null` the way serde writes it absent an attribute saying otherwise — and the guard refuses the declaration and names the attribute to add (or, if the wire really does carry `null` here, points at [`nullable`](#nullable-object-keys-nullable) instead). So the flag decides the key in exactly one place — a build with the `serde` feature **off**, where no attribute is read and no such guard runs:
+**Two positions have no key for it to make optional, and writing it on either is a compile error, in every build.** A positional slot writes no key at all, so the flag names a spelling the tuple line has no room for. A member a serde attribute takes off the wire in *both* directions (`skip`, or `skip_serializing` and `skip_deserializing` together) is described on no surface, so there is no line for the flag to write its key on. An attribute that drops the key one way only (`skip_serializing_if`, `skip_serializing`) leaves the member standing and the flag decides its spelling as usual.
+
+With the `serde` feature on, an `Option<T>` field must carry a key-dropping attribute anyway: its declared shape is `T | undefined`, so its key has to be dropped for a `None`, not written as `null` the way serde writes it absent an attribute saying otherwise — the guard refuses the declaration and names the attribute to add (or, if the wire really does carry `null` here, points at [`nullable`](#nullable-object-keys-nullable) instead). The example below is a build with the feature **off**, where no attribute is read and no such guard runs:
 
 ```rust
 #[model_schema()]
@@ -1742,7 +1744,7 @@ export type Profile = {
 
 `nick_handle` is the same field without the flag, so the flag is the whole of the difference between those two lines.
 
-This is a TypeScript-only knob -- the Zod schema and JSON Schema are unchanged (the field is already optional in both, flagged or not). The flag is only valid on `Option<T>` fields; applying it to a non-`Option` field is a compile error. It composes with `as = Type`, which names the type the field already renders. On a field the flag has no say over — one already carrying an omission attribute, or a positional slot, which has no key to make optional — writing it is accepted and inert.
+This is a TypeScript-only knob -- the Zod schema and JSON Schema are unchanged (the field is already optional in both, flagged or not). The flag is only valid on `Option<T>` fields; applying it to a non-`Option` field is a compile error. It composes with `as = Type`, which names the type the field already renders.
 
 ### Nullable Object Keys (`nullable`)
 

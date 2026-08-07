@@ -3,6 +3,10 @@
 //! Every shape below carries a flagged member beside an unflagged control of the same type and
 //! attributes, so the flag is the only difference. Held under both feature flavours, since only
 //! one reads an attribute at all.
+//!
+//! A member with no key for the flag to make optional — a positional slot, or one a serde
+//! attribute takes off the wire in both directions — is refused at expansion, so no shape here
+//! can carry that spelling.
 
 #[cfg(feature = "serde")]
 mod under_the_serde_feature {
@@ -32,19 +36,6 @@ mod under_the_serde_feature {
         b: Option<String>,
     }
 
-    /// The key is dropped in both directions, which takes both members off the surface entirely —
-    /// the flag has no member left to spell.
-    #[model_schema()]
-    #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-    struct UnderSkip {
-        #[model_schema_prop(ts_optional)]
-        #[serde(skip)]
-        a: Option<String>,
-        #[serde(skip)]
-        b: Option<String>,
-        id: String,
-    }
-
     #[test]
     fn the_flag_decides_the_spelling_the_omission_attribute_leaves_open() {
         let predicate = UnderAPredicate::ts_definition();
@@ -63,17 +54,6 @@ mod under_the_serde_feature {
             member(&skip_serializing, "b: string | undefined;"),
             "Got: {skip_serializing}"
         );
-    }
-
-    /// A key the wire carries in neither direction has no member for the flag to spell, flagged or
-    /// not.
-    #[test]
-    fn a_key_off_the_wire_entirely_leaves_the_flag_nothing_to_spell() {
-        let ts = UnderSkip::ts_definition();
-
-        assert!(!ts.contains("a?"), "Got: {ts}");
-        assert!(!ts.contains("b?"), "Got: {ts}");
-        assert!(member(&ts, "id: string;"), "Got: {ts}");
     }
 }
 

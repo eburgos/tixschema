@@ -778,7 +778,9 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 ///
 /// - `ts_optional` — on an `Option<T>` field, writes the optional TypeScript key `field?: T`
 ///   instead of the default `field: T | undefined`. TypeScript-only; Zod and JSON Schema are
-///   unchanged.
+///   unchanged. The field must have a key for it to make optional: a positional slot writes none,
+///   and a member a serde attribute takes off the wire in both directions is described nowhere, so
+///   the flag is refused on either.
 /// - `as_number` — on a `DateTime<Tz>` field, renders an epoch-millisecond `number` with an
 ///   inline Zod coercer instead of the default `Date`.
 /// - `nullable` — on an `Option<T>` field, renders `T | null` with the key **required** on
