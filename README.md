@@ -1462,10 +1462,15 @@ The verdict is read off the parsed pattern rather than off its text, so the same
 | `a*`, `a?`, `a\|`, `^a*`, `a*$` | Refused -- the repeated part may run zero times, or the alternative may be skipped |
 | `^$` | Accepted -- both ends at one position, which only the empty string has |
 | `^a*$` | Accepted -- both ends pinned around a run of `a` |
-| `\b`, `\B` | Accepted -- the empty string holds no word boundary |
+| `\b`, `\B` | Constraining -- the empty string holds no word boundary -- and refused by the next rule |
+| `\b\w+`, `\Ba` | Accepted -- a boundary with something beside it |
 | `a+`, `^[a-z]+$` | Accepted -- a character has to be there |
 
-One case is left standing. `clippy::trivial_regex`, which a consumer denying `clippy::nursery` gets, also flags `\b` -- as "the regex is unlikely to be useful as it is", naming no replacement -- and reports it against the `#[model_schema]` attribute, where there is no edit available. `\b` keeps its regex anyway: it is a real constraint, and answering the lint would mean dropping a check the author asked for.
+#### A `pattern` cannot be one assertion and nothing else
+
+`\b` and `\B` are refused for a third reason, and it is not about what they accept. The generated Rust validator builds the pattern with `regex::Regex::new`, and `clippy::trivial_regex` -- which a consumer denying `clippy::nursery` gets -- calls a lone assertion "unlikely to be useful as it is" and reports it against the `#[model_schema]` attribute, where the author has no edit to make. For the shapes that lint does name a replacement for -- `^abc`, `abc$`, `^abc$`, `^$`, `abc` -- this crate emits the `str` call instead of a regex, so they compile clean; for a lone boundary it names none, so there is nothing to put in the regex's place.
+
+Write the boundary beside what has to sit next to it: `\b\w+` rather than `\b`, `\B\w` rather than `\B`. That keeps the regex, keeps the boundary check, and is no longer trivial to the lint. Only the lone assertion is refused -- `\ba`, `^\bfoo` and every other pattern with a boundary somewhere in it are untouched.
 
 ### Numeric Constraints (minimum, maximum)
 
