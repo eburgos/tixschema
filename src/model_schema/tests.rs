@@ -1,5 +1,5 @@
 use super::{
-    FieldDefType, ModelSchemaPropMeta, check_nullable_ts_optional_conflict,
+    EnumCasing, FieldDefType, ModelSchemaPropMeta, check_nullable_ts_optional_conflict,
     check_undescribable_std_field, collect_discriminated_variants, field_label, get_field_def,
     render_discriminated_variants, validate_as_number_flag, validate_nullable_flag,
     validate_ts_optional_flag,
@@ -115,6 +115,12 @@ const SEQUENCE_WRAPPERS: [&str; 6] = [
 /// expansion registers.
 #[cfg(feature = "serde")]
 const UNTAGGED_MODULE: Option<&str> = Some("choice_schema");
+
+/// What an enum declaring neither container-level casing rule hands its variant walk.
+const UNCASED: EnumCasing<'static> = EnumCasing {
+    variant_fields: None,
+    variants: None,
+};
 
 #[test]
 fn ts_optional_ok_on_option_field() {
@@ -2123,7 +2129,7 @@ fn a_constraint_refused_its_placement_leaves_no_hook_naming_the_dropped_module()
             },
         }
     };
-    let errors = collect_discriminated_variants(&mut item, None, Some("action_schema")).2;
+    let errors = collect_discriminated_variants(&mut item, UNCASED, Some("action_schema")).2;
     assert_eq!(errors.len(), 1, "got: {errors:?}");
     assert!(
         errors[0]
@@ -7761,7 +7767,7 @@ fn rendered_discriminated_union() -> (Vec<String>, Vec<String>, Vec<String>) {
             Archive,
         }
     };
-    let variants = collect_discriminated_variants(&mut item, None, Some("action_schema"));
+    let variants = collect_discriminated_variants(&mut item, UNCASED, Some("action_schema"));
     let rendered = render_discriminated_variants("type", "value", "Action", &variants.0);
     (
         rendered.0,
@@ -7829,7 +7835,7 @@ fn adjacently_tagged_empty_named_variant_nests_an_empty_content_object() {
             Unit,
         }
     };
-    let variants = collect_discriminated_variants(&mut item, None, Some("probe_schema"));
+    let variants = collect_discriminated_variants(&mut item, UNCASED, Some("probe_schema"));
     let rendered = render_discriminated_variants("kind", "data", "Probe", &variants.0);
 
     let ts = &rendered.0[0];
@@ -8186,7 +8192,7 @@ fn a_constrained_tuple_variant_yields_diagnostics_rather_than_helpers() {
             Three(String),
         }
     };
-    let variants = collect_discriminated_variants(&mut item, None, Some("probe_schema"));
+    let variants = collect_discriminated_variants(&mut item, UNCASED, Some("probe_schema"));
 
     let validation_fns: Vec<String> = variants.1.iter().map(ToString::to_string).collect();
     assert!(validation_fns.is_empty(), "got: {validation_fns:?}");
@@ -9933,7 +9939,7 @@ fn an_untagged_sibling_exclusion_writes_a_non_identifier_key_as_a_string() {
 /// Collects a discriminated enum's guard failures as rendered `compile_error!` token strings.
 #[cfg(feature = "serde")]
 fn discriminated_guard_errors(mut item: syn::ItemEnum) -> Vec<String> {
-    collect_discriminated_variants(&mut item, None, Some("probe_schema"))
+    collect_discriminated_variants(&mut item, UNCASED, Some("probe_schema"))
         .2
         .iter()
         .map(ToString::to_string)
@@ -9943,7 +9949,7 @@ fn discriminated_guard_errors(mut item: syn::ItemEnum) -> Vec<String> {
 /// The field defs one variant of a discriminated enum collected, beside the ones it flattens.
 #[cfg(feature = "serde")]
 fn collected_variant_fields(mut item: syn::ItemEnum) -> (Vec<String>, Vec<String>) {
-    let variants = collect_discriminated_variants(&mut item, None, Some("probe_schema")).0;
+    let variants = collect_discriminated_variants(&mut item, UNCASED, Some("probe_schema")).0;
     let variant = variants.first().unwrap();
     (
         variant.field_defs.iter().map(|f| f.name.clone()).collect(),
@@ -10115,7 +10121,8 @@ fn the_variant_flatten_refusal_names_the_remedy() {
 #[cfg(feature = "serde")]
 fn collected_untagged_variant_fields(mut item: syn::ItemEnum) -> (Vec<String>, Vec<String>) {
     let variant = item.variants.first_mut().unwrap();
-    let walked = super::collect_untagged_variant_members(variant, "Probe", UNTAGGED_MODULE, &[]);
+    let walked =
+        super::collect_untagged_variant_members(variant, "Probe", UNTAGGED_MODULE, &[], None);
     (
         walked.field_defs.iter().map(|f| f.name.clone()).collect(),
         walked
@@ -10160,7 +10167,8 @@ fn a_flattening_untagged_member_proves_no_key_list() {
         }
     };
     let variant = item.variants.first_mut().unwrap();
-    let walked = super::collect_untagged_variant_members(variant, "Probe", UNTAGGED_MODULE, &[]);
+    let walked =
+        super::collect_untagged_variant_members(variant, "Probe", UNTAGGED_MODULE, &[], None);
     assert_eq!(
         super::untagged_member_keys(
             &VariantKind::Named,

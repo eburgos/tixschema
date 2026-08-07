@@ -566,6 +566,15 @@ struct UntaggedVariantMembers {
     validation_fns: Vec<proc_macro2::TokenStream>,
 }
 
+/// The two casing rules an enum's container declares, which reach two different things: `variants`
+/// renames the variant names, `variant_fields` the members inside every struct variant. Bundled
+/// because two loose `Option<&str>` neighbours meaning different things transpose silently.
+#[derive(Clone, Copy)]
+struct EnumCasing<'ctx> {
+    variant_fields: Option<&'ctx str>,
+    variants: Option<&'ctx str>,
+}
+
 /// What the item around a field says about it: everything [`process_field`] needs that is not the
 /// field itself, bundled so the walk hands one context down instead of six loose parameters.
 struct FieldContext<'ctx> {
@@ -5245,18 +5254,24 @@ fn process_enum(item_enum: syn::ItemEnum, args: &ModelSchemaArgs) -> TokenStream
             return process_untagged_enum(item_enum, &name, &item_name, args);
         }
 
+        #[cfg(feature = "serde")]
+        let casing = EnumCasing {
+            variant_fields: serde_type_meta.rename_all_fields.as_deref(),
+            variants: serde_type_meta.rename_all.as_deref(),
+        };
+
+        #[cfg(not(feature = "serde"))]
+        let casing = EnumCasing {
+            variant_fields: None,
+            variants: None,
+        };
+
         // Neither tagging key named, so serde writes the externally tagged form and that is what
         // the surfaces describe. Only the attributes the `serde` feature reads tell the two forms
         // apart; without it no declaration can be distinguished and the adjacent form stands.
         #[cfg(feature = "serde")]
         if serde_type_meta.tag.is_none() && serde_type_meta.content.is_none() {
-            return process_externally_tagged_enum(
-                item_enum,
-                &name,
-                serde_type_meta.rename_all.as_deref(),
-                &item_name,
-                args,
-            );
+            return process_externally_tagged_enum(item_enum, &name, casing, &item_name, args);
         }
 
         // A tag with no content is serde's internally tagged form: what a variant writes joins the
@@ -5266,18 +5281,11 @@ fn process_enum(item_enum: syn::ItemEnum, args: &ModelSchemaArgs) -> TokenStream
             serde_type_meta.tag.as_ref(),
             serde_type_meta.content.as_ref(),
         ) {
-            return process_internally_tagged_enum(
-                item_enum,
-                &name,
-                tag,
-                serde_type_meta.rename_all.as_deref(),
-                &item_name,
-                args,
-            );
+            return process_internally_tagged_enum(item_enum, &name, tag, casing, &item_name, args);
         }
 
         #[cfg(feature = "serde")]
-        let (tag_name, content_name, rename_all) = (
+        let (tag_name, content_name) = (
             serde_type_meta
                 .tag
                 .as_ref()
@@ -5286,19 +5294,17 @@ fn process_enum(item_enum: syn::ItemEnum, args: &ModelSchemaArgs) -> TokenStream
                 .content
                 .as_ref()
                 .map_or_else(|| "value".to_owned(), Clone::clone),
-            serde_type_meta.rename_all,
         );
 
         #[cfg(not(feature = "serde"))]
-        let (tag_name, content_name, rename_all): (String, String, Option<String>) =
-            ("type".to_owned(), "value".to_owned(), None);
+        let (tag_name, content_name): (String, String) = ("type".to_owned(), "value".to_owned());
 
         process_discriminated_enum(
             item_enum,
             &name,
             &tag_name,
             &content_name,
-            rename_all.as_deref(),
+            casing,
             &item_name,
             args,
         )
@@ -5701,20 +5707,29 @@ fn check_variant_slot_wire_is_readable(
     ))
 }
 
-/// The two name overrides a variant declares: its own `#[serde(rename)]`, and the `rename_all` its
-/// own fields are read against. serde treats a struct variant as the container for its fields, so
+/// The two name overrides a variant declares: its own `#[serde(rename)]`, and the rule its own
+/// fields are read against — its own `rename_all` where it writes one, the container's
+/// `rename_all_fields` otherwise. serde treats a struct variant as the container for its fields, so
 /// the enum's container-level `rename_all` never reaches them — that one renames variant names only.
 #[cfg(feature = "serde")]
-fn variant_serde_names(attrs: &[syn::Attribute]) -> (Option<String>, Option<String>) {
+fn variant_serde_names(
+    attrs: &[syn::Attribute],
+    rename_all_fields: Option<&str>,
+) -> (Option<String>, Option<String>) {
     (
         parse_serde_field_attributes(attrs).rename,
-        parse_serde_type_attributes(attrs).rename_all,
+        parse_serde_type_attributes(attrs)
+            .rename_all
+            .or_else(|| rename_all_fields.map(ToOwned::to_owned)),
     )
 }
 
 /// No declaration is read where nothing parses serde's attributes.
 #[cfg(not(feature = "serde"))]
-const fn variant_serde_names(_attrs: &[syn::Attribute]) -> (Option<String>, Option<String>) {
+const fn variant_serde_names(
+    _attrs: &[syn::Attribute],
+    _rename_all_fields: Option<&str>,
+) -> (Option<String>, Option<String>) {
     (None, None)
 }
 
@@ -5772,7 +5787,7 @@ fn variant_flatten_guard_errors(
 /// `validate()` arms those functions are run from.
 fn collect_discriminated_variants(
     item_enum: &mut syn::ItemEnum,
-    rename_all: Option<&str>,
+    casing: EnumCasing<'_>,
     enum_module_name_opt: Option<&str>,
 ) -> DiscriminatedVariantData {
     let type_parameters = type_parameters_in_scope(&item_enum.generics);
@@ -5785,10 +5800,11 @@ fn collect_discriminated_variants(
     let enum_type_name = item_enum.ident.to_string();
 
     for item in &mut item_enum.variants {
-        let (field_rename, variant_rename_all) = variant_serde_names(&item.attrs);
+        let (field_rename, variant_rename_all) =
+            variant_serde_names(&item.attrs, casing.variant_fields);
         let variant_ident = item.ident.to_string();
         let final_name =
-            get_final_variant_name(&variant_ident, field_rename.as_deref(), rename_all);
+            get_final_variant_name(&variant_ident, field_rename.as_deref(), casing.variants);
         // The Rust shape the `validate()` arm is matched by, beside the wire shape the surfaces
         // describe: a variant that publishes no slot is still declared holding one.
         let declared_kind = classify_variant(item);
@@ -5852,8 +5868,7 @@ fn collect_discriminated_variants(
             // A constrained positional slot is refused by its own guard, so a member with a body to
             // run is always one the arm can name.
             if let (Some(body), Some(ident)) = (validate_body, field.ident.as_ref()) {
-                let binding = member_binding(ident);
-                bound.push((ident.clone(), binding));
+                bound.push((ident.clone(), member_binding(ident)));
                 checks.push(body);
             }
             if positional && omission.absent_from_wire() {
@@ -5994,7 +6009,7 @@ fn process_discriminated_enum(
     name: &syn::Ident,
     tag_name: &str,
     content_name: &str,
-    rename_all: Option<&str>,
+    casing: EnumCasing<'_>,
     item_name: &str,
     args: &ModelSchemaArgs,
 ) -> TokenStream {
@@ -6027,7 +6042,7 @@ fn process_discriminated_enum(
     // Bind both result tuples whole so feature-gated field access marks them used (no per-element
     // guards): `variants` = (variants, validation_fns, guard_errors);
     // `rendered` = (ts, zod, json).
-    let variants = collect_discriminated_variants(&mut item_enum, rename_all, enum_module_name_opt);
+    let variants = collect_discriminated_variants(&mut item_enum, casing, enum_module_name_opt);
     if let Some(output) = guard_failure_output(&item_enum, Some(&item_enum.ident), &variants.2) {
         return output;
     }
@@ -6519,7 +6534,7 @@ fn join_external_union(
 fn process_externally_tagged_enum(
     mut item_enum: syn::ItemEnum,
     name: &syn::Ident,
-    rename_all: Option<&str>,
+    casing: EnumCasing<'_>,
     item_name: &str,
     args: &ModelSchemaArgs,
 ) -> TokenStream {
@@ -6542,7 +6557,7 @@ fn process_externally_tagged_enum(
     let enum_module_name_opt = None;
 
     let self_type_name = item_enum.ident.to_string();
-    let variants = collect_discriminated_variants(&mut item_enum, rename_all, enum_module_name_opt);
+    let variants = collect_discriminated_variants(&mut item_enum, casing, enum_module_name_opt);
     if let Some(output) = guard_failure_output(&item_enum, Some(&item_enum.ident), &variants.2) {
         return output;
     }
@@ -6922,7 +6937,7 @@ fn process_internally_tagged_enum(
     mut item_enum: syn::ItemEnum,
     name: &syn::Ident,
     tag_name: &str,
-    rename_all: Option<&str>,
+    casing: EnumCasing<'_>,
     item_name: &str,
     args: &ModelSchemaArgs,
 ) -> TokenStream {
@@ -6947,7 +6962,7 @@ fn process_internally_tagged_enum(
         return output;
     }
 
-    let variants = collect_discriminated_variants(&mut item_enum, rename_all, enum_module_name_opt);
+    let variants = collect_discriminated_variants(&mut item_enum, casing, enum_module_name_opt);
     if let Some(output) = guard_failure_output(&item_enum, Some(&item_enum.ident), &variants.2) {
         return output;
     }
@@ -7509,10 +7524,13 @@ fn collect_untagged_variant_members(
     enum_type_name: &str,
     schema_module_name: Option<&str>,
     type_parameters: &[String],
+    rename_all_fields: Option<&str>,
 ) -> UntaggedVariantMembers {
     let variant_name = variant.ident.to_string();
     let variant_defaulted = has_serde_default(&variant.attrs);
-    let variant_rename_all = parse_serde_type_attributes(&variant.attrs).rename_all;
+    // An untagged variant has no name on the wire, so the rename the seam also resolves is unused
+    // here.
+    let (_, variant_rename_all) = variant_serde_names(&variant.attrs, rename_all_fields);
     let mut walked = UntaggedVariantMembers {
         bound: Vec::new(),
         checks: Vec::new(),
@@ -7609,6 +7627,7 @@ fn collect_untagged_members(
 ) -> UntaggedMemberData {
     let enum_type_name = item_enum.ident.to_string();
     let type_parameters = type_parameters_in_scope(&item_enum.generics);
+    let rename_all_fields = parse_serde_type_attributes(&item_enum.attrs).rename_all_fields;
     let mut ts_parts: Vec<String> = Vec::new();
     #[cfg(feature = "typescript")]
     let mut ts_member_keys: Vec<Option<Vec<String>>> = Vec::new();
@@ -7633,6 +7652,7 @@ fn collect_untagged_members(
             &enum_type_name,
             schema_module_name,
             &type_parameters,
+            rename_all_fields.as_deref(),
         );
         guard_errors.append(&mut walked.guard_errors);
         validation_fns.append(&mut walked.validation_fns);
