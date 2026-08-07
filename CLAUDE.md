@@ -451,6 +451,12 @@ Rules:
   type parameter publishes `$SchemaFactory`/`$SchemaDefault` instead — the parameter's inner
   composes the factory's bound argument (`idType`), never the opaque `z.unknown()`
 - Serde transparent serialization works normally — the newtype is invisible in JSON
+- The slot takes no `#[model_schema_prop(...)]`: a brand publishes its inner's own schema with a
+  `.brand()` written onto it, so no key written there reaches any surface, and one written there is
+  refused at `exec_model_schema` — the ungated seam, so the verdict is the same in every feature
+  combination — with the item re-emitted stripped of it. The three checks a brand does carry are
+  written on the type: `#[model_schema(pattern = "...", minLength = N, maxLength = N)]`. A
+  `#[serde(transparent)]` struct with a *named* field is no brand and is untouched
 
 ### Generic Types and Zod Factories
 

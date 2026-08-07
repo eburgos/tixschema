@@ -2857,6 +2857,101 @@ mod branded_scalar_keyword_tests {
     }
 }
 
+/// What the brand-slot refusal must leave where it is: the checks a brand does carry, which are
+/// written on the type; a brand carrying none; and a `#[serde(transparent)]` struct whose field is
+/// named, which is no brand and reads its field attribute on every surface.
+#[cfg(all(feature = "zod", feature = "typescript", feature = "jsonschema"))]
+mod untouched_by_the_slot_refusal_tests {
+    use super::*;
+
+    #[model_schema(pattern = "^[a-z]+$", minLength = 2, maxLength = 8)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct TypeLevel(pub String);
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct BareBrand(pub String);
+
+    #[model_schema()]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct NamedTransparent {
+        #[model_schema_prop(pattern = "^[a-z]+$")]
+        pub inner: String,
+    }
+
+    #[test]
+    fn the_checks_a_brand_carries_still_land_on_its_inner() {
+        let zod = TypeLevel::zod_schema();
+        assert_eq!(
+            zod.lines().next(),
+            Some(
+                "const TypeLevel$RawSchema = z.string().min(2).max(8)\
+                 .check(z.regex(/^[a-z]+$/)).brand<\"TypeLevel\">().meta({"
+            ),
+            "Got:\n{zod}"
+        );
+        assert_eq!(
+            TypeLevel::json_schema(),
+            serde_json::json!({
+                "type": "string",
+                "minLength": 2_u32,
+                "maxLength": 8_u32,
+                "pattern": "^[a-z]+$"
+            })
+        );
+        assert_eq!(
+            TypeLevel::ts_definition(),
+            "export type TypeLevel = string & $brand<\"TypeLevel\">;"
+        );
+    }
+
+    #[test]
+    fn an_unconstrained_brand_describes_its_bare_inner() {
+        let zod = BareBrand::zod_schema();
+        assert_eq!(
+            zod.lines().next(),
+            Some("const BareBrand$RawSchema = z.string().brand<\"BareBrand\">().meta({"),
+            "Got:\n{zod}"
+        );
+        assert_eq!(
+            BareBrand::json_schema(),
+            serde_json::json!({ "type": "string" })
+        );
+        assert_eq!(
+            BareBrand::ts_definition(),
+            "export type BareBrand = string & $brand<\"BareBrand\">;"
+        );
+    }
+
+    /// A named field is not a slot, so the transparent wrapper around it is not a brand and the
+    /// attribute on it is read exactly as it is on any other named field.
+    #[test]
+    fn a_named_field_under_transparent_still_reads_its_attribute() {
+        let zod = NamedTransparent::zod_schema();
+        assert!(
+            zod.contains("  inner: z.string().check(z.regex(/^[a-z]+$/)),"),
+            "Got:\n{zod}"
+        );
+        assert_eq!(
+            NamedTransparent::json_schema(),
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": { "inner": { "type": "string", "pattern": "^[a-z]+$" } },
+                "required": ["inner"]
+            })
+        );
+        assert!(
+            NamedTransparent::ts_definition().contains("  inner: string;"),
+            "Got:\n{}",
+            NamedTransparent::ts_definition()
+        );
+    }
+}
+
 #[cfg(any(
     feature = "serde",
     feature = "zod",

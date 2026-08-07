@@ -51,6 +51,28 @@ pub struct EverySlotSkipped(#[serde(skip)] pub String, #[serde(skip)] pub u32);
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SkippedLoneSlot(#[serde(skip)] pub String);
 
+/// The slot of a tuple struct that is *not* a brand, which reads every key written on it. These
+/// four pin what the brand-slot refusal must leave where it is.
+#[cfg(all(feature = "zod", feature = "typescript"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct PreprocessedSlot(#[model_schema_prop(preprocess = ["trim"])] pub String);
+
+#[cfg(all(feature = "zod", feature = "typescript"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct LiteralSlot(#[model_schema_prop(literal = "fixed")] pub String);
+
+#[cfg(all(feature = "zod", feature = "typescript"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct NullableSlot(#[model_schema_prop(nullable)] pub Option<String>);
+
+#[cfg(all(feature = "zod", feature = "typescript"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SubstitutedSlot(#[model_schema_prop(as = String)] pub String);
+
 /// The wire criterion the newtype surfaces are read against.
 #[test]
 fn test_serde_writes_a_newtype_struct_as_the_inner_value_alone() {
@@ -446,5 +468,56 @@ fn test_json_schema_never_names_a_slot_by_its_absent_ident() {
         MaybeName::json_schema(),
     ] {
         assert!(!json.to_string().contains("\"\""), "Got: {json}");
+    }
+}
+
+#[cfg(all(feature = "zod", feature = "typescript"))]
+#[test]
+fn test_every_key_written_on_a_plain_slot_reaches_zod() {
+    for (zod, binding) in [
+        (
+            PreprocessedSlot::zod_schema(),
+            "const PreprocessedSlot$RawSchema = z.preprocess(trim, z.string());",
+        ),
+        (
+            LiteralSlot::zod_schema(),
+            "const LiteralSlot$RawSchema = z.literal(\"fixed\");",
+        ),
+        (
+            NullableSlot::zod_schema(),
+            "const NullableSlot$RawSchema = z.nullable(z.string());",
+        ),
+        (
+            SubstitutedSlot::zod_schema(),
+            "const SubstitutedSlot$RawSchema = z.string();",
+        ),
+    ] {
+        assert_eq!(zod.lines().next(), Some(binding), "Got:\n{zod}");
+    }
+}
+
+/// [`test_every_key_written_on_a_plain_slot_reaches_zod`] for the TypeScript surface.
+#[cfg(all(feature = "zod", feature = "typescript"))]
+#[test]
+fn test_every_key_written_on_a_plain_slot_reaches_typescript() {
+    for (ts, declaration) in [
+        (
+            PreprocessedSlot::ts_definition(),
+            "export type PreprocessedSlot = string;",
+        ),
+        (
+            LiteralSlot::ts_definition(),
+            "export type LiteralSlot = \"fixed\";",
+        ),
+        (
+            NullableSlot::ts_definition(),
+            "export type NullableSlot = string | null;",
+        ),
+        (
+            SubstitutedSlot::ts_definition(),
+            "export type SubstitutedSlot = string;",
+        ),
+    ] {
+        assert!(ts.ends_with(declaration), "Got:\n{ts}");
     }
 }
