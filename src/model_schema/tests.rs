@@ -1,8 +1,8 @@
 use super::{
-    EnumCasing, FieldDefType, ModelSchemaPropMeta, check_nullable_ts_optional_conflict,
-    check_undescribable_std_field, collect_discriminated_variants, field_label, get_field_def,
-    render_discriminated_variants, validate_as_number_flag, validate_nullable_flag,
-    validate_ts_optional_flag,
+    EnumCasing, FieldDefType, ModelSchemaPropMeta, apply_serde_key_omission,
+    check_nullable_ts_optional_conflict, check_undescribable_std_field,
+    collect_discriminated_variants, field_label, get_field_def, render_discriminated_variants,
+    validate_as_number_flag, validate_nullable_flag, validate_ts_optional_flag,
 };
 
 #[cfg(feature = "serde")]
@@ -122,22 +122,85 @@ const UNCASED: EnumCasing<'static> = EnumCasing {
     variants: None,
 };
 
+/// The flag's verdict on a declaration's sole member, read the way `process_field` reads it: the
+/// omission the field declares is on the def before the guard asks its question of it.
+fn ts_optional_verdict(item: &syn::ItemStruct, flag_set: bool) -> Result<(), String> {
+    let field = item.fields.iter().next().unwrap();
+    let mut rendered = get_field_def("", &field.ty, "");
+    apply_serde_key_omission(&mut rendered, field);
+    validate_ts_optional_flag(field, &rendered, flag_set)
+}
+
 #[test]
 fn ts_optional_ok_on_option_field() {
-    validate_ts_optional_flag(true, true).unwrap();
+    ts_optional_verdict(
+        &syn::parse_quote! { struct Report { name: Option<String> } },
+        true,
+    )
+    .unwrap();
+}
+
+/// A field carrying an attribute that drops its key on the way out still writes a member, and the
+/// flag is what decides which of the two spellings that member takes.
+#[test]
+fn ts_optional_ok_on_an_option_field_whose_key_is_dropped_one_way() {
+    for item in [
+        syn::parse_quote! {
+            struct Report { #[serde(skip_serializing_if = "Option::is_none")] name: Option<String> }
+        },
+        syn::parse_quote! { struct Report { #[serde(skip_serializing)] name: Option<String> } },
+    ] {
+        ts_optional_verdict(&item, true).unwrap();
+    }
 }
 
 #[test]
 fn ts_optional_ok_when_flag_unset() {
-    validate_ts_optional_flag(true, false).unwrap();
-    validate_ts_optional_flag(false, false).unwrap();
+    for item in [
+        syn::parse_quote! { struct Report { name: Option<String> } },
+        syn::parse_quote! { struct Report { name: String } },
+        syn::parse_quote! { struct Report(Option<String>); },
+        syn::parse_quote! { struct Report { #[serde(skip)] name: Option<String> } },
+    ] {
+        ts_optional_verdict(&item, false).unwrap();
+    }
 }
 
 #[test]
 fn ts_optional_err_on_non_option_field() {
-    let err = validate_ts_optional_flag(false, true).unwrap_err();
+    let err = ts_optional_verdict(&syn::parse_quote! { struct Report { name: String } }, true)
+        .unwrap_err();
     assert!(err.contains("ts_optional"));
     assert!(err.contains("Option<T>"));
+}
+
+/// A positional slot writes no key, so the flag names a spelling the tuple line has no room for.
+#[test]
+fn ts_optional_err_on_a_positional_slot() {
+    let err = ts_optional_verdict(&syn::parse_quote! { struct Report(Option<String>); }, true)
+        .unwrap_err();
+    assert_eq!(
+        err,
+        "#[model_schema_prop(ts_optional)] requires a named field: a positional slot writes no \
+         key for the flag to make optional"
+    );
+}
+
+/// A member serde takes out of both directions is described on no surface, so the flag has no line
+/// to write its key on.
+#[test]
+fn ts_optional_err_on_a_member_off_the_wire() {
+    let err = ts_optional_verdict(
+        &syn::parse_quote! { struct Report { #[serde(skip)] name: Option<String> } },
+        true,
+    )
+    .unwrap_err();
+    assert_eq!(
+        err,
+        "#[model_schema_prop(ts_optional)] requires a field the wire carries: a serde attribute \
+         takes this one out of both directions, so no member is written for the flag to make \
+         optional"
+    );
 }
 
 #[cfg(feature = "chrono")]
@@ -2441,6 +2504,7 @@ fn field_prop_guard_errors_in_scope(item: &syn::ItemStruct, parameters: &[String
     let written = get_field_def(&name, &field.ty, "");
     let mut rendered = written.clone();
     rendered.erase_type_parameters(parameters);
+    apply_serde_key_omission(&mut rendered, field);
     let meta = super::parse_model_schema_prop_attributes(&field.attrs);
     super::collect_field_guard_errors(field, &rendered, &written, &name, &meta, Vec::new())
         .iter()
@@ -3099,11 +3163,54 @@ fn the_field_prop_misuses_leave_by_the_guard_channel() {
     }
 }
 
+/// The two positions the flag has no key to make optional, refused on the same channel and spanned
+/// on what carries them: a slot the tuple line writes without a key, and a member serde takes out
+/// of both directions.
+#[test]
+fn the_flag_leaves_by_the_guard_channel_where_it_has_no_key_to_make_optional() {
+    let slot = field_prop_guard_errors(&syn::parse_quote! {
+        struct Report(#[model_schema_prop(ts_optional)] Option<String>);
+    });
+    assert_eq!(slot.len(), 1, "{slot:?}");
+    for expected in ["compile_error", "tuple field", "requires a named field"] {
+        assert!(
+            slot[0].contains(expected),
+            "{expected} missing: {}",
+            slot[0]
+        );
+    }
+
+    let off_the_wire = field_prop_guard_errors(&syn::parse_quote! {
+        struct Report {
+            #[model_schema_prop(ts_optional)]
+            #[serde(skip)]
+            name: Option<String>,
+        }
+    });
+    assert_eq!(off_the_wire.len(), 1, "{off_the_wire:?}");
+    for expected in [
+        "compile_error",
+        "field `name`",
+        "requires a field the wire carries",
+    ] {
+        assert!(
+            off_the_wire[0].contains(expected),
+            "{expected} missing: {}",
+            off_the_wire[0]
+        );
+    }
+}
+
 /// The valid spellings of the same three keys stay valid.
 #[test]
 fn the_field_prop_flags_on_the_shapes_they_fit_are_accepted() {
     for field in [
         quote::quote! { #[model_schema_prop(ts_optional)] name: Option<String> },
+        quote::quote! {
+            #[model_schema_prop(ts_optional)]
+            #[serde(skip_serializing_if = "Option::is_none")]
+            name: Option<String>
+        },
         quote::quote! { #[model_schema_prop(preprocess = ["trim"])] name: String },
         quote::quote! { #[model_schema_prop(as = String, minLength = 1)] name: String },
     ] {

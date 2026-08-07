@@ -10461,9 +10461,34 @@ fn validate_as_number_flag(field_type: &FieldDefType, flag_set: bool) -> Result<
     Ok(())
 }
 
-fn validate_ts_optional_flag(field_optional: bool, flag_set: bool) -> Result<(), String> {
-    if flag_set && !field_optional {
+/// Rejects `ts_optional` where the member has no key for it to make optional. A positional slot
+/// writes no key at all, and one a serde attribute takes out of both of serde's directions is
+/// described on no surface, so on either the flag asks for a spelling nothing emits.
+fn validate_ts_optional_flag(
+    field: &Field,
+    field_def: &FieldDef,
+    flag_set: bool,
+) -> Result<(), String> {
+    if !flag_set {
+        return Ok(());
+    }
+    if field.ident.is_none() {
+        return Err(
+            "#[model_schema_prop(ts_optional)] requires a named field: a positional slot writes \
+             no key for the flag to make optional"
+                .into(),
+        );
+    }
+    if !field_def.is_optional() {
         return Err("#[model_schema_prop(ts_optional)] requires an Option<T> field".into());
+    }
+    if field_def.absent_from_wire {
+        return Err(
+            "#[model_schema_prop(ts_optional)] requires a field the wire carries: a serde \
+             attribute takes this one out of both directions, so no member is written for the \
+             flag to make optional"
+                .into(),
+        );
     }
     Ok(())
 }
@@ -10683,7 +10708,7 @@ fn model_schema_prop_guard_errors(
         flag_guard_error(
             field,
             label,
-            validate_ts_optional_flag(field_def.is_optional(), prop_meta.ts_optional),
+            validate_ts_optional_flag(field, field_def, prop_meta.ts_optional),
         ),
         flag_guard_error(
             field,
