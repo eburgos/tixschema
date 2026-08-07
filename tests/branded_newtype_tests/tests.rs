@@ -703,6 +703,29 @@ mod branded_in_struct_no_jsonschema_tests {
     }
 }
 
+/// A tuple in a map slot is unrenderable on the JSON surface alone, which is why the guard refusing
+/// it is gated with that surface — with `jsonschema` off the same brand still writes its record.
+#[cfg(all(not(feature = "jsonschema"), feature = "zod"))]
+mod branded_tuple_map_value_no_jsonschema_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[model_schema(no_display)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct SpanMap(pub HashMap<String, (u32, u32)>);
+
+    #[test]
+    fn a_tuple_map_value_still_renders_without_the_json_surface() {
+        let zod = SpanMap::zod_schema();
+        assert!(
+            zod.contains("z.record(z.string(), z.tuple([z.number().int(), z.number().int()]))"),
+            "Got:\n{zod}"
+        );
+        assert!(zod.contains(&brand_marker("SpanMap")), "Got:\n{zod}");
+    }
+}
+
 #[cfg(all(
     feature = "jsonschema",
     not(feature = "zod"),

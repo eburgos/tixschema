@@ -387,8 +387,11 @@ enum MapMemberRejection {
 
 #[cfg(feature = "jsonschema")]
 impl MapMemberRejection {
-    /// The written tokens the diagnostic points at. A key under a sequence wrapper points at the
-    /// element rather than the wrapper, `get_field_def` having collapsed the wrapper onto it.
+    /// The written tokens the diagnostic points at, behind the guards rather than in front of
+    /// them: every authoring position a map key is written in is refused upstream by a guard of its
+    /// own, spanned on the type as written. A key under a sequence wrapper still carries the
+    /// element's span here, `get_field_def` having collapsed the wrapper onto it, and no reachable
+    /// position draws that caret.
     const fn span(&self) -> proc_macro2::Span {
         match *self {
             Self::Key(_, span) | Self::Tuple(span) => span,
@@ -2097,6 +2100,8 @@ fn default_types_guard_errors(
     rejections.extend(fillings_no_document_can_be_built_from(args));
     #[cfg(feature = "jsonschema")]
     rejections.extend(fillings_reaching_an_undescribable_std_type(args));
+    #[cfg(feature = "jsonschema")]
+    rejections.extend(fillings_reaching_an_unwritable_map_key(args));
 
     rejections
         .iter()
@@ -2204,6 +2209,23 @@ fn fillings_reaching_an_undescribable_std_type(args: &ModelSchemaArgs) -> Vec<sy
             let rejection = undescribable_std_rejection(&written)?;
             let message =
                 undescribable_std_message(&format!("`default_types` entry `{name}`"), &rejection);
+            Some(syn::Error::new_spanned(filling, message))
+        })
+        .collect()
+}
+
+/// The refusal every `default_types` entry earns whose filling reaches a map key no surface can
+/// write, at any depth, spanned on the filling as written. Gated with the JSON surface because it
+/// is the only one that reads a declared filling at all.
+#[cfg(feature = "jsonschema")]
+fn fillings_reaching_an_unwritable_map_key(args: &ModelSchemaArgs) -> Vec<syn::Error> {
+    args.default_types
+        .iter()
+        .filter_map(|(name, filling)| {
+            let written = get_field_def("_filling", filling, "");
+            let rejection = map_key_rejection(&written)?;
+            let message =
+                map_key_rejection_message(&format!("`default_types` entry `{name}`"), &rejection);
             Some(syn::Error::new_spanned(filling, message))
         })
         .collect()
@@ -3226,11 +3248,50 @@ fn branded_map_key_error(name: &Ident, inner_field: &Field) -> Option<proc_macro
     Some(syn::Error::new_spanned(&inner_field.ty, message).to_compile_error())
 }
 
+/// The `compile_error!` tokens for a branded newtype whose inner the JSON slot dispatch cannot
+/// render, or `None` when it renders. Gated on `jsonschema` because that is the only surface the
+/// rejection stands on: a tuple map value renders as a Zod tuple and a TypeScript tuple, and an
+/// ungated guard would newly refuse brands every jsonschema-off build accepts today.
+#[cfg(feature = "jsonschema")]
+fn branded_slot_value_error(
+    generics: &syn::Generics,
+    name: &Ident,
+    inner_field: &Field,
+) -> Option<proc_macro2::TokenStream> {
+    let inner = branded_inner_value_surface(generics, inner_field);
+    let BrandedJsonInner::Slot(slot) = branded_json_inner(&inner) else {
+        return None;
+    };
+    let rejection = build_tuple_element_json_schema(&slot).err()?;
+    // Every key reason this walk can reach is already worded by `branded_map_key_error`, at every
+    // depth, so reporting one here would refuse the same inner twice.
+    if matches!(rejection, MapMemberRejection::Key(..)) {
+        return None;
+    }
+    let message = prefixed_guard_message(&map_member_rejection_message(
+        &format!("type `{name}`"),
+        &rejection,
+    ));
+    Some(syn::Error::new(rejection.span(), message).to_compile_error())
+}
+
+#[cfg(all(
+    not(feature = "jsonschema"),
+    any(feature = "typescript", feature = "zod")
+))]
+const fn branded_slot_value_error(
+    _generics: &syn::Generics,
+    _name: &Ident,
+    _inner_field: &Field,
+) -> Option<proc_macro2::TokenStream> {
+    None
+}
+
 /// The `compile_error!` tokens for every guard a branded newtype violates: a `cfg_attr`-wrapped
 /// serde attribute on the type or on its inner slot, an `Option` inner type, string constraints
 /// over an inner type that cannot carry them, a `pattern` that is not a regex, a std type the inner
-/// reaches that serde has no wire form for, and a map key the inner reaches that no surface can
-/// write.
+/// reaches that serde has no wire form for, a map key the inner reaches that no surface can write,
+/// and an inner the JSON slot dispatch cannot render.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn branded_guard_errors(
     item_struct: &syn::ItemStruct,
@@ -3252,6 +3313,11 @@ fn branded_guard_errors(
             inner_field,
         ))
         .chain(branded_map_key_error(&item_struct.ident, inner_field))
+        .chain(branded_slot_value_error(
+            &item_struct.generics,
+            &item_struct.ident,
+            inner_field,
+        ))
         .collect()
 }
 
