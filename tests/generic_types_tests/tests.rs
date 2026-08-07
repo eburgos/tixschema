@@ -1604,6 +1604,15 @@ pub struct Undefaulted<IdType> {
     pub id: IdType,
 }
 
+/// A filling holding a map serde cannot key. Only the JSON surface reads a declared filling deeply
+/// enough to refuse one, so with `jsonschema` off the entry is declared and rendered as any other.
+#[cfg(all(not(feature = "jsonschema"), feature = "zod"))]
+#[model_schema(default_types(HeldType = HashMap<Vec<String>, u32>))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SequenceKeyedHolder<HeldType> {
+    pub held: HeldType,
+}
+
 /// The item the reference-site fixtures below point at. A generic type publishes a factory rather
 /// than a schema, so a field naming it has nothing to name — it has to call that factory with what
 /// fills each parameter.
@@ -1910,6 +1919,16 @@ pub struct FlatDefaulted<HeldType> {
     #[serde(flatten)]
     pub held: HeldType,
     pub tag: String,
+}
+
+#[cfg(all(not(feature = "jsonschema"), feature = "zod"))]
+#[test]
+fn a_sequence_keyed_map_filling_still_renders_its_default() {
+    let zod = SequenceKeyedHolder::<HashMap<Vec<String>, u32>>::zod_schema();
+    assert!(
+        zod.contains("SequenceKeyedHolder$SchemaDefault"),
+        "Got:\n{zod}"
+    );
 }
 
 #[cfg(not(feature = "jsonschema"))]

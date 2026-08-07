@@ -4021,6 +4021,71 @@ fn a_brand_over_a_writable_map_key_clears_the_guard() {
     }
 }
 
+/// A brand whose inner the slot dispatch cannot render is refused here rather than inside the
+/// `json_schema()` body, so the expansion stops instead of carrying on to emit a `Display` impl
+/// whose `where` clause reports a second, unasked-for error beside the refusal.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_brand_over_a_map_with_a_tuple_value_is_refused() {
+    for inner in [
+        quote::quote! { HashMap<String, (u32, u32)> },
+        quote::quote! { Vec<HashMap<String, (u32, u32)>> },
+        quote::quote! { (String, HashMap<String, (u32, u32)>) },
+    ] {
+        let errors = branded_errors(&syn::parse_quote! {
+            #[serde(transparent)]
+            struct Wrap(pub #inner);
+        });
+        assert_eq!(errors.len(), 1, "for {inner}, got: {errors:?}");
+        for needle in [
+            "compile_error",
+            "model_schema: type `Wrap`",
+            "a tuple is not supported as a map value",
+        ] {
+            assert!(
+                errors[0].contains(needle),
+                "{needle} missing for {inner}: {}",
+                errors[0]
+            );
+        }
+    }
+}
+
+/// The refusal points at the tuple that earned it, not at the map or the whole inner.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_brand_slot_value_refusal_is_spanned_on_the_tuple() {
+    let item: syn::ItemStruct =
+        syn::parse_str("#[serde(transparent)] struct Wrap(pub HashMap<String, (u32, u32)>);")
+            .unwrap();
+    let refusals = branded_guard_errors(&item, &super::ModelSchemaArgs::default());
+    assert_eq!(refusals.len(), 1, "got: {}", refusals.len());
+    assert_eq!(
+        refusals[0].span().source_text().as_deref(),
+        Some("(u32, u32)")
+    );
+}
+
+/// The guard is a filter here too: a tuple written in its own right is a fixed-arity array every
+/// surface describes, and only a tuple reached through a slot is not.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_brand_over_a_renderable_slot_clears_the_guard() {
+    for inner in [
+        quote::quote! { (String, u32) },
+        quote::quote! { HashMap<String, u32> },
+        quote::quote! { Vec<Vec<i32>> },
+        quote::quote! { Vec<Option<String>> },
+        quote::quote! { [u8; 4] },
+    ] {
+        let errors = branded_errors(&syn::parse_quote! {
+            #[serde(transparent)]
+            struct Wrap(pub #inner);
+        });
+        assert!(errors.is_empty(), "for {inner}, got: {errors:?}");
+    }
+}
+
 /// Every constraint the guard reacts to, applied one at a time: `has_string_constraints` is an
 /// or over three independent fields, so a guard wired to only one of them would still pass a
 /// pattern-only probe.
@@ -5282,6 +5347,102 @@ fn an_undescribable_std_filling_refusal_is_spanned_on_the_filling() {
         refusals[0].span().source_text().as_deref(),
         Some("OsString")
     );
+}
+
+/// A declared filling is the one map-key position no guard of its own covered, so a key no surface
+/// can write reached the rendering sink and drew its caret on whatever `get_field_def` had
+/// collapsed the key onto. Refused at the entry, at whatever depth it was written.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_filling_reaching_an_unwritable_map_key_is_refused_at_the_entry() {
+    for (written, reason) in [
+        ("HashMap<Vec<String>, u32>", "is a sequence of `String`"),
+        ("HashMap<Option<String>, u32>", "an `Option<String>`"),
+        ("HashMap<[String; 2], u32>", "is a sequence of `String`"),
+        (
+            "HashMap<String, HashMap<Vec<String>, u32>>",
+            "is a sequence of `String`",
+        ),
+        (
+            "Holder<HashMap<Vec<String>, u32>>",
+            "is a sequence of `String`",
+        ),
+        ("HashMap<(u8, u8), u32>", "serde writes `(_, _)`"),
+    ] {
+        let messages = default_types_messages(
+            "pub struct Probe<ValueType> { pub held: ValueType }",
+            &format!("default_types(ValueType = {written})"),
+        );
+        assert_eq!(messages.len(), 1, "for {written}: {messages:?}");
+        for needle in [
+            "compile_error",
+            "`default_types` entry `ValueType`",
+            "a map key must be",
+            reason,
+            "type `Probe`",
+        ] {
+            assert!(
+                messages[0].contains(needle),
+                "{needle} missing for {written}: {}",
+                messages[0]
+            );
+        }
+    }
+}
+
+/// The refusal points at the filling as written, the tokens the author can change — never at the
+/// element a sequence wrapper was collapsed onto, which is what the rendering sink underlined. Every
+/// collapsing spelling moves the same way, and the span is the one the entry's other filling guard
+/// already draws in this position.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn an_unwritable_map_key_filling_refusal_is_spanned_on_the_filling() {
+    for written in [
+        "HashMap<Vec<String>, u32>",
+        "HashMap<Vec<Vec<String>>, u32>",
+        "HashMap<Option<String>, u32>",
+        "HashMap<[String; 2], u32>",
+    ] {
+        let refusals = default_types_refusals(
+            "pub struct Probe<IdType, HeldType> { pub id: IdType, pub held: HeldType }",
+            &format!("default_types(IdType = String, HeldType = {written})"),
+        );
+        assert_eq!(refusals.len(), 1, "for {written}: {refusals:?}");
+        assert_eq!(
+            refusals[0].span().source_text().as_deref(),
+            Some(written),
+            "for {written}"
+        );
+    }
+
+    let undescribable = default_types_refusals(
+        "pub struct Probe<IdType, HeldType> { pub id: IdType, pub held: HeldType }",
+        "default_types(IdType = String, HeldType = HashMap<String, OsString>)",
+    );
+    assert_eq!(
+        undescribable[0].span().source_text().as_deref(),
+        Some("HashMap<String, OsString>")
+    );
+}
+
+/// The guard is a filter: a filling whose map key can be written, and one that is no map at all,
+/// earn nothing.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_filling_with_a_writable_map_key_clears_the_guard() {
+    register_alias_info("Slot", "Slot", "slot_schema", AliasKind::EnumMembers);
+    for written in [
+        "HashMap<String, u32>",
+        "HashMap<Slot, u32>",
+        "Vec<HashMap<String, u32>>",
+        "String",
+    ] {
+        let messages = default_types_messages(
+            "pub struct Probe<ValueType> { pub held: ValueType }",
+            &format!("default_types(ValueType = {written})"),
+        );
+        assert!(messages.is_empty(), "for {written}: {messages:?}");
+    }
 }
 
 /// The refusal points at the filling as written — the token the author can change — rather than at
