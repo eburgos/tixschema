@@ -616,7 +616,7 @@ export const Document$Schema: ZodType<Document> = Document$RawSchema;
 ///
 #[proc_macro_attribute]
 pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
-    exec_model_schema(args, input)
+    exec_model_schema(args.into(), input.into()).into()
 }
 
 /// # `model_schema_prop`

@@ -6132,7 +6132,6 @@ fn display_assertion(source: &str) -> proc_macro2::TokenStream {
 
 /// Collects the source text each token in `tokens` points at, skipping the macro-synthesized
 /// tokens that carry no location.
-#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn located_source_texts(tokens: &proc_macro2::TokenStream) -> Vec<String> {
     let mut texts = Vec::new();
     for tree in tokens.clone() {
@@ -10826,4 +10825,60 @@ fn a_flattened_untagged_variant_field_over_a_single_key_set_source_is_not_refuse
         })
         .is_empty()
     );
+}
+
+/// Runs the whole attribute expansion over `source`, the way the `#[proc_macro_attribute]` does
+/// either side of its `proc_macro` conversion.
+fn expansion_over(source: &str) -> proc_macro2::TokenStream {
+    super::exec_model_schema(
+        proc_macro2::TokenStream::new(),
+        syn::parse_str(source).unwrap(),
+    )
+}
+
+/// The seam's fallthrough, the one sink no item that compiles can reach: an item whose shape the
+/// macro has no expansion for earns the refusal, spanned on the item so the caret lands on the
+/// declaration rather than on the attribute.
+#[test]
+fn an_item_with_no_shape_is_refused_on_the_item() {
+    for (source, first_token) in [
+        ("pub fn unsupported_shape() {}", "pub"),
+        ("impl Unsupported {}", "impl"),
+        ("pub trait Unsupported {}", "pub"),
+        ("pub mod unsupported {}", "pub"),
+        ("pub const UNSUPPORTED: u8 = 0;", "pub"),
+        ("pub static UNSUPPORTED: u8 = 0;", "pub"),
+        ("pub union Unsupported { pub a: u8 }", "pub"),
+    ] {
+        let tokens = expansion_over(source);
+        assert!(
+            tokens
+                .to_string()
+                .contains("model_schema: unsupported target for this attribute"),
+            "for {source}, got: {tokens}"
+        );
+        let located = located_source_texts(&tokens);
+        assert_eq!(
+            located.first().map(String::as_str),
+            Some(first_token),
+            "for {source}, got: {located:?}"
+        );
+    }
+}
+
+/// The arm answers for what is left over, not for everything: the three shapes the macro does
+/// expand pass the dispatch without earning it.
+#[test]
+fn the_shapes_the_macro_expands_are_not_refused() {
+    for source in [
+        "pub struct DispatchedShape { pub name: String }",
+        "pub enum DispatchedChoice { One, Two }",
+        "pub type DispatchedAlias = String;",
+    ] {
+        let tokens = expansion_over(source);
+        assert!(
+            !tokens.to_string().contains("unsupported target"),
+            "for {source}, got: {tokens}"
+        );
+    }
 }
