@@ -1938,14 +1938,12 @@ fn an_alias_targeting_a_map_key_with_no_members_is_refused() {
         pub type CountsByDoc = HashMap<Doc, u32>;
     };
     let field_def = get_field_def("CountsByDocType", &alias.ty, "");
-    let error = alias_map_key_guard_error(&alias, "CountsByDocType", &field_def)
+    let error = alias_map_key_guard_error(&alias, &field_def)
         .unwrap_or_default()
         .to_string();
     assert!(error.contains("compile_error"), "got: {error}");
-    assert!(
-        error.contains("type alias `CountsByDocType`"),
-        "got: {error}"
-    );
+    assert!(error.contains("type alias `CountsByDoc`"), "got: {error}");
+    assert!(!error.contains("CountsByDocType"), "got: {error}");
     assert!(error.contains("a map key must be a plain"), "got: {error}");
     assert!(error.contains("Doc"), "got: {error}");
 }
@@ -1956,7 +1954,7 @@ fn an_alias_targeting_a_map_key_with_no_members_is_refused() {
 fn alias_undescribable_std_error_text(source: &str) -> String {
     let alias: syn::ItemType = syn::parse_str(source).unwrap();
     let field_def = get_field_def("Probe", &alias.ty, "");
-    alias_undescribable_std_error(&alias, "Probe", &field_def)
+    alias_undescribable_std_error(&alias, &field_def)
         .unwrap_or_default()
         .to_string()
 }
@@ -1967,27 +1965,43 @@ fn alias_undescribable_std_error_text(source: &str) -> String {
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn an_alias_targeting_an_undescribable_std_type_is_refused() {
-    for (target, named, wire) in [
-        ("pub type Slot = OnceLock<u32>;", "`OnceLock`", "Serialize"),
-        ("pub type Location = OsString;", "`OsString`", "externally"),
+    for (target, subject, named, wire) in [
+        (
+            "pub type Slot = OnceLock<u32>;",
+            "type alias `Slot`",
+            "`OnceLock`",
+            "Serialize",
+        ),
+        (
+            "pub type Location = OsString;",
+            "type alias `Location`",
+            "`OsString`",
+            "externally",
+        ),
         (
             "pub type Nested = Vec<OnceLock<u32>>;",
+            "type alias `Nested`",
             "`OnceLock`",
             "Serialize",
         ),
         (
             "pub type Keyed = HashMap<String, OsString>;",
+            "type alias `Keyed`",
             "`OsString`",
             "externally",
         ),
     ] {
         let error = alias_undescribable_std_error_text(target);
-        for needle in ["compile_error", "type alias `Probe`", named, wire] {
+        for needle in ["compile_error", subject, named, wire] {
             assert!(
                 error.contains(needle),
                 "{needle} missing for {target}: {error}"
             );
         }
+        assert!(
+            !error.contains("Probe"),
+            "the field-def name leaked for {target}: {error}"
+        );
     }
 }
 
@@ -2023,13 +2037,47 @@ fn an_alias_violating_both_type_level_guards_earns_both_refusals() {
     };
     let field_def = get_field_def("Audited", &alias.ty, "");
     assert!(
-        alias_undescribable_std_error(&alias, "Audited", &field_def).is_some(),
+        alias_undescribable_std_error(&alias, &field_def).is_some(),
         "the std-type guard found nothing"
     );
     assert!(
-        alias_map_key_guard_error(&alias, "Audited", &field_def).is_some(),
+        alias_map_key_guard_error(&alias, &field_def).is_some(),
         "the map-key guard found nothing"
     );
+}
+
+/// An alias publishes under a computed export name — `SlotJson` under `SlotType`, sharing no
+/// substring with what was written. Both type-level guards name the written ident, the one string
+/// the author can find in their own source.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_json_suffixed_alias_is_named_by_its_written_ident() {
+    register_alias_info("Tally", "Tally", "tally_schema", AliasKind::NoEnumMembers);
+    let held: syn::ItemType = syn::parse_quote! {
+        pub type SlotJson = OnceLock<u32>;
+    };
+    let held_def = get_field_def("SlotType", &held.ty, "");
+    let held_error = alias_undescribable_std_error(&held, &held_def)
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        held_error.contains("type alias `SlotJson`"),
+        "got: {held_error}"
+    );
+    assert!(!held_error.contains("SlotType"), "got: {held_error}");
+
+    let keyed: syn::ItemType = syn::parse_quote! {
+        pub type CountsJson = HashMap<Tally, u32>;
+    };
+    let keyed_def = get_field_def("CountsType", &keyed.ty, "");
+    let keyed_error = alias_map_key_guard_error(&keyed, &keyed_def)
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        keyed_error.contains("type alias `CountsJson`"),
+        "got: {keyed_error}"
+    );
+    assert!(!keyed_error.contains("CountsType"), "got: {keyed_error}");
 }
 
 /// A refused item still publishes the schema module every reference to it addresses. The address
@@ -3413,7 +3461,11 @@ fn an_alias_of_an_unrenderable_target_emits_only_the_compile_error() {
             "for {alias_source}, got: {tokens}"
         );
         assert!(
-            tokens.contains("type alias `RowsType`"),
+            tokens.contains("type alias `Rows`"),
+            "for {alias_source}, got: {tokens}"
+        );
+        assert!(
+            !tokens.contains("type alias `RowsType`"),
             "for {alias_source}, got: {tokens}"
         );
         assert!(
@@ -3430,6 +3482,26 @@ fn an_alias_of_an_unrenderable_target_emits_only_the_compile_error() {
              for {alias_source}, got: {tokens}"
         );
     }
+}
+
+/// The rejection names the written ident, not the export name the alias publishes under: `RowsJson`
+/// exports as `RowsType`, which the author's source does not contain anywhere.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_json_suffixed_alias_rejection_names_its_written_ident() {
+    let alias: syn::ItemType = syn::parse_quote! {
+        pub type RowsJson = HashMap<String, (u32, u32)>;
+    };
+    let field_def = super::get_field_def("RowsType", &alias.ty, "");
+    let tokens = super::generate_alias_json_schema_method(
+        &alias,
+        "RowsType",
+        &field_def,
+        &super::ModelSchemaArgs::default(),
+    )
+    .to_string();
+    assert!(tokens.contains("type alias `RowsJson`"), "got: {tokens}");
+    assert!(!tokens.contains("type alias `RowsType`"), "got: {tokens}");
 }
 
 /// A type parameter reaches the mapping as a named type, and a name is carried by a reference to
