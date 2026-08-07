@@ -193,13 +193,9 @@ type DiscriminatedVariantData = (
     Vec<proc_macro2::TokenStream>,
 );
 
-/// Rendered per-variant output for a discriminated enum: TypeScript fragments, Zod fragments
-/// (each with its optional-field list), and JSON-schema fragments.
-type RenderedVariants = (
-    Vec<String>,
-    Vec<(String, Vec<String>)>,
-    Vec<proc_macro2::TokenStream>,
-);
+/// Rendered per-variant output for a discriminated enum: TypeScript fragments, Zod fragments, and
+/// JSON-schema fragments.
+type RenderedVariants = (Vec<String>, Vec<String>, Vec<proc_macro2::TokenStream>);
 
 /// What an untagged enum's members contribute to an object that merges it, which only the Zod
 /// surface multiplies out and so only it has a member type for. The other tables carry the same
@@ -576,7 +572,6 @@ struct FieldContext<'ctx> {
 /// fields) from tripping `needless_pass_by_ref_mut` under feature subsets.
 struct VariantParts {
     json_fields: Vec<proc_macro2::TokenStream>,
-    optional_fields: Vec<String>,
     schema_code: String,
     type_code: String,
 }
@@ -5830,8 +5825,8 @@ fn collect_discriminated_variants(
     )
 }
 
-/// Renders the TypeScript type fragments, Zod schema fragments (with optional-field lists), and
-/// JSON-schema fragments for each variant of a discriminated enum.
+/// Renders the TypeScript type fragments, Zod schema fragments, and JSON-schema fragments for each
+/// variant of a discriminated enum.
 fn render_discriminated_variants(
     tag_name: &str,
     content_name: &str,
@@ -5843,10 +5838,10 @@ fn render_discriminated_variants(
     let mut json_schema_variants: Vec<proc_macro2::TokenStream> = Vec::new();
 
     for variant in variants {
-        let (variant_type_code, variant_schema_code, optional_fields, json_schema_variant) =
+        let (variant_type_code, variant_schema_code, json_schema_variant) =
             generate_variant_code(tag_name, content_name, variant, item_name);
         type_code_items.push(variant_type_code);
-        schema_code_items.push((variant_schema_code, optional_fields));
+        schema_code_items.push(variant_schema_code);
         json_schema_variants.push(json_schema_variant);
     }
 
@@ -5913,12 +5908,12 @@ fn adjacent_collapsed_slot_guard_errors(
 /// Builds the Zod `z.discriminatedUnion` expression for a discriminated enum from its per-variant
 /// member schemas, beside [`discriminated_main_schema_code`] which answers the same for JSON.
 #[cfg(feature = "zod")]
-fn discriminated_zod_schema_code(tag_name: &str, members: &[(String, Vec<String>)]) -> String {
+fn discriminated_zod_schema_code(tag_name: &str, members: &[String]) -> String {
     format!(
         "z.discriminatedUnion(\"{tag_name}\", [{}])",
         members
             .iter()
-            .map(|(member, _opts)| format!("z.strictObject({member})"))
+            .map(|member| format!("z.strictObject({member})"))
             .collect::<Vec<_>>()
             .join(", ")
     )
@@ -6190,7 +6185,6 @@ fn render_external_content(
         VariantKind::Named => {
             let mut parts = VariantParts {
                 json_fields: Vec::new(),
-                optional_fields: Vec::new(),
                 schema_code: String::new(),
                 type_code: String::new(),
             };
@@ -7964,7 +7958,6 @@ fn tagged_variant_parts(
     let tag_key = ts_member_key(tag_name);
     VariantParts {
         json_fields: Vec::new(),
-        optional_fields: Vec::new(),
         schema_code: format!("{{\n  {tag_key}: z.literal(\"{discriminator_value}\"),\n"),
         type_code: format!(
             "{{\n{}\n  {tag_key}: \"{discriminator_value}\";\n",
@@ -8023,7 +8016,7 @@ fn generate_variant_code(
     content_name: &str,
     variant: &DiscriminatedVariant,
     self_type_name: &str,
-) -> (String, String, Vec<String>, proc_macro2::TokenStream) {
+) -> (String, String, proc_macro2::TokenStream) {
     let discriminator_value = &variant.discriminator_value;
     let field_defs = &variant.field_defs;
     let mut parts = tagged_variant_parts(tag_name, discriminator_value, &variant.docs);
@@ -8063,12 +8056,7 @@ fn generate_variant_code(
     #[cfg(not(feature = "jsonschema"))]
     let json_schema_variant = quote! {};
 
-    (
-        parts.type_code,
-        parts.schema_code,
-        parts.optional_fields,
-        json_schema_variant,
-    )
+    (parts.type_code, parts.schema_code, json_schema_variant)
 }
 
 /// Writes an adjacently tagged struct variant's fields nested under the content key, the shape
@@ -8082,7 +8070,6 @@ fn write_adjacent_named_variant_fields(
 ) {
     let mut inner = VariantParts {
         json_fields: Vec::new(),
-        optional_fields: Vec::new(),
         schema_code: String::new(),
         type_code: String::new(),
     };
@@ -8147,7 +8134,6 @@ fn write_named_variant_fields(
 ) {
     let variant_type_code = &mut parts.type_code;
     let variant_schema_code = &mut parts.schema_code;
-    let optional_fields = &mut parts.optional_fields;
     let json_schema_variant_fields = &mut parts.json_fields;
     for fld in field_defs {
         let key = ts_member_key(&fld.name);
@@ -8187,10 +8173,6 @@ fn write_named_variant_fields(
         }
         #[cfg(not(feature = "jsonschema"))]
         let _: &_ = &(tag_name, &json_schema_variant_fields);
-
-        if fld.is_optional() {
-            optional_fields.push(fld.name.clone());
-        }
     }
 }
 

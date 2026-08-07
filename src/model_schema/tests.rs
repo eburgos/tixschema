@@ -7446,11 +7446,7 @@ fn rendered_discriminated_union() -> (Vec<String>, Vec<String>, Vec<String>) {
     let rendered = render_discriminated_variants("type", "value", "Action", &variants.0);
     (
         rendered.0,
-        rendered
-            .1
-            .into_iter()
-            .map(|(schema_code, _optional)| schema_code)
-            .collect(),
+        rendered.1,
         rendered.2.iter().map(ToString::to_string).collect(),
     )
 }
@@ -7521,7 +7517,7 @@ fn adjacently_tagged_empty_named_variant_nests_an_empty_content_object() {
     assert!(ts.contains("data: {\n};"), "Got: {ts}");
 
     #[cfg(feature = "zod")]
-    let zod = &rendered.1[0].0;
+    let zod = &rendered.1[0];
     #[cfg(feature = "zod")]
     assert!(zod.contains("data: z.strictObject({\n}),"), "Got: {zod}");
 
