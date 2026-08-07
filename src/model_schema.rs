@@ -3,11 +3,11 @@ extern crate alloc;
 use alloc::borrow::ToOwned;
 use core::fmt::Write as _;
 
-use proc_macro::TokenStream;
+use proc_macro2::TokenStream;
 use quote::quote;
 use syn::parse::{Parse, ParseStream, Parser as _};
 use syn::punctuated::Punctuated;
-use syn::{Field, Item, ItemType, Meta, Token, parse_macro_input};
+use syn::{Field, Item, ItemType, Meta, Token};
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use quote::quote_spanned;
@@ -1020,8 +1020,13 @@ fn record_pattern(result: &mut ModelSchemaArgs, lit_str: &syn::LitStr) {
 }
 
 pub fn exec_model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
-    let parsed_args = parse_model_schema_args(args.into());
-    let item = parse_macro_input!(input as Item);
+    let parsed_args = parse_model_schema_args(args);
+    // Written out rather than `parse_macro_input!`, which returns from the enclosing function and
+    // so forces its return type to be `proc_macro::TokenStream`. This is the match it expands to.
+    let item = match syn::parse2::<Item>(input) {
+        Ok(item) => item,
+        Err(rejection) => return rejection.to_compile_error(),
+    };
     // An argument the parser refused describes a surface no expansion below can honour, so the
     // item is refused before it is dispatched to its shape.
     if let Some(rejection) = parsed_args.arg_rejection.as_ref()
@@ -1098,7 +1103,6 @@ pub fn exec_model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
             prefixed_guard_message("unsupported target for this attribute"),
         )
         .to_compile_error()
-        .into()
     };
     let answered = with_prefixed_tokens(expanded, &deferred_shape_refusals(registering.as_ref()));
     with_prefixed_tokens(answered, &filling_bound_checks)
@@ -1210,7 +1214,7 @@ fn process_type_alias(item_type: ItemType, args: &ModelSchemaArgs) -> TokenStrea
         &args.default_types,
     );
 
-    let output = quote! {
+    quote! {
         #alias
 
         pub mod #module_ident {
@@ -1225,9 +1229,7 @@ fn process_type_alias(item_type: ItemType, args: &ModelSchemaArgs) -> TokenStrea
                 #zod_method
             }
         }
-    };
-
-    TokenStream::from(output)
+    }
 }
 
 #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
@@ -1236,7 +1238,7 @@ fn process_type_alias(item_type: ItemType, _args: &ModelSchemaArgs) -> TokenStre
     alias
         .attrs
         .retain(|attr| !attr.path().is_ident("model_schema"));
-    TokenStream::from(quote! { #alias })
+    quote! { #alias }
 }
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -1465,7 +1467,7 @@ where
 
     log::trace!("{output}");
 
-    TokenStream::from(output)
+    output
 }
 
 /// The type-level `validate()` a struct publishes: the aggregate of its per-field validators, or
@@ -1876,7 +1878,7 @@ where
         #absorbing_module
     };
     log::trace!("{output}");
-    Some(TokenStream::from(output))
+    Some(output)
 }
 
 /// Turns a `cfg_attr` rejection into `compile_error!` tokens naming the item it was found on,
@@ -2451,12 +2453,10 @@ fn with_prefixed_tokens(expanded: TokenStream, prefix: &[proc_macro2::TokenStrea
     if prefix.is_empty() {
         return expanded;
     }
-    let item_and_surface: proc_macro2::TokenStream = expanded.into();
     quote! {
         #(#prefix)*
-        #item_and_surface
+        #expanded
     }
-    .into()
 }
 
 /// The `compile_error!` tokens an item earns for carrying a ` ```rust example ` block while
@@ -3800,7 +3800,7 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
             #item_struct
         };
         log::trace!("{output}");
-        TokenStream::from(output)
+        output
     }
 }
 
@@ -5094,7 +5094,7 @@ fn assemble_branded_output(parts: &BrandedNewtypeOutput) -> TokenStream {
 
     log::trace!("{output}");
 
-    TokenStream::from(output)
+    output
 }
 
 /// The output a branded newtype its guards refused is replaced by, or `None` when it earns none.
@@ -5751,7 +5751,7 @@ fn process_plain_enum(
 
     log::trace!("{output}");
 
-    TokenStream::from(output)
+    output
 }
 
 /// The kind a variant publishes, which is not always the kind it declares.
@@ -6233,7 +6233,7 @@ fn process_discriminated_enum(
             #item_enum
         };
         log::trace!("{output}");
-        TokenStream::from(output)
+        output
     }
 }
 
@@ -6754,7 +6754,7 @@ fn process_externally_tagged_enum(
             #item_enum
         };
         log::trace!("{output}");
-        TokenStream::from(output)
+        output
     }
 }
 
@@ -7154,7 +7154,7 @@ fn process_internally_tagged_enum(
             #item_enum
         };
         log::trace!("{output}");
-        TokenStream::from(output)
+        output
     }
 }
 
@@ -8170,7 +8170,7 @@ fn process_untagged_enum(
             #item_enum
         };
         log::trace!("{output}");
-        TokenStream::from(output)
+        output
     }
 }
 
