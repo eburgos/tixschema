@@ -53,6 +53,14 @@ impl SerdeKeyOmission {
     }
 }
 
+/// What a list-form `rename(...)` or `rename_all(...)` names in each of serde's two directions.
+#[cfg(feature = "serde")]
+#[derive(Default)]
+struct RenameDirections {
+    deserialize: Option<String>,
+    serialize: Option<String>,
+}
+
 /// Metadata for serde attributes applied to a struct or enum.
 #[cfg(feature = "serde")]
 #[derive(Clone, Debug, Default)]
@@ -116,8 +124,9 @@ pub fn parse_serde_key_omission(attrs: &[Attribute]) -> SerdeKeyOmission {
 
 /// Consumes the value of a `key = value` or the group of a `key(...)` list the walk had no use
 /// for, so an unread value doesn't end the walk early and drop every attribute written after it.
-/// The list is consumed whole rather than parsed — nothing here reads into `bound(...)`,
-/// `rename(...)`, or `rename_all(...)`, only steps past them.
+/// The list is consumed whole rather than parsed. `bound(...)` is the one list form worth naming
+/// here: it replaces the trait bounds serde's derive writes on its own impls and leaves the JSON
+/// byte-identical, so no surface generated from this walk has anything to read out of it.
 fn consume_unread_value(nested: &ParseNestedMeta<'_>) -> syn::Result<()> {
     if nested.input.peek(Token![=]) {
         nested.value()?.parse::<syn::Expr>()?;
@@ -133,6 +142,129 @@ fn consume_unread_value(nested: &ParseNestedMeta<'_>) -> syn::Result<()> {
 /// (`default` and `default = "path"`).
 pub fn has_serde_default(attrs: &[Attribute]) -> bool {
     parse_serde_key_omission(attrs).defaulted
+}
+
+/// Reads the `serialize` and `deserialize` sub-keys out of a list-form `rename(...)` /
+/// `rename_all(...)`, stepping past any other sub-key the same way the outer walk does.
+#[cfg(feature = "serde")]
+fn parse_rename_directions(nested: &ParseNestedMeta<'_>) -> syn::Result<RenameDirections> {
+    let mut directions = RenameDirections::default();
+    nested.parse_nested_meta(|inner| {
+        if inner.path.is_ident("serialize") {
+            directions.serialize = Some(inner.value()?.parse::<LitStr>()?.value());
+        } else if inner.path.is_ident("deserialize") {
+            directions.deserialize = Some(inner.value()?.parse::<LitStr>()?.value());
+        } else {
+            consume_unread_value(&inner)?;
+        }
+        Ok(())
+    })?;
+    Ok(directions)
+}
+
+/// The one name both of serde's directions agree on, or the refusal a pair naming two earns. A
+/// direction the list leaves out keeps the name it would otherwise have had, which serde was
+/// measured to do, so writing one direction alone splits the two apart just as writing two
+/// different values does.
+#[cfg(feature = "serde")]
+fn agreed_rename(
+    key: &str,
+    path: &syn::Path,
+    directions: &RenameDirections,
+) -> Result<Option<String>, Error> {
+    match (&directions.serialize, &directions.deserialize) {
+        (Some(serialize), Some(deserialize)) if serialize == deserialize => {
+            Ok(Some(serialize.clone()))
+        }
+        (Some(serialize), Some(deserialize)) => Err(Error::new_spanned(
+            path,
+            format!(
+                "serde `{key}` names `{serialize}` when serializing and `{deserialize}` when \
+                 deserializing, so the payload serde writes is not one serde reads. A schema \
+                 describes one key per member, so no schema can be written for the pair. Write \
+                 both directions at one value, or use the single-value spelling `{key} = \"...\"`."
+            ),
+        )),
+        (Some(serialize), None) => Err(one_direction_only(key, path, serialize, "serializing")),
+        (None, Some(deserialize)) => {
+            Err(one_direction_only(key, path, deserialize, "deserializing"))
+        }
+        (None, None) => Ok(None),
+    }
+}
+
+/// The refusal a list form writing one of serde's two directions and not the other earns.
+#[cfg(feature = "serde")]
+fn one_direction_only(key: &str, path: &syn::Path, written: &str, direction: &str) -> Error {
+    Error::new_spanned(
+        path,
+        format!(
+            "serde `{key}` names `{written}` when {direction} only, and leaves the other \
+             direction at the name it would otherwise use, so the payload serde writes is not one \
+             serde reads. A schema describes one key per member, so no schema can be written for \
+             the pair. Write both directions at one value, or use the single-value spelling \
+             `{key} = \"...\"`."
+        ),
+    )
+}
+
+/// The name a `rename` / `rename_all` key carries, in either spelling: the value of `key = "..."`,
+/// or the one name a list form's two directions agree on. A list form the directions disagree over
+/// names nothing a surface could render, and is answered by [`rename_direction_rejection`].
+#[cfg(feature = "serde")]
+fn read_renaming(nested: &ParseNestedMeta<'_>, key: &str) -> syn::Result<Option<String>> {
+    if nested.input.peek(Token![=]) {
+        let lit: LitStr = nested.value()?.parse()?;
+        Ok(Some(lit.value()))
+    } else if nested.input.peek(Paren) {
+        let directions = parse_rename_directions(nested)?;
+        Ok(agreed_rename(key, &nested.path, &directions).ok().flatten())
+    } else {
+        Ok(None)
+    }
+}
+
+/// The refusal the item's own list-form `rename(...)` / `rename_all(...)` earns when its two
+/// directions do not name one key, or `None` when every renaming written here names exactly one.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+pub fn rename_direction_rejection(attrs: &[Attribute]) -> Option<Error> {
+    let mut rejection: Option<Error> = None;
+
+    for attr in attrs {
+        if !attr.path().is_ident("serde") {
+            continue;
+        }
+        attr.parse_nested_meta(|nested| {
+            let renaming = if nested.path.is_ident("rename") {
+                Some("rename")
+            } else if nested.path.is_ident("rename_all") {
+                Some("rename_all")
+            } else {
+                None
+            };
+            if let Some(key) = renaming
+                && nested.input.peek(Paren)
+            {
+                let directions = parse_rename_directions(&nested)?;
+                if let Err(refusal) = agreed_rename(key, &nested.path, &directions)
+                    && rejection.is_none()
+                {
+                    rejection = Some(refusal);
+                }
+                return Ok(());
+            }
+            consume_unread_value(&nested)?;
+            Ok(())
+        })
+        .unwrap_or_else(|e| {
+            log::trace!("Failed to parse serde rename attribute: {e}");
+        });
+    }
+
+    rejection
 }
 
 /// The rejection for a `cfg_attr` carrying a `serde(...)` attribute, or `None` for every other
@@ -179,13 +311,10 @@ pub fn parse_serde_type_attributes(attrs: &[Attribute]) -> SerdeTypeMeta {
                     let lit: LitStr = value.parse()?;
                     meta.content = Some(lit.value());
                 }
-                // Handle `rename_all = "value"`. The list form `rename_all(serialize = "...",
-                // deserialize = "...")` is left to fall through to `consume_unread_value` below,
-                // the same as any other key this walk has no use for.
-                else if nested.path.is_ident("rename_all") && nested.input.peek(Token![=]) {
-                    let value = nested.value()?;
-                    let lit: LitStr = value.parse()?;
-                    meta.rename_all = Some(lit.value());
+                // Handle `rename_all = "value"` and `rename_all(serialize = "...",
+                // deserialize = "...")`
+                else if nested.path.is_ident("rename_all") {
+                    meta.rename_all = read_renaming(&nested, "rename_all")?;
                 }
                 // Handle `untagged`
                 else if nested.path.is_ident("untagged") {
@@ -217,13 +346,9 @@ pub fn parse_serde_field_attributes(attrs: &[Attribute]) -> SerdeFieldMeta {
             meta.cfg_attr_rejection = cfg_attr_serde_rejection(attr);
         } else if attr.path().is_ident("serde") {
             attr.parse_nested_meta(|nested| {
-                // Handle `rename = "value"`. The list form `rename(serialize = "...",
-                // deserialize = "...")` is left to fall through to `consume_unread_value` below,
-                // the same as any other key this walk has no use for.
-                if nested.path.is_ident("rename") && nested.input.peek(Token![=]) {
-                    let value = nested.value()?;
-                    let lit: LitStr = value.parse()?;
-                    meta.rename = Some(lit.value());
+                // Handle `rename = "value"` and `rename(serialize = "...", deserialize = "...")`
+                if nested.path.is_ident("rename") {
+                    meta.rename = read_renaming(&nested, "rename")?;
                 }
                 // Handle the whole `skip` lump
                 else if nested.path.is_ident("skip")

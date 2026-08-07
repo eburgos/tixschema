@@ -1267,6 +1267,100 @@ fn cfg_attr_wrapped_serde_on_a_variant_is_rejected() {
     assert!(errors[0].contains("variant `Active`"), "got: {}", errors[0]);
 }
 
+/// Collects an item's rename-direction guard failures as rendered `compile_error!` token strings.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+fn rename_direction_errors(item: &syn::Item) -> Vec<String> {
+    super::rename_direction_guard_errors(item)
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn a_container_renaming_naming_two_keys_is_rejected() {
+    let errors = rename_direction_errors(&syn::parse_quote! {
+        #[serde(rename_all(serialize = "camelCase", deserialize = "snake_case"))]
+        struct Profile {
+            my_field: u32,
+        }
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(errors[0].contains("compile_error"), "got: {}", errors[0]);
+    assert!(errors[0].contains("type `Profile`"), "got: {}", errors[0]);
+    assert!(errors[0].contains("camelCase"), "got: {}", errors[0]);
+    assert!(errors[0].contains("snake_case"), "got: {}", errors[0]);
+}
+
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn a_field_renaming_naming_two_keys_is_rejected() {
+    let errors = rename_direction_errors(&syn::parse_quote! {
+        struct Profile {
+            #[serde(rename(serialize = "out_name", deserialize = "in_name"))]
+            value: u32,
+        }
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(errors[0].contains("field `value`"), "got: {}", errors[0]);
+    assert!(errors[0].contains("out_name"), "got: {}", errors[0]);
+    assert!(errors[0].contains("in_name"), "got: {}", errors[0]);
+}
+
+/// A variant carries both spellings of its own, and its members carry theirs, so the walk reaches
+/// three levels down an enum.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn a_variant_and_its_member_are_both_reached() {
+    let errors = rename_direction_errors(&syn::parse_quote! {
+        enum Event {
+            #[serde(rename(serialize = "created", deserialize = "made"))]
+            Created {
+                #[serde(rename(serialize = "at", deserialize = "when"))]
+                moment: u32,
+            },
+        }
+    });
+    assert_eq!(errors.len(), 2, "got: {errors:?}");
+    assert!(
+        errors.iter().any(|e| e.contains("variant `Created`")),
+        "got: {errors:?}"
+    );
+    assert!(
+        errors.iter().any(|e| e.contains("field `moment`")),
+        "got: {errors:?}"
+    );
+}
+
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn renamings_naming_one_key_are_left_alone() {
+    let errors = rename_direction_errors(&syn::parse_quote! {
+        #[serde(rename_all(serialize = "camelCase", deserialize = "camelCase"))]
+        #[serde(bound(serialize = "T: Clone", deserialize = "T: Clone"))]
+        struct Profile<T> {
+            #[serde(rename(serialize = "same_name", deserialize = "same_name"))]
+            my_field: T,
+        }
+    });
+    assert!(errors.is_empty(), "got: {errors:?}");
+}
+
 #[cfg(feature = "serde")]
 #[test]
 fn cfg_attr_without_serde_leaves_an_enum_alone() {
