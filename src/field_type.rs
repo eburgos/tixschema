@@ -966,6 +966,51 @@ impl FieldDef {
         }
     }
 
+    /// The name of the first `is_unsupported_std_wrapper` this field reaches, at any depth.
+    pub fn unsupported_std_wrapper_name(&self) -> Option<&str> {
+        match &self.field_type {
+            FieldDefType::SiblingType(name, generics) => {
+                if is_unsupported_std_wrapper(name.as_str()) {
+                    return Some(name);
+                }
+                generics.iter().find_map(Self::unsupported_std_wrapper_name)
+            }
+            FieldDefType::Map(key, value) => key
+                .unsupported_std_wrapper_name()
+                .or_else(|| value.unsupported_std_wrapper_name()),
+            FieldDefType::Tuple(elements) => {
+                elements.iter().find_map(Self::unsupported_std_wrapper_name)
+            }
+            FieldDefType::TypeParam(_)
+            | FieldDefType::Unknown
+            | FieldDefType::StringLiteral(_)
+            | FieldDefType::BooleanLiteral(_)
+            | FieldDefType::NumberLiteral(_)
+            | FieldDefType::Boolean
+            | FieldDefType::Char
+            | FieldDefType::String
+            | FieldDefType::U8
+            | FieldDefType::U16
+            | FieldDefType::U32
+            | FieldDefType::U64
+            | FieldDefType::I8
+            | FieldDefType::I16
+            | FieldDefType::I32
+            | FieldDefType::I64
+            | FieldDefType::Usize
+            | FieldDefType::Isize
+            | FieldDefType::F32
+            | FieldDefType::F64 => None,
+            #[cfg(feature = "object_id")]
+            FieldDefType::ObjectId => None,
+            #[cfg(feature = "chrono")]
+            FieldDefType::NaiveDate
+            | FieldDefType::NaiveTime
+            | FieldDefType::NaiveDateTime
+            | FieldDefType::DateTime => None,
+        }
+    }
+
     /// The value this field's wrappers hold, as a field of its own: the same type with the
     /// `Option`s and the array levels dropped. The wrappers are the field's to declare and the
     /// value under them is what a type name stands for, so this is what an `as = Type` is compared
@@ -1280,6 +1325,25 @@ pub fn is_ownership_wrapper(name: &str) -> bool {
 /// ownership wrapper — see `generic_wrap` in `model_schema.rs`.
 pub fn is_interior_mutability_wrapper(name: &str) -> bool {
     matches!(name, "Cell" | "Mutex" | "RefCell" | "RwLock")
+}
+
+/// The std cell/lock/lazy-init types and borrow guards serde implements neither `Serialize` nor
+/// `Deserialize` for: unlike `is_transparent_wrapper`'s members there is no wire form to describe.
+/// Matched on the bare name, as `os_string_name` matches its two — a user item named `Ref` or
+/// `RefMut` is refused with them.
+pub fn is_unsupported_std_wrapper(name: &str) -> bool {
+    matches!(
+        name,
+        "OnceLock"
+            | "OnceCell"
+            | "LazyLock"
+            | "LazyCell"
+            | "Ref"
+            | "RefMut"
+            | "MutexGuard"
+            | "RwLockReadGuard"
+            | "RwLockWriteGuard"
+    )
 }
 
 /// Classifies a `syn::Variant` into its `VariantKind`.

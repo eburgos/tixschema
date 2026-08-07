@@ -437,6 +437,88 @@ fn test_a_schematizable_field_is_not_reported_as_an_os_string() {
     }
 }
 
+/// The cell/lock/lazy-init types and the borrow guards serde writes nothing for: the parse leaves
+/// each a sibling, and the report names it from wherever it was written.
+#[test]
+fn test_an_unsupported_std_wrapper_is_reported_wherever_it_was_written() {
+    for (spelling, expected) in [
+        ("OnceLock<u32>", "OnceLock"),
+        ("OnceCell<u32>", "OnceCell"),
+        ("LazyLock<u32>", "LazyLock"),
+        ("LazyCell<u32>", "LazyCell"),
+        ("Ref<'a, u32>", "Ref"),
+        ("RefMut<'a, u32>", "RefMut"),
+        ("MutexGuard<'a, u32>", "MutexGuard"),
+        ("RwLockReadGuard<'a, u32>", "RwLockReadGuard"),
+        ("RwLockWriteGuard<'a, u32>", "RwLockWriteGuard"),
+        ("Option<OnceLock<u32>>", "OnceLock"),
+        ("Vec<LazyCell<u32>>", "LazyCell"),
+        ("HashMap<String, OnceCell<u32>>", "OnceCell"),
+        ("(String, MutexGuard<'a, u32>)", "MutexGuard"),
+        ("Box<Ref<'a, u32>>", "Ref"),
+        ("Wrapper<RefMut<'a, u32>>", "RefMut"),
+    ] {
+        let ty: syn::Type = syn::parse_str(spelling).unwrap();
+        let parsed = super::get_field_def("guarded", &ty, "");
+        assert_eq!(
+            parsed.unsupported_std_wrapper_name(),
+            Some(expected),
+            "for: {spelling}"
+        );
+    }
+}
+
+/// The report is for those nine names alone: the wrappers the crate reads straight through, and a
+/// user type that merely carries one of the names inside its own, all describe a wire form.
+#[test]
+fn test_a_schematizable_field_is_not_reported_as_an_unsupported_std_wrapper() {
+    for spelling in [
+        "String",
+        "Box<u32>",
+        "Rc<u32>",
+        "Arc<u32>",
+        "Cow<'a, str>",
+        "RefCell<u32>",
+        "Cell<u32>",
+        "Mutex<u32>",
+        "RwLock<u32>",
+        "OnceLockHolder",
+        "RefHolder",
+        "Wrapper<String>",
+    ] {
+        let ty: syn::Type = syn::parse_str(spelling).unwrap();
+        let parsed = super::get_field_def("guarded", &ty, "");
+        assert_eq!(
+            parsed.unsupported_std_wrapper_name(),
+            None,
+            "for: {spelling}"
+        );
+    }
+}
+
+#[test]
+fn test_the_unsupported_std_wrapper_list_is_exactly_the_nine_names() {
+    for name in [
+        "OnceLock",
+        "OnceCell",
+        "LazyLock",
+        "LazyCell",
+        "Ref",
+        "RefMut",
+        "MutexGuard",
+        "RwLockReadGuard",
+        "RwLockWriteGuard",
+    ] {
+        assert!(super::is_unsupported_std_wrapper(name), "for: {name}");
+        assert!(!super::is_transparent_wrapper(name), "for: {name}");
+    }
+    for name in [
+        "Arc", "Box", "Cow", "Rc", "Cell", "Mutex", "RefCell", "RwLock", "Inner",
+    ] {
+        assert!(!super::is_unsupported_std_wrapper(name), "for: {name}");
+    }
+}
+
 /// An `Option` written inside a sequence wrapper and one written around it are two different
 /// values on the wire — `[null]` against `null` — so the parse keeps them apart: each is recorded
 /// at the level it was written at, the element's below the array and the field's own at the top.

@@ -1,7 +1,8 @@
 use super::{
     FieldDefType, ModelSchemaPropMeta, check_nullable_ts_optional_conflict, check_os_string_field,
-    collect_discriminated_variants, field_label, get_field_def, render_discriminated_variants,
-    validate_as_number_flag, validate_nullable_flag, validate_ts_optional_flag,
+    check_unsupported_std_wrapper_field, collect_discriminated_variants, field_label,
+    get_field_def, render_discriminated_variants, validate_as_number_flag, validate_nullable_flag,
+    validate_ts_optional_flag,
 };
 
 #[cfg(feature = "serde")]
@@ -1458,6 +1459,90 @@ fn a_path_field_is_left_alone() {
         let error = field_os_string_error(&syn::parse_quote! {
             struct Report {
                 location: #ty,
+            }
+        });
+        assert!(error.is_none(), "for {ty}, got: {error:?}");
+    }
+}
+
+/// Runs the field walk the way [`process_field`] does and renders the std-wrapper guard failure.
+fn field_unsupported_std_wrapper_error(item: &syn::ItemStruct) -> Option<String> {
+    let field = item.fields.iter().next()?;
+    let name = field
+        .ident
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    let field_def = get_field_def(&name, &field.ty, "");
+    check_unsupported_std_wrapper_field(field, &field_def, &field_label(&name))
+        .err()
+        .map(|err| err.to_compile_error().to_string())
+}
+
+#[test]
+fn a_once_lock_field_is_rejected_by_name() {
+    let error = field_unsupported_std_wrapper_error(&syn::parse_quote! {
+        struct Probe {
+            guarded: OnceLock<u32>,
+        }
+    })
+    .unwrap();
+    assert!(error.contains("compile_error"), "got: {error}");
+    assert!(error.contains("field `guarded`"), "got: {error}");
+    assert!(error.contains("`OnceLock`"), "got: {error}");
+    assert!(error.contains("Serialize"), "got: {error}");
+}
+
+/// The guard reads through the wrappers the parser reads through, so the refusal names the
+/// unsupported type rather than the sequence or option it was written inside.
+#[test]
+fn a_wrapped_once_lock_field_is_rejected_by_its_own_name() {
+    let error = field_unsupported_std_wrapper_error(&syn::parse_quote! {
+        struct Probe {
+            guarded: Vec<Option<OnceLock<u32>>>,
+        }
+    })
+    .unwrap();
+    assert!(error.contains("`OnceLock`"), "got: {error}");
+    assert!(!error.contains("`Vec`"), "got: {error}");
+}
+
+/// A borrow guard writes a lifetime ahead of its type parameter, which the argument filter drops
+/// before the walk ever sees it.
+#[test]
+fn a_lifetime_parameterized_guard_field_is_rejected_by_name() {
+    for (spelling, expected) in [
+        (quote::quote! { MutexGuard<'a, u32> }, "`MutexGuard`"),
+        (quote::quote! { Ref<'a, u32> }, "`Ref`"),
+        (
+            quote::quote! { RwLockReadGuard<'a, u32> },
+            "`RwLockReadGuard`",
+        ),
+    ] {
+        let error = field_unsupported_std_wrapper_error(&syn::parse_quote! {
+            struct Probe {
+                guarded: #spelling,
+            }
+        })
+        .unwrap();
+        assert!(error.contains(expected), "for {spelling}, got: {error}");
+    }
+}
+
+/// A sibling type and the wrappers the crate reads straight through both describe a wire form, so
+/// neither is what this guard answers for.
+#[test]
+fn a_schematizable_field_is_left_alone_by_the_std_wrapper_guard() {
+    for ty in [
+        quote::quote! { Inner },
+        quote::quote! { Box<u32> },
+        quote::quote! { RefCell<u32> },
+        quote::quote! { Arc<Inner> },
+        quote::quote! { String },
+    ] {
+        let error = field_unsupported_std_wrapper_error(&syn::parse_quote! {
+            struct Probe {
+                guarded: #ty,
             }
         });
         assert!(error.is_none(), "for {ty}, got: {error:?}");

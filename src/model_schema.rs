@@ -10376,9 +10376,10 @@ fn field_guard_errors(
         .collect()
 }
 
-/// Every guard error the field violates: the two the type earns — the `OsString` guard and the
-/// map-key guard, neither of which any attribute can hide — then everything the
-/// `model_schema_prop` attribute earned, then the serde-side guards when any fired.
+/// Every guard error the field violates: the three the type earns — the `OsString` guard, the
+/// unsupported-std-wrapper guard and the map-key guard, none of which any attribute can hide —
+/// then everything the `model_schema_prop` attribute earned, then the serde-side guards when any
+/// fired.
 fn collect_field_guard_errors(
     field: &Field,
     field_def: &FieldDef,
@@ -10400,6 +10401,11 @@ fn collect_field_guard_errors(
         .err()
         .map(|err| err.to_compile_error())
         .into_iter()
+        .chain(
+            check_unsupported_std_wrapper_field(field, field_def, &label)
+                .err()
+                .map(|err| err.to_compile_error()),
+        )
         .chain(map_key_error)
         .chain(model_schema_prop_guard_errors(
             field,
@@ -10677,6 +10683,27 @@ fn check_os_string_field(
              enum naming the target platform (`{{\"Unix\":[u8, ...]}}` or \
              `{{\"Windows\":[u16, ...]}}`), not a string, so no schema can describe it portably. \
              Use `String`, or `PathBuf` for a filesystem path."
+        ),
+    ))
+}
+
+/// Rejects a field that reaches a std cell/lock/lazy-init wrapper or borrow guard, at any depth:
+/// left unrefused the name falls through to `FieldDefType::SiblingType`, and the expansion
+/// references a schema module nothing publishes rather than naming the unsupported type.
+fn check_unsupported_std_wrapper_field(
+    field: &Field,
+    field_def: &FieldDef,
+    label: &str,
+) -> Result<(), syn::Error> {
+    let Some(name) = field_def.unsupported_std_wrapper_name() else {
+        return Ok(());
+    };
+    Err(syn::Error::new_spanned(
+        field,
+        format!(
+            "model_schema: {label} reaches `{name}`, which serde implements neither `Serialize` \
+             nor `Deserialize` for, so there is no wire form for a schema to describe. Store the \
+             value `{name}` holds directly, or leave this field out of the serialized shape."
         ),
     ))
 }
