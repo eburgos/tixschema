@@ -321,9 +321,15 @@ const UNCONSTRAINING_PATTERNS: [&str; 12] = [
 
 /// Patterns that turn some value away, kept beside [`UNCONSTRAINING_PATTERNS`] as the near misses
 /// that decide where the line sits.
-const CONSTRAINING_PATTERNS: [&str; 8] = [
-    "^$", "^a*$", r"\b", r"\B", "a+", "(?:ab)+", "^[a-z]+$", r"^\s*$",
-];
+const CONSTRAINING_PATTERNS: [&str; 6] = ["^$", "^a*$", "a+", "(?:ab)+", "^[a-z]+$", r"^\s*$"];
+
+/// The look-arounds that survive the other two guards -- the text anchors admit every value and
+/// every other boundary flavour is unportable -- and so are the whole of what the third refuses.
+const LONE_ASSERTION_PATTERNS: [&str; 2] = [r"\b", r"\B"];
+
+/// The same boundaries with something beside them: what the refusal tells the author to write, and
+/// what the lint stops calling trivial.
+const BOUNDED_ASSERTION_PATTERNS: [&str; 4] = [r"\ba", r"\Ba", r"^\bfoo", r"\b[0-9A-Za-z_]+"];
 
 /// The negated classes the verdict was decided over: a single member, the ranges an author reaches
 /// for to bound one to ASCII, an escape, and the `\d` the guard writes out to `0-9` on its way in.
@@ -1185,12 +1191,13 @@ fn test_trivial_pattern_accepts_exactly_what_its_regex_accepts() {
     }
 }
 
-/// Runs both `pattern` guards the way the attribute parsers run them, and hands back the refusal
-/// as the author reads it.
-fn constraining(pattern: &str) -> Result<String, String> {
+/// Runs the three `pattern` guards the way the attribute parsers run them, and hands back the
+/// refusal as the author reads it.
+fn guarded(pattern: &str) -> Result<String, String> {
     let lit = LitStr::new(pattern, proc_macro2::Span::call_site());
     portable_pattern(&lit)
         .and_then(|portable| constraining_pattern(&lit, portable))
+        .and_then(|constraining| emittable_pattern(&lit, constraining))
         .map_err(|rejection| rejection.to_string())
 }
 
@@ -1209,7 +1216,10 @@ fn test_the_unconstraining_verdict_is_the_regex_crate_s_own() {
             );
         }
     }
-    for pattern in CONSTRAINING_PATTERNS {
+    for pattern in CONSTRAINING_PATTERNS
+        .into_iter()
+        .chain(LONE_ASSERTION_PATTERNS)
+    {
         let regex = regex::Regex::new(pattern).unwrap();
         assert!(
             haystacks.iter().any(|haystack| !regex.is_match(haystack)),
@@ -1223,7 +1233,7 @@ fn test_the_unconstraining_verdict_is_the_regex_crate_s_own() {
 #[test]
 fn test_a_pattern_admitting_every_value_is_refused() {
     for pattern in UNCONSTRAINING_PATTERNS {
-        let rejection = constraining(pattern).unwrap_err();
+        let rejection = guarded(pattern).unwrap_err();
         for needle in ["pattern", "admits every value", "constrains nothing"] {
             assert!(
                 rejection.contains(needle),
@@ -1233,14 +1243,49 @@ fn test_a_pattern_admitting_every_value_is_refused() {
     }
 }
 
-/// A pattern that turns some value away keeps its place, `\b` included.
+/// A pattern that turns some value away keeps its place.
 #[test]
 fn test_a_pattern_turning_some_value_away_clears_the_guard() {
     for pattern in CONSTRAINING_PATTERNS {
         assert!(
-            constraining(pattern).is_ok(),
+            guarded(pattern).is_ok(),
             "{pattern} constrains something and was refused: {:?}",
-            constraining(pattern)
+            guarded(pattern)
+        );
+    }
+}
+
+/// A lone look-around says something about the value and still cannot be emitted: the regex the
+/// validator builds from it draws `clippy::trivial_regex` at the attribute that wrote it, and the
+/// lint names no `str` call to put in the regex's place. The refusal names the rewrite that keeps
+/// the check.
+#[test]
+fn test_a_pattern_that_is_one_assertion_and_nothing_else_is_refused() {
+    for pattern in LONE_ASSERTION_PATTERNS {
+        let rejection = guarded(pattern).unwrap_err();
+        for needle in [
+            "one look-around assertion and nothing else",
+            "clippy::trivial_regex",
+            r"`\b\w+` rather than `\b`",
+            r"`\B\w` rather than `\B`",
+        ] {
+            assert!(
+                rejection.contains(needle),
+                "{needle} missing for {pattern}: {rejection}"
+            );
+        }
+    }
+}
+
+/// The rewrite the refusal names is accepted, and so is every other pattern with a boundary in it:
+/// one assertion beside anything at all is more than the lint calls trivial.
+#[test]
+fn test_a_boundary_beside_something_clears_the_guard() {
+    for pattern in BOUNDED_ASSERTION_PATTERNS {
+        assert_eq!(
+            guarded(pattern).as_deref(),
+            Ok(pattern),
+            "{pattern} was refused, or came back in a different spelling"
         );
     }
 }
@@ -1252,7 +1297,7 @@ fn test_a_pattern_turning_some_value_away_clears_the_guard() {
 fn test_the_shapes_already_classified_still_clear_the_guard() {
     for pattern in TRIVIAL_PATTERNS.into_iter().chain(PORTABLE_PATTERNS) {
         assert_eq!(
-            constraining(pattern).as_deref(),
+            guarded(pattern).as_deref(),
             Ok(pattern),
             "{pattern} was refused, or came back in a different spelling"
         );
