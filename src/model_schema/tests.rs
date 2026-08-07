@@ -1037,14 +1037,128 @@ fn untagged_member_holding_an_unsupported_map_value_emits_only_the_compile_error
 #[cfg(all(feature = "serde", feature = "jsonschema"))]
 #[test]
 fn an_external_variant_holding_an_unrenderable_content_is_refused() {
-    let rendered =
-        super::external_content_rejection_value("rows", &super::MapMemberRejection::Tuple)
-            .to_string();
-    assert!(rendered.starts_with("compile_error !"), "got: {rendered}");
+    let rendered = super::external_content_rejection_value(
+        "rows",
+        &super::MapMemberRejection::Tuple(proc_macro2::Span::call_site()),
+    )
+    .to_string();
+    assert!(
+        rendered.starts_with(":: core :: compile_error !"),
+        "got: {rendered}"
+    );
     assert!(
         rendered.contains("model_schema: variant `rows`: a tuple is not supported as a map value"),
         "got: {rendered}"
     );
+}
+
+/// The field defs one variant of `source` declares, parsed from text so each carries the span of
+/// the tokens it was written with.
+#[cfg(feature = "jsonschema")]
+fn variant_field_defs(source: &str, variant_name: &str) -> Vec<super::FieldDef> {
+    let item: syn::ItemEnum = syn::parse_str(source).unwrap();
+    item.variants
+        .iter()
+        .filter(|variant| variant.ident == variant_name)
+        .flat_map(|variant| variant.fields.iter())
+        .map(|field| {
+            let name = field
+                .ident
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            get_field_def(&name, &field.ty, "")
+        })
+        .collect()
+}
+
+/// The content sink's caret, at both contents an externally tagged variant can carry. The
+/// multi-content variant offends in its second element, which the sink cannot pick out of the slot
+/// list it is handed.
+#[cfg(all(feature = "serde", feature = "jsonschema"))]
+#[test]
+fn a_refused_external_content_points_at_the_written_content() {
+    const SOURCE: &str = "enum Tagged { \
+        Rows(HashMap<String, (u32, u32)>), \
+        Multi(String, HashMap<String, (u32, u32)>) }";
+
+    let single = variant_field_defs(SOURCE, "Rows");
+    let single_rejection = super::build_tuple_element_json_schema(&single[0]).unwrap_err();
+    assert_points_only_at(
+        &super::external_content_rejection_value("Rows", &single_rejection),
+        "(u32, u32)",
+        "a single-content variant",
+    );
+
+    let multi = variant_field_defs(SOURCE, "Multi");
+    let multi_rejection = super::tuple_json_schema_value(&multi).unwrap_err();
+    assert_points_only_at(
+        &super::external_content_rejection_value("Multi", &multi_rejection),
+        "(u32, u32)",
+        "a multi-content variant",
+    );
+}
+
+/// The adjacently tagged content sink's caret, at both contents a variant can carry: the single
+/// value writes its own key, and the multi one writes the fixed array, and neither knows which slot
+/// the dispatch refused.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_refused_adjacent_content_points_at_the_written_content() {
+    const SOURCE: &str = "enum Tagged { \
+        Rows(HashMap<String, (u32, u32)>), \
+        Multi(String, HashMap<String, (u32, u32)>) }";
+
+    let mut single_fields = Vec::new();
+    super::push_single_tuple_json_field(
+        &mut single_fields,
+        "value",
+        &variant_field_defs(SOURCE, "Rows")[0],
+    );
+    assert_points_only_at(
+        &single_fields[0],
+        "(u32, u32)",
+        "an adjacent single content",
+    );
+
+    let mut parts = super::VariantParts {
+        json_fields: Vec::new(),
+        schema_code: String::new(),
+        type_code: String::new(),
+    };
+    super::write_tuple_multiple_variant_fields(
+        &variant_field_defs(SOURCE, "Multi"),
+        "value",
+        "Tagged",
+        &mut parts,
+    );
+    assert_points_only_at(
+        &parts.json_fields[0],
+        "(u32, u32)",
+        "an adjacent multi content",
+    );
+}
+
+/// The untagged member sink's caret, on both paths a member reaches it by: a map written straight
+/// into the member, and a map reached through a tuple element.
+#[cfg(all(feature = "serde", feature = "jsonschema"))]
+#[test]
+fn a_refused_untagged_member_points_at_the_written_value() {
+    for (member_type, context) in [
+        ("HashMap<String, (u32, u32)>", "an untagged map member"),
+        (
+            "(String, HashMap<String, (u32, u32)>)",
+            "an untagged tuple member",
+        ),
+    ] {
+        let source = format!("enum Untagged {{ Rows {{ rows: {member_type} }} }}");
+        let member = &variant_field_defs(&source, "Rows")[0];
+        assert_points_only_at(
+            &super::field_json_schema_value(member),
+            "(u32, u32)",
+            context,
+        );
+    }
 }
 
 /// Collects the internally tagged path's guard failures as rendered `compile_error!` token strings.
@@ -3331,10 +3445,29 @@ fn a_brand_over_an_unrenderable_slot_is_refused() {
     let rendered =
         super::branded_slot_json_schema(&super::ModelSchemaArgs::default(), &inner, "DocumentId")
             .to_string();
-    assert!(rendered.starts_with("compile_error !"), "got: {rendered}");
+    assert!(
+        rendered.starts_with(":: core :: compile_error !"),
+        "got: {rendered}"
+    );
     assert!(
         rendered.contains("model_schema: `DocumentId`: a tuple is not supported as a map value"),
         "got: {rendered}"
+    );
+}
+
+/// [`a_brand_over_an_unrenderable_slot_is_refused`]'s caret, which belongs on the inner the brand
+/// was declared over rather than on the attribute that declared it.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_refused_brand_inner_points_at_the_written_inner() {
+    let item: syn::ItemStruct =
+        syn::parse_str("pub struct DocumentId(pub HashMap<String, (u32, u32)>);").unwrap();
+    let field = item.fields.iter().next().unwrap();
+    let inner = get_field_def("_inner", &field.ty, "");
+    assert_points_only_at(
+        &super::branded_slot_json_schema(&super::ModelSchemaArgs::default(), &inner, "DocumentId"),
+        "(u32, u32)",
+        "a brand's inner",
     );
 }
 
@@ -5854,6 +5987,19 @@ fn located_source_texts(tokens: &proc_macro2::TokenStream) -> Vec<String> {
     texts
 }
 
+/// Asserts that every located token in `tokens` points at `expected` and that at least one does —
+/// what a diagnostic spanned on one written value looks like, and what one falling back to the
+/// attribute does not.
+#[cfg(feature = "jsonschema")]
+fn assert_points_only_at(tokens: &proc_macro2::TokenStream, expected: &str, context: &str) {
+    let located = located_source_texts(tokens);
+    assert!(!located.is_empty(), "for {context}, nothing located");
+    assert!(
+        located.iter().all(|text| text == expected),
+        "for {context}, got: {located:?}"
+    );
+}
+
 /// Without a span carried over from the user's source there is no source text to report, which is
 /// what the assertion below would silently degrade into.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -6185,7 +6331,7 @@ fn an_unsupported_enum_keyed_map_value_emits_only_the_compile_error() {
     ] {
         let tokens = map_field_schema(map_type).to_string();
         assert!(
-            tokens.starts_with("compile_error !"),
+            tokens.starts_with(":: core :: compile_error !"),
             "for {map_type}, got: {tokens}"
         );
         assert!(
@@ -6719,7 +6865,10 @@ fn a_map_key_known_to_lack_enum_members_names_the_requirement() {
         !tokens.contains("KeyAlias :: enum_members"),
         "got: {tokens}"
     );
-    assert!(tokens.starts_with("compile_error !"), "got: {tokens}");
+    assert!(
+        tokens.starts_with(":: core :: compile_error !"),
+        "got: {tokens}"
+    );
     assert!(
         tokens.contains("a map key must be a plain"),
         "got: {tokens}"
@@ -6805,12 +6954,35 @@ fn an_opaque_string_keyed_map_value_stays_permissive() {
 #[test]
 fn an_unsupported_string_keyed_map_value_emits_only_the_compile_error() {
     let tokens = map_field_schema("HashMap<String, (String, u32)>").to_string();
-    assert!(tokens.starts_with("compile_error !"), "got: {tokens}");
+    assert!(
+        tokens.starts_with(":: core :: compile_error !"),
+        "got: {tokens}"
+    );
     assert!(!tokens.contains("properties . insert"), "got: {tokens}");
     assert!(
         tokens.contains("model_schema: field `m`: a tuple is not supported as a map value"),
         "got: {tokens}"
     );
+}
+
+/// The caret has to land on the tokens the author edits. A field's refused map value is written
+/// inside the field's type, and a diagnostic carrying no location of its own falls back to the
+/// attribute — a line no edit to it can fix.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_refused_map_value_points_at_the_written_value() {
+    let tokens = sole_field_json_schema("pub struct Rows { pub m: HashMap<String, (u32, u32)> }");
+    assert_points_only_at(&tokens, "(u32, u32)", "a map value");
+}
+
+/// [`a_refused_map_value_points_at_the_written_value`] for a map reached through a tuple element,
+/// where the offending value sits two levels inside the written field type.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_refused_tuple_element_map_value_points_at_the_written_value() {
+    let tokens =
+        sole_field_json_schema("pub struct Rows { pub t: (String, HashMap<String, (u32, u32)>) }");
+    assert_points_only_at(&tokens, "(u32, u32)", "a tuple element map value");
 }
 
 /// The value types the branch already rendered keep the tokens they have always produced: the
@@ -7119,7 +7291,7 @@ fn a_nested_map_key_known_to_lack_enum_members_names_the_requirement() {
             "for {map_type}, got: {tokens}"
         );
         assert!(
-            tokens.starts_with("compile_error !"),
+            tokens.starts_with(":: core :: compile_error !"),
             "for {map_type}, got: {tokens}"
         );
         assert!(
@@ -7145,7 +7317,10 @@ fn a_tuple_element_map_key_known_to_lack_enum_members_names_the_requirement() {
         AliasKind::NoEnumMembers,
     );
     let tokens = tuple_field_schema("(String, HashMap<KeyAlias, String>)");
-    assert!(tokens.starts_with("compile_error !"), "got: {tokens}");
+    assert!(
+        tokens.starts_with(":: core :: compile_error !"),
+        "got: {tokens}"
+    );
     assert!(
         tokens.contains("a map key must be a plain"),
         "got: {tokens}"
@@ -7207,7 +7382,7 @@ fn an_unsupported_nested_map_value_emits_only_the_compile_error() {
     ] {
         let tokens = map_field_schema(map_type).to_string();
         assert!(
-            tokens.starts_with("compile_error !"),
+            tokens.starts_with(":: core :: compile_error !"),
             "for {map_type}, got: {tokens}"
         );
         assert!(
@@ -7318,10 +7493,54 @@ fn a_reference_site_argument_the_dispatch_cannot_render_is_refused() {
         "",
     );
     let rendered = super::argument_json_schema_value("IdType", &argument).to_string();
-    assert!(rendered.starts_with("compile_error !"), "got: {rendered}");
+    assert!(
+        rendered.starts_with(":: core :: compile_error !"),
+        "got: {rendered}"
+    );
     assert!(
         rendered.contains("model_schema: `IdType`: a tuple is not supported as a map value"),
         "got: {rendered}"
+    );
+}
+
+/// The arguments a reference site writes, read off the sole field of `source` so each one carries
+/// the span of the tokens it was written with.
+#[cfg(feature = "jsonschema")]
+fn sole_field_arguments(source: &str) -> Vec<super::FieldDef> {
+    let item: syn::ItemStruct = syn::parse_str(source).unwrap();
+    let field = item.fields.iter().next().unwrap();
+    let FieldDefType::SiblingType(_, arguments) = get_field_def("", &field.ty, "").field_type
+    else {
+        return Vec::new();
+    };
+    arguments
+}
+
+/// [`a_reference_site_argument_the_dispatch_cannot_render_is_refused`]'s caret, which belongs on
+/// the argument inside the reference rather than on the whole field or the attribute.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_refused_reference_site_argument_points_at_the_written_argument() {
+    let arguments =
+        sole_field_arguments("pub struct Holder { pub boxed: Boxed<HashMap<String, (u32, u32)>> }");
+    assert_points_only_at(
+        &super::argument_json_schema_value("Boxed", &arguments[0]),
+        "(u32, u32)",
+        "a reference-site argument",
+    );
+}
+
+/// The same argument sink reached through a declared filling, where the offending tokens sit inside
+/// the attribute: the caret narrows to the filling rather than underlining the whole attribute.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_refused_declared_filling_points_at_the_written_filling() {
+    let parameter: syn::Ident = syn::parse_str("IdType").unwrap();
+    let filling: syn::Type = syn::parse_str("HashMap<String, (u32, u32)>").unwrap();
+    assert_points_only_at(
+        &super::declared_filling_json_schema_value("IdType", &[(parameter, filling)]),
+        "(u32, u32)",
+        "a declared filling",
     );
 }
 
@@ -7723,7 +7942,7 @@ fn a_tuple_element_holding_an_unrenderable_map_emits_only_the_compile_error() {
     ] {
         let tokens = tuple_field_schema(field_type);
         assert!(
-            tokens.starts_with("compile_error !"),
+            tokens.starts_with(":: core :: compile_error !"),
             "for {field_type}, got: {tokens}"
         );
         assert!(
@@ -8556,13 +8775,36 @@ fn a_tuple_struct_slot_the_dispatch_cannot_render_is_refused() {
         whole_tuple(&["String", "HashMap<String, (u32, u32)>"]),
     ] {
         let rendered = tuple_struct_json_body("Pair", &shape).to_string();
-        assert!(rendered.starts_with("compile_error !"), "Got: {rendered}");
+        assert!(
+            rendered.starts_with(":: core :: compile_error !"),
+            "Got: {rendered}"
+        );
         assert!(
             rendered.contains("model_schema: `Pair`: a tuple is not supported as a map value"),
             "Got: {rendered}"
         );
         assert!(!rendered.contains("prefixItems"), "Got: {rendered}");
     }
+}
+
+/// The caret lands on the slot that offends, not on the first one the body walks: the sink holds
+/// the whole slot list and can only know which one was refused from the rejection itself.
+#[cfg(feature = "jsonschema")]
+#[test]
+fn a_refused_tuple_struct_slot_points_at_that_slot_alone() {
+    let item: syn::ItemStruct =
+        syn::parse_str("pub struct Pair(pub String, pub HashMap<String, (u32, u32)>);").unwrap();
+    let slots: Vec<super::FieldDef> = item
+        .fields
+        .iter()
+        .map(|field| get_field_def("", &field.ty, ""))
+        .collect();
+    let shape = tuple_struct_shape(slots.len(), slots);
+    assert_points_only_at(
+        &tuple_struct_json_body("Pair", &shape),
+        "(u32, u32)",
+        "a tuple struct's second slot",
+    );
 }
 
 /// The bare value is the *declared* arity's, not the described list's. Captured from serde: a

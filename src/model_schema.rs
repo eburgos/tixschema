@@ -370,17 +370,30 @@ enum MapMemberItem {
     Value(proc_macro2::TokenStream),
 }
 
-/// Why a value in a slot has no rendering. Each shape carries its own diagnostic, and the field
-/// name the message needs belongs to the caller rather than to the dispatch, so the reason travels
-/// out and the message is formatted once at the top.
+/// Why a value in a slot has no rendering, and where it was written. Each shape carries its own
+/// diagnostic, and the field name the message needs belongs to the caller rather than to the
+/// dispatch, so the reason travels out and the message is formatted once at the top. The span
+/// travels with it because the callers that format it hold a slice of slots and cannot tell which
+/// one the dispatch refused.
 #[cfg(feature = "jsonschema")]
 #[derive(Debug)]
 enum MapMemberRejection {
     /// A map key with no rendering, whatever reason it has and at whatever depth the value walk
     /// reached it. The reason is the same value the field guard refuses on, so a key is worded
     /// once however the expansion arrives at it.
-    Key(MapKeyRejection),
-    Tuple,
+    Key(MapKeyRejection, proc_macro2::Span),
+    Tuple(proc_macro2::Span),
+}
+
+#[cfg(feature = "jsonschema")]
+impl MapMemberRejection {
+    /// The written tokens the diagnostic points at. A key under a sequence wrapper points at the
+    /// element rather than the wrapper, `get_field_def` having collapsed the wrapper onto it.
+    const fn span(&self) -> proc_macro2::Span {
+        match *self {
+            Self::Key(_, span) | Self::Tuple(span) => span,
+        }
+    }
 }
 
 /// What a map key opens: an open member set, the members it enumerates, nothing this expansion can
@@ -3874,7 +3887,7 @@ fn tuple_struct_json_body(item_name: &str, shape: &TupleStructShape) -> proc_mac
                 &format!("`{item_name}`"),
                 &rejection,
             ));
-            quote! { compile_error!(#message) }
+            syn::Error::new(rejection.span(), message).to_compile_error()
         }
     }
 }
@@ -4270,7 +4283,7 @@ fn branded_slot_json_schema(
                 &format!("`{def_name}`"),
                 &rejection,
             ));
-            quote! { compile_error!(#message) }
+            syn::Error::new(rejection.span(), message).to_compile_error()
         }
     }
 }
@@ -6220,7 +6233,7 @@ fn external_content_rejection_value(
         &format!("variant `{discriminator_value}`"),
         rejection,
     ));
-    quote! { compile_error!(#message) }
+    syn::Error::new(rejection.span(), message).to_compile_error()
 }
 
 /// Renders what one variant of an externally tagged enum writes under its key.
@@ -7453,7 +7466,7 @@ fn member_rejection_value(
         &field_label(field_name),
         rejection,
     ));
-    quote! { compile_error!(#message) }
+    syn::Error::new(rejection.span(), message).to_compile_error()
 }
 
 /// One untagged member's field def in the two readings the guards need: as the surfaces will
@@ -8732,7 +8745,7 @@ fn argument_json_schema_value(name: &str, argument: &FieldDef) -> proc_macro2::T
             &format!("`{name}`"),
             &rejection,
         ));
-        quote! { compile_error!(#message) }
+        syn::Error::new(rejection.span(), message).to_compile_error()
     })
 }
 
@@ -9133,7 +9146,9 @@ fn build_nested_map_member_item(
             )
         }
         MapKeyPath::Unnarrowed => MapMemberItem::Fragment(unnarrowed_key_map_json_schema_item()),
-        MapKeyPath::Refused(rejection) => return Err(MapMemberRejection::Key(rejection)),
+        MapKeyPath::Refused(rejection) => {
+            return Err(MapMemberRejection::Key(rejection, inner_key.type_span));
+        }
     })
 }
 
@@ -9233,7 +9248,7 @@ fn build_map_member_item(value: &FieldDef) -> Result<MapMemberItem, MapMemberRej
 /// inline rendering — every other type the scalar mapping names renders there.
 #[cfg(feature = "jsonschema")]
 fn scalar_slot_item(fld: &FieldDef) -> Result<proc_macro2::TokenStream, MapMemberRejection> {
-    scalar_field_json_schema_item(fld).ok_or(MapMemberRejection::Tuple)
+    scalar_field_json_schema_item(fld).ok_or(MapMemberRejection::Tuple(fld.type_span))
 }
 
 /// The `additionalProperties` schema every member of a `String`-keyed map carries, or the rejection
@@ -9252,8 +9267,10 @@ fn build_map_member_schema(
 #[cfg(feature = "jsonschema")]
 fn map_member_rejection_message(subject: &str, rejection: &MapMemberRejection) -> String {
     match rejection {
-        MapMemberRejection::Key(key_rejection) => map_key_rejection_message(subject, key_rejection),
-        MapMemberRejection::Tuple => format!(
+        MapMemberRejection::Key(key_rejection, _) => {
+            map_key_rejection_message(subject, key_rejection)
+        }
+        MapMemberRejection::Tuple(_) => format!(
             "{subject}: a tuple is not supported as a map value — give the value a `#[model_schema()]` struct instead"
         ),
     }
@@ -9270,7 +9287,7 @@ fn map_member_rejection_error(
         &format!("field `{field_name_str}`"),
         rejection,
     ));
-    quote! { compile_error!(#message); }
+    syn::Error::new(rejection.span(), message).to_compile_error()
 }
 
 /// The object a `String`-keyed map describes as, as a standalone `serde_json::Value` expression, or
@@ -9300,9 +9317,10 @@ fn enum_key_map_json_schema_value(
     value: &FieldDef,
 ) -> Result<proc_macro2::TokenStream, MapMemberRejection> {
     if proves_no_enum_members(key_type_name) {
-        return Err(MapMemberRejection::Key(MapKeyRejection::NoEnumMembers(
-            key_type_name.to_owned(),
-        )));
+        return Err(MapMemberRejection::Key(
+            MapKeyRejection::NoEnumMembers(key_type_name.to_owned()),
+            key_span,
+        ));
     }
 
     let normalized = normalized_slot_value(value);
@@ -9339,7 +9357,7 @@ fn map_json_schema_value(
         }
         MapKeyPath::Open => string_key_map_json_schema_value(value),
         MapKeyPath::Unnarrowed => Ok(unnarrowed_key_map_json_schema_value(key)),
-        MapKeyPath::Refused(rejection) => Err(MapMemberRejection::Key(rejection)),
+        MapKeyPath::Refused(rejection) => Err(MapMemberRejection::Key(rejection, key.type_span)),
     }
 }
 
