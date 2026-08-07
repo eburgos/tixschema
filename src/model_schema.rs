@@ -91,16 +91,13 @@ use crate::features::model_schema_prop::{
 
 #[cfg(feature = "jsonschema")]
 use crate::features::jsonschema::{
-    MergedSource, SchemaParameter,
+    MergeDiagnostic, MergedSource, SchemaParameter,
     generate_plain_enum_json_schema_method as generate_plain_enum_json_schema_method_impl,
     generate_struct_json_schema_method as generate_struct_json_schema_method_impl, in_flight_type,
-    json_schema_methods,
+    json_schema_methods, merged_object_value,
 };
 #[cfg(feature = "jsonschema")]
 use crate::utils::json_argument_binding;
-
-#[cfg(all(feature = "serde", feature = "jsonschema"))]
-use crate::features::jsonschema::{MergeDiagnostic, merged_object_value};
 
 #[cfg(any(
     feature = "typescript",
@@ -179,6 +176,10 @@ struct DiscriminatedVariant {
     discriminator_value: String,
     docs: String,
     field_defs: Vec<FieldDef>,
+    /// The variant's own `#[serde(flatten)]` sources, held apart from `field_defs` the way
+    /// [`collect_struct_fields`] holds a struct's apart: they write no key of their own, so every
+    /// surface joins them onto the object the rest of the fields close.
+    flattened_fields: Vec<FieldDef>,
     kind: VariantKind,
 }
 
@@ -3251,6 +3252,48 @@ fn flatten_edge_guard_error(
     Some(syn::Error::new_spanned(&field.ty, message).to_compile_error())
 }
 
+/// The `compile_error!` tokens for a `#[serde(flatten)]` field of an enum variant whose source
+/// writes more than one key set, or `None` for every source that writes exactly one. A variant's
+/// members are a fragment of a larger literal, with nowhere to bind them to the `$OwnSchema` const
+/// [`zod_merged_statements`] hoists once it counts more than one combination.
+#[cfg(all(feature = "serde", feature = "zod"))]
+fn variant_flatten_branch_guard_error(
+    field: &syn::Field,
+    type_name: &str,
+    variant_name: &str,
+) -> Option<proc_macro2::TokenStream> {
+    let inner = get_field_def("_flattened", &field.ty, "");
+    let written = if flattened_zod_branches(&inner).is_empty() {
+        if SourceAbsence::written(&inner).offered() {
+            "writes its members or no members at all"
+        } else {
+            return None;
+        }
+    } else {
+        "writes one key set per branch of the choice it names"
+    };
+    let field_name = field_label(
+        &field
+            .ident
+            .as_ref()
+            .map_or_else(String::new, ToString::to_string),
+    );
+    Some(
+        syn::Error::new_spanned(
+            &field.ty,
+            format!(
+                "model_schema: {field_name} of variant `{variant_name}` of `{type_name}` carries \
+                 `#[serde(flatten)]` over a source that {written}, which a variant cannot merge: \
+                 the variant's own members are written inside the union member that carries them, \
+                 leaving nowhere to bind them to a name each alternative could join. Flatten the \
+                 source into a struct of its own and write that struct as the variant's content, \
+                 or write the field as a named member so the value gets a key of its own."
+            ),
+        )
+        .to_compile_error(),
+    )
+}
+
 /// The JSON type keyword the item a flattened field names publishes, where the name is the whole of
 /// what the field writes and the registry proves that wire is no object — and `None` everywhere the
 /// declaration is left as it stands.
@@ -3308,12 +3351,9 @@ fn collect_struct_fields(
     let mut deferred_attrs: Vec<Vec<syn::Attribute>> = Vec::new();
 
     for field in fields.iter_mut() {
-        #[cfg(feature = "serde")]
-        let is_flatten = parse_serde_field_attributes(&field.attrs).flatten;
-        #[cfg(not(feature = "serde"))]
-        let is_flatten = false;
-
         // Read before the field is processed, which strips the attributes the declaration carried.
+        let is_flatten = is_flattened_field(field);
+
         #[cfg(all(
             feature = "serde",
             any(feature = "typescript", feature = "zod", feature = "jsonschema")
@@ -5597,6 +5637,72 @@ fn check_variant_slot_wire_is_readable(
     ))
 }
 
+/// The two name overrides a variant declares: its own `#[serde(rename)]`, and the `rename_all` its
+/// own fields are read against. serde treats a struct variant as the container for its fields, so
+/// the enum's container-level `rename_all` never reaches them — that one renames variant names only.
+#[cfg(feature = "serde")]
+fn variant_serde_names(attrs: &[syn::Attribute]) -> (Option<String>, Option<String>) {
+    (
+        parse_serde_field_attributes(attrs).rename,
+        parse_serde_type_attributes(attrs).rename_all,
+    )
+}
+
+/// No declaration is read where nothing parses serde's attributes.
+#[cfg(not(feature = "serde"))]
+const fn variant_serde_names(_attrs: &[syn::Attribute]) -> (Option<String>, Option<String>) {
+    (None, None)
+}
+
+/// Whether a field's members join the object being written rather than sitting under a key of their
+/// own.
+#[cfg(feature = "serde")]
+fn is_flattened_field(field: &syn::Field) -> bool {
+    parse_serde_field_attributes(&field.attrs).flatten
+}
+
+/// No field flattens where nothing parses serde's attributes.
+#[cfg(not(feature = "serde"))]
+const fn is_flattened_field(_field: &syn::Field) -> bool {
+    false
+}
+
+/// The `compile_error!` tokens a variant's `#[serde(flatten)]` field is refused with: the two the
+/// struct-level split already reads a flattened field against, plus the branching a variant's own
+/// position cannot compose.
+fn variant_flatten_guard_errors(
+    field: &syn::Field,
+    enum_type_name: &str,
+    variant_ident: &str,
+) -> Vec<proc_macro2::TokenStream> {
+    #[cfg(all(
+        feature = "serde",
+        any(feature = "typescript", feature = "zod", feature = "jsonschema")
+    ))]
+    let named = [flattened_field_guard_error(field, enum_type_name)];
+    #[cfg(not(all(
+        feature = "serde",
+        any(feature = "typescript", feature = "zod", feature = "jsonschema")
+    )))]
+    let named = {
+        let _: (&_, &_) = (&field, &enum_type_name);
+        [None]
+    };
+
+    #[cfg(all(feature = "serde", feature = "zod"))]
+    let edges = [
+        flatten_edge_guard_error(field, enum_type_name),
+        variant_flatten_branch_guard_error(field, enum_type_name, variant_ident),
+    ];
+    #[cfg(not(all(feature = "serde", feature = "zod")))]
+    let edges = {
+        let _: &_ = &variant_ident;
+        [None, None]
+    };
+
+    named.into_iter().chain(edges).flatten().collect()
+}
+
 /// Processes each variant of a discriminated enum, returning per-variant field defs, doc strings,
 /// and variant kinds in declaration order, plus the collected serde validation functions and the
 /// `validate()` arms those functions are run from.
@@ -5615,18 +5721,7 @@ fn collect_discriminated_variants(
     let enum_type_name = item_enum.ident.to_string();
 
     for item in &mut item_enum.variants {
-        #[cfg(feature = "serde")]
-        let field_rename = parse_serde_field_attributes(&item.attrs).rename;
-        #[cfg(not(feature = "serde"))]
-        let field_rename: Option<String> = None;
-        // serde treats a struct variant as the container for its own fields: its own
-        // `rename_all` (if any) reaches them, the enum's container-level `rename_all` never does
-        // — that one renames variant names only.
-        #[cfg(feature = "serde")]
-        let variant_rename_all = parse_serde_type_attributes(&item.attrs).rename_all;
-        #[cfg(not(feature = "serde"))]
-        let variant_rename_all: Option<String> = None;
-
+        let (field_rename, variant_rename_all) = variant_serde_names(&item.attrs);
         let variant_ident = item.ident.to_string();
         let final_name =
             get_final_variant_name(&variant_ident, field_rename.as_deref(), rename_all);
@@ -5639,6 +5734,7 @@ fn collect_discriminated_variants(
         let variant_defaulted = has_serde_default(&item.attrs);
 
         let mut field_defs: Vec<FieldDef> = Vec::new();
+        let mut flattened_fields: Vec<FieldDef> = Vec::new();
         let mut bound: Vec<(proc_macro2::Ident, proc_macro2::Ident)> = Vec::new();
         let mut checks: Vec<proc_macro2::TokenStream> = Vec::new();
         let total_fields = item.fields.len();
@@ -5654,6 +5750,18 @@ fn collect_discriminated_variants(
             ) {
                 guard_errors.push(rejection.to_compile_error());
             }
+
+            // Read before the field is processed, which strips the attributes the declaration
+            // carried.
+            let is_flatten = is_flattened_field(field);
+            if is_flatten {
+                guard_errors.extend(variant_flatten_guard_errors(
+                    field,
+                    &enum_type_name,
+                    &variant_ident,
+                ));
+            }
+
             let (f_def, validation_fn, validate_body, field_guard_errors) = process_field(
                 &FieldContext {
                     container_defaulted: variant_defaulted,
@@ -5666,6 +5774,14 @@ fn collect_discriminated_variants(
                 field,
                 &mut deferred_attrs,
             );
+            guard_errors.extend(field_guard_errors);
+
+            if is_flatten {
+                let _: (&_, &_) = (&validation_fn, &validate_body);
+                flattened_fields.push(f_def);
+                continue;
+            }
+
             if let Some(vfn) = validation_fn {
                 enum_validation_fns.push(vfn);
             }
@@ -5676,7 +5792,6 @@ fn collect_discriminated_variants(
                 bound.push((ident.clone(), binding));
                 checks.push(body);
             }
-            guard_errors.extend(field_guard_errors);
             if positional && omission.absent_from_wire() {
                 continue;
             }
@@ -5692,6 +5807,7 @@ fn collect_discriminated_variants(
             discriminator_value: final_name,
             docs: discriminator_docs,
             field_defs,
+            flattened_fields,
             kind: wire_kind,
         });
     }
@@ -5728,15 +5844,7 @@ fn render_discriminated_variants(
 
     for variant in variants {
         let (variant_type_code, variant_schema_code, optional_fields, json_schema_variant) =
-            generate_variant_code(
-                tag_name,
-                content_name,
-                &variant.discriminator_value,
-                &variant.field_defs,
-                &variant.kind,
-                &variant.docs,
-                item_name,
-            );
+            generate_variant_code(tag_name, content_name, variant, item_name);
         type_code_items.push(variant_type_code);
         schema_code_items.push((variant_schema_code, optional_fields));
         json_schema_variants.push(json_schema_variant);
@@ -5955,23 +6063,54 @@ fn process_discriminated_enum(
 }
 
 /// The object schema a struct variant's fields sit in when they are written under a key of their
-/// own rather than beside a discriminator. Used by both the externally tagged form and the
-/// adjacently tagged form's own struct variant.
+/// own rather than beside a discriminator, with the members of every `#[serde(flatten)]` source the
+/// variant carries merged beside them. Used by both the externally tagged form and the adjacently
+/// tagged form's own struct variant.
 #[cfg(feature = "jsonschema")]
-fn named_content_json_value(json_fields: &[proc_macro2::TokenStream]) -> proc_macro2::TokenStream {
-    quote! {
+fn named_content_json_value(
+    json_fields: &[proc_macro2::TokenStream],
+    flattened_fields: &[FieldDef],
+    self_type_name: &str,
+    variant_name: &str,
+) -> proc_macro2::TokenStream {
+    let object = quote! {
         {
+            let mut schema_obj = serde_json::Map::new();
+            schema_obj.insert("type".to_string(), serde_json::Value::String("object".to_string()));
             let mut properties = serde_json::Map::new();
             let mut required: Vec<serde_json::Value> = Vec::new();
             #(#json_fields)*
-            serde_json::json!({
-                "type": "object",
-                "properties": serde_json::Value::Object(properties),
-                "required": serde_json::Value::Array(required),
-                "additionalProperties": false
-            })
+            schema_obj.insert("properties".to_string(), serde_json::Value::Object(properties));
+            schema_obj.insert("required".to_string(), serde_json::Value::Array(required));
+            schema_obj.insert("additionalProperties".to_string(), serde_json::Value::Bool(false));
+            schema_obj
         }
+    };
+    variant_merged_json_value(&object, flattened_fields, self_type_name, variant_name)
+}
+
+/// A variant's own object with the members of every `#[serde(flatten)]` source it carries merged
+/// beside them, and the object exactly as it stands where the variant flattens nothing.
+#[cfg(feature = "jsonschema")]
+fn variant_merged_json_value(
+    base: &proc_macro2::TokenStream,
+    flattened_fields: &[FieldDef],
+    self_type_name: &str,
+    variant_name: &str,
+) -> proc_macro2::TokenStream {
+    if flattened_fields.is_empty() {
+        return quote! { serde_json::Value::Object(#base) };
     }
+    merged_object_value(
+        base,
+        &flatten_merged_sources(flattened_fields),
+        &MergeDiagnostic {
+            cycle_remedy: "write the field as a named member so the cycle defers through a reference",
+            edge: &format!("`#[serde(flatten)]` in variant `{variant_name}` of"),
+            non_object_remedy: "write the field as a named member so the value gets a key of its own",
+            subject: self_type_name,
+        },
+    )
 }
 
 /// The diagnostic a variant whose content has no rendering produces, in the value position the
@@ -5989,15 +6128,15 @@ fn external_content_rejection_value(
 /// Renders what one variant of an externally tagged enum writes under its key.
 #[cfg(feature = "serde")]
 fn render_external_content(
-    kind: &VariantKind,
-    field_defs: &[FieldDef],
-    discriminator_value: &str,
+    variant: &DiscriminatedVariant,
     self_type_name: &str,
 ) -> (String, String, proc_macro2::TokenStream) {
+    let field_defs = &variant.field_defs;
+    let discriminator_value = &variant.discriminator_value;
     #[cfg(not(feature = "jsonschema"))]
     let _: &str = discriminator_value;
 
-    match kind {
+    match &variant.kind {
         VariantKind::Unit => (String::new(), String::new(), quote! {}),
         VariantKind::TupleSingle => {
             // `classify_variant` names this kind only for a variant of exactly one unnamed field.
@@ -6056,18 +6195,24 @@ fn render_external_content(
                 type_code: String::new(),
             };
             write_named_variant_fields(field_defs, None, self_type_name, &mut parts);
+            let flatten = variant_flatten_intersections(&variant.flattened_fields);
 
             #[cfg(feature = "zod")]
-            let zod = format!("z.strictObject({{\n{}}})", parts.schema_code);
+            let zod = format!("z.strictObject({{\n{}}}){}", parts.schema_code, flatten.1);
             #[cfg(not(feature = "zod"))]
             let zod = String::new();
 
             #[cfg(feature = "jsonschema")]
-            let json = named_content_json_value(&parts.json_fields);
+            let json = named_content_json_value(
+                &parts.json_fields,
+                &variant.flattened_fields,
+                self_type_name,
+                discriminator_value,
+            );
             #[cfg(not(feature = "jsonschema"))]
             let json = quote! {};
 
-            (format!("{{\n{}}}", parts.type_code), zod, json)
+            (format!("{{\n{}}}{}", parts.type_code, flatten.0), zod, json)
         }
     }
 }
@@ -6094,8 +6239,7 @@ fn render_external_variant(
         );
     }
 
-    let (content_ts, content_zod, content_json) =
-        render_external_content(&variant.kind, &variant.field_defs, key, self_type_name);
+    let (content_ts, content_zod, content_json) = render_external_content(variant, self_type_name);
 
     #[cfg(feature = "zod")]
     let zod = {
@@ -6598,16 +6742,23 @@ fn render_internal_variant(
         .flatten();
 
     let Some(inner) = flattened else {
+        let flatten = variant_flatten_intersections(&variant.flattened_fields);
+
         #[cfg(feature = "jsonschema")]
-        let json = quote! { serde_json::Value::Object(#tag_object) };
+        let json = variant_merged_json_value(
+            &tag_object,
+            &variant.flattened_fields,
+            self_type_name,
+            &variant.discriminator_value,
+        );
         #[cfg(not(feature = "jsonschema"))]
         let json = quote! {};
 
         return (
-            parts.type_code,
-            format!("z.strictObject({})", parts.schema_code),
+            format!("{}{}", parts.type_code, flatten.0),
+            format!("z.strictObject({}){}", parts.schema_code, flatten.1),
             json,
-            false,
+            !variant.flattened_fields.is_empty(),
         );
     };
 
@@ -7870,27 +8021,21 @@ fn tagged_variant_json_object(
 fn generate_variant_code(
     tag_name: &str,
     content_name: &str,
-    discriminator_value: &str,
-    field_defs: &[FieldDef],
-    variant_kind: &VariantKind,
-    discriminator_docs: &str,
+    variant: &DiscriminatedVariant,
     self_type_name: &str,
 ) -> (String, String, Vec<String>, proc_macro2::TokenStream) {
-    let mut parts = tagged_variant_parts(tag_name, discriminator_value, discriminator_docs);
+    let discriminator_value = &variant.discriminator_value;
+    let field_defs = &variant.field_defs;
+    let mut parts = tagged_variant_parts(tag_name, discriminator_value, &variant.docs);
 
-    match variant_kind {
+    match &variant.kind {
         VariantKind::Unit => {
             // Unit variant: no additional fields beyond the discriminator
             // TypeScript: { type: "Variant" }
             // Zod: { type: z.literal("Variant") }
         }
         VariantKind::Named => {
-            write_adjacent_named_variant_fields(
-                field_defs,
-                content_name,
-                self_type_name,
-                &mut parts,
-            );
+            write_adjacent_named_variant_fields(variant, content_name, self_type_name, &mut parts);
         }
         VariantKind::TupleSingle => {
             write_tuple_single_variant_fields(field_defs, content_name, self_type_name, &mut parts);
@@ -7930,7 +8075,7 @@ fn generate_variant_code(
 /// serde actually writes for it (`{"tag":"Variant","content":{...fields}}`). Reuses
 /// [`write_named_variant_fields`]'s own `None`-tag rendering rather than a second nesting mechanism.
 fn write_adjacent_named_variant_fields(
-    field_defs: &[FieldDef],
+    variant: &DiscriminatedVariant,
     content_name: &str,
     self_type_name: &str,
     parts: &mut VariantParts,
@@ -7941,24 +8086,31 @@ fn write_adjacent_named_variant_fields(
         schema_code: String::new(),
         type_code: String::new(),
     };
-    write_named_variant_fields(field_defs, None, self_type_name, &mut inner);
+    write_named_variant_fields(&variant.field_defs, None, self_type_name, &mut inner);
+    let flatten = variant_flatten_intersections(&variant.flattened_fields);
 
     let content_key = ts_member_key(content_name);
     let _ = writeln!(
         parts.type_code,
-        "  {content_key}: {{\n{}}};",
-        inner.type_code
+        "  {content_key}: {{\n{}}}{};",
+        inner.type_code, flatten.0
     );
 
     #[cfg(feature = "zod")]
     let _ = writeln!(
         parts.schema_code,
-        "  {content_key}: z.strictObject({{\n{}}}),",
-        inner.schema_code
+        "  {content_key}: z.strictObject({{\n{}}}){},",
+        inner.schema_code, flatten.1
     );
 
     #[cfg(feature = "jsonschema")]
-    push_named_content_json_field(&mut parts.json_fields, content_name, &inner.json_fields);
+    push_named_content_json_field(
+        &mut parts.json_fields,
+        content_name,
+        &inner.json_fields,
+        variant,
+        self_type_name,
+    );
 }
 
 /// Pushes the JSON-schema property/required entries for an adjacently tagged struct variant's
@@ -7968,9 +8120,16 @@ fn push_named_content_json_field(
     json_schema_variant_fields: &mut Vec<proc_macro2::TokenStream>,
     content_name: &str,
     inner_json_fields: &[proc_macro2::TokenStream],
+    variant: &DiscriminatedVariant,
+    self_type_name: &str,
 ) {
     let content_name_str = content_name.to_owned();
-    let inner = named_content_json_value(inner_json_fields);
+    let inner = named_content_json_value(
+        inner_json_fields,
+        &variant.flattened_fields,
+        self_type_name,
+        &variant.discriminator_value,
+    );
     json_schema_variant_fields.push(quote! {
         properties.insert(#content_name_str.to_string(), #inner);
         required.push(serde_json::Value::String(#content_name_str.to_string()));
@@ -10938,6 +11097,52 @@ fn flatten_merged_source(fld: &FieldDef) -> MergedSource {
     }
 }
 
+/// The ` & A & B` an object's own block is closed with, one operand per merged source.
+#[cfg(feature = "typescript")]
+fn ts_intersection_suffix(operands: &[MergedOperand]) -> String {
+    operands.iter().fold(String::new(), |mut acc, operand| {
+        let _ = write!(acc, " & {}", ts_merged_operand(operand));
+        acc
+    })
+}
+
+/// The `.and(...)` chain an object's own `z.strictObject` is closed with. Every source reaching
+/// here contributes exactly one key set, so the chain is the whole merge — the struct-level
+/// [`zod_merged_statements`] is what multiplies the sources that contribute more.
+#[cfg(feature = "zod")]
+fn zod_intersection_suffix(operands: &[MergedOperand]) -> String {
+    operands.iter().fold(String::new(), |mut acc, operand| {
+        let _ = write!(acc, ".and({})", deferred_zod_operand(&operand.spelling));
+        acc
+    })
+}
+
+/// What a variant's `#[serde(flatten)]` sources are joined onto its own object with: the TypeScript
+/// intersection first, the Zod chain second, each empty where its surface is off or the variant
+/// flattens nothing.
+#[cfg(any(feature = "typescript", feature = "zod"))]
+fn variant_flatten_intersections(flattened_fields: &[FieldDef]) -> (String, String) {
+    let operands = compute_flatten_outputs(flattened_fields);
+
+    #[cfg(feature = "typescript")]
+    let typescript = ts_intersection_suffix(&operands.0);
+    #[cfg(not(feature = "typescript"))]
+    let typescript = String::new();
+
+    #[cfg(feature = "zod")]
+    let zod = zod_intersection_suffix(&operands.1);
+    #[cfg(not(feature = "zod"))]
+    let zod = String::new();
+
+    (typescript, zod)
+}
+
+/// Nothing is joined where neither surface writes an intersection.
+#[cfg(not(any(feature = "typescript", feature = "zod")))]
+const fn variant_flatten_intersections(_flattened_fields: &[FieldDef]) -> (String, String) {
+    (String::new(), String::new())
+}
+
 /// What one merged source is written as inside the intersection.
 #[cfg(feature = "typescript")]
 fn ts_merged_operand(operand: &MergedOperand) -> String {
@@ -10966,10 +11171,7 @@ fn generate_ts_definition_method(
     let has_flatten = !flatten_types.is_empty();
     let operands: Vec<String> = flatten_types.iter().map(ts_merged_operand).collect();
     let intersection_only = operands.join(" & ");
-    let intersection_suffix: String = operands.iter().fold(String::new(), |mut acc, t| {
-        let _ = write!(acc, " & {t}");
-        acc
-    });
+    let intersection_suffix = ts_intersection_suffix(flatten_types);
 
     let typescript_type_gen = if fields_empty {
         if has_flatten {

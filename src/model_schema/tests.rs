@@ -9590,3 +9590,184 @@ fn an_untagged_sibling_exclusion_writes_a_non_identifier_key_as_a_string() {
         "{ subject: string; \"reply-to\"?: never; sent_at?: never }"
     );
 }
+
+/// Collects a discriminated enum's guard failures as rendered `compile_error!` token strings.
+#[cfg(feature = "serde")]
+fn discriminated_guard_errors(mut item: syn::ItemEnum) -> Vec<String> {
+    collect_discriminated_variants(&mut item, None, Some("probe_schema"))
+        .2
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// The field defs one variant of a discriminated enum collected, beside the ones it flattens.
+#[cfg(feature = "serde")]
+fn collected_variant_fields(mut item: syn::ItemEnum) -> (Vec<String>, Vec<String>) {
+    let variants = collect_discriminated_variants(&mut item, None, Some("probe_schema")).0;
+    let variant = variants.first().unwrap();
+    (
+        variant.field_defs.iter().map(|f| f.name.clone()).collect(),
+        variant
+            .flattened_fields
+            .iter()
+            .map(|f| f.name.clone())
+            .collect(),
+    )
+}
+
+/// A variant's `#[serde(flatten)]` field is held apart from the members that write a key, exactly
+/// as a struct's own is.
+#[cfg(feature = "serde")]
+#[test]
+fn a_flattened_variant_field_is_split_out_of_the_variants_members() {
+    let (written, flattened) = collected_variant_fields(syn::parse_quote! {
+        enum Probe {
+            Named {
+                #[serde(flatten)]
+                extra: PlainBase,
+                x: String,
+            },
+        }
+    });
+    assert_eq!(written, vec!["x".to_owned()]);
+    assert_eq!(flattened, vec!["extra".to_owned()]);
+}
+
+/// And an unregistered source is left to the merge, which is what the struct-level split does with
+/// a name the expansion has not seen either.
+#[cfg(feature = "serde")]
+#[test]
+fn a_flattened_variant_field_over_an_unrecorded_name_is_not_refused() {
+    assert!(
+        discriminated_guard_errors(syn::parse_quote! {
+            enum Probe {
+                Named {
+                    #[serde(flatten)]
+                    extra: NeverRecordedBase,
+                    x: String,
+                },
+            }
+        })
+        .is_empty()
+    );
+}
+
+/// The guards a struct's own flattened field is read against reach a variant's too: a plain enum
+/// writes its variant name as a key holding null, which no closed object admits.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn a_flattened_variant_field_over_a_plain_enum_is_refused() {
+    register_alias_info(
+        "VariantHue",
+        "VariantHue",
+        &ident_schema_module_name("VariantHue"),
+        AliasKind::EnumMembers,
+    );
+    let errors = discriminated_guard_errors(syn::parse_quote! {
+        enum Probe {
+            Named {
+                #[serde(flatten)]
+                tone: VariantHue,
+                x: String,
+            },
+        }
+    });
+    assert_eq!(errors.len(), 1, "got: {errors:?}");
+    assert!(errors[0].contains("compile_error"), "got: {}", errors[0]);
+    assert!(
+        errors[0].contains("carries `#[serde(flatten)]` over `VariantHue`"),
+        "got: {}",
+        errors[0]
+    );
+}
+
+/// A source that writes one key set per branch is refused where a variant flattens it: the
+/// variant's own members are written inside the union member carrying them, so there is nowhere to
+/// bind them to a name each alternative could join.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_flattened_variant_field_over_a_multi_branch_source_is_refused() {
+    let mut choice: syn::ItemEnum = syn::parse_quote! {
+        enum VariantChoice {
+            First(Holder),
+            Second(Other),
+        }
+    };
+    let (_, _, _, merge_parts, _, errors, _, _) =
+        collect_untagged_members(&mut choice, UNTAGGED_MODULE);
+    assert!(errors.is_empty(), "got: {errors:?}");
+    register_alias_info(
+        "VariantChoice",
+        "VariantChoice",
+        &ident_schema_module_name("VariantChoice"),
+        AliasKind::NoEnumMembers,
+    );
+    record_zod_union_members("VariantChoice", &merge_parts);
+
+    let refusals = discriminated_guard_errors(syn::parse_quote! {
+        enum Probe {
+            Named {
+                #[serde(flatten)]
+                either: VariantChoice,
+                x: String,
+            },
+        }
+    });
+    assert_eq!(refusals.len(), 1, "got: {refusals:?}");
+    assert!(
+        refusals[0].contains("writes one key set per branch of the choice it names"),
+        "got: {}",
+        refusals[0]
+    );
+    assert!(
+        refusals[0].contains("variant `Named` of `Probe`"),
+        "got: {}",
+        refusals[0]
+    );
+}
+
+/// So is a source serde writes all the members of or none of: that is two key sets as well.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn an_optional_flattened_variant_field_is_refused() {
+    let refusals = discriminated_guard_errors(syn::parse_quote! {
+        enum Probe {
+            Named {
+                #[serde(flatten, skip_serializing_if = "Option::is_none", default)]
+                extra: Option<PlainBase>,
+                x: String,
+            },
+        }
+    });
+    assert_eq!(refusals.len(), 1, "got: {refusals:?}");
+    assert!(
+        refusals[0].contains("writes its members or no members at all"),
+        "got: {}",
+        refusals[0]
+    );
+}
+
+/// And each refusal names a way out the author can act on.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn the_variant_flatten_refusal_names_the_remedy() {
+    let refusals = discriminated_guard_errors(syn::parse_quote! {
+        enum Probe {
+            Named {
+                #[serde(flatten, skip_serializing_if = "Option::is_none", default)]
+                extra: Option<PlainBase>,
+                x: String,
+            },
+        }
+    });
+    assert!(
+        refusals[0]
+            .contains("write the field as a named member so the value gets a key of its own"),
+        "got: {}",
+        refusals[0]
+    );
+}

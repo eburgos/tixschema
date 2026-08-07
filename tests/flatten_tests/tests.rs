@@ -970,6 +970,115 @@ struct OptUnionHolder {
     own: String,
 }
 
+/// The source an enum's own struct variants flatten, and one form of the enum per tagging: serde
+/// writes the source's members into the variant's own content object, wherever that object sits.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct VariantExtra {
+    note: String,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct VariantRank {
+    rank: i64,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+enum ExternalFlatVariant {
+    Named {
+        #[serde(flatten)]
+        extra: VariantExtra,
+        x: String,
+    },
+    Plain {
+        y: String,
+    },
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "kind")]
+enum InternalFlatVariant {
+    Named {
+        #[serde(flatten)]
+        extra: VariantExtra,
+        x: String,
+    },
+    Plain {
+        y: String,
+    },
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "kind", content = "data")]
+enum AdjacentFlatVariant {
+    Named {
+        #[serde(flatten)]
+        extra: VariantExtra,
+        x: String,
+    },
+    Plain {
+        y: String,
+    },
+}
+
+/// Two sources flattened into one variant: both sets of members join the same content object.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+enum TwiceFlatVariant {
+    Named {
+        #[serde(flatten)]
+        extra: VariantExtra,
+        #[serde(flatten)]
+        rank: VariantRank,
+        x: String,
+    },
+}
+
+/// The content object of `variant` in `document`, whichever of the three taggings put it there.
+#[cfg(feature = "jsonschema")]
+fn variant_content(document: &serde_json::Value, variant: &str) -> serde_json::Value {
+    let branches = document["oneOf"].as_array().unwrap();
+    let member = branches
+        .iter()
+        .find(|branch| {
+            let properties = branch["properties"].as_object().unwrap();
+            properties.contains_key(variant)
+                || properties
+                    .get("kind")
+                    .is_some_and(|tag| tag["const"] == variant)
+        })
+        .unwrap();
+    let properties = member["properties"].as_object().unwrap();
+    for key in [variant, "data"] {
+        if let Some(content) = properties.get(key) {
+            return content.clone();
+        }
+    }
+    member.clone()
+}
+
+/// The keys a content object names, and the keys it requires.
+#[cfg(feature = "jsonschema")]
+fn described_keys(content: &serde_json::Value) -> (Vec<String>, Vec<String>) {
+    let named = content["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    let required = content["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|key| key.as_str().unwrap().to_owned())
+        .collect();
+    (named, required)
+}
+
 /// Whether `payload` is accepted by a document every leaf of which is an object closed by
 /// `additionalProperties: false`: a leaf accepts when it names every key the payload carries and
 /// requires no key it does not.
@@ -3271,4 +3380,237 @@ fn test_the_inline_untagged_direct_flatten_document_is_unchanged() {
         serde_json::to_string(&InlineUntagDirectHolder::json_schema()).unwrap(),
         r#"{"type":"object","anyOf":[{"type":"object","properties":{"own":{"type":"string"},"left":{"type":"string"}},"required":["own","left"],"additionalProperties":false},{"type":"object","properties":{"own":{"type":"string"},"right":{"type":"boolean"}},"required":["own","right"],"additionalProperties":false}]}"#
     );
+}
+
+/// What serde writes for a `#[serde(flatten)]` field of an enum's own struct variant: the source's
+/// members sit in the variant's content object, under no key of their own — the same merge a
+/// struct's own flattened field gets, one level deeper.
+#[test]
+fn test_a_flattened_variant_field_writes_its_members_into_the_variants_content() {
+    assert_eq!(
+        serde_json::to_value(ExternalFlatVariant::Named {
+            extra: VariantExtra {
+                note: "n".to_owned()
+            },
+            x: "y".to_owned(),
+        })
+        .unwrap(),
+        serde_json::json!({ "Named": { "note": "n", "x": "y" } })
+    );
+    assert_eq!(
+        serde_json::to_value(InternalFlatVariant::Named {
+            extra: VariantExtra {
+                note: "n".to_owned()
+            },
+            x: "y".to_owned(),
+        })
+        .unwrap(),
+        serde_json::json!({ "kind": "Named", "note": "n", "x": "y" })
+    );
+    assert_eq!(
+        serde_json::to_value(AdjacentFlatVariant::Named {
+            extra: VariantExtra {
+                note: "n".to_owned()
+            },
+            x: "y".to_owned(),
+        })
+        .unwrap(),
+        serde_json::json!({ "kind": "Named", "data": { "note": "n", "x": "y" } })
+    );
+    assert_eq!(
+        serde_json::to_value(TwiceFlatVariant::Named {
+            extra: VariantExtra {
+                note: "n".to_owned()
+            },
+            rank: VariantRank { rank: 3 },
+            x: "y".to_owned(),
+        })
+        .unwrap(),
+        serde_json::json!({ "Named": { "note": "n", "rank": 3_i64, "x": "y" } })
+    );
+}
+
+/// And reads them back the same way, so the merged shape is what a payload must carry in both
+/// directions.
+#[test]
+fn test_a_flattened_variant_field_reads_back_from_the_merged_shape() {
+    let external: ExternalFlatVariant =
+        serde_json::from_value(serde_json::json!({ "Named": { "note": "n", "x": "y" } })).unwrap();
+    assert_eq!(
+        external,
+        ExternalFlatVariant::Named {
+            extra: VariantExtra {
+                note: "n".to_owned()
+            },
+            x: "y".to_owned(),
+        }
+    );
+    let internal: InternalFlatVariant =
+        serde_json::from_value(serde_json::json!({ "kind": "Named", "note": "n", "x": "y" }))
+            .unwrap();
+    assert_eq!(
+        internal,
+        InternalFlatVariant::Named {
+            extra: VariantExtra {
+                note: "n".to_owned()
+            },
+            x: "y".to_owned(),
+        }
+    );
+}
+
+/// So the TypeScript the variant describes as is an intersection at the content's own position,
+/// never a key holding the source.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_a_flattened_variant_field_is_a_typescript_intersection_inside_the_variant() {
+    let external = ExternalFlatVariant::ts_definition();
+    assert!(external.contains("} & VariantExtra;"), "Got: {external}");
+    assert!(!external.contains("extra:"), "Got: {external}");
+    assert!(external.contains("y: string;"), "Got: {external}");
+
+    let internal = InternalFlatVariant::ts_definition();
+    assert!(internal.contains("} & VariantExtra"), "Got: {internal}");
+    assert!(!internal.contains("extra:"), "Got: {internal}");
+
+    let adjacent = AdjacentFlatVariant::ts_definition();
+    assert!(adjacent.contains("} & VariantExtra;"), "Got: {adjacent}");
+    assert!(!adjacent.contains("extra:"), "Got: {adjacent}");
+}
+
+#[test]
+#[cfg(feature = "typescript")]
+fn test_two_flattened_variant_fields_join_the_same_content_object() {
+    let ts = TwiceFlatVariant::ts_definition();
+    assert!(ts.contains("} & VariantExtra & VariantRank;"), "Got: {ts}");
+    assert!(!ts.contains("rank:"), "Got: {ts}");
+}
+
+/// And the Zod schema joins the source through the same deferred operand a struct's own flattened
+/// base joins through, so a source declared below the enum is still read when something validates.
+#[test]
+#[cfg(feature = "zod")]
+fn test_a_flattened_variant_field_is_a_zod_intersection_inside_the_variant() {
+    for zod in [
+        ExternalFlatVariant::zod_schema(),
+        InternalFlatVariant::zod_schema(),
+        AdjacentFlatVariant::zod_schema(),
+    ] {
+        assert!(
+            zod.contains("}).and(z.lazy(() => VariantExtra$Schema))"),
+            "Got: {zod}"
+        );
+        assert!(!zod.contains("extra:"), "Got: {zod}");
+        assert!(
+            !zod.contains(".and(VariantExtra$Schema)"),
+            "the source is read while the const initializes: {zod}"
+        );
+    }
+}
+
+#[test]
+#[cfg(feature = "zod")]
+fn test_two_flattened_variant_fields_chain_their_zod_operands() {
+    let zod = TwiceFlatVariant::zod_schema();
+    assert!(
+        zod.contains(
+            "}).and(z.lazy(() => VariantExtra$Schema)).and(z.lazy(() => VariantRank$Schema))"
+        ),
+        "Got: {zod}"
+    );
+}
+
+/// An internally tagged member that flattens is an intersection rather than an object, and Zod
+/// discriminates only between objects — so the union carrying it is a plain one.
+#[test]
+#[cfg(feature = "zod")]
+fn test_an_internally_tagged_flattened_variant_forces_a_plain_zod_union() {
+    let zod = InternalFlatVariant::zod_schema();
+    assert!(zod.contains("z.union(["), "Got: {zod}");
+    assert!(!zod.contains("z.discriminatedUnion("), "Got: {zod}");
+}
+
+/// The JSON document names the source's members where the variant's own members are named, and
+/// requires them beside its own — no key stands for the flattened field itself.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_a_flattened_variant_field_merges_into_the_variants_json_content() {
+    for document in [
+        ExternalFlatVariant::json_schema(),
+        InternalFlatVariant::json_schema(),
+        AdjacentFlatVariant::json_schema(),
+    ] {
+        let content = variant_content(&document, "Named");
+        let (named, required) = described_keys(&content);
+        assert!(named.contains(&"note".to_owned()), "Got: {content}");
+        assert!(named.contains(&"x".to_owned()), "Got: {content}");
+        assert!(!named.contains(&"extra".to_owned()), "Got: {content}");
+        assert!(required.contains(&"note".to_owned()), "Got: {content}");
+        assert!(required.contains(&"x".to_owned()), "Got: {content}");
+        assert_eq!(content["additionalProperties"], serde_json::json!(false));
+    }
+}
+
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_two_flattened_variant_fields_merge_into_one_json_content() {
+    let content = variant_content(&TwiceFlatVariant::json_schema(), "Named");
+    let (named, required) = described_keys(&content);
+    for key in ["note", "rank", "x"] {
+        assert!(named.contains(&key.to_owned()), "Got: {content}");
+        assert!(required.contains(&key.to_owned()), "Got: {content}");
+    }
+}
+
+/// And the document accepts exactly the payload serde writes.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_the_flattened_variant_document_accepts_what_serde_writes() {
+    let cases = [
+        (
+            ExternalFlatVariant::json_schema(),
+            serde_json::to_value(ExternalFlatVariant::Named {
+                extra: VariantExtra {
+                    note: "n".to_owned(),
+                },
+                x: "y".to_owned(),
+            })
+            .unwrap(),
+        ),
+        (
+            InternalFlatVariant::json_schema(),
+            serde_json::to_value(InternalFlatVariant::Named {
+                extra: VariantExtra {
+                    note: "n".to_owned(),
+                },
+                x: "y".to_owned(),
+            })
+            .unwrap(),
+        ),
+    ];
+    for (document, payload) in cases {
+        assert!(
+            closed_document_accepts(&document, &payload),
+            "{document} rejected {payload}"
+        );
+    }
+}
+
+/// A variant carrying no flattened field is untouched: its content stays the object it always was,
+/// with a key per declared field and no intersection anywhere.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_a_variant_without_a_flattened_field_keeps_its_typescript_object() {
+    let ts = ExternalFlatVariant::ts_definition();
+    let declared = &ts[ts.find("export type").unwrap()..];
+    let plain = &declared[declared.find("\"Plain\"").unwrap()..];
+    assert!(!plain.contains(" & "), "Got: {plain}");
+}
+
+#[test]
+#[cfg(feature = "zod")]
+fn test_a_variant_without_a_flattened_field_keeps_its_zod_object() {
+    let zod = AdjacentFlatVariant::zod_schema();
+    let plain = &zod[zod.find("z.literal(\"Plain\")").unwrap()..];
+    assert!(!plain.contains(".and("), "Got: {plain}");
 }
