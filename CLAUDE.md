@@ -542,12 +542,13 @@ them is split off. It refuses in both directions:
   the parameter, because nothing else reads the default;
 - `default_types` on an item with no type parameter, and an empty `default_types()`, both being a
   declaration with nothing to declare;
-- an entry filled at a type the field-definition dispatch has no arm for — refused only under
-  `#[cfg(feature = "jsonschema")]`, spanned on the filling. That dispatch takes a name it does not
-  recognise for another `#[model_schema]` item, which is right for a sibling declared below and
-  gibberish for `char`: the emission names a `char_schema` module nothing publishes. Tokens cannot
-  separate the two, so `is_undescribable_primitive` refuses only what provably cannot become a
-  sibling — the primitive names the language reserves that the dispatch answers for nowhere
+- an entry filled at a type the field-definition dispatch has no arm for — refused under
+  `#[cfg(any(feature = "zod", feature = "jsonschema"))]`, the two surfaces that read a declared
+  filling, spanned on the filling. That dispatch takes a name it does not recognise for another
+  `#[model_schema]` item, which is right for a sibling declared below and gibberish for `char`: the
+  emission names a `char_schema` module nothing publishes. Tokens cannot separate the two, so
+  `is_undescribable_primitive` refuses only what provably cannot become a sibling — the primitive
+  names the language reserves that the dispatch answers for nowhere
   (`char`, `i128`, `u128`, `f16`, `f128`).
 
 A const parameter earns its own refusal, from `const_parameter_argument_errors` at the same seam

@@ -1681,7 +1681,7 @@ fn get_field_def_type_or_sibling(t_name: &str) -> FieldDefType {
 
 /// Whether a name is one the language reserves for a primitive type that
 /// [`get_field_def_type_or_sibling`] has no arm for.
-#[cfg(feature = "jsonschema")]
+#[cfg(any(feature = "zod", feature = "jsonschema"))]
 pub fn is_undescribable_primitive(name: &str) -> bool {
     matches!(name, "i128" | "u128" | "f16" | "f128")
 }
