@@ -53,7 +53,7 @@ impl SerdeKeyOmission {
     }
 }
 
-/// What a list-form `rename(...)` or `rename_all(...)` names in each of serde's two directions.
+/// What a list-form renaming names in each of serde's two directions.
 #[cfg(feature = "serde")]
 #[derive(Default)]
 struct RenameDirections {
@@ -69,8 +69,11 @@ pub struct SerdeTypeMeta {
     pub cfg_attr_rejection: Option<Error>,
     pub content: Option<String>, // e.g., "value" for adjacently tagged enums
     pub rename_all: Option<String>, // e.g., "camelCase"
-    pub tag: Option<String>,     // e.g., "behaviorType"
-    pub untagged: bool,          // Whether the enum is `#[serde(untagged)]`
+    /// The casing rule the container applies to the members of every struct variant. serde keeps
+    /// this apart from `rename_all`, which reaches variant names only.
+    pub rename_all_fields: Option<String>,
+    pub tag: Option<String>, // e.g., "behaviorType"
+    pub untagged: bool,      // Whether the enum is `#[serde(untagged)]`
 }
 
 /// Metadata for serde attributes applied to a field. Whether the field's key is omitted is not
@@ -144,8 +147,8 @@ pub fn has_serde_default(attrs: &[Attribute]) -> bool {
     parse_serde_key_omission(attrs).defaulted
 }
 
-/// Reads the `serialize` and `deserialize` sub-keys out of a list-form `rename(...)` /
-/// `rename_all(...)`, stepping past any other sub-key the same way the outer walk does.
+/// Reads the `serialize` and `deserialize` sub-keys out of a list-form renaming, stepping past any
+/// other sub-key the same way the outer walk does.
 #[cfg(feature = "serde")]
 fn parse_rename_directions(nested: &ParseNestedMeta<'_>) -> syn::Result<RenameDirections> {
     let mut directions = RenameDirections::default();
@@ -208,9 +211,9 @@ fn one_direction_only(key: &str, path: &syn::Path, written: &str, direction: &st
     )
 }
 
-/// The name a `rename` / `rename_all` key carries, in either spelling: the value of `key = "..."`,
-/// or the one name a list form's two directions agree on. A list form the directions disagree over
-/// names nothing a surface could render, and is answered by [`rename_direction_rejection`].
+/// The name a renaming key carries, in either spelling: the value of `key = "..."`, or the one name
+/// a list form's two directions agree on. A list form the directions disagree over names nothing a
+/// surface could render, and is answered by [`rename_direction_rejection`].
 #[cfg(feature = "serde")]
 fn read_renaming(nested: &ParseNestedMeta<'_>, key: &str) -> syn::Result<Option<String>> {
     if nested.input.peek(Token![=]) {
@@ -224,8 +227,8 @@ fn read_renaming(nested: &ParseNestedMeta<'_>, key: &str) -> syn::Result<Option<
     }
 }
 
-/// The refusal the item's own list-form `rename(...)` / `rename_all(...)` earns when its two
-/// directions do not name one key, or `None` when every renaming written here names exactly one.
+/// The refusal the item's own list-form renaming earns when its two directions do not name one key,
+/// or `None` when every renaming written here names exactly one.
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
@@ -242,6 +245,8 @@ pub fn rename_direction_rejection(attrs: &[Attribute]) -> Option<Error> {
                 Some("rename")
             } else if nested.path.is_ident("rename_all") {
                 Some("rename_all")
+            } else if nested.path.is_ident("rename_all_fields") {
+                Some("rename_all_fields")
             } else {
                 None
             };
@@ -315,6 +320,10 @@ pub fn parse_serde_type_attributes(attrs: &[Attribute]) -> SerdeTypeMeta {
                 // deserialize = "...")`
                 else if nested.path.is_ident("rename_all") {
                     meta.rename_all = read_renaming(&nested, "rename_all")?;
+                }
+                // Handle `rename_all_fields = "value"` and its list form
+                else if nested.path.is_ident("rename_all_fields") {
+                    meta.rename_all_fields = read_renaming(&nested, "rename_all_fields")?;
                 }
                 // Handle `untagged`
                 else if nested.path.is_ident("untagged") {

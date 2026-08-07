@@ -28,6 +28,7 @@ fn test_final_field_name() {
         tag: None,
         content: None,
         rename_all: Some("camelCase".to_owned()),
+        rename_all_fields: None,
         untagged: false,
     };
 
@@ -479,6 +480,88 @@ fn test_list_form_rename_written_for_one_direction_only_is_refused() {
     assert!(
         read_in.contains("`in_name` when deserializing only"),
         "{read_in}"
+    );
+}
+
+#[test]
+fn test_rename_all_fields_is_read_in_both_spellings() {
+    let single: syn::ItemEnum = syn::parse_quote! {
+        #[serde(rename_all_fields = "camelCase")]
+        enum E { Made { my_field: u32 } }
+    };
+    assert_eq!(
+        parse_serde_type_attributes(&single.attrs)
+            .rename_all_fields
+            .as_deref(),
+        Some("camelCase")
+    );
+
+    let listed: syn::ItemEnum = syn::parse_quote! {
+        #[serde(rename_all_fields(serialize = "camelCase", deserialize = "camelCase"))]
+        enum E { Made { my_field: u32 } }
+    };
+    assert_eq!(
+        parse_serde_type_attributes(&listed.attrs)
+            .rename_all_fields
+            .as_deref(),
+        Some("camelCase")
+    );
+}
+
+/// `is_ident` matches the whole ident, so the `rename_all` arm cannot swallow `rename_all_fields`
+/// written beside it, and the two rules stay the independent pair serde treats them as.
+#[test]
+fn test_rename_all_and_rename_all_fields_are_recorded_apart() {
+    let item: syn::ItemEnum = syn::parse_quote! {
+        #[serde(rename_all = "SCREAMING_SNAKE_CASE", rename_all_fields = "camelCase")]
+        enum E { MadeVariant { my_field: u32 } }
+    };
+    let meta = parse_serde_type_attributes(&item.attrs);
+    assert_eq!(meta.rename_all.as_deref(), Some("SCREAMING_SNAKE_CASE"));
+    assert_eq!(meta.rename_all_fields.as_deref(), Some("camelCase"));
+}
+
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn test_list_form_rename_all_fields_naming_two_rules_is_refused() {
+    let item: syn::ItemEnum = syn::parse_quote! {
+        #[serde(rename_all_fields(serialize = "camelCase", deserialize = "kebab-case"))]
+        enum E { Made { my_field: u32 } }
+    };
+    let message = rename_direction_rejection(&item.attrs).unwrap().to_string();
+    assert!(message.contains("`rename_all_fields`"), "{message}");
+    assert!(
+        message.contains("`camelCase` when serializing"),
+        "{message}"
+    );
+    assert!(
+        message.contains("`kebab-case` when deserializing"),
+        "{message}"
+    );
+    assert!(
+        parse_serde_type_attributes(&item.attrs)
+            .rename_all_fields
+            .is_none()
+    );
+}
+
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn test_list_form_rename_all_fields_written_for_one_direction_only_is_refused() {
+    let item: syn::ItemEnum = syn::parse_quote! {
+        #[serde(rename_all_fields(serialize = "camelCase"))]
+        enum E { Made { my_field: u32 } }
+    };
+    let message = rename_direction_rejection(&item.attrs).unwrap().to_string();
+    assert!(message.contains("`rename_all_fields`"), "{message}");
+    assert!(
+        message.contains("`camelCase` when serializing only"),
+        "{message}"
+    );
+    assert!(
+        parse_serde_type_attributes(&item.attrs)
+            .rename_all_fields
+            .is_none()
     );
 }
 
