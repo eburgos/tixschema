@@ -6,7 +6,7 @@
 use syn::meta::ParseNestedMeta;
 use syn::{Attribute, Lit, LitStr, Type};
 
-use crate::utils::{constraining_pattern, portable_pattern};
+use crate::utils::{constraining_pattern, emittable_pattern, portable_pattern};
 
 /// Every key the parser reads, in the order the unknown-key rejection names them. Add a new key to
 /// [`parse_prop_key`], add it here too, or `no_key_the_parser_reads_is_rejected` fails.
@@ -135,8 +135,9 @@ pub struct ModelSchemaPropMeta {
     /// earned a [`Self::pattern_rejection`].
     pub pattern: Option<String>, // e.g., "^[0-9a-fA-F]{24}$" from pattern = "^[0-9a-fA-F]{24}$"
     /// What keeps `pattern` off the surfaces it was written for -- a regex the `regex` crate
-    /// cannot parse, a construct a JavaScript regex literal cannot carry, or a shape that admits
-    /// every value and so says nothing on any of them -- spanned on the literal it was written as.
+    /// cannot parse, a construct a JavaScript regex literal cannot carry, a shape that admits
+    /// every value and so says nothing on any of them, or a lone look-around the emitted regex
+    /// cannot carry lint-free -- spanned on the literal it was written as.
     pub pattern_rejection: Option<syn::Error>,
     pub preprocess: Vec<String>, // e.g., ["epoch_to_date", "trim"] from preprocess = ["epoch_to_date", "trim"]
     pub ts_optional: bool,
@@ -177,7 +178,10 @@ fn parse_prop_key(nested: &ParseNestedMeta, meta: &mut ModelSchemaPropMeta) -> s
         let lit: LitStr = nested.value()?.parse()?;
         // A refused pattern is recorded as written: the guards that answer for what a `pattern`
         // may sit on read that one was given, not what it says.
-        match portable_pattern(&lit).and_then(|portable| constraining_pattern(&lit, portable)) {
+        match portable_pattern(&lit)
+            .and_then(|portable| constraining_pattern(&lit, portable))
+            .and_then(|constraining| emittable_pattern(&lit, constraining))
+        {
             Ok(pattern) => meta.pattern = Some(pattern),
             Err(rejection) => {
                 meta.pattern_rejection = Some(rejection);

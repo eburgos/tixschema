@@ -52,8 +52,9 @@ use crate::features::object_id::OBJECT_ID_HEX_PATTERN;
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::{
-    AliasKind, PublishedShape, ShapeQuestion, constraining_pattern, lookup_alias_info,
-    portable_pattern, record_shape_question, record_value_shape, shape_questions_for,
+    AliasKind, PublishedShape, ShapeQuestion, constraining_pattern, emittable_pattern,
+    lookup_alias_info, portable_pattern, record_shape_question, record_value_shape,
+    shape_questions_for,
 };
 
 #[cfg(feature = "serde")]
@@ -486,8 +487,9 @@ struct ModelSchemaArgs {
     /// earned a `pattern_rejection`.
     pattern: Option<String>,
     /// What keeps `pattern` off the surfaces it was written for: an unparseable regex, a construct
-    /// a JavaScript regex literal cannot carry, or a shape that admits every value — spanned on
-    /// the literal it was written as.
+    /// a JavaScript regex literal cannot carry, a shape that admits every value, or a lone
+    /// look-around the emitted regex cannot carry lint-free — spanned on the literal it was
+    /// written as.
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     pattern_rejection: Option<syn::Error>,
 }
@@ -1003,7 +1005,10 @@ fn unknown_arg_rejection(meta: &Meta) -> syn::Error {
 /// what it says.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 fn record_pattern(result: &mut ModelSchemaArgs, lit_str: &syn::LitStr) {
-    match portable_pattern(lit_str).and_then(|portable| constraining_pattern(lit_str, portable)) {
+    match portable_pattern(lit_str)
+        .and_then(|portable| constraining_pattern(lit_str, portable))
+        .and_then(|constraining| emittable_pattern(lit_str, constraining))
+    {
         Ok(pattern) => result.pattern = Some(pattern),
         Err(rejection) => {
             result.pattern_rejection = Some(rejection);

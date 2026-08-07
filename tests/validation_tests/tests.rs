@@ -1185,6 +1185,38 @@ fn test_pattern_pinning_both_ends_to_one_position() {
     );
 }
 
+/// The rewrite a lone `\b` is refused in favour of. It reaches the emitter as a regex, and this
+/// crate's own lints deny `clippy::nursery`, so compiling this fixture is what proves the emitted
+/// `Regex::new` draws no `trivial_regex` at the attribute that wrote it.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn test_pattern_boundary_with_a_word_beside_it() {
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct PatternBoundedWord {
+        #[model_schema_prop(pattern = r"\b\w+")]
+        pub caption: String,
+    }
+
+    PatternBoundedWord {
+        caption: "hello there".to_owned(),
+    }
+    .validate()
+    .unwrap();
+
+    let rejected = PatternBoundedWord {
+        caption: "...".to_owned(),
+    };
+    let errors = rejected.validate().unwrap_err();
+    assert_eq!(
+        errors[0], r"'caption' does not match pattern '\b[0-9A-Za-z_]+'",
+        "Rejection should quote the pattern in the spelling every surface receives: {errors:?}"
+    );
+}
+
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")

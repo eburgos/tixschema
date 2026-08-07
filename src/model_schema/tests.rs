@@ -2632,11 +2632,39 @@ fn a_field_pattern_admitting_every_value_names_the_field_and_says_so() {
     }
 }
 
+/// A lone word boundary says something about the value and still cannot be emitted: the regex the
+/// validator builds from it draws `clippy::trivial_regex` at this very attribute, where the author
+/// has no edit to make. The refusal names the field and the rewrite that keeps the check.
+#[test]
+fn a_field_pattern_that_is_one_assertion_and_nothing_else_names_the_field_and_says_so() {
+    for pattern in [r"\b", r"\B"] {
+        let errors = field_prop_guard_errors(&syn::parse_quote! {
+            struct Report {
+                #[model_schema_prop(pattern = #pattern)]
+                name: String,
+            }
+        });
+        assert_eq!(errors.len(), 1, "for {pattern:?}, got: {errors:?}");
+        for needle in [
+            "compile_error",
+            "field `name`",
+            "one look-around assertion and nothing else",
+            "clippy::trivial_regex",
+        ] {
+            assert!(
+                errors[0].contains(needle),
+                "{needle} missing for {pattern:?}: {}",
+                errors[0]
+            );
+        }
+    }
+}
+
 /// The shapes written out of the same pieces that still turn a value away clear the guard: `^$`
-/// asks for the empty string, `^a*$` for a run of `a`, and `\b` for a word boundary.
+/// asks for the empty string, `^a*$` for a run of `a`, and `\b\w+` for a word at a boundary.
 #[test]
 fn a_field_pattern_written_out_of_the_same_pieces_that_still_constrains_clears_the_guard() {
-    for pattern in ["^$", "^a*$", r"\b"] {
+    for pattern in ["^$", "^a*$", r"\b\w+"] {
         let errors = field_prop_guard_errors(&syn::parse_quote! {
             struct Report {
                 #[model_schema_prop(pattern = #pattern)]
@@ -4057,10 +4085,33 @@ fn a_brand_pattern_admitting_every_value_names_the_type_and_says_so() {
     }
 }
 
+/// The brand's `pattern` reaches the same `regex::Regex::new` a field's does, so the shape that
+/// cannot be emitted without a lint at the attribute is refused here too, naming the type.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[test]
+fn a_brand_pattern_that_is_one_assertion_and_nothing_else_names_the_type_and_says_so() {
+    for pattern in [r"\b", r"\B"] {
+        let errors = brand_pattern_errors(pattern);
+        assert_eq!(errors.len(), 1, "for {pattern:?}, got: {errors:?}");
+        for needle in [
+            "compile_error",
+            "type `UserId`",
+            "one look-around assertion and nothing else",
+            "clippy::trivial_regex",
+        ] {
+            assert!(
+                errors[0].contains(needle),
+                "{needle} missing for {pattern:?}: {}",
+                errors[0]
+            );
+        }
+    }
+}
+
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn a_brand_pattern_that_still_constrains_clears_the_guard() {
-    for pattern in ["^$", "^a*$", r"\b"] {
+    for pattern in ["^$", "^a*$", r"\b\w+"] {
         let errors = brand_pattern_errors(pattern);
         assert!(errors.is_empty(), "for {pattern:?}, got: {errors:?}");
     }
@@ -10491,18 +10542,19 @@ fn the_empty_string_pattern_keeps_the_call_it_was_already_emitted_as() {
     );
 }
 
-/// `\b` is trivial to `clippy::trivial_regex` and names no `str` call, so it keeps the regex — and
-/// the lint keeps firing on it in the consumer, which is the one case left standing here.
+/// A boundary with something beside it is the rewrite the lone-assertion refusal names. It is not
+/// trivial to `clippy::trivial_regex` and names no `str` call either, so it keeps the regex and
+/// compiles clean at the consumer.
 #[cfg(feature = "serde")]
 #[test]
 fn a_word_boundary_pattern_keeps_its_regex() {
     assert_eq!(
-        emitted_pattern_validator(r"\b"),
+        emitted_pattern_validator(r"\b[0-9A-Za-z_]+"),
         "pub fn validate_field_value (value : & str) -> Result < () , String > \
          { { use std :: sync :: LazyLock ; \
-         static RE : LazyLock < regex :: Regex > = LazyLock :: new (|| { regex :: Regex :: new (\"\\\\b\") . unwrap () }) ; \
+         static RE : LazyLock < regex :: Regex > = LazyLock :: new (|| { regex :: Regex :: new (\"\\\\b[0-9A-Za-z_]+\") . unwrap () }) ; \
          if ! RE . is_match (value) { \
-         return Err (format ! (\"'{}' does not match pattern '{}'\" , \"field\" , \"\\\\b\")) ; } } Ok (()) } "
+         return Err (format ! (\"'{}' does not match pattern '{}'\" , \"field\" , \"\\\\b[0-9A-Za-z_]+\")) ; } } Ok (()) } "
     );
 }
 

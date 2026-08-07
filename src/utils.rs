@@ -1281,6 +1281,39 @@ pub fn constraining_pattern(lit: &LitStr, pattern: String) -> Result<String, syn
     Ok(pattern)
 }
 
+/// The `pattern` handed back when the regex built from it draws no lint at the line that wrote it,
+/// or the refusal it earns for being one look-around and nothing else -- spanned on the literal the
+/// author wrote.
+pub fn emittable_pattern(lit: &LitStr, pattern: String) -> Result<String, syn::Error> {
+    if is_lone_look_around(&pattern) {
+        return Err(syn::Error::new_spanned(
+            lit,
+            "`pattern` is one look-around assertion and nothing else, which no surface can be \
+             handed without a warning at the line that wrote it: the generated validator builds \
+             the pattern with `regex::Regex::new`, and `clippy::trivial_regex` -- which a consumer \
+             denying `clippy::nursery` gets -- calls a lone assertion unlikely to be useful and \
+             reports it against the `model_schema` attribute, where there is no edit to make. The \
+             shapes that lint names a `str` call for are emitted as that call instead; for this \
+             one it names none, so there is nothing to put in the regex's place. Write the \
+             boundary beside what has to sit next to it -- `\\b\\w+` rather than `\\b`, `\\B\\w` \
+             rather than `\\B` -- which keeps the regex and stops it being trivial.",
+        ));
+    }
+    Ok(pattern)
+}
+
+/// Whether the whole pattern is a single look-around, read off the HIR the way the verdict above
+/// is. The text anchors reach this shape too and are refused before it for admitting every value,
+/// and every boundary flavour but `\b` and `\B` is unportable, so what is left here is those two.
+fn is_lone_look_around(pattern: &str) -> bool {
+    regex_syntax::ParserBuilder::new()
+        .unicode(true)
+        .utf8(true)
+        .build()
+        .parse(pattern)
+        .is_ok_and(|parsed| matches!(*parsed.kind(), hir::HirKind::Look(_)))
+}
+
 /// Whether a search for `pattern` succeeds in every haystack, read off the HIR rather than off the
 /// pattern text: `^` and `(^)` and `^|a` are one verdict written three ways, and `^$` is written
 /// out of the same two anchors as `^` and `$` yet admits only the empty string.
