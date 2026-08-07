@@ -545,11 +545,12 @@ them is split off. It refuses in both directions:
 - an entry filled at a type the field-definition dispatch has no arm for — refused under
   `#[cfg(any(feature = "zod", feature = "jsonschema"))]`, the two surfaces that read a declared
   filling, spanned on the filling. That dispatch takes a name it does not recognise for another
-  `#[model_schema]` item, which is right for a sibling declared below and gibberish for `char`: the
-  emission names a `char_schema` module nothing publishes. Tokens cannot separate the two, so
+  `#[model_schema]` item, which is right for a sibling declared below and gibberish for `i128`: the
+  emission names an `i128_schema` module nothing publishes. Tokens cannot separate the two, so
   `is_undescribable_primitive` refuses only what provably cannot become a sibling — the primitive
   names the language reserves that the dispatch answers for nowhere
-  (`char`, `i128`, `u128`, `f16`, `f128`).
+  (`i128`, `u128`, `f16`, `f128`). `char` is not among them: it has an arm of its own, and a
+  filling at it describes as the one-character string serde writes.
 
 A const parameter earns its own refusal, from `const_parameter_argument_errors` at the same seam
 and gated on `typescript`/`jsonschema`: a const handed to a written type as an *argument* stands
