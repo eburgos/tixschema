@@ -3488,48 +3488,6 @@ fn flatten_edge_guard_error(
     Some(syn::Error::new_spanned(&field.ty, message).to_compile_error())
 }
 
-/// The `compile_error!` tokens for a `#[serde(flatten)]` field of an enum variant whose source
-/// writes more than one key set, or `None` for every source that writes exactly one. A variant's
-/// members are a fragment of a larger literal, with nowhere to bind them to the `$OwnSchema` const
-/// [`zod_merged_statements`] hoists once it counts more than one combination.
-#[cfg(all(feature = "serde", feature = "zod"))]
-fn variant_flatten_branch_guard_error(
-    field: &syn::Field,
-    type_name: &str,
-    variant_name: &str,
-) -> Option<proc_macro2::TokenStream> {
-    let inner = get_field_def("_flattened", &field.ty, "");
-    let written = if flattened_zod_branches(&inner).is_empty() {
-        if SourceAbsence::written(&inner).offered() {
-            "writes its members or no members at all"
-        } else {
-            return None;
-        }
-    } else {
-        "writes one key set per branch of the choice it names"
-    };
-    let field_name = field_label(
-        &field
-            .ident
-            .as_ref()
-            .map_or_else(String::new, ToString::to_string),
-    );
-    Some(
-        syn::Error::new_spanned(
-            &field.ty,
-            format!(
-                "model_schema: {field_name} of variant `{variant_name}` of `{type_name}` carries \
-                 `#[serde(flatten)]` over a source that {written}, which a variant cannot merge: \
-                 the variant's own members are written inside the union member that carries them, \
-                 leaving nowhere to bind them to a name each alternative could join. Flatten the \
-                 source into a struct of its own and write that struct as the variant's content, \
-                 or write the field as a named member so the value gets a key of its own."
-            ),
-        )
-        .to_compile_error(),
-    )
-}
-
 /// The JSON type keyword the item a flattened field names publishes, where the name is the whole of
 /// what the field writes and the registry proves that wire is no object — and `None` everywhere the
 /// declaration is left as it stands.
@@ -5915,13 +5873,12 @@ const fn is_flattened_field(_field: &syn::Field) -> bool {
     false
 }
 
-/// The `compile_error!` tokens a variant's `#[serde(flatten)]` field is refused with: the two the
-/// struct-level split already reads a flattened field against, plus the branching a variant's own
-/// position cannot compose.
+/// The `compile_error!` tokens a variant's `#[serde(flatten)]` field is refused with, which are the
+/// two the struct-level split already reads a flattened field against: a variant's own position
+/// multiplies the key sets its sources write exactly as a struct's does.
 fn variant_flatten_guard_errors(
     field: &syn::Field,
     enum_type_name: &str,
-    variant_ident: &str,
 ) -> Vec<proc_macro2::TokenStream> {
     #[cfg(all(
         feature = "serde",
@@ -5938,15 +5895,9 @@ fn variant_flatten_guard_errors(
     };
 
     #[cfg(all(feature = "serde", feature = "zod"))]
-    let edges = [
-        flatten_edge_guard_error(field, enum_type_name),
-        variant_flatten_branch_guard_error(field, enum_type_name, variant_ident),
-    ];
+    let edges = [flatten_edge_guard_error(field, enum_type_name)];
     #[cfg(not(all(feature = "serde", feature = "zod")))]
-    let edges = {
-        let _: &_ = &variant_ident;
-        [None, None]
-    };
+    let edges = [None];
 
     named.into_iter().chain(edges).flatten().collect()
 }
@@ -6004,11 +5955,7 @@ fn collect_discriminated_variants(
             // carried.
             let is_flatten = is_flattened_field(field);
             if is_flatten {
-                guard_errors.extend(variant_flatten_guard_errors(
-                    field,
-                    &enum_type_name,
-                    &variant_ident,
-                ));
+                guard_errors.extend(variant_flatten_guard_errors(field, &enum_type_name));
             }
 
             let (f_def, validation_fn, validate_body, field_guard_errors) = process_field(
@@ -6444,10 +6391,12 @@ fn render_external_content(
                 type_code: String::new(),
             };
             write_named_variant_fields(field_defs, None, self_type_name, &mut parts);
-            let flatten = variant_flatten_intersections(&variant.flattened_fields);
 
             #[cfg(feature = "zod")]
-            let zod = format!("z.strictObject({{\n{}}}){}", parts.schema_code, flatten.1);
+            let zod = variant_flatten_zod(
+                &format!("z.strictObject({{\n{}}})", parts.schema_code),
+                &variant.flattened_fields,
+            );
             #[cfg(not(feature = "zod"))]
             let zod = String::new();
 
@@ -6461,7 +6410,15 @@ fn render_external_content(
             #[cfg(not(feature = "jsonschema"))]
             let json = quote! {};
 
-            (format!("{{\n{}}}{}", parts.type_code, flatten.0), zod, json)
+            (
+                format!(
+                    "{{\n{}}}{}",
+                    parts.type_code,
+                    variant_flatten_typescript(&variant.flattened_fields)
+                ),
+                zod,
+                json,
+            )
         }
     }
 }
@@ -6991,8 +6948,6 @@ fn render_internal_variant(
         .flatten();
 
     let Some(inner) = flattened else {
-        let flatten = variant_flatten_intersections(&variant.flattened_fields);
-
         #[cfg(feature = "jsonschema")]
         let json = variant_merged_json_value(
             &tag_object,
@@ -7003,9 +6958,21 @@ fn render_internal_variant(
         #[cfg(not(feature = "jsonschema"))]
         let json = quote! {};
 
+        #[cfg(feature = "zod")]
+        let zod = variant_flatten_zod(
+            &format!("z.strictObject({})", parts.schema_code),
+            &variant.flattened_fields,
+        );
+        #[cfg(not(feature = "zod"))]
+        let zod = String::new();
+
         return (
-            format!("{}{}", parts.type_code, flatten.0),
-            format!("z.strictObject({}){}", parts.schema_code, flatten.1),
+            format!(
+                "{}{}",
+                parts.type_code,
+                variant_flatten_typescript(&variant.flattened_fields)
+            ),
+            zod,
             json,
             !variant.flattened_fields.is_empty(),
         );
@@ -7331,7 +7298,6 @@ fn render_untagged_named(
     variant_name: &str,
 ) -> (String, String, proc_macro2::TokenStream) {
     let field_defs = &members.field_defs;
-    let flatten = variant_flatten_intersections(&members.flattened_fields);
     #[cfg(not(feature = "jsonschema"))]
     let _: &str = variant_name;
 
@@ -7347,7 +7313,10 @@ fn render_untagged_named(
         })
         .collect::<Vec<_>>()
         .join("; ");
-    let ts = format!("{{ {ts_fields} }}{}", flatten.0);
+    let ts = format!(
+        "{{ {ts_fields} }}{}",
+        variant_flatten_typescript(&members.flattened_fields)
+    );
 
     #[cfg(feature = "zod")]
     let zod = {
@@ -7362,8 +7331,7 @@ fn render_untagged_named(
             }
         }
         body.push_str("})");
-        body.push_str(&flatten.1);
-        body
+        variant_flatten_zod(&body, &members.flattened_fields)
     };
     #[cfg(not(feature = "zod"))]
     let zod = {
@@ -7731,11 +7699,9 @@ fn collect_untagged_variant_members(
         // Read before the field is processed, which strips the attributes the declaration carried.
         let is_flatten = is_flattened_field(field);
         if is_flatten {
-            walked.guard_errors.extend(variant_flatten_guard_errors(
-                field,
-                enum_type_name,
-                &variant_name,
-            ));
+            walked
+                .guard_errors
+                .extend(variant_flatten_guard_errors(field, enum_type_name));
         }
 
         let field_name = field_ident_string(field);
@@ -8389,20 +8355,23 @@ fn write_adjacent_named_variant_fields(
         type_code: String::new(),
     };
     write_named_variant_fields(&variant.field_defs, None, self_type_name, &mut inner);
-    let flatten = variant_flatten_intersections(&variant.flattened_fields);
 
     let content_key = ts_member_key(content_name);
     let _ = writeln!(
         parts.type_code,
         "  {content_key}: {{\n{}}}{};",
-        inner.type_code, flatten.0
+        inner.type_code,
+        variant_flatten_typescript(&variant.flattened_fields)
     );
 
     #[cfg(feature = "zod")]
     let _ = writeln!(
         parts.schema_code,
-        "  {content_key}: z.strictObject({{\n{}}}){},",
-        inner.schema_code, flatten.1
+        "  {content_key}: {},",
+        variant_flatten_zod(
+            &format!("z.strictObject({{\n{}}})", inner.schema_code),
+            &variant.flattened_fields
+        )
     );
 
     #[cfg(feature = "jsonschema")]
@@ -11481,41 +11450,25 @@ fn ts_intersection_suffix(operands: &[MergedOperand]) -> String {
     })
 }
 
-/// The `.and(...)` chain an object's own `z.strictObject` is closed with. Every source reaching
-/// here contributes exactly one key set, so the chain is the whole merge — the struct-level
-/// [`zod_merged_statements`] is what multiplies the sources that contribute more.
+/// The ` & A & B` a variant's own object block is closed with, empty where the variant flattens
+/// nothing.
+#[cfg(feature = "typescript")]
+fn variant_flatten_typescript(flattened_fields: &[FieldDef]) -> String {
+    ts_intersection_suffix(&compute_flatten_outputs(flattened_fields).0)
+}
+
+/// Nothing closes the block where the surface is off.
+#[cfg(not(feature = "typescript"))]
+const fn variant_flatten_typescript(_flattened_fields: &[FieldDef]) -> String {
+    String::new()
+}
+
+/// What a variant's object is written as with its `#[serde(flatten)]` sources merged in: `own`
+/// closed with one `.and(...)` chain where the sources write a single key set between them, and one
+/// closed copy of `own` per key set inside a `z.union` where they write more.
 #[cfg(feature = "zod")]
-fn zod_intersection_suffix(operands: &[MergedOperand]) -> String {
-    operands.iter().fold(String::new(), |mut acc, operand| {
-        let _ = write!(acc, ".and({})", deferred_zod_operand(&operand.spelling));
-        acc
-    })
-}
-
-/// What a variant's `#[serde(flatten)]` sources are joined onto its own object with: the TypeScript
-/// intersection first, the Zod chain second, each empty where its surface is off or the variant
-/// flattens nothing.
-#[cfg(any(feature = "typescript", feature = "zod"))]
-fn variant_flatten_intersections(flattened_fields: &[FieldDef]) -> (String, String) {
-    let operands = compute_flatten_outputs(flattened_fields);
-
-    #[cfg(feature = "typescript")]
-    let typescript = ts_intersection_suffix(&operands.0);
-    #[cfg(not(feature = "typescript"))]
-    let typescript = String::new();
-
-    #[cfg(feature = "zod")]
-    let zod = zod_intersection_suffix(&operands.1);
-    #[cfg(not(feature = "zod"))]
-    let zod = String::new();
-
-    (typescript, zod)
-}
-
-/// Nothing is joined where neither surface writes an intersection.
-#[cfg(not(any(feature = "typescript", feature = "zod")))]
-const fn variant_flatten_intersections(_flattened_fields: &[FieldDef]) -> (String, String) {
-    (String::new(), String::new())
+fn variant_flatten_zod(own: &str, flattened_fields: &[FieldDef]) -> String {
+    zod_merged_object(own, &compute_flatten_outputs(flattened_fields).1)
 }
 
 /// What one merged source is written as inside the intersection.
@@ -12042,16 +11995,12 @@ fn zod_operand_contributions(operand: &MergedOperand) -> Vec<&str> {
     }
 }
 
-/// What the object's schema is written as: the statements bound ahead of it, and the expression
-/// itself.
+/// The `.and(...)` chain one per key set the merged sources write between them: one per branch of a
+/// source naming a choice, one more without the source wherever it offers its own absence, and the
+/// cross product of those across the sources. Always at least one, the empty chain a source-less
+/// object closes with.
 #[cfg(feature = "zod")]
-fn zod_merged_statements(
-    item_name: &str,
-    own: &str,
-    operands: &[MergedOperand],
-) -> (String, String) {
-    // Built as the joins alone so the root can be decided once every combination is counted: one
-    // combination writes the object's own keys where they stood, and more bind them to a name.
+fn zod_merged_joins(operands: &[MergedOperand]) -> Vec<String> {
     let mut joins = vec![String::new()];
     for operand in operands {
         joins = joins
@@ -12068,7 +12017,20 @@ fn zod_merged_statements(
             })
             .collect();
     }
+    joins
+}
 
+/// What the object's schema is written as: the statements bound ahead of it, and the expression
+/// itself.
+#[cfg(feature = "zod")]
+fn zod_merged_statements(
+    item_name: &str,
+    own: &str,
+    operands: &[MergedOperand],
+) -> (String, String) {
+    // The root is decided once every combination is counted: one combination writes the object's
+    // own keys where they stood, and more bind them to a name.
+    let joins = zod_merged_joins(operands);
     if let [only] = joins.as_slice() {
         return (String::new(), format!("{own}{only}"));
     }
@@ -12082,6 +12044,22 @@ fn zod_merged_statements(
         format!("const {own_name} = {own};\n\n"),
         format!("z.union([\n{written}])"),
     )
+}
+
+/// The same multiplication [`zod_merged_statements`] performs, written where the object stands
+/// rather than beside a name for it: one closed copy of `own` per combination, joined in a union
+/// once there is more than one.
+#[cfg(feature = "zod")]
+fn zod_merged_object(own: &str, operands: &[MergedOperand]) -> String {
+    let joins = zod_merged_joins(operands);
+    if let [only] = joins.as_slice() {
+        return format!("{own}{only}");
+    }
+    let written = joins.iter().fold(String::new(), |mut acc, join| {
+        let _ = writeln!(acc, "  {own}{join},");
+        acc
+    });
+    format!("z.union([\n{written}])")
 }
 
 #[cfg(feature = "zod")]

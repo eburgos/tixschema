@@ -1078,6 +1078,187 @@ struct UntaggedFlatVariantHolder {
     own: String,
 }
 
+/// The members a variant's flattened choice is built from, one key apiece so a payload names which
+/// branch wrote it.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct ChoiceLeft {
+    left: String,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct ChoiceMiddle {
+    middle: bool,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct ChoiceRight {
+    right: i64,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct ChoiceUp {
+    up: String,
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct ChoiceDown {
+    down: String,
+}
+
+/// A registered choice: serde writes one key set per member, so a variant flattening it writes one
+/// key set per member too.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum VariantChoice {
+    Left(ChoiceLeft),
+    Right(ChoiceRight),
+}
+
+/// The same with a third member, so the multiplication is counted rather than assumed to be a pair.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum ThreeBranchChoice {
+    Left(ChoiceLeft),
+    Middle(ChoiceMiddle),
+    Right(ChoiceRight),
+}
+
+/// A second choice over keys the first one does not write, so two of them in one variant multiply
+/// into a cross product a payload can be matched against.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum PairChoice {
+    Down(ChoiceDown),
+    Up(ChoiceUp),
+}
+
+/// One form of enum per tagging, each flattening the same two-member choice into a struct variant.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+enum ExternalChoiceVariant {
+    Named {
+        #[serde(flatten)]
+        choice: VariantChoice,
+        x: String,
+    },
+    Plain {
+        y: String,
+    },
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "kind")]
+enum InternalChoiceVariant {
+    Named {
+        #[serde(flatten)]
+        choice: VariantChoice,
+        x: String,
+    },
+    Plain {
+        y: String,
+    },
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "kind", content = "data")]
+enum AdjacentChoiceVariant {
+    Named {
+        #[serde(flatten)]
+        choice: VariantChoice,
+        x: String,
+    },
+    Plain {
+        y: String,
+    },
+}
+
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum UntaggedChoiceVariant {
+    Named {
+        #[serde(flatten)]
+        choice: VariantChoice,
+        x: String,
+    },
+    Plain {
+        y: String,
+    },
+}
+
+/// Three branches, so the variant's object is written three times over.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+enum ThreeBranchChoiceVariant {
+    Named {
+        #[serde(flatten)]
+        choice: ThreeBranchChoice,
+        x: String,
+    },
+}
+
+/// An `Option` over a plain source: serde writes the source's members or leaves them out, which is
+/// two key sets and no branching of the source's own.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+enum OptionalSourceVariant {
+    Named {
+        #[serde(flatten, skip_serializing_if = "Option::is_none", default)]
+        extra: Option<VariantExtra>,
+        x: String,
+    },
+}
+
+/// Two choices in one variant: the combinations are the cross product of their members.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+enum TwoChoiceVariant {
+    Named {
+        #[serde(flatten)]
+        choice: VariantChoice,
+        #[serde(flatten)]
+        pair: PairChoice,
+        x: String,
+    },
+}
+
+/// An `Option` over a choice: the source's own members, and the absence beside them.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+enum OptionalChoiceVariant {
+    Named {
+        #[serde(flatten, skip_serializing_if = "Option::is_none", default)]
+        choice: Option<VariantChoice>,
+        x: String,
+    },
+}
+
+/// A multiplying variant whose own member reaches the enum being defined, so every combination has
+/// to carry the deferral a single combination already carries.
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+enum RecursiveChoiceVariant {
+    Named {
+        #[serde(flatten)]
+        choice: VariantChoice,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        next: Option<Box<Self>>,
+    },
+    Plain {
+        y: String,
+    },
+}
+
 /// The branch of an untagged document that names `key`.
 #[cfg(feature = "jsonschema")]
 fn untagged_branch(document: &serde_json::Value, key: &str) -> serde_json::Value {
@@ -3900,5 +4081,705 @@ fn test_a_flattening_untagged_member_closes_no_sibling_against_unprovable_keys()
         UntaggedFlatVariant::ts_definition().contains("| { y: string };"),
         "Got: {}",
         UntaggedFlatVariant::ts_definition()
+    );
+}
+
+/// What serde writes for a variant flattening a registered choice: the matched member's keys sit in
+/// the variant's content object beside the variant's own, one key set per member, wherever the
+/// tagging puts that object.
+#[test]
+fn test_a_multi_branch_variant_source_writes_one_key_set_per_branch() {
+    assert_eq!(
+        serde_json::to_value(ExternalChoiceVariant::Named {
+            choice: VariantChoice::Left(ChoiceLeft {
+                left: "l".to_owned()
+            }),
+            x: "y".to_owned(),
+        })
+        .unwrap(),
+        serde_json::json!({ "Named": { "left": "l", "x": "y" } })
+    );
+    assert_eq!(
+        serde_json::to_value(ExternalChoiceVariant::Named {
+            choice: VariantChoice::Right(ChoiceRight { right: 3 }),
+            x: "y".to_owned(),
+        })
+        .unwrap(),
+        serde_json::json!({ "Named": { "right": 3_i64, "x": "y" } })
+    );
+    assert_eq!(
+        serde_json::to_value(InternalChoiceVariant::Named {
+            choice: VariantChoice::Left(ChoiceLeft {
+                left: "l".to_owned()
+            }),
+            x: "y".to_owned(),
+        })
+        .unwrap(),
+        serde_json::json!({ "kind": "Named", "left": "l", "x": "y" })
+    );
+    assert_eq!(
+        serde_json::to_value(AdjacentChoiceVariant::Named {
+            choice: VariantChoice::Right(ChoiceRight { right: 3 }),
+            x: "y".to_owned(),
+        })
+        .unwrap(),
+        serde_json::json!({ "kind": "Named", "data": { "right": 3_i64, "x": "y" } })
+    );
+    assert_eq!(
+        serde_json::to_value(UntaggedChoiceVariant::Named {
+            choice: VariantChoice::Left(ChoiceLeft {
+                left: "l".to_owned()
+            }),
+            x: "y".to_owned(),
+        })
+        .unwrap(),
+        serde_json::json!({ "left": "l", "x": "y" })
+    );
+}
+
+/// And reads every one of them back, so the multiplied shape is what a payload carries in both
+/// directions.
+#[test]
+fn test_a_multi_branch_variant_source_reads_back_every_key_set() {
+    for (payload, expected) in [
+        (
+            serde_json::json!({ "Named": { "left": "l", "x": "y" } }),
+            ExternalChoiceVariant::Named {
+                choice: VariantChoice::Left(ChoiceLeft {
+                    left: "l".to_owned(),
+                }),
+                x: "y".to_owned(),
+            },
+        ),
+        (
+            serde_json::json!({ "Named": { "right": 3_i64, "x": "y" } }),
+            ExternalChoiceVariant::Named {
+                choice: VariantChoice::Right(ChoiceRight { right: 3 }),
+                x: "y".to_owned(),
+            },
+        ),
+        (
+            serde_json::json!({ "Plain": { "y": "p" } }),
+            ExternalChoiceVariant::Plain { y: "p".to_owned() },
+        ),
+    ] {
+        let read: ExternalChoiceVariant = serde_json::from_value(payload.clone()).unwrap();
+        assert_eq!(read, expected);
+        assert_eq!(serde_json::to_value(&read).unwrap(), payload);
+    }
+
+    for value in [
+        UntaggedChoiceVariant::Named {
+            choice: VariantChoice::Left(ChoiceLeft {
+                left: "l".to_owned(),
+            }),
+            x: "y".to_owned(),
+        },
+        UntaggedChoiceVariant::Named {
+            choice: VariantChoice::Right(ChoiceRight { right: 3 }),
+            x: "y".to_owned(),
+        },
+        UntaggedChoiceVariant::Plain { y: "p".to_owned() },
+    ] {
+        let written = serde_json::to_value(&value).unwrap();
+        assert_eq!(
+            serde_json::from_value::<UntaggedChoiceVariant>(written).unwrap(),
+            value
+        );
+    }
+}
+
+/// So the Zod schema writes the variant's object once per key set and offers the copies as a union,
+/// each copy closed with the branch it carries through the same deferred operand a single source
+/// joins through.
+#[test]
+#[cfg(feature = "zod")]
+fn test_a_multi_branch_variant_source_writes_one_zod_object_per_branch() {
+    let external = ExternalChoiceVariant::zod_schema();
+    assert!(
+        external.contains(
+            "\"Named\": z.union([\n  \
+             z.strictObject({\n  x: z.string(),\n}).and(z.lazy(() => ChoiceLeft$Schema)),\n  \
+             z.strictObject({\n  x: z.string(),\n}).and(z.lazy(() => ChoiceRight$Schema)),\n])"
+        ),
+        "Got: {external}"
+    );
+
+    let internal = InternalChoiceVariant::zod_schema();
+    assert!(
+        internal.contains(
+            "z.union([\n  \
+             z.strictObject({\n  kind: z.literal(\"Named\"),\n  x: z.string(),\n})\
+             .and(z.lazy(() => ChoiceLeft$Schema)),\n  \
+             z.strictObject({\n  kind: z.literal(\"Named\"),\n  x: z.string(),\n})\
+             .and(z.lazy(() => ChoiceRight$Schema)),\n])"
+        ),
+        "Got: {internal}"
+    );
+
+    let adjacent = AdjacentChoiceVariant::zod_schema();
+    assert!(
+        adjacent.contains(
+            "data: z.union([\n  \
+             z.strictObject({\n  x: z.string(),\n}).and(z.lazy(() => ChoiceLeft$Schema)),\n  \
+             z.strictObject({\n  x: z.string(),\n}).and(z.lazy(() => ChoiceRight$Schema)),\n])"
+        ),
+        "Got: {adjacent}"
+    );
+
+    let untagged = UntaggedChoiceVariant::zod_schema();
+    assert!(
+        untagged.contains(
+            "z.union([\n  \
+             z.strictObject({ x: z.string(), }).and(z.lazy(() => ChoiceLeft$Schema)),\n  \
+             z.strictObject({ x: z.string(), }).and(z.lazy(() => ChoiceRight$Schema)),\n])"
+        ),
+        "Got: {untagged}"
+    );
+}
+
+/// Every branch serde writes has a combination naming the schema of the member that wrote it, and
+/// no combination names a key for the flattened field itself.
+#[test]
+#[cfg(feature = "zod")]
+fn test_the_multiplied_variant_zod_names_the_branch_every_serde_payload_wrote() {
+    let cases = [
+        (
+            ExternalChoiceVariant::zod_schema(),
+            serde_json::to_value(ExternalChoiceVariant::Named {
+                choice: VariantChoice::Left(ChoiceLeft {
+                    left: "l".to_owned(),
+                }),
+                x: "y".to_owned(),
+            })
+            .unwrap(),
+            "ChoiceLeft$Schema",
+        ),
+        (
+            ExternalChoiceVariant::zod_schema(),
+            serde_json::to_value(ExternalChoiceVariant::Named {
+                choice: VariantChoice::Right(ChoiceRight { right: 3 }),
+                x: "y".to_owned(),
+            })
+            .unwrap(),
+            "ChoiceRight$Schema",
+        ),
+        (
+            InternalChoiceVariant::zod_schema(),
+            serde_json::to_value(InternalChoiceVariant::Named {
+                choice: VariantChoice::Right(ChoiceRight { right: 3 }),
+                x: "y".to_owned(),
+            })
+            .unwrap(),
+            "ChoiceRight$Schema",
+        ),
+        (
+            AdjacentChoiceVariant::zod_schema(),
+            serde_json::to_value(AdjacentChoiceVariant::Named {
+                choice: VariantChoice::Left(ChoiceLeft {
+                    left: "l".to_owned(),
+                }),
+                x: "y".to_owned(),
+            })
+            .unwrap(),
+            "ChoiceLeft$Schema",
+        ),
+        (
+            UntaggedChoiceVariant::zod_schema(),
+            serde_json::to_value(UntaggedChoiceVariant::Named {
+                choice: VariantChoice::Right(ChoiceRight { right: 3 }),
+                x: "y".to_owned(),
+            })
+            .unwrap(),
+            "ChoiceRight$Schema",
+        ),
+    ];
+    for (zod, payload, branch) in cases {
+        assert!(
+            zod.contains(&format!(".and(z.lazy(() => {branch}))")),
+            "nothing joins {branch} for {payload}: {zod}"
+        );
+        assert!(!zod.contains("choice:"), "Got: {zod}");
+    }
+}
+
+/// A third member is a third key set serde writes, so the multiplication is counted rather than
+/// assumed to be a pair.
+#[test]
+fn test_a_three_branch_variant_source_writes_three_key_sets() {
+    for (value, written) in [
+        (
+            ThreeBranchChoiceVariant::Named {
+                choice: ThreeBranchChoice::Left(ChoiceLeft {
+                    left: "l".to_owned(),
+                }),
+                x: "y".to_owned(),
+            },
+            serde_json::json!({ "Named": { "left": "l", "x": "y" } }),
+        ),
+        (
+            ThreeBranchChoiceVariant::Named {
+                choice: ThreeBranchChoice::Middle(ChoiceMiddle { middle: true }),
+                x: "y".to_owned(),
+            },
+            serde_json::json!({ "Named": { "middle": true, "x": "y" } }),
+        ),
+        (
+            ThreeBranchChoiceVariant::Named {
+                choice: ThreeBranchChoice::Right(ChoiceRight { right: 3 }),
+                x: "y".to_owned(),
+            },
+            serde_json::json!({ "Named": { "right": 3_i64, "x": "y" } }),
+        ),
+    ] {
+        assert_eq!(serde_json::to_value(&value).unwrap(), written);
+        assert_eq!(
+            serde_json::from_value::<ThreeBranchChoiceVariant>(written).unwrap(),
+            value
+        );
+    }
+}
+
+/// And a third copy of the object in the schema, in the order the choice records its members.
+#[test]
+#[cfg(feature = "zod")]
+fn test_a_three_branch_variant_source_writes_three_zod_objects() {
+    let zod = ThreeBranchChoiceVariant::zod_schema();
+    assert!(
+        zod.contains(
+            "\"Named\": z.union([\n  \
+             z.strictObject({\n  x: z.string(),\n}).and(z.lazy(() => ChoiceLeft$Schema)),\n  \
+             z.strictObject({\n  x: z.string(),\n}).and(z.lazy(() => ChoiceMiddle$Schema)),\n  \
+             z.strictObject({\n  x: z.string(),\n}).and(z.lazy(() => ChoiceRight$Schema)),\n])"
+        ),
+        "Got: {zod}"
+    );
+}
+
+/// An internally tagged member that multiplies is a union rather than an object, and Zod
+/// discriminates only between objects — so the union carrying it is a plain one.
+#[test]
+#[cfg(feature = "zod")]
+fn test_an_internally_tagged_multiplying_variant_forces_a_plain_zod_union() {
+    let zod = InternalChoiceVariant::zod_schema();
+    assert!(zod.contains("z.union(["), "Got: {zod}");
+    assert!(!zod.contains("z.discriminatedUnion("), "Got: {zod}");
+}
+
+/// An adjacently tagged member keeps its object: the multiplied union sits under the content key,
+/// where it leaves the tag the enclosing union discriminates on in place.
+#[test]
+#[cfg(feature = "zod")]
+fn test_an_adjacently_tagged_multiplying_variant_keeps_its_discriminated_union() {
+    let zod = AdjacentChoiceVariant::zod_schema();
+    assert!(
+        zod.contains("z.discriminatedUnion(\"kind\", ["),
+        "Got: {zod}"
+    );
+    assert!(zod.contains("kind: z.literal(\"Named\"),"), "Got: {zod}");
+}
+
+/// An `Option` over a plain source writes the source's members or leaves them out, which is the
+/// object with the source joined and the object as it stands, in that order.
+#[test]
+fn test_an_optional_variant_source_writes_the_object_with_the_source_and_without_it() {
+    assert_eq!(
+        serde_json::to_value(OptionalSourceVariant::Named {
+            extra: Some(VariantExtra {
+                note: "n".to_owned()
+            }),
+            x: "y".to_owned(),
+        })
+        .unwrap(),
+        serde_json::json!({ "Named": { "note": "n", "x": "y" } })
+    );
+    assert_eq!(
+        serde_json::to_value(OptionalSourceVariant::Named {
+            extra: None,
+            x: "y".to_owned(),
+        })
+        .unwrap(),
+        serde_json::json!({ "Named": { "x": "y" } })
+    );
+}
+
+#[test]
+#[cfg(feature = "zod")]
+fn test_an_optional_variant_source_offers_the_source_and_its_absence_in_zod() {
+    let zod = OptionalSourceVariant::zod_schema();
+    assert!(
+        zod.contains(
+            "\"Named\": z.union([\n  \
+             z.strictObject({\n  x: z.string(),\n}).and(z.lazy(() => VariantExtra$Schema)),\n  \
+             z.strictObject({\n  x: z.string(),\n}),\n])"
+        ),
+        "Got: {zod}"
+    );
+}
+
+/// Two sources in one variant multiply: every key set the first writes stands beside every key set
+/// the second does, the first source varying slowest.
+#[test]
+fn test_two_variant_sources_write_their_cross_product() {
+    for (value, written) in [
+        (
+            TwoChoiceVariant::Named {
+                choice: VariantChoice::Left(ChoiceLeft {
+                    left: "l".to_owned(),
+                }),
+                pair: PairChoice::Up(ChoiceUp { up: "u".to_owned() }),
+                x: "y".to_owned(),
+            },
+            serde_json::json!({ "Named": { "left": "l", "up": "u", "x": "y" } }),
+        ),
+        (
+            TwoChoiceVariant::Named {
+                choice: VariantChoice::Right(ChoiceRight { right: 3 }),
+                pair: PairChoice::Down(ChoiceDown {
+                    down: "d".to_owned(),
+                }),
+                x: "y".to_owned(),
+            },
+            serde_json::json!({ "Named": { "right": 3_i64, "down": "d", "x": "y" } }),
+        ),
+    ] {
+        assert_eq!(serde_json::to_value(&value).unwrap(), written);
+        assert_eq!(
+            serde_json::from_value::<TwoChoiceVariant>(written).unwrap(),
+            value
+        );
+    }
+}
+
+#[test]
+#[cfg(feature = "zod")]
+fn test_two_variant_sources_write_their_cross_product_in_zod() {
+    let zod = TwoChoiceVariant::zod_schema();
+    let own = "z.strictObject({\n  x: z.string(),\n})";
+    assert!(
+        zod.contains(&format!(
+            "\"Named\": z.union([\n  \
+             {own}.and(z.lazy(() => ChoiceLeft$Schema)).and(z.lazy(() => ChoiceDown$Schema)),\n  \
+             {own}.and(z.lazy(() => ChoiceLeft$Schema)).and(z.lazy(() => ChoiceUp$Schema)),\n  \
+             {own}.and(z.lazy(() => ChoiceRight$Schema)).and(z.lazy(() => ChoiceDown$Schema)),\n  \
+             {own}.and(z.lazy(() => ChoiceRight$Schema)).and(z.lazy(() => ChoiceUp$Schema)),\n])"
+        )),
+        "Got: {zod}"
+    );
+}
+
+/// An `Option` over a choice offers the choice's members and one absence beside them, not one
+/// absence per member.
+#[test]
+fn test_an_optional_multi_branch_variant_source_writes_a_members_keys_or_none() {
+    for (value, written) in [
+        (
+            OptionalChoiceVariant::Named {
+                choice: Some(VariantChoice::Left(ChoiceLeft {
+                    left: "l".to_owned(),
+                })),
+                x: "y".to_owned(),
+            },
+            serde_json::json!({ "Named": { "left": "l", "x": "y" } }),
+        ),
+        (
+            OptionalChoiceVariant::Named {
+                choice: None,
+                x: "y".to_owned(),
+            },
+            serde_json::json!({ "Named": { "x": "y" } }),
+        ),
+    ] {
+        assert_eq!(serde_json::to_value(&value).unwrap(), written);
+        assert_eq!(
+            serde_json::from_value::<OptionalChoiceVariant>(written).unwrap(),
+            value
+        );
+    }
+}
+
+#[test]
+#[cfg(feature = "zod")]
+fn test_an_optional_multi_branch_variant_source_offers_its_branches_and_the_absence() {
+    let zod = OptionalChoiceVariant::zod_schema();
+    assert!(
+        zod.contains(
+            "\"Named\": z.union([\n  \
+             z.strictObject({\n  x: z.string(),\n}).and(z.lazy(() => ChoiceLeft$Schema)),\n  \
+             z.strictObject({\n  x: z.string(),\n}).and(z.lazy(() => ChoiceRight$Schema)),\n  \
+             z.strictObject({\n  x: z.string(),\n}),\n])"
+        ),
+        "Got: {zod}"
+    );
+}
+
+/// A member reaching the enum being defined is deferred in every copy of the object it stands in,
+/// the same getter one copy already carries, so no combination reads the binding while the `const`
+/// holding it initializes.
+#[test]
+#[cfg(feature = "zod")]
+fn test_a_multiplying_variant_defers_the_member_that_reaches_the_enum() {
+    let zod = RecursiveChoiceVariant::zod_schema();
+    let getter = "get next() { return z.union([z.null().transform(() => undefined), \
+                  RecursiveChoiceVariant$Schema, z.undefined()]).prefault(undefined); },";
+    assert_eq!(zod.matches(getter).count(), 2, "Got: {zod}");
+    assert!(
+        zod.contains(&format!(
+            "z.union([\n  z.strictObject({{\n  {getter}\n}})\
+             .and(z.lazy(() => ChoiceLeft$Schema)),\n  \
+             z.strictObject({{\n  {getter}\n}}).and(z.lazy(() => ChoiceRight$Schema)),\n])"
+        )),
+        "Got: {zod}"
+    );
+    assert!(
+        !zod.contains("next: z."),
+        "the enum is read while the const initializes: {zod}"
+    );
+}
+
+#[test]
+fn test_a_multiplying_recursive_variant_round_trips_every_branch() {
+    for value in [
+        RecursiveChoiceVariant::Named {
+            choice: VariantChoice::Left(ChoiceLeft {
+                left: "l".to_owned(),
+            }),
+            next: None,
+        },
+        RecursiveChoiceVariant::Named {
+            choice: VariantChoice::Right(ChoiceRight { right: 3 }),
+            next: Some(Box::new(RecursiveChoiceVariant::Plain {
+                y: "p".to_owned(),
+            })),
+        },
+    ] {
+        let written = serde_json::to_value(&value).unwrap();
+        assert_eq!(
+            serde_json::from_value::<RecursiveChoiceVariant>(written).unwrap(),
+            value
+        );
+    }
+}
+
+/// The JSON document admits every payload serde writes for a multiplied variant, whichever tagging
+/// wrote it.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_the_multiplied_variant_document_accepts_what_serde_writes() {
+    for (content, payload) in [
+        (
+            variant_content(&ExternalChoiceVariant::json_schema(), "Named"),
+            serde_json::json!({ "left": "l", "x": "y" }),
+        ),
+        (
+            variant_content(&ExternalChoiceVariant::json_schema(), "Named"),
+            serde_json::json!({ "right": 3_i64, "x": "y" }),
+        ),
+        (
+            variant_content(&AdjacentChoiceVariant::json_schema(), "Named"),
+            serde_json::json!({ "left": "l", "x": "y" }),
+        ),
+        (
+            variant_content(&AdjacentChoiceVariant::json_schema(), "Named"),
+            serde_json::json!({ "right": 3_i64, "x": "y" }),
+        ),
+    ] {
+        assert!(
+            closed_document_accepts(&content, &payload),
+            "{content} rejected {payload}"
+        );
+    }
+
+    for (document, payload) in [
+        (
+            InternalChoiceVariant::json_schema(),
+            serde_json::json!({ "kind": "Named", "left": "l", "x": "y" }),
+        ),
+        (
+            InternalChoiceVariant::json_schema(),
+            serde_json::json!({ "kind": "Named", "right": 3_i64, "x": "y" }),
+        ),
+        (
+            InternalChoiceVariant::json_schema(),
+            serde_json::json!({ "kind": "Plain", "y": "p" }),
+        ),
+        (
+            UntaggedChoiceVariant::json_schema(),
+            serde_json::json!({ "left": "l", "x": "y" }),
+        ),
+        (
+            UntaggedChoiceVariant::json_schema(),
+            serde_json::json!({ "right": 3_i64, "x": "y" }),
+        ),
+        (
+            UntaggedChoiceVariant::json_schema(),
+            serde_json::json!({ "y": "p" }),
+        ),
+    ] {
+        assert!(
+            closed_document_accepts(&document, &payload),
+            "{document} rejected {payload}"
+        );
+    }
+}
+
+/// And rejects the shapes no branch writes: a payload carrying two branches' keys at once, one
+/// carrying none of them, and the stale nesting the flattened field's own key would have made.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_the_multiplied_variant_document_rejects_what_no_branch_writes() {
+    let content = variant_content(&ExternalChoiceVariant::json_schema(), "Named");
+    for payload in [
+        serde_json::json!({ "left": "l", "right": 3_i64, "x": "y" }),
+        serde_json::json!({ "x": "y" }),
+        serde_json::json!({ "choice": { "left": "l" }, "x": "y" }),
+        serde_json::json!({ "left": "l" }),
+    ] {
+        assert!(
+            !closed_document_accepts(&content, &payload),
+            "{content} admitted {payload}"
+        );
+    }
+
+    for payload in [
+        serde_json::json!({ "kind": "Named", "left": "l", "right": 3_i64, "x": "y" }),
+        serde_json::json!({ "kind": "Named", "x": "y" }),
+    ] {
+        let document = InternalChoiceVariant::json_schema();
+        assert!(
+            !closed_document_accepts(&document, &payload),
+            "{document} admitted {payload}"
+        );
+    }
+}
+
+/// The document names one branch per key set, which is what the anyOf multiplication already wrote
+/// for a struct-level merge.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_the_multiplied_variant_document_writes_one_branch_per_key_set() {
+    let content = variant_content(&ExternalChoiceVariant::json_schema(), "Named");
+    let branches = content["anyOf"].as_array().unwrap();
+    assert_eq!(branches.len(), 2, "Got: {content}");
+    for (branch, key) in branches.iter().zip(["left", "right"]) {
+        let (named, required) = described_keys(branch);
+        assert_eq!(named, vec!["x".to_owned(), key.to_owned()], "Got: {branch}");
+        assert_eq!(
+            required,
+            vec!["x".to_owned(), key.to_owned()],
+            "Got: {branch}"
+        );
+        assert_eq!(branch["additionalProperties"], serde_json::json!(false));
+    }
+}
+
+/// TypeScript distributes the intersection over the choice's own union, so the type is written the
+/// way a single-key-set source is written and the multiplication never reaches it.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_the_multiplied_variant_type_is_the_intersection_typescript_distributes() {
+    assert!(
+        ExternalChoiceVariant::ts_definition().contains("} & VariantChoice;"),
+        "Got: {}",
+        ExternalChoiceVariant::ts_definition()
+    );
+    assert!(
+        InternalChoiceVariant::ts_definition().contains("} & VariantChoice |"),
+        "Got: {}",
+        InternalChoiceVariant::ts_definition()
+    );
+    assert!(
+        AdjacentChoiceVariant::ts_definition().contains("} & VariantChoice;"),
+        "Got: {}",
+        AdjacentChoiceVariant::ts_definition()
+    );
+    assert!(
+        UntaggedChoiceVariant::ts_definition()
+            .contains("= { x: string } & VariantChoice | { y: string };"),
+        "Got: {}",
+        UntaggedChoiceVariant::ts_definition()
+    );
+    assert!(
+        TwoChoiceVariant::ts_definition().contains("} & VariantChoice & PairChoice;"),
+        "Got: {}",
+        TwoChoiceVariant::ts_definition()
+    );
+    for ts in [
+        OptionalSourceVariant::ts_definition(),
+        OptionalChoiceVariant::ts_definition(),
+    ] {
+        assert!(ts.contains("]?: never });"), "Got: {ts}");
+    }
+}
+
+/// A variant flattening a source that writes exactly one key set is written as it always was: one
+/// `.and(...)`, no union introduced, on every tagging. Pinned as the merged expression rather than
+/// the whole method, so the same text is asserted whichever binding the `typescript` toggle
+/// publishes it under.
+#[test]
+#[cfg(feature = "zod")]
+fn test_a_single_key_set_variant_flatten_schema_is_byte_identical() {
+    for (schema, expression) in [
+        (
+            ExternalFlatVariant::zod_schema(),
+            "z.union([z.strictObject({\n  \"Named\": z.strictObject({\n  x: z.string(),\n})\
+             .and(z.lazy(() => VariantExtra$Schema)),\n}), z.strictObject({\n  \
+             \"Plain\": z.strictObject({\n  y: z.string(),\n}),\n})]);",
+        ),
+        (
+            InternalFlatVariant::zod_schema(),
+            "z.union([z.strictObject({\n  kind: z.literal(\"Named\"),\n  x: z.string(),\n})\
+             .and(z.lazy(() => VariantExtra$Schema)), z.strictObject({\n  \
+             kind: z.literal(\"Plain\"),\n  y: z.string(),\n})]);",
+        ),
+        (
+            AdjacentFlatVariant::zod_schema(),
+            "z.discriminatedUnion(\"kind\", [z.strictObject({\n  kind: z.literal(\"Named\"),\n  \
+             data: z.strictObject({\n  x: z.string(),\n})\
+             .and(z.lazy(() => VariantExtra$Schema)),\n}), z.strictObject({\n  \
+             kind: z.literal(\"Plain\"),\n  data: z.strictObject({\n  y: z.string(),\n}),\n})]);",
+        ),
+        (
+            UntaggedFlatVariant::zod_schema(),
+            "z.union([z.strictObject({ x: z.string(), })\
+             .and(z.lazy(() => VariantExtra$Schema)), z.strictObject({ y: z.string(), })]);",
+        ),
+    ] {
+        assert!(schema.contains(expression), "Got: {schema}");
+    }
+}
+
+/// And two such sources still chain onto the one object, rather than multiplying it.
+#[test]
+#[cfg(feature = "zod")]
+fn test_two_single_key_set_variant_sources_are_byte_identical() {
+    for (schema, expression) in [
+        (
+            TwiceFlatVariant::zod_schema(),
+            "z.union([z.strictObject({\n  \"Named\": z.strictObject({\n  x: z.string(),\n})\
+             .and(z.lazy(() => VariantExtra$Schema))\
+             .and(z.lazy(() => VariantRank$Schema)),\n})]);",
+        ),
+        (
+            TwiceUntaggedFlatVariant::zod_schema(),
+            "z.union([z.strictObject({ x: z.string(), })\
+             .and(z.lazy(() => VariantExtra$Schema))\
+             .and(z.lazy(() => VariantRank$Schema))]);",
+        ),
+    ] {
+        assert!(schema.contains(expression), "Got: {schema}");
+    }
+}
+
+/// A variant flattening nothing is the object it always was, with no `.and(...)` and no union of
+/// its own.
+#[test]
+#[cfg(feature = "zod")]
+fn test_a_variant_flattening_nothing_is_byte_identical() {
+    let zod = ExternalChoiceVariant::zod_schema();
+    let plain = &zod[zod.find("\"Plain\"").unwrap()..];
+    assert!(
+        plain.starts_with("\"Plain\": z.strictObject({\n  y: z.string(),\n}),\n})]);"),
+        "Got: {plain}"
     );
 }
