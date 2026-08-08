@@ -105,14 +105,7 @@ const SLOT_OMISSION_SPELLINGS: [(&str, bool); 6] = [
 
 /// The covered wrappers, under the names a dispatch reads them by.
 #[cfg(any(feature = "jsonschema", feature = "serde"))]
-const SEQUENCE_WRAPPERS: [&str; 6] = [
-    "BTreeSet",
-    "BinaryHeap",
-    "HashSet",
-    "LinkedList",
-    "Vec",
-    "VecDeque",
-];
+const SEQUENCE_WRAPPERS: [&str; 5] = ["BTreeSet", "BinaryHeap", "HashSet", "Vec", "VecDeque"];
 
 /// The module name a generated hook is written against, standing in for the one the enum's own
 /// expansion registers.
@@ -1800,6 +1793,66 @@ fn the_field_refusal_for_an_unsupported_wrapper_reads_exactly_this() {
     );
 }
 
+#[test]
+fn the_field_refusal_for_a_linked_list_reads_exactly_this() {
+    let message = field_undescribable_std_message(&syn::parse_quote! {
+        struct Queue {
+            pending: LinkedList<String>,
+        }
+    })
+    .unwrap();
+    assert_eq!(
+        message,
+        "model_schema: field `pending` reaches `LinkedList`, which serde writes as the same JSON \
+         array `Vec<T>` writes, so nothing on the wire tells the two apart and this crate \
+         describes only the one spelling. Use `Vec<T>`, or `VecDeque<T>` where values are pushed \
+         at both ends."
+    );
+}
+
+/// The wrappers still covered are the ones a field can be written with, and each keeps rendering
+/// as the array it writes rather than earning the refusal its dropped neighbour now earns.
+#[test]
+fn the_covered_sequence_spellings_are_left_alone_by_the_std_wrapper_guard() {
+    for spelling in [
+        quote::quote! { Vec<String> },
+        quote::quote! { VecDeque<String> },
+        quote::quote! { HashSet<String> },
+        quote::quote! { BTreeSet<String> },
+        quote::quote! { BinaryHeap<String> },
+    ] {
+        let error = field_undescribable_std_error(&syn::parse_quote! {
+            struct Queue {
+                pending: #spelling,
+            }
+        });
+        assert!(error.is_none(), "for {spelling}, got: {error:?}");
+    }
+}
+
+/// The guard reads through the wrappers the parser reads through, so the refusal names the linked
+/// list rather than whatever it was written inside.
+#[test]
+fn a_wrapped_linked_list_field_is_rejected_by_its_own_name() {
+    for spelling in [
+        quote::quote! { Vec<LinkedList<String>> },
+        quote::quote! { Option<LinkedList<String>> },
+        quote::quote! { HashMap<String, LinkedList<String>> },
+        quote::quote! { (u8, LinkedList<String>) },
+    ] {
+        let error = field_undescribable_std_error(&syn::parse_quote! {
+            struct Queue {
+                pending: #spelling,
+            }
+        })
+        .unwrap();
+        assert!(
+            error.contains("`LinkedList`"),
+            "for {spelling}, got: {error}"
+        );
+    }
+}
+
 /// A positional slot has no ident to name, and the label it is refused under is the one thing the
 /// collapse could have moved.
 #[test]
@@ -2196,6 +2249,12 @@ fn an_alias_targeting_an_undescribable_std_type_is_refused() {
             "model_schema: type alias `Keyed`",
             "`OsString`",
             "externally",
+        ),
+        (
+            "pub type Pending = LinkedList<String>;",
+            "model_schema: type alias `Pending`",
+            "`LinkedList`",
+            "Vec<T>",
         ),
     ] {
         let error = alias_undescribable_std_error_text(target);
@@ -3972,6 +4031,11 @@ fn a_brand_over_an_undescribable_std_inner_is_refused() {
             "`OnceLock`",
             "Serialize",
         ),
+        (
+            quote::quote! { LinkedList<String> },
+            "`LinkedList`",
+            "Vec<T>",
+        ),
     ] {
         let errors = branded_errors(&syn::parse_quote! {
             #[serde(transparent)]
@@ -4309,7 +4373,6 @@ fn string_constraints_over_a_non_string_inner_are_rejected() {
         ("BTreeSet<String>", "container"),
         ("BinaryHeap<String>", "container"),
         ("HashSet<String>", "container"),
-        ("LinkedList<String>", "container"),
         ("VecDeque<String>", "container"),
         ("HashMap<String, String>", "container"),
         ("(String, String)", "container"),
@@ -5495,6 +5558,7 @@ fn a_filling_reaching_an_undescribable_std_type_is_refused_at_the_entry() {
         ("OsString", "`OsString`", "externally"),
         ("Vec<OnceLock<u32>>", "`OnceLock`", "Serialize"),
         ("HashMap<String, OsString>", "`OsString`", "externally"),
+        ("LinkedList<String>", "`LinkedList`", "Vec<T>"),
     ] {
         let messages = default_types_messages(
             "pub struct Probe<ValueType> { pub held: ValueType }",

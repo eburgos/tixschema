@@ -12,13 +12,7 @@ use tixschema::model_schema;
 /// The covered wrappers by the name a generated surface could leak. `Vec` is covered too but
 /// never arrives under its own name: the parser collapses it onto its element long before.
 #[cfg(any(feature = "typescript", feature = "zod"))]
-const SEQUENCE_WRAPPERS: [&str; 5] = [
-    "BTreeSet",
-    "BinaryHeap",
-    "HashSet",
-    "LinkedList",
-    "VecDeque",
-];
+const SEQUENCE_WRAPPERS: [&str; 4] = ["BTreeSet", "BinaryHeap", "HashSet", "VecDeque"];
 
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -418,8 +412,6 @@ type MetricTagRef = MetricTag;
 
 // Every std wrapper serde writes as a JSON array of `T` puts the element in charge of what the
 // array holds. The twin structs carry the same element types under each covered spelling.
-// `LinkedList` has no twin here — the crate's own lints forbid a value of one — so it's covered
-// by name at the dispatch instead.
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct SetElementFields {

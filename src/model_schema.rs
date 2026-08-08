@@ -446,12 +446,14 @@ enum MapKeyRejection {
     },
 }
 
-/// A std type serde has no wire form for that a written type reaches, at any depth. Every position
-/// that reads a written type asks this, and each spans and names its own subject.
+/// A std type this crate describes no schema for that a written type reaches, at any depth. Every
+/// position that reads a written type asks this, and each spans and names its own subject.
 #[derive(Debug)]
 enum UndescribableStd<'name> {
     /// `OsString`/`OsStr`: serde writes an externally tagged enum naming the target platform.
     PlatformString(&'name str),
+    /// `LinkedList`: serde writes the array a `Vec` writes, and the covered spelling is that one.
+    Sequence(&'name str),
     /// A cell/lock/lazy-init wrapper or borrow guard: serde implements neither direction.
     Wrapper(&'name str),
 }
@@ -10980,9 +10982,10 @@ fn check_as_preprocess_conflict(
     ))
 }
 
-/// The std type `written` reaches that no schema can describe, and `None` when it reaches none.
-/// The platform string is answered first, so a type reaching both keeps the message that names its
-/// actual wire form.
+/// The std type `written` reaches that this crate describes no schema for, and `None` when it
+/// reaches none. The platform string is answered first, so a type reaching both keeps the message
+/// that names its actual wire form; the sequence is answered last, its rewrite being the only one
+/// of the three that leaves the surrounding type alone.
 fn undescribable_std_rejection(written: &FieldDef) -> Option<UndescribableStd<'_>> {
     written
         .os_string_name()
@@ -10992,11 +10995,16 @@ fn undescribable_std_rejection(written: &FieldDef) -> Option<UndescribableStd<'_
                 .unsupported_std_wrapper_name()
                 .map(UndescribableStd::Wrapper)
         })
+        .or_else(|| {
+            written
+                .refused_sequence_wrapper_name()
+                .map(UndescribableStd::Sequence)
+        })
 }
 
-/// What a written type reaching a std type serde cannot write is reported as. The `subject` names
-/// where it was written — a field, an alias, a brand, a `default_types` entry — which is all that
-/// differs between the positions.
+/// What a written type reaching a std type this crate has no schema for is reported as. The
+/// `subject` names where it was written — a field, an alias, a brand, a `default_types` entry —
+/// which is all that differs between the positions.
 fn undescribable_std_message(subject: &str, rejection: &UndescribableStd<'_>) -> String {
     match *rejection {
         UndescribableStd::PlatformString(name) => format!(
@@ -11004,6 +11012,11 @@ fn undescribable_std_message(subject: &str, rejection: &UndescribableStd<'_>) ->
              the target platform (`{{\"Unix\":[u8, ...]}}` or `{{\"Windows\":[u16, ...]}}`), not a \
              string, so no schema can describe it portably. Use `String`, or `PathBuf` for a \
              filesystem path."
+        ),
+        UndescribableStd::Sequence(name) => format!(
+            "{subject} reaches `{name}`, which serde writes as the same JSON array `Vec<T>` \
+             writes, so nothing on the wire tells the two apart and this crate describes only the \
+             one spelling. Use `Vec<T>`, or `VecDeque<T>` where values are pushed at both ends."
         ),
         UndescribableStd::Wrapper(name) => format!(
             "{subject} reaches `{name}`, which serde implements neither `Serialize` nor \
