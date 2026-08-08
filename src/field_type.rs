@@ -600,18 +600,25 @@ impl FieldDef {
 
     /// The name of the first `OsString`/`OsStr` this field reaches, at any depth.
     pub fn os_string_name(&self) -> Option<&str> {
+        self.reached_name(|name| matches!(name, "OsString" | "OsStr"))
+    }
+
+    /// The parameter this field is or reaches, which is what a nested position is asked for: below
+    /// the top level the two questions have one answer.
+    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+    fn parameter_or_argument_name(&self) -> Option<&str> {
+        self.parameter_shape_name()
+            .or_else(|| self.argument_parameter_name())
+    }
+
+    /// The enclosing item's own type parameter this field renders as, when a bound spelled against
+    /// it names a value whose type the expansion never sees.
+    pub fn parameter_shape_name(&self) -> Option<&str> {
         match &self.field_type {
-            FieldDefType::SiblingType(name, generics) => {
-                if matches!(name.as_str(), "OsString" | "OsStr") {
-                    return Some(name);
-                }
-                generics.iter().find_map(Self::os_string_name)
-            }
-            FieldDefType::Map(key, value) => {
-                key.os_string_name().or_else(|| value.os_string_name())
-            }
-            FieldDefType::Tuple(elements) => elements.iter().find_map(Self::os_string_name),
-            FieldDefType::TypeParam(_)
+            FieldDefType::TypeParam(name) => Some(name),
+            FieldDefType::SiblingType(_, _)
+            | FieldDefType::Map(_, _)
+            | FieldDefType::Tuple(_)
             | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
             | FieldDefType::BooleanLiteral(_)
@@ -641,22 +648,29 @@ impl FieldDef {
         }
     }
 
-    /// The parameter this field is or reaches, which is what a nested position is asked for: below
-    /// the top level the two questions have one answer.
-    #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-    fn parameter_or_argument_name(&self) -> Option<&str> {
-        self.parameter_shape_name()
-            .or_else(|| self.argument_parameter_name())
-    }
-
-    /// The enclosing item's own type parameter this field renders as, when a bound spelled against
-    /// it names a value whose type the expansion never sees.
-    pub fn parameter_shape_name(&self) -> Option<&str> {
+    /// The first name this field reaches, at any depth, that `refused` answers for. A name is only
+    /// ever written where a type is, so the walk descends the positions holding written types and
+    /// stops at every value the parser resolved to something of its own.
+    fn reached_name<F>(&self, refused: F) -> Option<&str>
+    where
+        F: Fn(&str) -> bool + Copy,
+    {
         match &self.field_type {
-            FieldDefType::TypeParam(name) => Some(name),
-            FieldDefType::SiblingType(_, _)
-            | FieldDefType::Map(_, _)
-            | FieldDefType::Tuple(_)
+            FieldDefType::SiblingType(name, generics) => {
+                if refused(name.as_str()) {
+                    return Some(name);
+                }
+                generics
+                    .iter()
+                    .find_map(|argument| argument.reached_name(refused))
+            }
+            FieldDefType::Map(key, value) => key
+                .reached_name(refused)
+                .or_else(|| value.reached_name(refused)),
+            FieldDefType::Tuple(elements) => elements
+                .iter()
+                .find_map(|element| element.reached_name(refused)),
+            FieldDefType::TypeParam(_)
             | FieldDefType::Unknown
             | FieldDefType::StringLiteral(_)
             | FieldDefType::BooleanLiteral(_)
@@ -730,6 +744,11 @@ impl FieldDef {
             | FieldDefType::NaiveDateTime
             | FieldDefType::DateTime => false,
         }
+    }
+
+    /// The name of the first `is_refused_sequence_wrapper` this field reaches, at any depth.
+    pub fn refused_sequence_wrapper_name(&self) -> Option<&str> {
+        self.reached_name(is_refused_sequence_wrapper)
     }
 
     /// Rewrites any `Self` type reference to the concrete enclosing type name, at the parameters
@@ -968,47 +987,7 @@ impl FieldDef {
 
     /// The name of the first `is_unsupported_std_wrapper` this field reaches, at any depth.
     pub fn unsupported_std_wrapper_name(&self) -> Option<&str> {
-        match &self.field_type {
-            FieldDefType::SiblingType(name, generics) => {
-                if is_unsupported_std_wrapper(name.as_str()) {
-                    return Some(name);
-                }
-                generics.iter().find_map(Self::unsupported_std_wrapper_name)
-            }
-            FieldDefType::Map(key, value) => key
-                .unsupported_std_wrapper_name()
-                .or_else(|| value.unsupported_std_wrapper_name()),
-            FieldDefType::Tuple(elements) => {
-                elements.iter().find_map(Self::unsupported_std_wrapper_name)
-            }
-            FieldDefType::TypeParam(_)
-            | FieldDefType::Unknown
-            | FieldDefType::StringLiteral(_)
-            | FieldDefType::BooleanLiteral(_)
-            | FieldDefType::NumberLiteral(_)
-            | FieldDefType::Boolean
-            | FieldDefType::Char
-            | FieldDefType::String
-            | FieldDefType::U8
-            | FieldDefType::U16
-            | FieldDefType::U32
-            | FieldDefType::U64
-            | FieldDefType::I8
-            | FieldDefType::I16
-            | FieldDefType::I32
-            | FieldDefType::I64
-            | FieldDefType::Usize
-            | FieldDefType::Isize
-            | FieldDefType::F32
-            | FieldDefType::F64 => None,
-            #[cfg(feature = "object_id")]
-            FieldDefType::ObjectId => None,
-            #[cfg(feature = "chrono")]
-            FieldDefType::NaiveDate
-            | FieldDefType::NaiveTime
-            | FieldDefType::NaiveDateTime
-            | FieldDefType::DateTime => None,
-        }
+        self.reached_name(is_unsupported_std_wrapper)
     }
 
     /// The value this field's wrappers hold, as a field of its own: the same type with the
@@ -1289,8 +1268,14 @@ fn zod_factory_call(name: &str, arguments: &[FieldDef]) -> String {
 pub fn is_sequence_wrapper(name: &str) -> bool {
     matches!(
         name,
-        "BTreeSet" | "BinaryHeap" | "HashSet" | "LinkedList" | "Vec" | "VecDeque"
+        "BTreeSet" | "BinaryHeap" | "HashSet" | "Vec" | "VecDeque"
     )
+}
+
+/// The std sequence the crate refuses rather than renders. serde writes it as the array a `Vec`
+/// writes, so the covered spelling already describes every wire form it has.
+pub fn is_refused_sequence_wrapper(name: &str) -> bool {
+    name == "LinkedList"
 }
 
 /// The number of leading type arguments a std container's wire form is written from, or `None` for

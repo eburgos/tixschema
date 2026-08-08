@@ -5,13 +5,7 @@ use crate::utils::{AliasKind, register_alias_info};
 
 /// The wrappers whose fields write a JSON array of their element, named here as they reach the
 /// renderers — `Vec` excluded, the parser having collapsed it long before.
-const SEQUENCE_WRAPPERS: [&str; 5] = [
-    "BTreeSet",
-    "BinaryHeap",
-    "HashSet",
-    "LinkedList",
-    "VecDeque",
-];
+const SEQUENCE_WRAPPERS: [&str; 4] = ["BTreeSet", "BinaryHeap", "HashSet", "VecDeque"];
 
 fn field(field_type: FieldDefType) -> FieldDef {
     FieldDef {
@@ -270,6 +264,19 @@ fn test_the_covered_transparent_wrappers_are_exactly_the_recorded_list() {
     }
 }
 
+/// The covered sequence list, stated once so it is a decision rather than a spelling that happened
+/// to work. `LinkedList` is on the false side deliberately: it writes the array `Vec` writes, so
+/// the covered spelling already describes it and a field written as one is refused instead.
+#[test]
+fn test_the_covered_sequence_wrappers_are_exactly_the_recorded_list() {
+    for name in ["BTreeSet", "BinaryHeap", "HashSet", "Vec", "VecDeque"] {
+        assert!(super::is_sequence_wrapper(name), "for: {name}");
+    }
+    for name in ["LinkedList", "BTreeMap", "HashMap", "Option", "Box"] {
+        assert!(!super::is_sequence_wrapper(name), "for: {name}");
+    }
+}
+
 /// The ownership/borrow split the covered list is built from: only the first four implement
 /// `Deref`, which is what a constraint's generated validator needs to reach through one.
 #[test]
@@ -496,6 +503,8 @@ fn test_a_schematizable_field_is_not_reported_as_an_unsupported_std_wrapper() {
     }
 }
 
+/// `LinkedList` is on the false side because it is refused by a list of its own: serde writes it,
+/// so the message it earns names the covered spelling rather than a missing wire form.
 #[test]
 fn test_the_unsupported_std_wrapper_list_is_exactly_the_nine_names() {
     for name in [
@@ -513,7 +522,16 @@ fn test_the_unsupported_std_wrapper_list_is_exactly_the_nine_names() {
         assert!(!super::is_transparent_wrapper(name), "for: {name}");
     }
     for name in [
-        "Arc", "Box", "Cow", "Rc", "Cell", "Mutex", "RefCell", "RwLock", "Inner",
+        "Arc",
+        "Box",
+        "Cow",
+        "Rc",
+        "Cell",
+        "Mutex",
+        "RefCell",
+        "RwLock",
+        "Inner",
+        "LinkedList",
     ] {
         assert!(!super::is_unsupported_std_wrapper(name), "for: {name}");
     }

@@ -146,8 +146,7 @@ enum ShapedUnion {
 
 // The std wrappers serde writes as a JSON array of their element, written in untagged members:
 // each describes as the `Vec` of the same element does, not as a schema module named after the
-// wrapper. `LinkedList` has no member here — the crate's own lints forbid a value of one — so
-// it's covered by name at the dispatch's own unit tests instead.
+// wrapper.
 #[model_schema()]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
