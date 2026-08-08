@@ -26,6 +26,9 @@ use super::{
 #[cfg(all(feature = "serde", feature = "zod"))]
 use super::{WireLeaf, flatten_edge_guard_error, record_wire_leaves, record_zod_union_members};
 
+#[cfg(feature = "zod")]
+use super::{MergedOperand, SourceAbsence};
+
 #[cfg(feature = "typescript")]
 use super::tuple_struct_ts_body;
 
@@ -10784,12 +10787,11 @@ fn a_flattened_variant_field_over_a_plain_enum_is_refused() {
     );
 }
 
-/// A source that writes one key set per branch is refused where a variant flattens it: the
-/// variant's own members are written inside the union member carrying them, so there is nowhere to
-/// bind them to a name each alternative could join.
+/// A source that writes one key set per branch is composed where a variant flattens it, the same
+/// way a struct composes it: the variant's object is written once per key set.
 #[cfg(all(feature = "serde", feature = "zod"))]
 #[test]
-fn a_flattened_variant_field_over_a_multi_branch_source_is_refused() {
+fn a_flattened_variant_field_over_a_multi_branch_source_is_accepted() {
     let mut choice: syn::ItemEnum = syn::parse_quote! {
         enum VariantChoice {
             First(Holder),
@@ -10816,23 +10818,14 @@ fn a_flattened_variant_field_over_a_multi_branch_source_is_refused() {
             },
         }
     });
-    assert_eq!(refusals.len(), 1, "got: {refusals:?}");
-    assert!(
-        refusals[0].contains("writes one key set per branch of the choice it names"),
-        "got: {}",
-        refusals[0]
-    );
-    assert!(
-        refusals[0].contains("variant `Named` of `Probe`"),
-        "got: {}",
-        refusals[0]
-    );
+    assert!(refusals.is_empty(), "got: {refusals:?}");
 }
 
-/// So is a source serde writes all the members of or none of: that is two key sets as well.
+/// So is a source serde writes all the members of or none of: that is two key sets as well, and so
+/// two combinations.
 #[cfg(all(feature = "serde", feature = "zod"))]
 #[test]
-fn an_optional_flattened_variant_field_is_refused() {
+fn an_optional_flattened_variant_field_is_accepted() {
     let refusals = discriminated_guard_errors(syn::parse_quote! {
         enum Probe {
             Named {
@@ -10842,33 +10835,7 @@ fn an_optional_flattened_variant_field_is_refused() {
             },
         }
     });
-    assert_eq!(refusals.len(), 1, "got: {refusals:?}");
-    assert!(
-        refusals[0].contains("writes its members or no members at all"),
-        "got: {}",
-        refusals[0]
-    );
-}
-
-/// And each refusal names a way out the author can act on.
-#[cfg(all(feature = "serde", feature = "zod"))]
-#[test]
-fn the_variant_flatten_refusal_names_the_remedy() {
-    let refusals = discriminated_guard_errors(syn::parse_quote! {
-        enum Probe {
-            Named {
-                #[serde(flatten, skip_serializing_if = "Option::is_none", default)]
-                extra: Option<PlainBase>,
-                x: String,
-            },
-        }
-    });
-    assert!(
-        refusals[0]
-            .contains("write the field as a named member so the value gets a key of its own"),
-        "got: {}",
-        refusals[0]
-    );
+    assert!(refusals.is_empty(), "got: {refusals:?}");
 }
 
 /// The members one untagged variant collected, beside the ones it flattens.
@@ -10969,11 +10936,11 @@ fn a_flattened_untagged_variant_field_over_a_plain_enum_is_refused() {
     );
 }
 
-/// And so does the branching an untagged variant's own position cannot compose, worded the way the
-/// tagged path words it.
+/// And an untagged variant composes the branching its own position multiplies, the way every other
+/// tagging composes it.
 #[cfg(all(feature = "serde", feature = "zod"))]
 #[test]
-fn a_flattened_untagged_variant_field_over_a_multi_branch_source_is_refused() {
+fn a_flattened_untagged_variant_field_over_a_multi_branch_source_is_accepted() {
     let mut choice: syn::ItemEnum = syn::parse_quote! {
         enum UntaggedVariantChoice {
             First(Holder),
@@ -11000,17 +10967,7 @@ fn a_flattened_untagged_variant_field_over_a_multi_branch_source_is_refused() {
             },
         }
     });
-    assert_eq!(refusals.len(), 1, "got: {refusals:?}");
-    assert!(
-        refusals[0].contains("writes one key set per branch of the choice it names"),
-        "got: {}",
-        refusals[0]
-    );
-    assert!(
-        refusals[0].contains("variant `Named` of `Probe`"),
-        "got: {}",
-        refusals[0]
-    );
+    assert!(refusals.is_empty(), "got: {refusals:?}");
 }
 
 /// A source that writes exactly one key set is what the merge composes, and neither guard fires on
@@ -11231,4 +11188,229 @@ fn a_prop_outside_a_brand_slot_earns_no_refusal() {
         let refusals = branded_slot_refusals(source);
         assert!(refusals.is_empty(), "for {source}, got: {refusals:?}");
     }
+}
+
+/// One merged source as [`super::zod_merged_joins`] reads it: what it is written as, the key sets
+/// it writes where it names a choice, and whether it offers its own absence beside them.
+#[cfg(feature = "zod")]
+fn merged_source(spelling: &str, branches: &[&str], absence: SourceAbsence) -> MergedOperand {
+    MergedOperand {
+        absence,
+        branches: branches
+            .iter()
+            .map(|branch| (*branch).to_owned())
+            .collect::<Vec<_>>(),
+        spelling: spelling.to_owned(),
+    }
+}
+
+/// A source writing one key set is joined as the one operand it is, and the object it closes is
+/// written once, with no union around it.
+#[cfg(feature = "zod")]
+#[test]
+fn a_single_key_set_source_closes_the_object_once() {
+    let operands = [merged_source("Base$Schema", &[], SourceAbsence::Never)];
+    assert_eq!(
+        super::zod_merged_joins(&operands),
+        vec![".and(z.lazy(() => Base$Schema))".to_owned()]
+    );
+    assert_eq!(
+        super::zod_merged_object("OWN", &operands),
+        "OWN.and(z.lazy(() => Base$Schema))"
+    );
+}
+
+/// A choice recording exactly one key set is that same single combination: the branch is joined in
+/// place of the choice's own name, and nothing is multiplied.
+#[cfg(feature = "zod")]
+#[test]
+fn a_single_branch_source_collapses_to_the_branchs_own_object() {
+    let operands = [merged_source(
+        "Choice$Schema",
+        &["Only$Schema"],
+        SourceAbsence::Never,
+    )];
+    assert_eq!(
+        super::zod_merged_object("OWN", &operands),
+        "OWN.and(z.lazy(() => Only$Schema))"
+    );
+}
+
+/// Flattening nothing writes the object as it stands.
+#[cfg(feature = "zod")]
+#[test]
+fn a_source_less_object_is_written_as_it_stands() {
+    assert_eq!(super::zod_merged_joins(&[]), vec![String::new()]);
+    assert_eq!(super::zod_merged_object("OWN", &[]), "OWN");
+}
+
+/// A two-branch choice writes two key sets, so the object is written twice over and the two are
+/// offered as a union.
+#[cfg(feature = "zod")]
+#[test]
+fn a_two_branch_source_writes_the_object_once_per_branch() {
+    let operands = [merged_source(
+        "Choice$Schema",
+        &["Left$Schema", "Right$Schema"],
+        SourceAbsence::Never,
+    )];
+    assert_eq!(
+        super::zod_merged_joins(&operands),
+        vec![
+            ".and(z.lazy(() => Left$Schema))".to_owned(),
+            ".and(z.lazy(() => Right$Schema))".to_owned(),
+        ]
+    );
+    assert_eq!(
+        super::zod_merged_object("OWN", &operands),
+        "z.union([\n  OWN.and(z.lazy(() => Left$Schema)),\n  OWN.and(z.lazy(() => Right$Schema)),\n])"
+    );
+}
+
+/// A third branch is a third combination, in the order the choice records its members.
+#[cfg(feature = "zod")]
+#[test]
+fn a_three_branch_source_writes_the_object_once_per_branch() {
+    let operands = [merged_source(
+        "Choice$Schema",
+        &["Left$Schema", "Middle$Schema", "Right$Schema"],
+        SourceAbsence::Never,
+    )];
+    assert_eq!(
+        super::zod_merged_joins(&operands),
+        vec![
+            ".and(z.lazy(() => Left$Schema))".to_owned(),
+            ".and(z.lazy(() => Middle$Schema))".to_owned(),
+            ".and(z.lazy(() => Right$Schema))".to_owned(),
+        ]
+    );
+    assert_eq!(
+        super::zod_merged_object("OWN", &operands),
+        "z.union([\n  OWN.and(z.lazy(() => Left$Schema)),\n  \
+         OWN.and(z.lazy(() => Middle$Schema)),\n  OWN.and(z.lazy(() => Right$Schema)),\n])"
+    );
+}
+
+/// A source offering its own absence writes its members or leaves them out, which is the same
+/// source once with the join and once without it, the bare object last.
+#[cfg(feature = "zod")]
+#[test]
+fn an_absent_source_writes_the_object_with_it_and_without_it() {
+    for absence in [SourceAbsence::Field, SourceAbsence::Published] {
+        let operands = [merged_source("Base$Schema", &[], absence)];
+        assert_eq!(
+            super::zod_merged_joins(&operands),
+            vec![".and(z.lazy(() => Base$Schema))".to_owned(), String::new()]
+        );
+        assert_eq!(
+            super::zod_merged_object("OWN", &operands),
+            "z.union([\n  OWN.and(z.lazy(() => Base$Schema)),\n  OWN,\n])"
+        );
+    }
+}
+
+/// Two sources multiply: every key set the first writes stands beside every key set the second
+/// does, the first source varying slowest.
+#[cfg(feature = "zod")]
+#[test]
+fn two_branching_sources_write_their_cross_product() {
+    let operands = [
+        merged_source(
+            "First$Schema",
+            &["Left$Schema", "Right$Schema"],
+            SourceAbsence::Never,
+        ),
+        merged_source(
+            "Second$Schema",
+            &["Up$Schema", "Down$Schema"],
+            SourceAbsence::Never,
+        ),
+    ];
+    assert_eq!(
+        super::zod_merged_joins(&operands),
+        vec![
+            ".and(z.lazy(() => Left$Schema)).and(z.lazy(() => Up$Schema))".to_owned(),
+            ".and(z.lazy(() => Left$Schema)).and(z.lazy(() => Down$Schema))".to_owned(),
+            ".and(z.lazy(() => Right$Schema)).and(z.lazy(() => Up$Schema))".to_owned(),
+            ".and(z.lazy(() => Right$Schema)).and(z.lazy(() => Down$Schema))".to_owned(),
+        ]
+    );
+}
+
+/// An absence over a branching source is one more combination beside the branches, not one more per
+/// branch: the source writes a matched member's keys, or no keys at all.
+#[cfg(feature = "zod")]
+#[test]
+fn an_absent_branching_source_offers_its_branches_and_the_absence() {
+    let operands = [merged_source(
+        "Choice$Schema",
+        &["Left$Schema", "Right$Schema"],
+        SourceAbsence::Field,
+    )];
+    assert_eq!(
+        super::zod_merged_joins(&operands),
+        vec![
+            ".and(z.lazy(() => Left$Schema))".to_owned(),
+            ".and(z.lazy(() => Right$Schema))".to_owned(),
+            String::new(),
+        ]
+    );
+    assert_eq!(
+        super::zod_merged_object("OWN", &operands),
+        "z.union([\n  OWN.and(z.lazy(() => Left$Schema)),\n  \
+         OWN.and(z.lazy(() => Right$Schema)),\n  OWN,\n])"
+    );
+}
+
+/// The same source beside an absent plain one: three combinations against two, six in all.
+#[cfg(feature = "zod")]
+#[test]
+fn a_branching_source_multiplies_against_an_absent_one() {
+    let operands = [
+        merged_source(
+            "Choice$Schema",
+            &["Left$Schema", "Right$Schema"],
+            SourceAbsence::Never,
+        ),
+        merged_source("Base$Schema", &[], SourceAbsence::Field),
+    ];
+    assert_eq!(
+        super::zod_merged_joins(&operands),
+        vec![
+            ".and(z.lazy(() => Left$Schema)).and(z.lazy(() => Base$Schema))".to_owned(),
+            ".and(z.lazy(() => Left$Schema))".to_owned(),
+            ".and(z.lazy(() => Right$Schema)).and(z.lazy(() => Base$Schema))".to_owned(),
+            ".and(z.lazy(() => Right$Schema))".to_owned(),
+        ]
+    );
+}
+
+/// The struct-level hoist and the variant-level inlining read the same combinations: the object is
+/// bound to a name where a name is available, and written out where it is not.
+#[cfg(feature = "zod")]
+#[test]
+fn the_hoist_and_the_inlining_write_the_same_combinations() {
+    let operands = [merged_source(
+        "Choice$Schema",
+        &["Left$Schema", "Right$Schema"],
+        SourceAbsence::Never,
+    )];
+    let (preamble, expression) = super::zod_merged_statements("Host", "OWN", &operands);
+    assert_eq!(preamble, "const Host$OwnSchema = OWN;\n\n");
+    assert_eq!(
+        expression,
+        super::zod_merged_object("Host$OwnSchema", &operands)
+    );
+}
+
+/// And a single combination is written where the object stood on both paths, with no name bound and
+/// no union introduced.
+#[cfg(feature = "zod")]
+#[test]
+fn a_single_combination_binds_no_name_on_either_path() {
+    let operands = [merged_source("Base$Schema", &[], SourceAbsence::Never)];
+    assert_eq!(
+        super::zod_merged_statements("Host", "OWN", &operands),
+        (String::new(), super::zod_merged_object("OWN", &operands))
+    );
 }
