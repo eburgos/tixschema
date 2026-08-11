@@ -7266,7 +7266,10 @@ fn unsupported_untagged_variant_error(variant: &syn::Variant, shape: &str) -> sy
 
 /// Renders a `TupleSingle` (`S(T)`) untagged variant as a union member (`T` / `T$Schema` / value).
 /// The variant carries no key of its own, so a `None` inner reaches the wire as a bare `null`
-/// rather than going absent — read through the slot spellings for that reason.
+/// rather than going absent — read through the slot spellings for that reason. That same missing
+/// key is why a member naming the union itself is deferred with [`deferred_zod_operand`] rather
+/// than the getter [`render_untagged_named`] hangs off a key: read eagerly, the name lands in its
+/// own `const`'s initializer and throws on import.
 #[cfg(feature = "serde")]
 fn render_untagged_tuple_single(
     fld: &FieldDef,
@@ -7275,16 +7278,25 @@ fn render_untagged_tuple_single(
     let ts = fld.typescript_slot_typename();
 
     #[cfg(feature = "zod")]
-    let zod = fld.zod_slot_type();
+    let zod = {
+        let slot = fld.zod_slot_type();
+        if fld.contains_type_reference(self_type_name) {
+            deferred_zod_operand(&slot)
+        } else {
+            slot
+        }
+    };
     #[cfg(not(feature = "zod"))]
-    let zod = String::new();
+    let zod = {
+        let _: &str = self_type_name;
+        String::new()
+    };
 
     #[cfg(feature = "jsonschema")]
     let json_val = nullable_slot_json_schema_value(fld, field_json_schema_value(fld));
     #[cfg(not(feature = "jsonschema"))]
     let json_val = quote! {};
 
-    let _: &str = self_type_name;
     (ts, zod, json_val)
 }
 
