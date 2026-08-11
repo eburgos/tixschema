@@ -108,6 +108,20 @@ enum CompliantUnion {
     },
 }
 
+// The plain-JSON value shape: an untagged union naming itself from newtype variants, which carry
+// no key for a getter to defer the name behind. Its two recursive members read the union's own
+// binding, so each has to be read after the `const` declaring it finishes rather than while it runs.
+#[model_schema()]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum JsonValueUnion {
+    B(bool),
+    L(Vec<Self>),
+    M(HashMap<String, Self>),
+    N(f64),
+    S(String),
+}
+
 // An untagged newtype variant's content has no key to drop: it is the whole serialized value, so
 // a `None` there reaches the wire as a bare `null`. The non-`Option` member beside it carries none.
 #[model_schema()]
@@ -409,6 +423,72 @@ fn test_tuple_single_union_zod() {
         zod.contains("export const DateValue$Schema: ZodType<DateValue> = DateValue$RawSchema;"),
         "Got:\n{zod}"
     );
+}
+
+/// A newtype member naming the union itself is read through a thunk, not written straight into the
+/// `const` that declares the name — the eager spelling is a cycle the bundle throws on at import.
+#[test]
+#[cfg(feature = "zod")]
+fn test_recursive_tuple_single_union_zod_defers_self_reference() {
+    let zod = JsonValueUnion::zod_schema();
+    assert!(
+        zod.contains("z.lazy(() => z.array(JsonValueUnion$Schema))"),
+        "Got:\n{zod}"
+    );
+    assert!(
+        zod.contains("z.lazy(() => z.record(z.string(), JsonValueUnion$Schema))"),
+        "Got:\n{zod}"
+    );
+}
+
+/// The deferral is paid only where the cycle is: a member naming nothing recursive keeps the eager
+/// spelling every other tuple-single member is written in.
+#[test]
+#[cfg(feature = "zod")]
+fn test_recursive_tuple_single_union_zod_keeps_scalar_members_eager() {
+    let zod = JsonValueUnion::zod_schema();
+    assert!(zod.contains("z.union([z.boolean(), z.lazy("), "Got:\n{zod}");
+    assert!(zod.contains("z.number(), z.string()])"), "Got:\n{zod}");
+    for member in ["z.string()", "z.boolean()", "z.number()"] {
+        assert!(
+            !zod.contains(&format!("z.lazy(() => {member})")),
+            "`{member}` names nothing recursive and must stay eager. Got:\n{zod}"
+        );
+    }
+}
+
+/// A TypeScript type names itself wherever it likes, so the union is written out flat — the thunk
+/// the Zod schema needs has no counterpart here.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_recursive_tuple_single_union_typescript_carries_no_deferral() {
+    let ts = JsonValueUnion::ts_definition();
+    assert!(
+        ts.contains(
+            "export type JsonValueUnion = boolean | Array<JsonValueUnion> | \
+             Partial<Record<string, JsonValueUnion>> | number | string;"
+        ),
+        "Got:\n{ts}"
+    );
+    assert!(!ts.contains("z.lazy"), "Got:\n{ts}");
+    assert!(!ts.contains("=>"), "Got:\n{ts}");
+}
+
+/// The nesting the deferral exists for, written and read back through the union that describes it.
+#[test]
+fn test_serde_round_trip_nested_recursive_union() {
+    let value = JsonValueUnion::M(HashMap::from([(
+        "items".to_owned(),
+        JsonValueUnion::L(vec![
+            JsonValueUnion::S("a".to_owned()),
+            JsonValueUnion::B(true),
+            JsonValueUnion::N(1.5),
+        ]),
+    )]));
+    let json = serde_json::to_string(&value).unwrap();
+    assert_eq!(json, r#"{"items":["a",true,1.5]}"#);
+    let back: JsonValueUnion = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, value);
 }
 
 #[test]
