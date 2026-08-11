@@ -966,29 +966,30 @@ impl FieldDef {
         }
     }
 
-    /// The slot spelling of a member of the type named by `self_type_name`, with a map whose
-    /// values name that type written as an index signature. `Partial<Record<K, V>>` is a mapped
-    /// type, and TypeScript resolves those while it resolves the alias declaring the union, so a
-    /// member spelled that way makes the alias circular (TS2456); the index-signature object it is
-    /// equal to states the same type and is resolved lazily. A key the index signature has no
-    /// parameter type for keeps the mapped spelling, as does a map under an array wrap, which is
-    /// already deferred by the wrap.
+    /// The slot spelling of a member of the type named by `self_type_name`, with a map whose values
+    /// name that type written so the alias declaring the union stays resolvable.
+    /// `Partial<Record<K, V>>` is `Partial` applied to `Record`, and TypeScript resolves both while
+    /// it resolves the alias, so a member spelled that way makes the alias circular (TS2456). A key
+    /// spelling as `string` or `number` is written as the index-signature object it is equal to; an
+    /// enumerated key is a literal type, which an index signature parameter cannot be (TS1337), so
+    /// it is written as the mapped type it is equal to instead. Both state the same object and
+    /// resolve their value lazily. A map under an array wrap keeps `Partial<Record<…>>`, the wrap
+    /// having deferred it already.
     #[cfg(all(feature = "serde", feature = "typescript"))]
     pub fn typescript_slot_typename_deferring_self(&self, self_type_name: &str) -> String {
         let FieldDefType::Map(key, value) = &self.field_type else {
             return self.typescript_slot_typename();
         };
-        let key_type = key.typescript_map_key_typename();
-        if self.array_depth > 0
-            || !matches!(key_type.as_str(), "number" | "string")
-            || !value.contains_type_reference(self_type_name)
-        {
+        if self.array_depth > 0 || !value.contains_type_reference(self_type_name) {
             return self.typescript_slot_typename();
         }
-        let base = format!(
-            "{{ [key: {key_type}]: {} | undefined }}",
-            value.typescript_slot_typename()
-        );
+        let key_type = key.typescript_map_key_typename();
+        let value_type = value.typescript_slot_typename();
+        let base = if matches!(key_type.as_str(), "number" | "string") {
+            format!("{{ [key: {key_type}]: {value_type} | undefined }}")
+        } else {
+            format!("{{ [key in {key_type}]?: {value_type} }}")
+        };
         if self.is_optional() {
             format!("{base} | null")
         } else {
