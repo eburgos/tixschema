@@ -149,6 +149,16 @@ enum KeyedUnion {
     Labels { labels: HashMap<String, String> },
 }
 
+// A newtype member holding a map that names nothing recursive: the mapped-type spelling the
+// self-naming member of `JsonValueUnion` has to avoid is what a member like this keeps.
+#[model_schema()]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum LabelBagUnion {
+    Bag(HashMap<String, String>),
+    Name(String),
+}
+
 // A tuple written in an untagged member. Serde writes it as the fixed-arity array a tuple field
 // writes, so the member has to describe as that field does.
 #[model_schema()]
@@ -457,21 +467,51 @@ fn test_recursive_tuple_single_union_zod_keeps_scalar_members_eager() {
     }
 }
 
-/// A TypeScript type names itself wherever it likes, so the union is written out flat — the thunk
-/// the Zod schema needs has no counterpart here.
+/// A TypeScript type names itself from an array member wherever it likes, so the union is written
+/// out flat — the thunk the Zod schema needs has no counterpart there. The map member is the one
+/// exception: `Partial<Record<…>>` is a mapped type, resolved while the alias resolves, so a member
+/// spelled that way makes the alias circular (TS2456). It is written as the index-signature object
+/// it is equal to, which is resolved lazily.
 #[test]
 #[cfg(feature = "typescript")]
-fn test_recursive_tuple_single_union_typescript_carries_no_deferral() {
+fn test_recursive_tuple_single_union_typescript_defers_only_the_map_member() {
     let ts = JsonValueUnion::ts_definition();
     assert!(
         ts.contains(
             "export type JsonValueUnion = boolean | Array<JsonValueUnion> | \
-             Partial<Record<string, JsonValueUnion>> | number | string;"
+             { [key: string]: JsonValueUnion | undefined } | number | string;"
         ),
         "Got:\n{ts}"
     );
+    assert!(
+        !ts.contains("Partial<Record<string, JsonValueUnion>>"),
+        "the mapped-type spelling is the circularity itself. Got:\n{ts}"
+    );
     assert!(!ts.contains("z.lazy"), "Got:\n{ts}");
     assert!(!ts.contains("=>"), "Got:\n{ts}");
+}
+
+/// The lazy spelling is paid only where the cycle is: a map member naming nothing recursive keeps
+/// the `Partial<Record<…>>` every other map is written in.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_non_recursive_tuple_single_map_member_keeps_mapped_type() {
+    let ts = LabelBagUnion::ts_definition();
+    assert!(
+        ts.contains("export type LabelBagUnion = Partial<Record<string, string>> | string;"),
+        "Got:\n{ts}"
+    );
+    assert!(!ts.contains("[key: string]"), "Got:\n{ts}");
+}
+
+/// The map member of a union that names nothing recursive, written and read back.
+#[test]
+fn test_serde_round_trip_non_recursive_map_member() {
+    let value = LabelBagUnion::Bag(HashMap::from([("a".to_owned(), "b".to_owned())]));
+    let json = serde_json::to_string(&value).unwrap();
+    assert_eq!(json, r#"{"a":"b"}"#);
+    let back: LabelBagUnion = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, value);
 }
 
 /// The nesting the deferral exists for, written and read back through the union that describes it.
