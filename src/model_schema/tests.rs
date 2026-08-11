@@ -2312,35 +2312,35 @@ fn an_alias_violating_both_type_level_guards_earns_both_refusals() {
     );
 }
 
-/// An alias publishes under a computed export name — `SlotJson` under `SlotType`, sharing no
+/// An alias publishes under a computed export name — `SlotData` under `SlotType`, sharing no
 /// substring with what was written. Both type-level guards name the written ident, the one string
 /// the author can find in their own source.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
-fn a_json_suffixed_alias_is_named_by_its_written_ident() {
+fn a_data_suffixed_alias_is_named_by_its_written_ident() {
     register_alias_info("Tally", "Tally", "tally_schema", AliasKind::NoEnumMembers);
     let held: syn::ItemType = syn::parse_quote! {
-        pub type SlotJson = OnceLock<u32>;
+        pub type SlotData = OnceLock<u32>;
     };
     let held_def = get_field_def("SlotType", &held.ty, "");
     let held_error = alias_undescribable_std_error(&held, &held_def)
         .unwrap_or_default()
         .to_string();
     assert!(
-        held_error.contains("type alias `SlotJson`"),
+        held_error.contains("type alias `SlotData`"),
         "got: {held_error}"
     );
     assert!(!held_error.contains("SlotType"), "got: {held_error}");
 
     let keyed: syn::ItemType = syn::parse_quote! {
-        pub type CountsJson = HashMap<Tally, u32>;
+        pub type CountsData = HashMap<Tally, u32>;
     };
     let keyed_def = get_field_def("CountsType", &keyed.ty, "");
     let keyed_error = alias_map_key_guard_error(&keyed, &keyed_def)
         .unwrap_or_default()
         .to_string();
     assert!(
-        keyed_error.contains("type alias `CountsJson`"),
+        keyed_error.contains("type alias `CountsData`"),
         "got: {keyed_error}"
     );
     assert!(!keyed_error.contains("CountsType"), "got: {keyed_error}");
@@ -3881,13 +3881,13 @@ fn an_alias_rejection_points_at_the_written_target() {
     );
 }
 
-/// The rejection names the written ident, not the export name the alias publishes under: `RowsJson`
+/// The rejection names the written ident, not the export name the alias publishes under: `RowsData`
 /// exports as `RowsType`, which the author's source does not contain anywhere.
 #[cfg(feature = "jsonschema")]
 #[test]
-fn a_json_suffixed_alias_rejection_names_its_written_ident() {
+fn a_data_suffixed_alias_rejection_names_its_written_ident() {
     let alias: syn::ItemType = syn::parse_quote! {
-        pub type RowsJson = HashMap<String, (u32, u32)>;
+        pub type RowsData = HashMap<String, (u32, u32)>;
     };
     let field_def = super::get_field_def("RowsType", &alias.ty, "");
     let tokens = super::generate_alias_json_schema_method(
@@ -3897,7 +3897,7 @@ fn a_json_suffixed_alias_rejection_names_its_written_ident() {
         &super::ModelSchemaArgs::default(),
     )
     .to_string();
-    assert!(tokens.contains("type alias `RowsJson`"), "got: {tokens}");
+    assert!(tokens.contains("type alias `RowsData`"), "got: {tokens}");
     assert!(!tokens.contains("type alias `RowsType`"), "got: {tokens}");
 }
 
@@ -5159,10 +5159,10 @@ fn an_exported_name_can_carry_no_double_quote() {
         syn::Ident::new_raw("type", proc_macro2::Span::call_site()).to_string(),
         "r#type"
     );
-    // The unrenamed path takes the ident whole but for a `Json` suffix, which drops characters and
+    // The unrenamed path takes the ident whole but for a `Data` suffix, which drops characters and
     // adds none; the renamed path takes the refused-unless-identifier override verbatim.
     assert_eq!(
-        super::compute_item_export_name("PayloadJson", None),
+        super::compute_item_export_name("PayloadData", None),
         "Payload"
     );
     assert_eq!(

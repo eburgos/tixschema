@@ -727,12 +727,12 @@ fn test_a_rust_named_group_reaches_the_zod_literal_as_javascript_spells_it() {
 fn test_a_rust_named_group_reaches_the_json_schema_as_ecma_262_spells_it() {
     #[model_schema()]
     #[derive(Serialize, Deserialize)]
-    pub struct RustNamedGroupJson {
+    pub struct RustNamedGroupJsonSchema {
         #[model_schema_prop(pattern = "^(?P<word>[a-z]+)$")]
         pub tag: String,
     }
 
-    let schema_str = serde_json::to_string(&RustNamedGroupJson::json_schema()).unwrap();
+    let schema_str = serde_json::to_string(&RustNamedGroupJsonSchema::json_schema()).unwrap();
     assert!(
         schema_str.contains(r#""pattern":"^(?<word>[a-z]+)$""#),
         "JSON Schema `pattern` is an ECMA-262 regex: {schema_str}"

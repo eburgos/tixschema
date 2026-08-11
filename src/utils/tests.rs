@@ -727,15 +727,26 @@ fn test_escape_js_regex_literal_rewrites_an_identity_escaped_line_terminator() {
     assert_eq!(escape_js_regex_literal("^a\\\\\nb$"), r"^a\\\nb$");
 }
 
+/// A name is the suffix's to take only where something is left behind: an item declared as the
+/// bare suffix has to publish under the name it was written with, there being no other.
+#[test]
+fn the_companion_suffix_never_empties_a_name() {
+    assert_eq!(safe_type_name("PayloadData"), "Payload");
+    assert_eq!(safe_type_name("Data"), "Data");
+    assert_eq!(safe_type_name("Payload"), "Payload");
+    assert_eq!(safe_type_name("PayloadJson"), "PayloadJson");
+    assert_eq!(safe_type_name("Json"), "Json");
+}
+
 /// The module name a reference assumes for a name it has not seen and the one an alias goes on to
 /// publish are the same call: the `Type` suffix an alias exports under and a `name = "…"` override
-/// both land on the export name only, and the `Json` suffix is still read through either way.
+/// both land on the export name only, and the `Data` suffix is still read through either way.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn ident_schema_module_name_is_derived_from_the_ident_alone() {
     assert_eq!(ident_schema_module_name("LaterAlias"), "later_alias_schema");
     assert_eq!(
-        ident_schema_module_name("LaterAliasJson"),
+        ident_schema_module_name("LaterAliasData"),
         "later_alias_schema"
     );
     assert_eq!(
@@ -754,7 +765,7 @@ fn ident_schema_module_name_is_derived_from_the_ident_alone() {
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 #[test]
 fn an_unrenamed_item_publishes_the_same_module_under_either_derivation() {
-    for ident in ["LaterItem", "LaterItemJson", "HTTPHeader", "A"] {
+    for ident in ["LaterItem", "LaterItemData", "HTTPHeader", "A"] {
         assert_eq!(
             ident_schema_module_name(ident),
             format!(
@@ -774,7 +785,7 @@ fn an_unrenamed_item_publishes_the_same_module_under_either_derivation() {
 }
 
 /// The ident re-export answers at the same spelling the module seam answers at: whatever a
-/// reference falls back to when the registry cannot help it, the ident with the `Json` suffix read
+/// reference falls back to when the registry cannot help it, the ident with the `Data` suffix read
 /// through. An item already exported under that spelling publishes nothing.
 #[cfg(feature = "typescript")]
 #[test]
@@ -791,7 +802,7 @@ fn a_ts_reexport_is_written_only_where_the_export_moved_off_the_ident() {
         ident_reexport_ts("Pair", "PairType", "<A, B>"),
         "\n\nexport type Pair<A, B> = PairType<A, B>;"
     );
-    for (ident, export) in [("PlainItem", "PlainItem"), ("PlainItemJson", "PlainItem")] {
+    for (ident, export) in [("PlainItem", "PlainItem"), ("PlainItemData", "PlainItem")] {
         assert_eq!(ident_reexport_ts(ident, export, ""), "", "for: {ident}");
     }
 }
@@ -803,7 +814,7 @@ fn a_zod_reexport_is_written_only_where_the_export_moved_off_the_ident() {
         ident_reexport_zod("LaterAlias", "LaterAliasType", "$Schema"),
         "\n\nexport const LaterAlias$Schema = LaterAliasType$Schema;"
     );
-    for (ident, export) in [("PlainItem", "PlainItem"), ("PlainItemJson", "PlainItem")] {
+    for (ident, export) in [("PlainItem", "PlainItem"), ("PlainItemData", "PlainItem")] {
         assert_eq!(
             ident_reexport_zod(ident, export, "$Schema"),
             "",

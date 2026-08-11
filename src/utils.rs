@@ -60,6 +60,10 @@ const ASTRAL_DIVERGENCE: &str = "a character outside the Basic Multilingual Plan
                                  the two code units it is written from -- so the set is the same \
                                  and the count is not, and no spelling of the class closes that";
 
+/// The suffix a companion type carries, taken off every generated name so `UserData` publishes as
+/// `User`.
+const COMPANION_SUFFIX: &str = "Data";
+
 /// Why a construct cannot reach the JavaScript surfaces as the author wrote it. The three are
 /// different failures and the rejection says which one it is.
 #[derive(Clone, Copy)]
@@ -765,12 +769,13 @@ pub fn written_type(ty: &Type) -> &Type {
     current
 }
 
+/// A name with [`COMPANION_SUFFIX`] taken off, unless taking it off would leave nothing to publish
+/// under.
 pub fn safe_type_name(key: &str) -> String {
-    if key.ends_with("Json") {
-        key.strip_suffix("Json").map(str::to_owned).unwrap()
-    } else {
-        key.to_owned()
-    }
+    key.strip_suffix(COMPANION_SUFFIX)
+        .filter(|stripped| !stripped.is_empty())
+        .unwrap_or(key)
+        .to_owned()
 }
 
 /// The schema module a `#[model_schema()]` item publishes — an alias, a struct, an enum, a branded
@@ -795,7 +800,7 @@ pub fn compute_alias_export_name(rust_ident: &str, override_name: Option<&str>) 
 
 /// The spelling every reference to a `#[model_schema()]` item falls back to when the registry
 /// cannot answer for it, which is what a reference standing *before* the item expanded has and
-/// nothing else — the ident with the `Json` suffix taken off, that being what the field walk
+/// nothing else — the ident with the `Data` suffix taken off, that being what the field walk
 /// records for a sibling and what [`ident_schema_module_name`] names the module from.
 #[cfg(any(feature = "typescript", feature = "zod"))]
 fn ident_reexport_name(rust_ident: &str, export_name: &str) -> Option<String> {

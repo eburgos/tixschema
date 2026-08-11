@@ -110,7 +110,7 @@ pub enum FieldDefType {
     /// See `README.md` for serialization format and validation details.
     ObjectId,
     /// Reference to another struct/enum type, potentially with generics
-    /// First String is the type name (without Json suffix in TS)
+    /// First String is the type name (without the companion suffix in TS)
     /// `Vec<FieldDef>` holds generic parameters if any.
     SiblingType(String, Vec<FieldDef>),
     /// String primitive - maps to string.
@@ -1657,10 +1657,7 @@ fn get_field_def_type_or_sibling(t_name: &str) -> FieldDefType {
         "NaiveTime" => FieldDefType::NaiveTime,
         #[cfg(feature = "chrono")]
         "NaiveDateTime" => FieldDefType::NaiveDateTime,
-        type_name_json if type_name_json.ends_with("Json") => {
-            FieldDefType::SiblingType(safe_type_name(type_name_json), vec![])
-        }
-        type_name => FieldDefType::SiblingType(type_name.to_owned(), vec![]),
+        type_name => FieldDefType::SiblingType(safe_type_name(type_name), vec![]),
     }
 }
 

@@ -174,7 +174,7 @@ The crate uses 5 optional features for minimal dependencies:
 
 ### 1. Type Naming Convention
 
-The `Json` suffix is **optional** on Rust type names. If present, it is stripped from the generated TypeScript name. If absent, the Rust name is used as-is.
+The `Data` suffix is **optional** on Rust type names. If present, it is stripped from the generated TypeScript name. If absent, the Rust name is used as-is. A type named exactly `Data` keeps that name: stripping never empties a name.
 
 ```rust
 // Both are valid:
@@ -182,10 +182,10 @@ The `Json` suffix is **optional** on Rust type names. If present, it is stripped
 pub struct User { ... }     // → TypeScript: User
 
 #[model_schema()]
-pub struct UserJson { ... } // → TypeScript: User (suffix stripped)
+pub struct UserData { ... } // → TypeScript: User (suffix stripped)
 ```
 
-The codebase convention is to use type names WITHOUT the `Json` suffix.
+The codebase convention is to use type names WITHOUT the `Data` suffix.
 
 ### 2. Required Derives and Imports
 
@@ -237,7 +237,7 @@ pub struct BadMapKey {
 - `Option<T>` → `T | undefined` (Zod: `z.union([z.null().transform(() => undefined), T, z.undefined()]).prefault(undefined)`, accepting an explicit `null` and coercing it to `undefined`; JSON Schema `anyOf: [T, {"type": "null"}]`, key left out of `required`); with `#[model_schema_prop(ts_optional)]` the TypeScript key becomes optional instead: `field?: T`; with `#[model_schema_prop(nullable)]` all three surfaces render `T | null` with the key **required** instead: Zod `z.union([T, z.null()])`, JSON Schema `anyOf: [T, {"type": "null"}]` with the key in `required`
 - `Vec<T>` → `Array<T>`
 - `HashMap<String, T>` → `Partial<Record<string, T>>`
-- Custom types → Reference by name (Json suffix stripped if present)
+- Custom types → Reference by name (`Data` suffix stripped if present)
 - `ObjectId` → `ObjectId` (with $oid validation)
 - `DateTime<Tz>` → `Date` (Zod `z.coerce.date()`); with `#[model_schema_prop(as_number)]` → `number` (inline epoch-ms coercer)
 - `NaiveTime` → `string` (Zod `z.iso.time()` wrapped in an inline preprocessor that also accepts millis-since-start-of-day)
@@ -376,7 +376,7 @@ constraints.
 
 ### 8. Branded Newtypes
 
-Single-field tuple structs with `#[serde(transparent)]` are treated as branded/opaque types. If the Rust name has a `Json` suffix, it is stripped from the TypeScript name.
+Single-field tuple structs with `#[serde(transparent)]` are treated as branded/opaque types. If the Rust name has a `Data` suffix, it is stripped from the TypeScript name.
 
 A non-generic brand publishes a `$RawSchema`/`$Schema` const pair:
 
@@ -730,12 +730,12 @@ fn test_generate_typescript() {
 
 The macro transforms Rust types to TypeScript following these rules:
 
-1. **Type Name Transformation**: If the Rust type name ends with `Json`, the suffix is stripped (e.g., `UserJson` → `User`). Otherwise, the name is used as-is (e.g., `User` → `User`).
+1. **Type Name Transformation**: If the Rust type name ends with `Data`, the suffix is stripped (e.g., `UserData` → `User`). Otherwise, the name is used as-is (e.g., `User` → `User`), and a name that is exactly `Data` is left alone.
 2. **Field Names**: Respect serde rename attributes (`#[serde(rename = "...")]`, `#[serde(rename_all = "...")]`)
 3. **Optional Fields**: `Option<T>` becomes `T | undefined` in TypeScript and `z.union([z.null().transform(() => undefined), type, z.undefined()]).prefault(undefined)` in Zod, accepting both an absent key and an explicit `null`
 4. **Arrays**: `Vec<T>` becomes `Array<T>` in TypeScript
 5. **Maps**: `HashMap<String, T>` becomes `Partial<Record<string, T>>` in TypeScript
-6. **Nested Types**: Reference other types by name (Json suffix stripped if present)
+6. **Nested Types**: Reference other types by name (`Data` suffix stripped if present)
 7. **MongoDB ObjectId**: `ObjectId` becomes `ObjectId` in TypeScript with proper JSON schema validation
 8. **ObjectId Serialization**: Uses MongoDB format `{ "$oid": "hex_string" }`
 9. **ObjectId Validation**: Includes regex validation for 24-character hexadecimal strings

@@ -646,7 +646,7 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 ///
 /// #[model_schema()]
 /// #[derive(Serialize, Deserialize)]
-/// pub struct UserJson {
+/// pub struct UserData {
 ///     #[model_schema_prop(minLength = 3, maxLength = 50, pattern = "^[a-z0-9_]+$")]
 ///     pub username: String,
 ///
@@ -688,7 +688,7 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 ///
 /// #[model_schema()]
 /// #[derive(Serialize, Deserialize)]
-/// pub struct ProductJson {
+/// pub struct ProductData {
 ///     #[model_schema_prop(minimum = 0, maximum = 120)]
 ///     pub age_restriction: u32,
 ///
@@ -710,7 +710,7 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 ///
 /// #[model_schema()]
 /// #[derive(Serialize, Deserialize)]
-/// pub struct RegistrationJson {
+/// pub struct RegistrationData {
 ///     #[model_schema_prop(minLength = 3, maxLength = 30)]
 ///     pub username: String,
 ///
@@ -723,7 +723,7 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 /// from:
 ///
 /// ```text
-/// let reg = RegistrationJson { username: "ab".to_string(), age: 150 };
+/// let reg = RegistrationData { username: "ab".to_string(), age: 150 };
 /// match reg.validate() {
 ///     Ok(()) => println!("valid"),
 ///     Err(errors) => {
@@ -749,7 +749,7 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 ///
 /// #[model_schema()]
 /// #[derive(Serialize, Deserialize)]
-/// pub struct ApiConfigJson {
+/// pub struct ApiConfigData {
 ///     #[model_schema_prop(as = String)]
 ///     pub metric: String,
 ///
@@ -770,7 +770,7 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 ///
 /// #[model_schema()]
 /// #[derive(Serialize, Deserialize)]
-/// pub struct EventJson {
+/// pub struct EventData {
 ///     // → z.preprocess(trim, z.preprocess(normalize, z.string()))
 ///     #[model_schema_prop(preprocess = ["trim", "normalize"])]
 ///     pub name: String,

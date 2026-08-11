@@ -5,17 +5,17 @@ This crate provides procedural macros for generating TypeScript types and Zod sc
 
 ## Usage Rules
 
-### 1. ALWAYS use `Json` suffix for Rust types
+### 1. ALWAYS use `Data` suffix for Rust types
 ```rust
 // ✅ CORRECT
 #[model_schema()]
 #[derive(Serialize, Deserialize)]
-pub struct UserJson {
+pub struct UserData {
     pub id: String,
     pub name: String,
 }
 
-// ❌ WRONG - missing Json suffix
+// ❌ WRONG - missing Data suffix
 #[model_schema()]
 #[derive(Serialize, Deserialize)]
 pub struct User {
@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct MyTypeJson {
+pub struct MyTypeData {
     // fields...
 }
 ```
@@ -43,7 +43,7 @@ pub struct MyTypeJson {
 #[model_schema()]
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct UserProfileJson {
+pub struct UserProfileData {
     pub user_id: String,          // becomes userId in TypeScript
     pub first_name: String,       // becomes firstName in TypeScript
     #[serde(rename = "email")]
@@ -54,13 +54,13 @@ pub struct UserProfileJson {
 ### 4. HashMap limitations
 ```rust
 // ✅ SUPPORTED - String keys only
-pub struct ConfigJson {
+pub struct ConfigData {
     pub settings: HashMap<String, String>,
     pub metadata: HashMap<String, i32>,
 }
 
 // ❌ NOT SUPPORTED - Non-string keys
-pub struct BadConfigJson {
+pub struct BadConfigData {
     pub settings: HashMap<i32, String>,  // Will cause compilation error
 }
 ```
@@ -70,7 +70,7 @@ pub struct BadConfigJson {
 // ✅ CORRECT optional field handling
 #[model_schema()]
 #[derive(Serialize, Deserialize)]
-pub struct UserJson {
+pub struct UserData {
     pub id: String,
     pub name: String,
     pub email: Option<String>,                    // becomes email?: string
@@ -84,10 +84,10 @@ pub struct UserJson {
 // ✅ SUPPORTED collection types
 #[model_schema()]
 #[derive(Serialize, Deserialize)]
-pub struct DataJson {
+pub struct CollectionsData {
     pub tags: Vec<String>,                        // becomes Array<string>
     pub scores: Vec<u32>,                         // becomes Array<number>
-    pub nested: Vec<OtherJson>,                   // becomes Array<Other>
+    pub nested: Vec<OtherData>,                   // becomes Array<Other>
 }
 ```
 
@@ -97,7 +97,7 @@ pub struct DataJson {
 #[model_schema()]
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum StatusJson {
+pub enum StatusData {
     Active,
     Inactive,
     Pending,
@@ -107,7 +107,7 @@ pub enum StatusJson {
 #[model_schema()]
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
-pub enum PaymentJson {
+pub enum PaymentData {
     CreditCard { number: String, expiry: String },
     BankTransfer { account: String, routing: String },
     PayPal { email: String },
@@ -119,17 +119,17 @@ pub enum PaymentJson {
 // ✅ CORRECT nested type usage
 #[model_schema()]
 #[derive(Serialize, Deserialize)]
-pub struct AddressJson {
+pub struct AddressData {
     pub street: String,
     pub city: String,
 }
 
 #[model_schema()]
 #[derive(Serialize, Deserialize)]
-pub struct UserJson {
+pub struct UserData {
     pub id: String,
-    pub address: AddressJson,                     // References Address in TypeScript
-    pub addresses: Vec<AddressJson>,              // Array<Address>
+    pub address: AddressData,                     // References Address in TypeScript
+    pub addresses: Vec<AddressData>,              // Array<Address>
 }
 ```
 
@@ -140,7 +140,7 @@ use tixschema::{model_schema, model_schema_prop};
 
 #[model_schema()]
 #[derive(Serialize, Deserialize)]
-pub struct ApiConfigJson {
+pub struct ApiConfigData {
     pub id: String,
     #[model_schema_prop(as = String)]
     pub custom_field: String,
@@ -160,9 +160,9 @@ impl MyEntities {
         (
             "Generated Types".to_string(),
             vec![
-                UserJson::ts_definition(),
-                AddressJson::ts_definition(),
-                StatusJson::ts_definition(),
+                UserData::ts_definition(),
+                AddressData::ts_definition(),
+                StatusData::ts_definition(),
                 // Add all your types here
             ],
         )
@@ -198,7 +198,7 @@ pub fn generate_ts_schemas(target_path: &str) -> Result<(), Box<dyn std::error::
 
 ## Common Mistakes to Avoid
 
-### 1. ❌ Forgetting Json suffix
+### 1. ❌ Forgetting Data suffix
 ```rust
 // Wrong - will not follow naming convention
 #[model_schema()]
@@ -210,13 +210,13 @@ pub struct User { ... }
 // Wrong - missing Serialize, Deserialize
 #[model_schema()]
 #[derive(Debug)]
-pub struct UserJson { ... }
+pub struct UserData { ... }
 ```
 
 ### 3. ❌ Non-string HashMap keys
 ```rust
 // Wrong - will cause compilation error
-pub struct ConfigJson {
+pub struct ConfigData {
     pub settings: HashMap<i32, String>,
 }
 ```
@@ -229,8 +229,8 @@ impl MyEntities {
         (
             "Generated Types".to_string(),
             vec![
-                UserJson::ts_definition(),
-                // Missing: NewTypeJson::ts_definition(),
+                UserData::ts_definition(),
+                // Missing: NewTypeData::ts_definition(),
             ],
         )
     }
@@ -239,12 +239,12 @@ impl MyEntities {
 
 ## Generated Output Understanding
 
-1. **Type Name Transformation**: `UserJson` in Rust becomes `User` in TypeScript
+1. **Type Name Transformation**: `UserData` in Rust becomes `User` in TypeScript
 2. **Field Names**: Respect serde rename attributes
 3. **Optional Fields**: `Option<T>` becomes `T | undefined`
 4. **Arrays**: `Vec<T>` becomes `Array<T>`
 5. **Maps**: `HashMap<String, T>` becomes `Partial<Record<string, T>>`
-6. **Nested Types**: Reference other types without Json suffix
+6. **Nested Types**: Reference other types without the `Data` suffix
 
 ## Testing Best Practices
 
@@ -260,7 +260,7 @@ impl MyEntities {
 my_project/
 ├── src/
 │   ├── types/
-│   │   ├── user.rs        # Contains UserJson, UserStatusJson, etc.
+│   │   ├── user.rs        # Contains UserData, UserStatusData, etc.
 │   │   └── mod.rs
 │   └── lib.rs
 ├── tests/
