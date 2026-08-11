@@ -159,6 +159,39 @@ enum LabelBagUnion {
     Name(String),
 }
 
+// A self-naming map member keyed by a type that enumerates its members. An index signature
+// parameter cannot be a literal type (TS1337), so the spelling `JsonValueUnion` is deferred with
+// is unavailable here and the equal mapped type carries the deferral instead.
+#[model_schema()]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum BucketTreeUnion {
+    Leaf(String),
+    Nested(HashMap<Bucket, Self>),
+}
+
+// The self-naming map member whose key spells as `number`: the index signature has a parameter
+// type for it, so it keeps that spelling rather than the mapped one.
+#[cfg(feature = "typescript")]
+#[model_schema()]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum CodeTreeUnion {
+    Leaf(String),
+    Nested(HashMap<u32, Self>),
+}
+
+// An enumerated key on a map member naming nothing recursive: no cycle to break, so the member
+// keeps the `Partial<Record<…>>` every other map is written in.
+#[cfg(feature = "typescript")]
+#[model_schema()]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum BucketBagUnion {
+    Bag(HashMap<Bucket, u32>),
+    Name(String),
+}
+
 // A tuple written in an untagged member. Serde writes it as the fixed-arity array a tuple field
 // writes, so the member has to describe as that field does.
 #[model_schema()]
@@ -511,6 +544,97 @@ fn test_serde_round_trip_non_recursive_map_member() {
     let json = serde_json::to_string(&value).unwrap();
     assert_eq!(json, r#"{"a":"b"}"#);
     let back: LabelBagUnion = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, value);
+}
+
+/// An enumerated key is a literal type, which an index signature parameter cannot be (TS1337), so
+/// the spelling that carries the open-keyed deferral is unavailable. The mapped type the key can be
+/// written in states the same object and resolves its value lazily.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_recursive_enum_keyed_map_member_typescript_uses_mapped_type() {
+    let ts = BucketTreeUnion::ts_definition();
+    assert!(
+        ts.contains(
+            "export type BucketTreeUnion = string | { [key in Bucket]?: BucketTreeUnion };"
+        ),
+        "Got:\n{ts}"
+    );
+    assert!(
+        !ts.contains("Partial<Record<Bucket, BucketTreeUnion>>"),
+        "the mapped-type spelling is the circularity itself. Got:\n{ts}"
+    );
+    assert!(!ts.contains("[key: Bucket]"), "Got:\n{ts}");
+}
+
+/// A key the index signature does have a parameter type for keeps that spelling: the mapped type is
+/// paid only where the literal key rules the index signature out.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_recursive_number_keyed_map_member_typescript_keeps_index_signature() {
+    let ts = CodeTreeUnion::ts_definition();
+    assert!(
+        ts.contains(
+            "export type CodeTreeUnion = string | { [key: number]: CodeTreeUnion | undefined };"
+        ),
+        "Got:\n{ts}"
+    );
+    assert!(!ts.contains("key in"), "Got:\n{ts}");
+}
+
+/// The rewrite is a break of a cycle, never a restyling of the key: an enumerated key with nothing
+/// recursive under it keeps `Partial<Record<…>>`.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_non_recursive_enum_keyed_map_member_keeps_mapped_record() {
+    let ts = BucketBagUnion::ts_definition();
+    assert!(
+        ts.contains("export type BucketBagUnion = Partial<Record<Bucket, number>> | string;"),
+        "Got:\n{ts}"
+    );
+    assert!(!ts.contains("key in"), "Got:\n{ts}");
+}
+
+/// The Zod surface reads the member through a thunk, which the TypeScript spelling does not change.
+#[test]
+#[cfg(feature = "zod")]
+fn test_recursive_enum_keyed_map_member_zod_defers_self_reference() {
+    let zod = BucketTreeUnion::zod_schema();
+    assert!(
+        zod.contains("z.lazy(() => z.record(Bucket$Schema, BucketTreeUnion$Schema))"),
+        "Got:\n{zod}"
+    );
+}
+
+/// The JSON surface hoists the union into `$defs` and points the member's values back at it.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_recursive_enum_keyed_map_member_json_schema_refers_to_definition() {
+    let schema = BucketTreeUnion::json_schema();
+    assert_eq!(schema["$ref"], "#/$defs/BucketTreeUnion");
+    let properties = &schema["$defs"]["BucketTreeUnion"]["anyOf"][1]["properties"];
+    for bucket in ["Large", "Small"] {
+        assert_eq!(
+            properties[bucket],
+            serde_json::json!({ "$ref": "#/$defs/BucketTreeUnion" }),
+            "Got:\n{schema:#?}"
+        );
+    }
+}
+
+/// The nesting the enumerated-key deferral exists for, written and read back.
+#[test]
+fn test_serde_round_trip_enum_keyed_recursive_union() {
+    let value = BucketTreeUnion::Nested(HashMap::from([(
+        Bucket::Large,
+        BucketTreeUnion::Nested(HashMap::from([(
+            Bucket::Small,
+            BucketTreeUnion::Leaf("leaf".to_owned()),
+        )])),
+    )]));
+    let json = serde_json::to_string(&value).unwrap();
+    assert_eq!(json, r#"{"Large":{"Small":"leaf"}}"#);
+    let back: BucketTreeUnion = serde_json::from_str(&json).unwrap();
     assert_eq!(back, value);
 }
 
