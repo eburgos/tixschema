@@ -9,13 +9,6 @@ pub struct PlainStruct {
 }
 
 #[cfg(feature = "typescript")]
-#[model_schema()]
-#[derive(Serialize, Deserialize, Debug)]
-pub struct SuffixedStructData {
-    pub label: String,
-}
-
-#[cfg(feature = "typescript")]
 #[model_schema(name = "RenamedStruct")]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct StructUnderRustName {
@@ -36,11 +29,6 @@ pub struct DocStructUnderRustName {
 pub struct PlainTuple(pub String, pub u32);
 
 #[cfg(feature = "typescript")]
-#[model_schema()]
-#[derive(Serialize, Deserialize, Debug)]
-pub struct SuffixedTupleData(pub String, pub u32);
-
-#[cfg(feature = "typescript")]
 #[model_schema(name = "RenamedTuple")]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TupleUnderRustName(pub String, pub u32);
@@ -49,14 +37,6 @@ pub struct TupleUnderRustName(pub String, pub u32);
 #[model_schema()]
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 pub enum PlainSlot {
-    Primary,
-    Secondary,
-}
-
-#[cfg(any(feature = "typescript", feature = "zod"))]
-#[model_schema()]
-#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
-pub enum SuffixedSlotData {
     Primary,
     Secondary,
 }
@@ -78,14 +58,6 @@ pub enum PlainShape {
 }
 
 #[cfg(feature = "typescript")]
-#[model_schema()]
-#[derive(Serialize, Deserialize, Debug)]
-pub enum SuffixedShapeData {
-    Named { side: u8 },
-    Unit,
-}
-
-#[cfg(feature = "typescript")]
 #[model_schema(name = "RenamedShape")]
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ShapeUnderRustName {
@@ -98,15 +70,6 @@ pub enum ShapeUnderRustName {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "kind", content = "payload")]
 pub enum PlainAdjacent {
-    Named { side: u8 },
-    Unit,
-}
-
-#[cfg(feature = "typescript")]
-#[model_schema()]
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(tag = "kind", content = "payload")]
-pub enum SuffixedAdjacentData {
     Named { side: u8 },
     Unit,
 }
@@ -130,15 +93,6 @@ pub enum PlainEither {
 }
 
 #[cfg(feature = "typescript")]
-#[model_schema()]
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(untagged)]
-pub enum SuffixedEitherData {
-    Count(u32),
-    Label(String),
-}
-
-#[cfg(feature = "typescript")]
 #[model_schema(name = "RenamedEither")]
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(untagged)]
@@ -152,12 +106,6 @@ pub enum EitherUnderRustName {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(transparent)]
 pub struct PlainBrand(pub String);
-
-#[cfg(feature = "zod")]
-#[model_schema()]
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(transparent)]
-pub struct SuffixedBrandData(pub String);
 
 #[cfg(feature = "zod")]
 #[model_schema(name = "RenamedBrand")]
@@ -220,12 +168,6 @@ fn an_undocumented_item_names_itself_in_jsdoc_as_it_is_exported() {
         (ShapeUnderRustName::ts_definition(), "RenamedShape"),
         (AdjacentUnderRustName::ts_definition(), "RenamedAdjacent"),
         (EitherUnderRustName::ts_definition(), "RenamedEither"),
-        (SuffixedStructData::ts_definition(), "SuffixedStruct"),
-        (SuffixedTupleData::ts_definition(), "SuffixedTuple"),
-        (SuffixedSlotData::ts_definition(), "SuffixedSlot"),
-        (SuffixedShapeData::ts_definition(), "SuffixedShape"),
-        (SuffixedAdjacentData::ts_definition(), "SuffixedAdjacent"),
-        (SuffixedEitherData::ts_definition(), "SuffixedEither"),
     ] {
         assert_jsdoc_opens_with(&ts, exported);
         assert!(
@@ -278,19 +220,6 @@ fn an_undocumented_item_never_writes_its_rust_ident() {
             !described.contains("UnderRustName"),
             "rust ident reached: {described}"
         );
-    }
-    for (ts, ident) in [
-        (SuffixedStructData::ts_definition(), "SuffixedStructData"),
-        (SuffixedTupleData::ts_definition(), "SuffixedTupleData"),
-        (SuffixedSlotData::ts_definition(), "SuffixedSlotData"),
-        (SuffixedShapeData::ts_definition(), "SuffixedShapeData"),
-        (
-            SuffixedAdjacentData::ts_definition(),
-            "SuffixedAdjacentData",
-        ),
-        (SuffixedEitherData::ts_definition(), "SuffixedEitherData"),
-    ] {
-        assert!(!ts.contains(ident), "rust ident reached: {ts}");
     }
 }
 
@@ -362,7 +291,6 @@ fn a_documented_item_keeps_its_docs_over_either_name() {
 fn a_plain_enum_describes_itself_as_it_is_exported() {
     for (zod, exported) in [
         (SlotUnderRustName::zod_schema(), "RenamedSlot"),
-        (SuffixedSlotData::zod_schema(), "SuffixedSlot"),
         (PlainSlot::zod_schema(), "PlainSlot"),
     ] {
         assert!(
@@ -376,10 +304,6 @@ fn a_plain_enum_describes_itself_as_it_is_exported() {
             .contains("UnderRustName"),
         "rust ident reached the description: {slot}"
     );
-    assert!(
-        !SuffixedSlotData::zod_schema().contains("SuffixedSlotData"),
-        "rust ident reached the description"
-    );
 }
 
 /// The brand path already spelled its description from the export name; it is the spelling the
@@ -389,7 +313,6 @@ fn a_plain_enum_describes_itself_as_it_is_exported() {
 fn a_brand_describes_itself_as_it_is_exported() {
     for (zod, exported) in [
         (BrandUnderRustName::zod_schema(), "RenamedBrand"),
-        (SuffixedBrandData::zod_schema(), "SuffixedBrand"),
         (PlainBrand::zod_schema(), "PlainBrand"),
     ] {
         assert!(

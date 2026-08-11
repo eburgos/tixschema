@@ -505,6 +505,55 @@ export const Document$Schema: ZodType<Document> = Document$RawSchema;
 /// `ObjectId` fields are serialized using `MongoDB`'s standard format: `{ "$oid": "hex_string" }`
 /// and include proper validation for 24-character hexadecimal `ObjectId` strings.
 ///
+/// ## The Name a Type Publishes Under
+///
+/// A type publishes under the Rust ident it is declared with, spelled exactly as written. Nothing
+/// is read off that spelling: no suffix is taken off it and no part of it is rewritten, so
+/// `UserData` publishes as `UserData` on all three surfaces.
+///
+/// `#[model_schema(name = "...")]` is the one way to publish under something else. It moves the
+/// name everywhere at once — the `export type` line, the Zod consts, the `$defs` key a
+/// self-referential document hoists under, and every reference another type writes:
+///
+/// ```rust
+/// # fn main() {}
+/// use tixschema::model_schema;
+/// use serde::{Deserialize, Serialize};
+///
+/// #[model_schema(name = "ContextValue")]
+/// #[derive(Serialize, Deserialize)]
+/// pub struct ContextValueData {
+///     pub label: String,
+/// }
+///
+/// #[model_schema()]
+/// #[derive(Serialize, Deserialize)]
+/// pub struct Holder {
+///     pub value: ContextValueData,
+/// }
+/// ```
+///
+/// The declaration is published as `export type ContextValue` and `ContextValue$Schema`, and
+/// `Holder`'s member is written `value: ContextValue;` and `value: ContextValue$Schema,`.
+///
+/// A type alias is the one shape with no surface name of its own, and publishes under a `Type`
+/// suffix — `pub type Slug = String;` as `SlugType` — unless `name` says otherwise.
+///
+/// Two declarations cannot publish under one name. The emitted types, schemas and definitions are
+/// one flat namespace, so a second declaration reaching a name already taken is refused at
+/// expansion, naming both declarations:
+///
+/// ```text
+/// error: model_schema: type `Beta` publishes as `Shared`, which type `Alpha` already publishes
+///        as -- one name cannot carry two declarations, whose types, schemas and definitions would
+///        overwrite each other. Give one of them a `#[model_schema(name = "...")]` of its own
+/// ```
+///
+/// A renamed type also publishes its Rust ident as an alias of the moved name (`export type
+/// ContextValueData = ContextValue;`), which is what lets a type declared *above* it — with only
+/// the ident to name it by — still resolve. The Rust module the schema is published in is named
+/// from the ident for the same reason, and an override never moves it.
+///
 /// ## Where a Referenced Type Must Be Declared
 ///
 /// A `#[model_schema()]` type publishes its schema in a module beside the type, and a type that

@@ -5159,15 +5159,116 @@ fn an_exported_name_can_carry_no_double_quote() {
         syn::Ident::new_raw("type", proc_macro2::Span::call_site()).to_string(),
         "r#type"
     );
-    // The unrenamed path takes the ident whole but for a `Data` suffix, which drops characters and
-    // adds none; the renamed path takes the refused-unless-identifier override verbatim.
+    // The unrenamed path takes the ident whole; the renamed path takes the
+    // refused-unless-identifier override verbatim.
     assert_eq!(
         super::compute_item_export_name("PayloadData", None),
-        "Payload"
+        "PayloadData"
     );
     assert_eq!(
         super::compute_item_export_name("Payload", Some("Renamed")),
         "Renamed"
+    );
+}
+
+/// What each of `declarations` — a source and the `model_schema` arguments written on it — earns
+/// for the name it publishes, rendered, and claimed in the order written, which is the order
+/// `exec_model_schema` claims them in.
+fn published_name_refusals(declarations: &[(&str, &str)]) -> Vec<Vec<String>> {
+    declarations
+        .iter()
+        .map(|&(source, args)| {
+            let item: syn::Item = syn::parse_str(source).unwrap();
+            let parsed = super::parse_model_schema_args(syn::parse_str(args).unwrap());
+            assert_eq!(
+                parsed.arg_rejection.as_ref().map(ToString::to_string),
+                None,
+                "for {args}"
+            );
+            super::published_name_collision_errors(&item, &parsed)
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        })
+        .collect()
+}
+
+/// One name cannot carry two declarations: the first to publish it keeps it and the second is
+/// refused, naming both so either declaration can be the one moved.
+#[test]
+fn a_second_declaration_publishing_a_taken_name_is_refused() {
+    let refusals = published_name_refusals(&[
+        (
+            "pub struct FirstUnderRustName { pub label: String }",
+            "name = \"OneSharedName\"",
+        ),
+        (
+            "pub enum SecondUnderRustName { One }",
+            "name = \"OneSharedName\"",
+        ),
+    ]);
+    assert!(refusals[0].is_empty(), "got: {:?}", refusals[0]);
+    assert_eq!(refusals[1].len(), 1, "got: {:?}", refusals[1]);
+    for needle in [
+        "compile_error",
+        "OneSharedName",
+        "FirstUnderRustName",
+        "SecondUnderRustName",
+    ] {
+        assert!(
+            refusals[1][0].contains(needle),
+            "{needle} missing: {}",
+            refusals[1][0]
+        );
+    }
+}
+
+/// A declaration publishes one name however it reached it, so an override landing on a name
+/// nothing overrode collides exactly as two overrides do — in either order.
+#[test]
+fn an_override_reaching_an_undeclared_items_own_name_is_refused() {
+    let refusals = published_name_refusals(&[
+        ("pub struct PlainlyNamed { pub label: String }", ""),
+        (
+            "pub struct AliasedOntoPlain { pub label: String }",
+            "name = \"PlainlyNamed\"",
+        ),
+        ("pub struct TakenByOverride { pub label: String }", ""),
+    ]);
+    assert!(refusals[0].is_empty(), "got: {:?}", refusals[0]);
+    assert_eq!(refusals[1].len(), 1, "got: {:?}", refusals[1]);
+    assert!(refusals[2].is_empty(), "got: {:?}", refusals[2]);
+}
+
+/// A name is the ident's to hold, not to claim once: the same declaration read again publishes the
+/// name it already published.
+#[test]
+fn a_declaration_reclaiming_the_name_it_holds_is_not_refused() {
+    let source = "pub struct ReadTwice { pub label: String }";
+    for refusal in published_name_refusals(&[(source, ""), (source, "")]) {
+        assert!(refusal.is_empty(), "got: {refusal:?}");
+    }
+}
+
+/// An alias has no surface name of its own and publishes the `Type`-suffixed one instead, so that
+/// is the name it claims — its ident stays free for a declared item.
+#[test]
+fn an_alias_claims_the_suffixed_name_it_publishes() {
+    let refusals = published_name_refusals(&[
+        ("pub type Measure = u32;", ""),
+        ("pub struct Measure { pub label: String }", ""),
+        (
+            "pub struct Aliased { pub label: String }",
+            "name = \"MeasureType\"",
+        ),
+    ]);
+    assert!(refusals[0].is_empty(), "got: {:?}", refusals[0]);
+    assert!(refusals[1].is_empty(), "got: {:?}", refusals[1]);
+    assert_eq!(refusals[2].len(), 1, "got: {:?}", refusals[2]);
+    assert!(
+        refusals[2][0].contains("MeasureType"),
+        "got: {}",
+        refusals[2][0]
     );
 }
 

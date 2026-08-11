@@ -9,7 +9,7 @@ use syn::spanned::Spanned as _;
 use syn::Attribute;
 
 use crate::features::model_schema_prop::ModelSchemaPropMeta;
-use crate::utils::{lookup_alias_info, safe_type_name, written_type};
+use crate::utils::{lookup_alias_info, written_type};
 
 #[cfg(feature = "zod")]
 use crate::utils::{
@@ -110,7 +110,8 @@ pub enum FieldDefType {
     /// See `README.md` for serialization format and validation details.
     ObjectId,
     /// Reference to another struct/enum type, potentially with generics
-    /// First String is the type name (without the companion suffix in TS)
+    /// First String is the Rust ident written at the reference; what it publishes under is read
+    /// off the registry where each surface writes it.
     /// `Vec<FieldDef>` holds generic parameters if any.
     SiblingType(String, Vec<FieldDef>),
     /// String primitive - maps to string.
@@ -299,9 +300,7 @@ impl FieldDef {
     pub fn contains_type_reference(&self, type_name: &str) -> bool {
         match &self.field_type {
             FieldDefType::SiblingType(name, generics) => {
-                // Direct match (check both original name and stripped name)
-                let stripped_name = safe_type_name(name);
-                if name == type_name || stripped_name == type_name {
+                if name == type_name {
                     return true;
                 }
                 generics
@@ -1382,12 +1381,12 @@ pub fn classify_variant(variant: &Variant) -> VariantKind {
 /// Main function to create `FieldDef` from `syn::Type`.
 fn get_field_def_from_type_path(
     type_path: &syn::TypePath,
-    safe_name: String,
+    field_name: String,
     field_docs: &str,
 ) -> FieldDef {
     let Some(segment) = type_path.path.segments.last() else {
         return FieldDef {
-            name: safe_name,
+            name: field_name,
             field_type: FieldDefType::Unknown,
             array_depth: 0,
             array_lengths: Vec::new(),
@@ -1403,7 +1402,7 @@ fn get_field_def_from_type_path(
     let ident = segment.ident.to_string();
     match &segment.arguments {
         PathArguments::None => FieldDef {
-            name: safe_name,
+            name: field_name,
             field_type: get_field_def_type_or_sibling(&ident),
             array_depth: 0,
             array_lengths: Vec::new(),
@@ -1418,11 +1417,11 @@ fn get_field_def_from_type_path(
             type_span: segment.ident.span(),
         },
         PathArguments::AngleBracketed(args) => {
-            get_field_def_from_generic_type(&segment.ident, args, safe_name, field_docs)
+            get_field_def_from_generic_type(&segment.ident, args, field_name, field_docs)
         }
         // Function pointer types are unsupported; fall back to `unknown`.
         PathArguments::Parenthesized(_) => FieldDef {
-            name: safe_name,
+            name: field_name,
             field_type: FieldDefType::Unknown,
             array_depth: 0,
             array_lengths: Vec::new(),
@@ -1441,7 +1440,7 @@ fn get_field_def_from_type_path(
 fn get_field_def_from_generic_type(
     type_ident: &Ident,
     args: &syn::AngleBracketedGenericArguments,
-    safe_name: String,
+    field_name: String,
     field_docs: &str,
 ) -> FieldDef {
     let ident_name = type_ident.to_string();
@@ -1466,7 +1465,7 @@ fn get_field_def_from_generic_type(
     }
     if arg_types.is_empty() {
         FieldDef {
-            name: safe_name,
+            name: field_name,
             field_type: FieldDefType::SiblingType(ident.to_owned(), vec![]),
             array_depth: 0,
             array_lengths: Vec::new(),
@@ -1479,7 +1478,7 @@ fn get_field_def_from_generic_type(
             type_span: type_ident.span(),
         }
     } else if let [element] = arg_types.as_slice()
-        && let Some(collapsed) = collapsed_wrapper_def(ident, element, &safe_name, field_docs)
+        && let Some(collapsed) = collapsed_wrapper_def(ident, element, &field_name, field_docs)
     {
         collapsed
     } else if arg_types.len() == 2 && (ident == "HashMap" || ident == "BTreeMap") {
@@ -1491,7 +1490,7 @@ fn get_field_def_from_generic_type(
         FieldDef {
             array_depth: 0,
             array_lengths: Vec::new(),
-            name: safe_name,
+            name: field_name,
             field_type: FieldDefType::Map(
                 Box::new(arg_types[0].clone()),
                 Box::new(arg_types[1].clone()),
@@ -1507,7 +1506,7 @@ fn get_field_def_from_generic_type(
     } else if arg_types.len() == 1 && is_datetime_generic_type(ident) {
         // The timezone type parameter says nothing about what is written.
         FieldDef {
-            name: safe_name,
+            name: field_name,
             field_type: datetime_field_type(),
             array_depth: 0,
             array_lengths: Vec::new(),
@@ -1522,7 +1521,7 @@ fn get_field_def_from_generic_type(
     } else {
         log::trace!("Creating SiblingType - name: {ident}, arg_types: {arg_types:?}");
         FieldDef {
-            name: safe_name,
+            name: field_name,
             field_type: FieldDefType::SiblingType(ident.to_owned(), arg_types),
             array_depth: 0,
             array_lengths: Vec::new(),
@@ -1541,7 +1540,7 @@ fn get_field_def_from_generic_type(
 fn collapsed_wrapper_def(
     ident: &str,
     element: &FieldDef,
-    safe_name: &str,
+    field_name: &str,
     field_docs: &str,
 ) -> Option<FieldDef> {
     let mut result = element.clone();
@@ -1551,7 +1550,7 @@ fn collapsed_wrapper_def(
         _ if is_transparent_wrapper(ident) => {}
         _ => return None,
     }
-    safe_name.clone_into(&mut result.name);
+    field_name.clone_into(&mut result.name);
     field_docs.clone_into(&mut result.docs);
     Some(result)
 }
@@ -1573,10 +1572,10 @@ fn literal_array_length(len: &syn::Expr) -> Option<usize> {
 
 /// Debug logging: Set `RUST_LOG=trace` to see HashMap/SiblingType creation.
 pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
-    let safe_name = safe_type_name(name);
+    let field_name = name.to_owned();
     let written = written_type(ty);
     if let Type::Path(type_path) = written {
-        get_field_def_from_type_path(type_path, safe_name, field_docs)
+        get_field_def_from_type_path(type_path, field_name, field_docs)
     } else if let Type::Reference(type_ref) = written {
         // let lifetime = type_ref
         //     .lifetime
@@ -1605,7 +1604,7 @@ pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
             .map(|(idx, v)| get_field_def(&format!("element_{idx}"), v, field_docs))
             .collect();
         FieldDef {
-            name: safe_name,
+            name: field_name,
             field_type: FieldDefType::Tuple(elements),
             array_depth: 0,
             array_lengths: Vec::new(),
@@ -1620,7 +1619,7 @@ pub fn get_field_def(name: &str, ty: &Type, field_docs: &str) -> FieldDef {
     } else {
         // Fallback for BareFn, ImplTrait, etc.
         FieldDef {
-            name: safe_name,
+            name: field_name,
             field_type: FieldDefType::Unknown,
             array_depth: 0,
             array_lengths: Vec::new(),
@@ -1687,7 +1686,7 @@ fn get_field_def_type_or_sibling(t_name: &str) -> FieldDefType {
         "NaiveTime" => FieldDefType::NaiveTime,
         #[cfg(feature = "chrono")]
         "NaiveDateTime" => FieldDefType::NaiveDateTime,
-        type_name => FieldDefType::SiblingType(safe_type_name(type_name), vec![]),
+        type_name => FieldDefType::SiblingType(type_name.to_owned(), vec![]),
     }
 }
 
