@@ -294,7 +294,7 @@ impl FieldDef {
             || self.parameter_shape_name().is_some()
     }
 
-    #[cfg(feature = "zod")]
+    #[cfg(any(feature = "zod", all(feature = "serde", feature = "typescript")))]
     /// Checks if this field contains a reference to the given type name.
     pub fn contains_type_reference(&self, type_name: &str) -> bool {
         match &self.field_type {
@@ -959,6 +959,36 @@ impl FieldDef {
     /// `None` in each of them.
     pub fn typescript_slot_typename(&self) -> String {
         let base = self.typescript_base();
+        if self.is_optional() {
+            format!("{base} | null")
+        } else {
+            base
+        }
+    }
+
+    /// The slot spelling of a member of the type named by `self_type_name`, with a map whose
+    /// values name that type written as an index signature. `Partial<Record<K, V>>` is a mapped
+    /// type, and TypeScript resolves those while it resolves the alias declaring the union, so a
+    /// member spelled that way makes the alias circular (TS2456); the index-signature object it is
+    /// equal to states the same type and is resolved lazily. A key the index signature has no
+    /// parameter type for keeps the mapped spelling, as does a map under an array wrap, which is
+    /// already deferred by the wrap.
+    #[cfg(all(feature = "serde", feature = "typescript"))]
+    pub fn typescript_slot_typename_deferring_self(&self, self_type_name: &str) -> String {
+        let FieldDefType::Map(key, value) = &self.field_type else {
+            return self.typescript_slot_typename();
+        };
+        let key_type = key.typescript_map_key_typename();
+        if self.array_depth > 0
+            || !matches!(key_type.as_str(), "number" | "string")
+            || !value.contains_type_reference(self_type_name)
+        {
+            return self.typescript_slot_typename();
+        }
+        let base = format!(
+            "{{ [key: {key_type}]: {} | undefined }}",
+            value.typescript_slot_typename()
+        );
         if self.is_optional() {
             format!("{base} | null")
         } else {

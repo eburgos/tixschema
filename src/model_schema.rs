@@ -7275,6 +7275,9 @@ fn render_untagged_tuple_single(
     fld: &FieldDef,
     self_type_name: &str,
 ) -> (String, String, proc_macro2::TokenStream) {
+    #[cfg(feature = "typescript")]
+    let ts = fld.typescript_slot_typename_deferring_self(self_type_name);
+    #[cfg(not(feature = "typescript"))]
     let ts = fld.typescript_slot_typename();
 
     #[cfg(feature = "zod")]
