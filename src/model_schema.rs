@@ -110,9 +110,9 @@ use crate::utils::get_enum_docs;
 use crate::utils::get_struct_docs;
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
-use crate::utils::{compute_alias_export_name, ident_schema_module_name};
+use crate::utils::ident_schema_module_name;
 
-use crate::utils::compute_item_export_name;
+use crate::utils::{claim_published_name, compute_alias_export_name, compute_item_export_name};
 
 #[cfg(feature = "typescript")]
 use crate::utils::get_item_docs;
@@ -1107,6 +1107,16 @@ pub fn exec_model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
     {
         return output;
     }
+    // A name already published by another declaration is refused here, after every guard that
+    // refuses the item outright: one that publishes nothing claims nothing, so it cannot be what a
+    // later declaration is refused against.
+    if let Some(output) = guard_failure_output(
+        &item,
+        item_schema_ident(&item),
+        &published_name_collision_errors(&item, &parsed_args),
+    ) {
+        return output;
+    }
     // Which Zod binding this item publishes turns on whether it declares type parameters, and a
     // field written at the item's own name reads that answer back the way any other reference
     // does. Recorded here, ahead of every shape, because a self-reference is rendered while the
@@ -1983,6 +1993,42 @@ const fn item_schema_ident(item: &Item) -> Option<&syn::Ident> {
     } else {
         None
     }
+}
+
+/// The name an item publishes on every surface: its own ident, or the `name = "..."` override, with
+/// an alias taking the `Type` suffix it has no surface name of its own without.
+fn item_published_name(item: &Item, override_name: Option<&str>) -> Option<String> {
+    let ident = item_schema_ident(item)?.to_string();
+    Some(if matches!(*item, Item::Type(_)) {
+        compute_alias_export_name(&ident, override_name)
+    } else {
+        compute_item_export_name(&ident, override_name)
+    })
+}
+
+/// The `compile_error!` tokens an item earns for publishing a name another declaration has already
+/// published. Read at the ungated seam, so the verdict is the same in every feature combination,
+/// and spanned on the ident, an override being refusable on either of the two declarations.
+fn published_name_collision_errors(
+    item: &Item,
+    args: &ModelSchemaArgs,
+) -> Vec<proc_macro2::TokenStream> {
+    let (Some(ident), Some(published)) = (
+        item_schema_ident(item),
+        item_published_name(item, args.name_override.as_deref()),
+    ) else {
+        return Vec::new();
+    };
+    let Some(holder) = claim_published_name(&published, &ident.to_string()) else {
+        return Vec::new();
+    };
+    let message = prefixed_guard_message(&format!(
+        "{} publishes as `{published}`, which type `{holder}` already publishes as -- one name \
+         cannot carry two declarations, whose types, schemas and definitions would overwrite each \
+         other. Give one of them a `#[model_schema(name = \"...\")]` of its own",
+        item_label(item)
+    ));
+    vec![syn::Error::new_spanned(ident, message).to_compile_error()]
 }
 
 /// Records which of the two Zod bindings an item publishes, ahead of the shape it is dispatched to.

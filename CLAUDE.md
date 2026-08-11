@@ -172,20 +172,28 @@ The crate uses 5 optional features for minimal dependencies:
 
 ## Critical Development Rules
 
-### 1. Type Naming Convention
+### 1. The Name a Type Publishes Under
 
-The `Data` suffix is **optional** on Rust type names. If present, it is stripped from the generated TypeScript name. If absent, the Rust name is used as-is. A type named exactly `Data` keeps that name: stripping never empties a name.
+A type publishes under the Rust ident it is declared with, spelled exactly as written. Nothing is read off that spelling — no suffix is taken off it and no part of it is rewritten.
+
+`#[model_schema(name = "...")]` is the only publishing override, and it moves the name on every surface at once: the `export type` line, the Zod consts, the `$defs` key a self-referential document hoists under, and every reference another type writes.
 
 ```rust
-// Both are valid:
 #[model_schema()]
-pub struct User { ... }     // → TypeScript: User
+pub struct User { ... }                             // → TypeScript: User
 
 #[model_schema()]
-pub struct UserData { ... } // → TypeScript: User (suffix stripped)
+pub struct UserData { ... }                         // → TypeScript: UserData
+
+#[model_schema(name = "User")]
+pub struct UserData { ... }                         // → TypeScript: User
 ```
 
-The codebase convention is to use type names WITHOUT the `Data` suffix.
+A renamed item also publishes its Rust ident as an alias of the moved name — `export type UserData = User;`, `export const UserData$Schema = User$Schema;` — which is what lets a type declared *above* it, with only the ident to name it by, still resolve. `ident_schema_module_name` names the generated Rust module from the ident for the same reason: an override never moves it.
+
+`compute_item_export_name` is the one seam a declared item's published name is read from, and `compute_alias_export_name` the alias counterpart — an alias has no surface name of its own and takes the `Type` suffix without an override.
+
+Two declarations cannot publish under one name: the emitted types, schemas and definitions are one flat namespace, so `published_name_collision_errors` refuses the second at `exec_model_schema` — the ungated seam, so the verdict is the same in every feature combination — naming both declarations. `claim_published_name` holds the claims, keyed the opposite way to the `ALIAS_INFO` registry so an ident reclaiming its own name is never a collision.
 
 ### 2. Required Derives and Imports
 
@@ -237,7 +245,7 @@ pub struct BadMapKey {
 - `Option<T>` → `T | undefined` (Zod: `z.union([z.null().transform(() => undefined), T, z.undefined()]).prefault(undefined)`, accepting an explicit `null` and coercing it to `undefined`; JSON Schema `anyOf: [T, {"type": "null"}]`, key left out of `required`); with `#[model_schema_prop(ts_optional)]` the TypeScript key becomes optional instead: `field?: T`; with `#[model_schema_prop(nullable)]` all three surfaces render `T | null` with the key **required** instead: Zod `z.union([T, z.null()])`, JSON Schema `anyOf: [T, {"type": "null"}]` with the key in `required`
 - `Vec<T>` → `Array<T>`
 - `HashMap<String, T>` → `Partial<Record<string, T>>`
-- Custom types → Reference by name (`Data` suffix stripped if present)
+- Custom types → Reference by the name the referenced type publishes (its ident, or its `name` override)
 - `ObjectId` → `ObjectId` (with $oid validation)
 - `DateTime<Tz>` → `Date` (Zod `z.coerce.date()`); with `#[model_schema_prop(as_number)]` → `number` (inline epoch-ms coercer)
 - `NaiveTime` → `string` (Zod `z.iso.time()` wrapped in an inline preprocessor that also accepts millis-since-start-of-day)
@@ -376,7 +384,7 @@ constraints.
 
 ### 8. Branded Newtypes
 
-Single-field tuple structs with `#[serde(transparent)]` are treated as branded/opaque types. If the Rust name has a `Data` suffix, it is stripped from the TypeScript name.
+Single-field tuple structs with `#[serde(transparent)]` are treated as branded/opaque types. The brand publishes under its Rust ident unless `#[model_schema(name = "...")]` names another, and that name reaches the surface twice: as the exported type and as the brand tag the values carry.
 
 A non-generic brand publishes a `$RawSchema`/`$Schema` const pair:
 
@@ -730,12 +738,12 @@ fn test_generate_typescript() {
 
 The macro transforms Rust types to TypeScript following these rules:
 
-1. **Type Name Transformation**: If the Rust type name ends with `Data`, the suffix is stripped (e.g., `UserData` → `User`). Otherwise, the name is used as-is (e.g., `User` → `User`), and a name that is exactly `Data` is left alone.
+1. **Type Name Transformation**: None. A type publishes under the Rust ident it is declared with, and `#[model_schema(name = "...")]` is the only thing that moves it.
 2. **Field Names**: Respect serde rename attributes (`#[serde(rename = "...")]`, `#[serde(rename_all = "...")]`)
 3. **Optional Fields**: `Option<T>` becomes `T | undefined` in TypeScript and `z.union([z.null().transform(() => undefined), type, z.undefined()]).prefault(undefined)` in Zod, accepting both an absent key and an explicit `null`
 4. **Arrays**: `Vec<T>` becomes `Array<T>` in TypeScript
 5. **Maps**: `HashMap<String, T>` becomes `Partial<Record<string, T>>` in TypeScript
-6. **Nested Types**: Reference other types by name (`Data` suffix stripped if present)
+6. **Nested Types**: Reference other types by the name they publish (their ident, or their `name` override)
 7. **MongoDB ObjectId**: `ObjectId` becomes `ObjectId` in TypeScript with proper JSON schema validation
 8. **ObjectId Serialization**: Uses MongoDB format `{ "$oid": "hex_string" }`
 9. **ObjectId Validation**: Includes regex validation for 24-character hexadecimal strings

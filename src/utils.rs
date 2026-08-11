@@ -60,10 +60,6 @@ const ASTRAL_DIVERGENCE: &str = "a character outside the Basic Multilingual Plan
                                  the two code units it is written from -- so the set is the same \
                                  and the count is not, and no spelling of the class closes that";
 
-/// The suffix a companion type carries, taken off every generated name so `UserData` publishes as
-/// `User`.
-const COMPANION_SUFFIX: &str = "Data";
-
 /// Why a construct cannot reach the JavaScript surfaces as the author wrote it. The three are
 /// different failures and the rejection says which one it is.
 #[derive(Clone, Copy)]
@@ -582,6 +578,26 @@ thread_local! {
 
 thread_local! {
     static ALIAS_INFO: RefCell<HashMap<String, AliasInfo>> = RefCell::new(HashMap::new());
+    /// The Rust ident holding each published name — see [`claim_published_name`]. Kept out of
+    /// [`ALIAS_INFO`], which is keyed the other way round and only written where a surface is on.
+    static PUBLISHED_NAMES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+}
+
+/// Claims `published` for `rust_ident`, answering with the ident already holding it — and `None`
+/// where the claim is free or is this ident's own. The emitted names are one flat namespace, so
+/// two declarations reaching one name overwrite each other on every surface rather than merging.
+pub fn claim_published_name(published: &str, rust_ident: &str) -> Option<String> {
+    PUBLISHED_NAMES.with(|names| {
+        let mut held = names.borrow_mut();
+        match held.get(published) {
+            Some(holder) if holder == rust_ident => None,
+            Some(holder) => Some(holder.clone()),
+            None => {
+                held.insert(published.to_owned(), rust_ident.to_owned());
+                None
+            }
+        }
+    })
 }
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -769,43 +785,30 @@ pub fn written_type(ty: &Type) -> &Type {
     current
 }
 
-/// A name with [`COMPANION_SUFFIX`] taken off, unless taking it off would leave nothing to publish
-/// under.
-pub fn safe_type_name(key: &str) -> String {
-    key.strip_suffix(COMPANION_SUFFIX)
-        .filter(|stripped| !stripped.is_empty())
-        .unwrap_or(key)
-        .to_owned()
-}
-
 /// The schema module a `#[model_schema()]` item publishes — an alias, a struct, an enum, a branded
 /// newtype alike — which is also the module a reference assumes for a name the registry does not
-/// hold.
+/// hold. Named from the Rust ident rather than the published name: a reference standing above the
+/// declaration has only the ident, and an override is not recoverable from it.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 pub fn ident_schema_module_name(rust_ident: &str) -> String {
-    format!("{}_schema", to_snake_case(&safe_type_name(rust_ident)))
+    format!("{}_schema", to_snake_case(rust_ident))
 }
 
 /// The export name is what `register_alias_info` stores and what the alias's TypeScript, zod, and
-/// JSON-schema surfaces are written under, so every feature that references an alias needs it, not
-/// just `typescript`. An override is taken verbatim: the parser has already refused a value no
-/// surface can carry.
-#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+/// JSON-schema surfaces are written under. An override is taken verbatim: the parser has already
+/// refused a value no surface can carry. Ungated, `claim_published_name`'s caller reading it in
+/// every build.
 pub fn compute_alias_export_name(rust_ident: &str, override_name: Option<&str>) -> String {
-    override_name.map_or_else(
-        || format!("{}Type", safe_type_name(rust_ident)),
-        ToOwned::to_owned,
-    )
+    override_name.map_or_else(|| format!("{rust_ident}Type"), ToOwned::to_owned)
 }
 
 /// The spelling every reference to a `#[model_schema()]` item falls back to when the registry
 /// cannot answer for it, which is what a reference standing *before* the item expanded has and
-/// nothing else — the ident with the `Data` suffix taken off, that being what the field walk
-/// records for a sibling and what [`ident_schema_module_name`] names the module from.
+/// nothing else — the Rust ident, that being what the field walk records for a sibling and what
+/// [`ident_schema_module_name`] names the module from.
 #[cfg(any(feature = "typescript", feature = "zod"))]
 fn ident_reexport_name(rust_ident: &str, export_name: &str) -> Option<String> {
-    let referenced = safe_type_name(rust_ident);
-    (referenced != export_name).then_some(referenced)
+    (rust_ident != export_name).then(|| rust_ident.to_owned())
 }
 
 /// The names an item's own declaration binds as type parameters.
@@ -875,7 +878,7 @@ pub fn json_argument_binding(parameter: &str) -> String {
 /// newtype. Without an override the item keeps the name it is declared under, which is the one
 /// difference from an alias: an alias has no surface name of its own and is given the `Type` suffix.
 pub fn compute_item_export_name(rust_ident: &str, override_name: Option<&str>) -> String {
-    override_name.map_or_else(|| safe_type_name(rust_ident), ToOwned::to_owned)
+    override_name.map_or_else(|| rust_ident.to_owned(), ToOwned::to_owned)
 }
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
