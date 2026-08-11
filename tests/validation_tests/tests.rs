@@ -2297,7 +2297,7 @@ fn test_readme_branded_validate_example_prints_what_the_generator_writes() {
 fn test_crate_rustdoc_quotes_the_messages_the_generator_writes() {
     #[model_schema()]
     #[derive(Serialize, Deserialize)]
-    pub struct RegistrationJson {
+    pub struct RegistrationData {
         #[model_schema_prop(minimum = 0, maximum = 120)]
         pub age: u32,
 
@@ -2305,7 +2305,7 @@ fn test_crate_rustdoc_quotes_the_messages_the_generator_writes() {
         pub username: String,
     }
 
-    let errors = RegistrationJson {
+    let errors = RegistrationData {
         age: 150,
         username: "ab".to_owned(),
     }

@@ -1087,7 +1087,7 @@ export type CorrelationId = string & { readonly [__brand_CorrelationId]: true };
 
 Notes:
 
-- If the Rust type name ends with `Json`, the suffix is stripped in the generated TypeScript (e.g., `UserIdJson` becomes `UserId`). Otherwise, the Rust name is used as-is.
+- If the Rust type name ends with `Data`, the suffix is stripped in the generated TypeScript (e.g., `UserIdData` becomes `UserId`). Otherwise, the Rust name is used as-is.
 - Generic parameter names (e.g., `IdType`) are preserved exactly in the TypeScript type.
 - A generic brand publishes a factory, as every other generic item does, so the brand and its inner's shape land on the argument the caller supplied rather than on a value pinned at expansion. A parameter reaches it as the factory's own argument, under the rule in [Type Parameters](#type-parameters); a brand written over that parameter still describes what its inner writes, so `TagList<T>(pub Vec<T>)` is an array on every surface — `Array<T>`, `z.array(t)`, `{"type": "array", "items": {}}` — and not the bare parameter.
 - The description is written before the brand in a factory and after it in a `const`. Inside a factory the receiver is the parameter the caller filled, and Zod's `.meta()` returns `this` — which TypeScript resolves back to that bare parameter, dropping the marker `.brand<"Name">()` had just added. Both orders build the same schema.
@@ -2159,9 +2159,9 @@ If the `serde` feature is disabled but serde attributes are present, you will se
 
 ## Important Notes
 
-1. **Naming Convention**: The `Json` suffix on Rust type names is optional. If present, it is automatically stripped in the generated TypeScript output (e.g., `UserJson` becomes `User`). If no `Json` suffix is present, the Rust type name is used as-is (e.g., `User` stays `User`).
+1. **Naming Convention**: The `Data` suffix on Rust type names is optional. If present, it is automatically stripped in the generated TypeScript output (e.g., `UserData` becomes `User`). If no `Data` suffix is present, the Rust type name is used as-is (e.g., `User` stays `User`), and a type named exactly `Data` keeps that name -- stripping never empties a name.
 
-2. **Type References**: Nested types reference each other by their TypeScript name (with the `Json` suffix stripped if present).
+2. **Type References**: Nested types reference each other by their TypeScript name (with the `Data` suffix stripped if present).
 
 3. **Map Keys**: `HashMap` and `BTreeMap` are both supported, and the key decides what the map describes as: a `String` key gives an object open to any string key, and a plain `#[model_schema()]` enum key gives one closed to the enum's members. A brand and a `#[model_schema()]` alias answer by their inner and their target, keeping their own name on the TypeScript and Zod surfaces. A key path proved to be one serde writes as no key at all, and any sequence-wrapped key, is refused at expansion; every other key describes as an open object. See [Collections and Maps](#collections-and-maps).
 
