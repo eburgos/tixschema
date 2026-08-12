@@ -497,14 +497,15 @@ fn a_generic_slot_over_a_bare_parameter_keeps_the_annotation_naming_its_own_type
     assert!(!zod.contains("$RawSchemaDefault"), "got: {zod}");
 }
 
-/// A brand's own binding is annotated from its inner's class and never republishes anything.
+/// A brand republishes nothing, yet reads its annotation off the value for the same reason a
+/// republishing binding does: `.brand()` narrows where no restated type reaches.
 #[cfg(all(feature = "zod", feature = "typescript"))]
 #[test]
-fn a_brands_own_binding_keeps_the_annotation_it_already_wrote() {
+fn a_brands_own_binding_reads_its_annotation_off_the_value_too() {
     let zod = CorrelationId::zod_schema();
     assert!(
         zod.contains(
-            "export const CorrelationId$Schema: $ZodBranded<ZodString, \"CorrelationId\"> = \
+            "export const CorrelationId$Schema: typeof CorrelationId$RawSchema = \
              CorrelationId$RawSchema;"
         ),
         "got: {zod}"
@@ -512,12 +513,17 @@ fn a_brands_own_binding_keeps_the_annotation_it_already_wrote() {
     let generic = GenericBrand::<String>::zod_schema();
     assert!(
         generic.contains(
-            "export const GenericBrand$SchemaDefault: $ZodBranded<ZodString, \"GenericBrand\"> = \
-             GenericBrand$SchemaFactory(z.string());"
+            "const GenericBrand$RawSchemaDefault = GenericBrand$SchemaFactory(z.string());"
         ),
         "got: {generic}"
     );
-    assert!(!generic.contains("$RawSchemaDefault"), "got: {generic}");
+    assert!(
+        generic.contains(
+            "export const GenericBrand$SchemaDefault: typeof GenericBrand$RawSchemaDefault = \
+             GenericBrand$RawSchemaDefault;"
+        ),
+        "got: {generic}"
+    );
 }
 
 /// A build emitting no TypeScript writes every binding as a bare `const`: an annotation is a type,

@@ -273,17 +273,6 @@ struct BrandedValidation {
     validate_fn: proc_macro2::TokenStream,
 }
 
-/// What a branded newtype's inner writes when what it writes is a composite: an array, a map, a
-/// tuple, or a value the parser could not classify at all.
-#[cfg(any(feature = "jsonschema", all(feature = "typescript", feature = "zod")))]
-enum BrandedComposite {
-    Array,
-    Map,
-    /// A value with no type name to narrow with, which admits anything.
-    Opaque,
-    Tuple,
-}
-
 /// The JSON schema shape a branded newtype's inner field describes.
 #[cfg(feature = "jsonschema")]
 enum BrandedJsonInner {
@@ -645,12 +634,12 @@ struct BrandedDefaultChecks {
 /// parameters as `clippy::too_many_arguments` admits.
 #[cfg(feature = "zod")]
 struct ZodDefaultInputs<'defaults> {
+    /// Whether `$SchemaDefault`'s annotation is read back off the value it binds rather than
+    /// restating the type the item declares — see [`raw_default_block`].
     #[cfg(feature = "typescript")]
-    brand: Option<BrandedAnnotation<'defaults>>,
+    annotated_by_value: bool,
     constrained: Option<(&'defaults str, &'defaults BrandedDefaultChecks)>,
     default_types: &'defaults [(syn::Ident, syn::Type)],
-    #[cfg(feature = "typescript")]
-    republished: bool,
 }
 
 /// What [`zod_published_binding`] needs beside the item's own name, parameters and expression.
@@ -660,20 +649,6 @@ struct PublishedBinding<'binding> {
     /// Whether the published expression *is* a sibling's own binding — see
     /// [`republishes_sibling_binding`].
     republished: bool,
-}
-
-/// What a branded newtype's `$SchemaDefault` is annotated with, read off the shape of the brand's
-/// own inner rather than off any one parameter's filling — see [`branded_default_annotation`].
-#[cfg(all(feature = "zod", feature = "typescript"))]
-enum BrandedAnnotation<'defaults> {
-    /// The inner is exactly one bare type parameter (`pub struct Name<T>(pub T)`) — the erased
-    /// inner itself carries no concrete class to name, so the annotation is read off that one
-    /// parameter's own declared default instead.
-    BareParameter(&'defaults str),
-    /// Every other inner shape — a tuple, an array, a concrete sibling — annotated with the bare
-    /// class [`branded_zod_type_name`] already reads off it for the non-generic const, widened
-    /// the same way regardless of what fills the brand's parameters.
-    Widened(String),
 }
 
 /// What [`default_zod_rendering`] found: a self-contained expression left eager, or a name
@@ -4540,7 +4515,7 @@ fn branded_json_inner(inner: &FieldDef) -> BrandedJsonInner {
     if branded_inner_is_object_id(inner) {
         return BrandedJsonInner::ObjectId;
     }
-    if branded_inner_composite(inner).is_some() {
+    if branded_inner_is_composite(inner) {
         return BrandedJsonInner::Slot(Box::new(inner.clone()));
     }
     #[cfg(feature = "chrono")]
@@ -4611,23 +4586,24 @@ const fn branded_inner_is_object_id(inner: &FieldDef) -> bool {
     matches!(inner.field_type, FieldDefType::ObjectId) && !inner.is_array()
 }
 
-/// What a branded newtype's inner writes when it writes a composite, and `None` when it writes a
-/// value one `"type"` keyword and one Zod class already name.
-#[cfg(any(feature = "jsonschema", all(feature = "typescript", feature = "zod")))]
-fn branded_inner_composite(inner: &FieldDef) -> Option<BrandedComposite> {
+/// Whether a branded newtype's inner writes a composite — an array, a map, a tuple, or a value the
+/// parser could not classify at all — rather than a value one `"type"` keyword already names.
+#[cfg(feature = "jsonschema")]
+fn branded_inner_is_composite(inner: &FieldDef) -> bool {
     if inner.is_array() {
-        return Some(BrandedComposite::Array);
+        return true;
     }
     if let FieldDefType::SiblingType(name, args) = &inner.field_type
         && matches!(args.as_slice(), [_])
         && is_sequence_wrapper(name)
     {
-        return Some(BrandedComposite::Array);
+        return true;
     }
     match &inner.field_type {
-        FieldDefType::Map(..) => Some(BrandedComposite::Map),
-        FieldDefType::Tuple(..) => Some(BrandedComposite::Tuple),
-        FieldDefType::TypeParam(_) | FieldDefType::Unknown => Some(BrandedComposite::Opaque),
+        FieldDefType::Map(..)
+        | FieldDefType::Tuple(..)
+        | FieldDefType::TypeParam(_)
+        | FieldDefType::Unknown => true,
         FieldDefType::Boolean
         | FieldDefType::BooleanLiteral(_)
         | FieldDefType::Char
@@ -4646,14 +4622,14 @@ fn branded_inner_composite(inner: &FieldDef) -> Option<BrandedComposite> {
         | FieldDefType::U16
         | FieldDefType::U32
         | FieldDefType::U64
-        | FieldDefType::Usize => None,
+        | FieldDefType::Usize => false,
         #[cfg(feature = "object_id")]
-        FieldDefType::ObjectId => None,
+        FieldDefType::ObjectId => false,
         #[cfg(feature = "chrono")]
         FieldDefType::DateTime
         | FieldDefType::NaiveDate
         | FieldDefType::NaiveDateTime
-        | FieldDefType::NaiveTime => None,
+        | FieldDefType::NaiveTime => false,
     }
 }
 
@@ -4669,58 +4645,6 @@ fn branded_zod_inner(args: &ModelSchemaArgs, inner: &FieldDef) -> String {
         return get_object_id_zod_schema_with(&checks);
     }
     format!("{}{checks}", inner.zod_type())
-}
-
-/// The Zod class a branded newtype's base schema is an instance of, for the exported binding's
-/// type annotation.
-#[cfg(all(feature = "zod", feature = "typescript"))]
-fn branded_zod_type_name(inner: &FieldDef) -> String {
-    #[cfg(feature = "object_id")]
-    if branded_inner_is_object_id(inner) {
-        return "ZodObject".to_owned();
-    }
-    if let Some(composite) = branded_inner_composite(inner) {
-        return match composite {
-            BrandedComposite::Array => "ZodArray".to_owned(),
-            BrandedComposite::Map => "ZodRecord".to_owned(),
-            BrandedComposite::Opaque => "ZodUnknown".to_owned(),
-            BrandedComposite::Tuple => "ZodTuple".to_owned(),
-        };
-    }
-    if let FieldDefType::SiblingType(name, args) = &inner.field_type {
-        return if args.is_empty() {
-            format!("typeof {}", inner.zod_type())
-        } else {
-            branded_zod_instantiated_type_name(name, args)
-        };
-    }
-    match inner.typescript_typename().as_str() {
-        "number" => "ZodNumber".to_owned(),
-        "boolean" => "ZodBoolean".to_owned(),
-        _ => "ZodString".to_owned(),
-    }
-}
-
-/// The Zod class a filled generic name composes to. Only a family publisher proves one — its
-/// argument's own class; every other shape widens to `ZodType` rather than guess.
-#[cfg(all(feature = "zod", feature = "typescript"))]
-fn branded_zod_instantiated_type_name(name: &str, args: &[FieldDef]) -> String {
-    match lookup_alias_info(name).map(|info| info.value_shape) {
-        Some(PublishedShape::Parameter(position)) => match args.get(position) {
-            Some(argument)
-                if argument.is_array()
-                    || !matches!(argument.field_type, FieldDefType::TypeParam(_)) =>
-            {
-                branded_zod_type_name(argument)
-            }
-            _ => "ZodType".to_owned(),
-        },
-        // A plain struct's own object shape is produced by exactly one registration site
-        // (`Surface::object()` — see its own doc comment), so unlike `union`/`container`/the
-        // bare-string bucket, the word alone already proves the Zod class.
-        Some(PublishedShape::Flat(Some("object"))) => "ZodObject".to_owned(),
-        _ => "ZodType".to_owned(),
-    }
 }
 
 /// Builds the `ts_definition()` method for a branded newtype's schema module.
@@ -4806,7 +4730,7 @@ fn build_branded_zod_schema_method(
     let expression = branded_zod_expression(args, item_name, parameters, inner, plain_description);
     let reexport = zod_binding_reexport(rust_ident, item_name, parameters);
     let body = if parameters.is_empty() {
-        branded_zod_const_block(item_name, inner, &expression, &reexport)
+        branded_zod_const_block(item_name, &expression, &reexport)
     } else {
         let checks = branded_zod_string_checks(args);
         let branded_checks = BrandedDefaultChecks {
@@ -4819,24 +4743,12 @@ fn build_branded_zod_schema_method(
             }
             _ => None,
         };
-        #[cfg(feature = "typescript")]
-        let brand = Some(
-            if let FieldDefType::TypeParam(parameter) = &inner.field_type
-                && !inner.is_array()
-            {
-                BrandedAnnotation::BareParameter(parameter.as_str())
-            } else {
-                BrandedAnnotation::Widened(branded_zod_type_name(inner))
-            },
-        );
         let defaults = ZodDefaultInputs {
+            // `.brand()` narrows at the value position, which no restated type can name.
             #[cfg(feature = "typescript")]
-            brand,
+            annotated_by_value: true,
             constrained: constrained_default,
             default_types: &args.default_types,
-            // A brand writes `.brand()` onto whatever it publishes, so it never republishes.
-            #[cfg(feature = "typescript")]
-            republished: false,
         };
         zod_factory_block(
             item_name,
@@ -4855,28 +4767,12 @@ fn build_branded_zod_schema_method(
     }
 }
 
-/// The binding a brand that declares no parameter publishes: the raw schema, then the exported
-/// `const` annotated with the branded class the inner's own rendering produces.
+/// The binding a brand that declares no parameter publishes. A brand always reads its annotation
+/// back off the value: `.brand()` narrows at the value position, and no class named here could
+/// stay true of whatever the inner rendered to.
 #[cfg(feature = "zod")]
-fn branded_zod_const_block(
-    item_name: &str,
-    inner: &FieldDef,
-    expression: &str,
-    reexport: &str,
-) -> String {
-    #[cfg(feature = "typescript")]
-    {
-        format!(
-            "const {item_name}$RawSchema = {expression};\n\nexport const {item_name}$Schema: \
-             $ZodBranded<{}, \"{item_name}\"> = {item_name}$RawSchema;{reexport}",
-            branded_zod_type_name(inner)
-        )
-    }
-    #[cfg(not(feature = "typescript"))]
-    {
-        let _: &FieldDef = inner;
-        format!("export const {item_name}$Schema = {expression};{reexport}")
-    }
+fn branded_zod_const_block(item_name: &str, expression: &str, reexport: &str) -> String {
+    zod_const_block(item_name, "", expression, reexport, true)
 }
 
 /// Builds the delegate methods (on the newtype impl) that forward to its schema module.
@@ -11870,12 +11766,6 @@ fn zod_default_block(
     record_zod_default_arguments(rust_ident, fold_keys);
     let renderings: Vec<DefaultZodRendering> = fields.iter().map(default_zod_rendering).collect();
 
-    #[cfg(feature = "typescript")]
-    let annotation =
-        branded_default_annotation(item_name, defaults, parameters, &fields, &renderings);
-    #[cfg(not(feature = "typescript"))]
-    let annotation = String::new();
-
     let arguments: Vec<String> = parameters
         .iter()
         .zip(renderings)
@@ -11895,77 +11785,35 @@ fn zod_default_block(
     let call = format!("{item_name}$SchemaFactory({})", arguments.join(", "));
 
     #[cfg(feature = "typescript")]
-    if defaults.republished {
-        return republished_default_block(item_name, &call);
+    if defaults.annotated_by_value {
+        return raw_default_block(item_name, &call);
     }
+
+    #[cfg(feature = "typescript")]
+    let annotation = format!(
+        ": ZodType<{item_name}<{}>>",
+        fields
+            .iter()
+            .map(FieldDef::typescript_typename)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    #[cfg(not(feature = "typescript"))]
+    let annotation = String::new();
 
     format!("\n\nexport const {item_name}$SchemaDefault{annotation} = {call};")
 }
 
-/// The `$SchemaDefault` of an item whose factory republishes another item's: the call is bound to a
-/// raw `const` first so the export can read its type back, the same two lines [`zod_const_block`]
+/// The `$SchemaDefault` of an item whose annotation is read back off the value: the call is bound
+/// to a raw `const` first so the export can name its type, the same two lines [`zod_const_block`]
 /// writes one level up. A generic item has no `$RawSchema` of its own to name.
 #[cfg(all(feature = "zod", feature = "typescript"))]
-fn republished_default_block(item_name: &str, call: &str) -> String {
+fn raw_default_block(item_name: &str, call: &str) -> String {
     format!(
         "\n\nconst {item_name}$RawSchemaDefault = {call};\n\nexport const \
          {item_name}$SchemaDefault: typeof {item_name}$RawSchemaDefault = \
          {item_name}$RawSchemaDefault;"
     )
-}
-
-/// The `$SchemaDefault` annotation [`zod_default_block`] writes: plain `ZodType<Name<...>>` for an
-/// ordinary generic item, and `$ZodBranded<Argument, Name>` for a branded newtype — whose factory
-/// always ends in `.brand()`, a return type strict tsc rejects under the plain spelling.
-#[cfg(all(feature = "zod", feature = "typescript"))]
-fn branded_default_annotation(
-    item_name: &str,
-    defaults: &ZodDefaultInputs<'_>,
-    parameters: &[String],
-    fields: &[FieldDef],
-    renderings: &[DefaultZodRendering],
-) -> String {
-    let plain_annotation = || {
-        format!(
-            ": ZodType<{item_name}<{}>>",
-            fields
-                .iter()
-                .map(FieldDef::typescript_typename)
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    };
-    let Some(brand) = &defaults.brand else {
-        return plain_annotation();
-    };
-    let argument_type = match brand {
-        BrandedAnnotation::Widened(class) => class.clone(),
-        BrandedAnnotation::BareParameter(target) => {
-            // Structurally always found: `target` is read off this same brand's own inner, which
-            // names one of its own declared parameters. Falling back to the plain annotation
-            // rather than panicking if that ever stopped holding costs nothing real — a branded
-            // `$SchemaDefault` is never reached without a parameter list to search.
-            let Some(index) = parameters.iter().position(|parameter| parameter == target) else {
-                return plain_annotation();
-            };
-            branded_default_argument_class(&fields[index], &renderings[index])
-        }
-    };
-    format!(": $ZodBranded<{argument_type}, \"{item_name}\">")
-}
-
-/// The class a bare-parameter brand's own declared-default argument is annotated with: the eager
-/// expression's class bare, or that class inside `ZodLazy<...>` for a deferred one — `typeof
-/// {schema}` for a binding name, widened for a factory call `typeof` cannot read.
-#[cfg(all(feature = "zod", feature = "typescript"))]
-fn branded_default_argument_class(field: &FieldDef, rendering: &DefaultZodRendering) -> String {
-    match rendering {
-        DefaultZodRendering::Eager(_) => branded_zod_type_name(field),
-        DefaultZodRendering::Deferred(schema) if !schema.contains('(') => {
-            format!("ZodLazy<typeof {schema}>")
-        }
-        DefaultZodRendering::Deferred(_) => format!("ZodLazy<{}>", branded_zod_type_name(field)),
-    }
 }
 
 /// What a generic type's Zod surface is written as: the builder holding the schema its arguments
@@ -12049,13 +11897,14 @@ fn zod_const_block(
     preamble: &str,
     expression: &str,
     reexport: &str,
-    republished: bool,
+    annotated_by_value: bool,
 ) -> String {
     #[cfg(feature = "typescript")]
     {
-        // A republished binding reads its annotation back off what it published: `.brand()`
-        // narrows at the value position, which restating the item's own type discards.
-        let annotation = if republished {
+        // `.brand()` narrows at the value position, which restating the item's own type discards
+        // — so a binding carrying one, republished or the brand's own, reads its type back off
+        // what it published.
+        let annotation = if annotated_by_value {
             format!("typeof {item_name}$RawSchema")
         } else {
             format!("ZodType<{item_name}>")
@@ -12067,7 +11916,7 @@ fn zod_const_block(
     }
     #[cfg(not(feature = "typescript"))]
     {
-        let _: &_ = &republished;
+        let _: &_ = &annotated_by_value;
         format!("{preamble}export const {item_name}$Schema = {expression};{reexport}")
     }
 }
@@ -12095,11 +11944,9 @@ fn zod_published_binding(
     } else {
         let defaults = ZodDefaultInputs {
             #[cfg(feature = "typescript")]
-            brand: None,
+            annotated_by_value: published.republished,
             constrained: None,
             default_types: published.default_types,
-            #[cfg(feature = "typescript")]
-            republished: published.republished,
         };
         zod_factory_block(
             item_name, rust_ident, parameters, &defaults, preamble, expression, reexport,
