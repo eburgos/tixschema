@@ -9,7 +9,7 @@ use syn::spanned::Spanned as _;
 use syn::Attribute;
 
 use crate::features::model_schema_prop::ModelSchemaPropMeta;
-use crate::utils::{lookup_alias_info, written_type};
+use crate::utils::{MapKeyWire, lookup_alias_info, written_type};
 
 #[cfg(feature = "zod")]
 use crate::utils::{
@@ -32,6 +32,17 @@ use crate::features::serde::{
 // Bring serde metadata types into scope (used by the serde parsing helpers below).
 #[cfg(feature = "serde")]
 use crate::features::serde::{SerdeFieldMeta, SerdeTypeMeta};
+
+/// The two strings serde writes a `bool` key as, in the order both surfaces state them so they
+/// cannot drift.
+const BOOLEAN_KEY_TYPESCRIPT: &str = "\"true\" | \"false\"";
+
+#[cfg(feature = "zod")]
+const BOOLEAN_KEY_ZOD: &str = "z.enum([\"true\", \"false\"])";
+
+/// A `DateTime<Tz>` key is the RFC 3339 string chrono renders it into, offset always written.
+#[cfg(all(feature = "chrono", feature = "zod"))]
+const TIMESTAMP_KEY_ZOD: &str = "z.iso.datetime({ offset: true })";
 
 /// Classifies how an enum variant stores its data, driving the TypeScript/Zod generation strategy
 /// for discriminated union variants.
@@ -495,6 +506,31 @@ impl FieldDef {
         }
     }
 
+    /// The form serde writes this key in, wherever that form is not what the key's own type spells
+    /// on the two nominal surfaces. Read through the registry for a name, so a brand or alias
+    /// chain forwards its target's answer; a key under an array or an `Option` writes no key at all
+    /// and keeps its name, its own guard having refused it already.
+    pub fn map_key_wire(&self) -> MapKeyWire {
+        if self.array_depth > 0 || self.is_optional() {
+            return MapKeyWire::Named;
+        }
+        if matches!(self.field_type, FieldDefType::Boolean) {
+            return MapKeyWire::Boolean;
+        }
+        #[cfg(feature = "chrono")]
+        if matches!(self.field_type, FieldDefType::DateTime) {
+            return MapKeyWire::Timestamp;
+        }
+        let FieldDefType::SiblingType(name, arguments) = &self.field_type else {
+            return MapKeyWire::Named;
+        };
+        if arguments.is_empty() {
+            lookup_alias_info(name).map_or(MapKeyWire::Named, |info| info.key_wire)
+        } else {
+            MapKeyWire::Named
+        }
+    }
+
     fn mark_fixed_length_at(&mut self, level: u8, length: usize) {
         if !self.array_lengths.iter().any(|&(at, _)| at == level) {
             self.array_lengths.push((level, length));
@@ -935,13 +971,19 @@ impl FieldDef {
     }
 
     /// The key a `Partial<Record<…>>` is written with: the key's own type, except where the key is
-    /// one of the enclosing item's type parameters, which states `string` — the same answer
-    /// [`Self::zod_map_key_type`] gives, for the same reason.
+    /// one of the enclosing item's type parameters, which states `string`, and where serde writes
+    /// the key in a form its own type does not spell — the same answer
+    /// [`Self::zod_map_record_call`] gives, for the same reason.
     fn typescript_map_key_typename(&self) -> String {
         if self.parameter_shape_name().is_some() {
             return "string".to_owned();
         }
-        self.typescript_typename()
+        match self.map_key_wire() {
+            MapKeyWire::Boolean => BOOLEAN_KEY_TYPESCRIPT.to_owned(),
+            #[cfg(feature = "chrono")]
+            MapKeyWire::Timestamp => "string".to_owned(),
+            MapKeyWire::Named => self.typescript_typename(),
+        }
     }
 
     /// What this field contributes to an object that writes its members beside its own, on the
@@ -1076,9 +1118,7 @@ impl FieldDef {
                     zod_factory_call(name, lst)
                 }
             }
-            FieldDefType::Map(k, v) => {
-                format!("z.record({}, {})", k.zod_map_key_type(), v.zod_slot_type())
-            }
+            FieldDefType::Map(k, v) => k.zod_map_record_call(&v.zod_slot_type()),
             FieldDefType::Boolean => "z.boolean()".to_owned(),
             // serde writes a `char` as a one-character string and reads only that back, so the
             // length is fixed rather than read from `model_schema_prop` — a `char` field carries
@@ -1139,14 +1179,23 @@ impl FieldDef {
         self.zod_preprocess_wrap(self.zod_array_base())
     }
 
-    /// The key schema a `z.record(…)` is written with: the key's own, except where the key is one
-    /// of the enclosing item's type parameters.
+    /// The whole record call a map is written as, read off its key: the constructor moves with the
+    /// key schema, because `z.record` over an enumerated key demands every member and the two
+    /// strings a `bool` writes are exactly such an enumeration — a map holding one of them has to
+    /// parse.
     #[cfg(feature = "zod")]
-    fn zod_map_key_type(&self) -> String {
+    fn zod_map_record_call(&self, value_schema: &str) -> String {
         if self.parameter_shape_name().is_some() {
-            return "z.string()".to_owned();
+            return format!("z.record(z.string(), {value_schema})");
         }
-        self.zod_type()
+        match self.map_key_wire() {
+            MapKeyWire::Boolean => {
+                format!("z.partialRecord({BOOLEAN_KEY_ZOD}, {value_schema})")
+            }
+            #[cfg(feature = "chrono")]
+            MapKeyWire::Timestamp => format!("z.record({TIMESTAMP_KEY_ZOD}, {value_schema})"),
+            MapKeyWire::Named => format!("z.record({}, {value_schema})", self.zod_type()),
+        }
     }
 
     /// The same value on the Zod surface, for the same reason: what a merged source validates, with

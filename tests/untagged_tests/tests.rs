@@ -1,4 +1,6 @@
 use alloc::collections::{BTreeSet, VecDeque};
+#[cfg(all(feature = "chrono", feature = "typescript"))]
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tixschema::model_schema;
@@ -179,6 +181,28 @@ enum BucketTreeUnion {
 enum CodeTreeUnion {
     Leaf(String),
     Nested(HashMap<u32, Self>),
+}
+
+// A self-naming map member keyed by a `bool`. serde writes `"true"`/`"false"`, and a literal type
+// cannot be an index signature parameter (TS1337), so the deferral is carried by the mapped type.
+#[cfg(feature = "typescript")]
+#[model_schema()]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum FlagTreeUnion {
+    Leaf(String),
+    Nested(HashMap<bool, Self>),
+}
+
+// The `DateTime<Tz>` twin: the key spells as `string`, which the index signature does have a
+// parameter type for.
+#[cfg(all(feature = "chrono", feature = "typescript"))]
+#[model_schema()]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum StampTreeUnion {
+    Leaf(String),
+    Nested(HashMap<DateTime<Utc>, Self>),
 }
 
 // An enumerated key on a map member naming nothing recursive: no cycle to break, so the member
@@ -565,6 +589,73 @@ fn test_recursive_enum_keyed_map_member_typescript_uses_mapped_type() {
         "the mapped-type spelling is the circularity itself. Got:\n{ts}"
     );
     assert!(!ts.contains("[key: Bucket]"), "Got:\n{ts}");
+}
+
+/// A `bool` key is the two strings serde writes, a literal type — so the self-naming member takes
+/// the mapped-type branch, the one an enumerated key takes.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_recursive_bool_keyed_map_member_typescript_uses_mapped_type() {
+    let ts = FlagTreeUnion::ts_definition();
+    assert!(
+        ts.contains(
+            "export type FlagTreeUnion = string | { [key in \"true\" | \"false\"]?: \
+             FlagTreeUnion };"
+        ),
+        "Got:\n{ts}"
+    );
+    assert!(!ts.contains("[key: "), "Got:\n{ts}");
+}
+
+/// A `DateTime<Tz>` key is the RFC 3339 string serde writes, which the index signature does have a
+/// parameter type for — so the self-naming member takes the other branch.
+#[test]
+#[cfg(all(feature = "chrono", feature = "typescript"))]
+fn test_recursive_date_time_keyed_map_member_typescript_keeps_index_signature() {
+    let ts = StampTreeUnion::ts_definition();
+    assert!(
+        ts.contains(
+            "export type StampTreeUnion = string | { [key: string]: StampTreeUnion | undefined };"
+        ),
+        "Got:\n{ts}"
+    );
+    assert!(!ts.contains("key in"), "Got:\n{ts}");
+}
+
+/// The wire the self-naming `bool`-keyed member is held against: serde writes the two string keys
+/// at every level of the tree. An untagged variant is read back through serde's buffered content,
+/// which hands a key on as the string it buffered and so has no reading for `bool` — the read-back
+/// of a `bool`-keyed map is pinned on a struct field instead, where no buffering stands between.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_recursive_bool_keyed_map_member_writes_the_two_string_keys() {
+    let flags = FlagTreeUnion::Nested(HashMap::from([(
+        true,
+        FlagTreeUnion::Nested(HashMap::from([(
+            false,
+            FlagTreeUnion::Leaf("x".to_owned()),
+        )])),
+    )]));
+    assert_eq!(
+        serde_json::to_string(&flags).unwrap(),
+        r#"{"true":{"false":"x"}}"#
+    );
+}
+
+#[test]
+#[cfg(all(feature = "chrono", feature = "typescript"))]
+fn test_recursive_date_time_keyed_map_member_round_trips() {
+    let stamp = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+    let stamps = StampTreeUnion::Nested(HashMap::from([(
+        stamp,
+        StampTreeUnion::Leaf("x".to_owned()),
+    )]));
+    let written = serde_json::to_string(&stamps).unwrap();
+    assert_eq!(written, r#"{"2023-11-14T22:13:20Z":"x"}"#);
+    assert_eq!(
+        serde_json::from_str::<StampTreeUnion>(&written).unwrap(),
+        stamps
+    );
 }
 
 /// A key the index signature does have a parameter type for keeps that spelling: the mapped type is

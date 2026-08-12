@@ -211,10 +211,9 @@ pub struct MyType { ... }
 A map key must be one serde can write as a JSON object key. `String` is the open case: any string
 is a key. `bool`, the numeric types, `char`, and the chrono date/time types are accepted too —
 serde stringifies each one (`7` → `"7"`, `true` → `"true"`) — so the map describes as an open
-object while TypeScript and Zod keep the key's own type (`HashMap<u32, T>` →
-`Partial<Record<number, T>>`). A plain `#[model_schema()]` enum key narrows the object to its
-members. A key serde does not stringify — a struct, tuple, `Vec`/array, `Option`, nested map, or
-`ObjectId` — is refused at expansion:
+object. A plain `#[model_schema()]` enum key narrows the object to its members. A key serde does
+not stringify — a struct, tuple, `Vec`/array, `Option`, nested map, or `ObjectId` — is refused at
+expansion:
 
 ```rust
 // ✅ Supported — string, and any key serde stringifies (bool/numeric/char/chrono)
@@ -236,6 +235,28 @@ pub struct BadMapKey {
 // error: field `m`: a map key must be a plain `#[model_schema()]` enum, whose members
 // become the object's keys — `KeyStruct` resolves to a type with no `enum_members()`
 ```
+
+On the two nominal surfaces a key renders in the form serde **writes** it wherever the key's own
+value form is not a TypeScript property key, and under the name it was written with wherever it is.
+`typescript_map_key_typename` and `zod_map_record_call` are the one pair of seams that decide, both
+reading `FieldDef::map_key_wire`, so the surfaces cannot drift:
+
+| key reached | TypeScript | Zod |
+|-------------|------------|-----|
+| `String`, `char`, `PathBuf`, plain enum, type parameter | own type (`string`, `MetricSlot`, …) | own schema |
+| the integer types | `number` | `z.record(z.number().int(), V)` |
+| `NaiveDate` / `NaiveTime` / `NaiveDateTime` | `string` | own schema |
+| `bool` | `"true" \| "false"` | `z.partialRecord(z.enum(["true", "false"]), V)` |
+| `DateTime<Tz>` | `string` | `z.record(z.iso.datetime({ offset: true }), V)` |
+
+The last two rows are the ones whose value form spells no property key: `boolean` and `Date` are
+rejected by `Record`'s own constraint, `z.boolean()` rejects the string serde wrote, and
+`z.coerce.date()` accepts it only to rewrite every key into a locale-dependent rendering. A brand or
+alias over one of those loses its name at a key position for the same reason — the only binding it
+publishes is that value-shaped schema — while a brand or alias over any other row keeps its name
+exactly as before. The constructor moves with the key because `z.record` over an enumerated key
+demands every member. JSON Schema is unaffected at every position: a stringified key describes as
+`{"type": "object", "additionalProperties": true}` whatever its wire form.
 
 ### 4. Type Mappings (Rust → TypeScript)
 

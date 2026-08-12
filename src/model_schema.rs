@@ -52,9 +52,9 @@ use crate::features::object_id::OBJECT_ID_HEX_PATTERN;
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::{
-    AliasKind, PublishedShape, ShapeQuestion, constraining_pattern, emittable_pattern,
-    lookup_alias_info, portable_pattern, record_shape_question, record_value_shape,
-    shape_questions_for,
+    AliasKind, MapKeyWire, PublishedShape, ShapeQuestion, constraining_pattern, emittable_pattern,
+    lookup_alias_info, portable_pattern, record_key_wire, record_shape_question,
+    record_value_shape, shape_questions_for,
 };
 
 #[cfg(feature = "serde")]
@@ -1223,6 +1223,8 @@ fn process_type_alias(item_type: ItemType, args: &ModelSchemaArgs) -> TokenStrea
     let alias_field_def = get_field_def(export_name.as_str(), &alias.ty, "");
     let kind = alias_target_kind(&alias_field_def);
     register_alias_info(&rust_ident_str, &export_name, &module_name, kind);
+    // An alias *is* its target, so a key written under its name renders in the target's wire form.
+    record_key_wire(&rust_ident_str, alias_field_def.map_key_wire());
     // An alias's schema *is* its target's, so it publishes whatever the target publishes.
     Surface::written(&alias_field_def, &type_parameters_in_scope(&alias.generics))
         .record(&rust_ident_str);
@@ -3338,6 +3340,13 @@ fn branded_alias_kind(inner_field: &Field) -> AliasKind {
     }
 }
 
+/// The form a key written under a brand's name renders in, read off the one field it is written
+/// with — the same inner [`branded_alias_kind`] reads.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn branded_key_wire(inner_field: &Field) -> MapKeyWire {
+    get_field_def("", &inner_field.ty, "").map_key_wire()
+}
+
 /// The `compile_error!` tokens for a branded newtype whose inner reaches a std type serde has no
 /// wire form for, or `None` when it reaches none. Spanned on the inner as written.
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -5206,6 +5215,9 @@ fn register_branded_newtype(
         module_name,
         branded_alias_kind(inner_field),
     );
+    // A brand adds a name to its inner's wire and nothing else, so a key written under it renders
+    // in whatever form the inner writes.
+    record_key_wire(rust_ident, branded_key_wire(inner_field));
     // A brand is written straight onto its inner's schema — `.brand()` hands back that same
     // instance — so it publishes whatever its inner publishes.
     Surface::written(
