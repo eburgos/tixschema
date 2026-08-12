@@ -1,6 +1,11 @@
 use alloc::collections::{BTreeSet, BinaryHeap, VecDeque};
 #[cfg(feature = "chrono")]
 use chrono::NaiveDate;
+#[cfg(all(
+    feature = "chrono",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+use chrono::{DateTime, NaiveDateTime, NaiveTime, Utc};
 use core::hash::BuildHasher;
 use core::iter::once;
 use serde::{Deserialize, Serialize};
@@ -339,6 +344,123 @@ struct ChronoAliasKeyedMaps {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct ChronoKeyedAliasTwin {
     by_day: HashMap<NaiveDate, u64>,
+}
+
+/// A brand over that brand: every link of the chain carries the same `"true"`/`"false"` wire.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+struct EnabledRef(Enabled);
+
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[model_schema()]
+type EnabledKeyRef = EnabledKey;
+
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[model_schema()]
+type EnabledBrandKey = Enabled;
+
+/// Every spelling that reaches a `bool` key, in the positions a map is written in. serde writes
+/// each of these keys as `"true"` or `"false"`, and that is what the two nominal surfaces have to
+/// state: `boolean` is no TypeScript property key, and the brand and alias names over it publish
+/// only the value-shaped schema that rejects the string serde wrote.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct BoolKeyedMaps {
+    alias_of_brand: HashMap<EnabledBrandKey, u64>,
+    aliased: HashMap<EnabledKey, u64>,
+    aliased_chain: HashMap<EnabledKeyRef, u64>,
+    bare: HashMap<bool, u64>,
+    branded: HashMap<Enabled, u64>,
+    branded_chain: HashMap<EnabledRef, u64>,
+    listed: Vec<HashMap<bool, u64>>,
+    nested: HashMap<String, HashMap<bool, u64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    optional: Option<HashMap<bool, u64>>,
+    samples: HashMap<bool, MetricSample>,
+}
+
+/// A brand over a `DateTime<Tz>`.
+#[cfg(all(
+    feature = "chrono",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+struct Stamp(DateTime<Utc>);
+
+#[cfg(all(
+    feature = "chrono",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+struct StampRef(Stamp);
+
+#[cfg(all(
+    feature = "chrono",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[model_schema()]
+type StampKey = DateTime<Utc>;
+
+#[cfg(all(
+    feature = "chrono",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[model_schema()]
+type StampKeyRef = StampKey;
+
+#[cfg(all(
+    feature = "chrono",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[model_schema()]
+type StampBrandKey = Stamp;
+
+/// Every key kind whose value form already spells a TypeScript property key, in one place: each
+/// keeps that form, and the name a brand or alias adds over one keeps standing.
+#[cfg(all(
+    feature = "chrono",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct PropertyKeyedMaps {
+    chars: HashMap<char, u64>,
+    dates: HashMap<NaiveDate, u64>,
+    datetimes: HashMap<NaiveDateTime, u64>,
+    numbers: HashMap<u32, u64>,
+    slots: HashMap<MetricSlot, u64>,
+    strings: HashMap<String, u64>,
+    times: HashMap<NaiveTime, u64>,
+}
+
+/// The `DateTime<Tz>` counterpart of [`BoolKeyedMaps`]. serde writes the key as the RFC 3339 string
+/// it renders the value into; `Date` is no TypeScript property key, and the value-shaped
+/// `z.coerce.date()` rewrites every key it accepts into a locale-dependent rendering.
+#[cfg(all(
+    feature = "chrono",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct DateTimeKeyedMaps {
+    alias_of_brand: HashMap<StampBrandKey, u64>,
+    aliased: HashMap<StampKey, u64>,
+    aliased_chain: HashMap<StampKeyRef, u64>,
+    bare: HashMap<DateTime<Utc>, u64>,
+    branded: HashMap<Stamp, u64>,
+    branded_chain: HashMap<StampRef, u64>,
+    listed: Vec<HashMap<DateTime<Utc>, u64>>,
+    nested: HashMap<String, HashMap<DateTime<Utc>, u64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    optional: Option<HashMap<DateTime<Utc>, u64>>,
+    samples: HashMap<DateTime<Utc>, MetricSample>,
 }
 
 // A String key enumerates nothing, so one `additionalProperties` schema stands for every member —
@@ -1925,17 +2047,18 @@ fn test_scalar_brand_keyed_maps_describe_as_their_bare_inner_twin() {
 }
 
 /// The name is the one thing the brand adds, and the nominal surfaces are where it lands: a
-/// `Record` and a `z.record` keyed by the brand, where the bare-inner twin writes `number` and
-/// `boolean`.
+/// `Record` and a `z.record` keyed by the brand, where the bare-inner twin writes `number`. A brand
+/// over `bool` is the exception — `boolean` spells no property key, so the name has nowhere to land
+/// and the key renders as the pair of strings serde writes.
 #[test]
 #[cfg(all(feature = "typescript", feature = "zod"))]
 fn test_scalar_brand_keyed_maps_name_the_brand_as_the_key_type() {
     let ts_definition = ScalarBrandKeyedMaps::ts_definition();
     for expected in [
-        "by_enabled: Partial<Record<Enabled, number>>;",
+        "by_enabled: Partial<Record<\"true\" | \"false\", number>>;",
         "by_tick: Partial<Record<Tick, number>>;",
         "chained: Partial<Record<TickRef, number>>;",
-        "nested: Partial<Record<Tick, Partial<Record<Enabled, number>>>>;",
+        "nested: Partial<Record<Tick, Partial<Record<\"true\" | \"false\", number>>>>;",
         "samples: Partial<Record<Tick, MetricSample>>;",
     ] {
         assert!(
@@ -1946,10 +2069,11 @@ fn test_scalar_brand_keyed_maps_name_the_brand_as_the_key_type() {
 
     let zod_schema = ScalarBrandKeyedMaps::zod_schema();
     for expected in [
-        "by_enabled: z.record(Enabled$Schema, z.number().int())",
+        "by_enabled: z.partialRecord(z.enum([\"true\", \"false\"]), z.number().int())",
         "by_tick: z.record(Tick$Schema, z.number().int())",
         "chained: z.record(TickRef$Schema, z.number().int())",
-        "nested: z.record(Tick$Schema, z.record(Enabled$Schema, z.number().int()))",
+        "nested: z.record(Tick$Schema, z.partialRecord(z.enum([\"true\", \"false\"]), \
+         z.number().int()))",
         "samples: z.record(Tick$Schema, MetricSample$Schema)",
     ] {
         assert!(
@@ -2135,17 +2259,19 @@ fn test_scalar_alias_keyed_maps_describe_as_their_bare_target_twin() {
 }
 
 /// The nominal surfaces keep the alias's own exported name as the key type, the way they keep a
-/// brand's — a `Record` and a `z.record` keyed by the alias, not by bare `number`.
+/// brand's — a `Record` and a `z.record` keyed by the alias, not by bare `number`. An alias of
+/// `bool` is the exception, for the reason a brand over one is: the name has no property key to
+/// stand in.
 #[test]
 #[cfg(all(feature = "typescript", feature = "zod"))]
 fn test_scalar_alias_keyed_maps_name_the_alias_as_the_key_type() {
     let ts_definition = ScalarAliasKeyedMaps::ts_definition();
     for expected in [
         "branded: Partial<Record<TickBrandKeyType, number>>;",
-        "by_enabled: Partial<Record<EnabledKeyType, number>>;",
+        "by_enabled: Partial<Record<\"true\" | \"false\", number>>;",
         "by_tick: Partial<Record<TickKeyType, number>>;",
         "chained: Partial<Record<TickKeyRefType, number>>;",
-        "nested: Partial<Record<TickKeyType, Partial<Record<EnabledKeyType, number>>>>;",
+        "nested: Partial<Record<TickKeyType, Partial<Record<\"true\" | \"false\", number>>>>;",
         "samples: Partial<Record<TickKeyType, MetricSample>>;",
     ] {
         assert!(
@@ -2157,10 +2283,11 @@ fn test_scalar_alias_keyed_maps_name_the_alias_as_the_key_type() {
     let zod_schema = ScalarAliasKeyedMaps::zod_schema();
     for expected in [
         "branded: z.record(TickBrandKeyType$Schema, z.number().int())",
-        "by_enabled: z.record(EnabledKeyType$Schema, z.number().int())",
+        "by_enabled: z.partialRecord(z.enum([\"true\", \"false\"]), z.number().int())",
         "by_tick: z.record(TickKeyType$Schema, z.number().int())",
         "chained: z.record(TickKeyRefType$Schema, z.number().int())",
-        "nested: z.record(TickKeyType$Schema, z.record(EnabledKeyType$Schema, z.number().int()))",
+        "nested: z.record(TickKeyType$Schema, z.partialRecord(z.enum([\"true\", \"false\"]), \
+         z.number().int()))",
         "samples: z.record(TickKeyType$Schema, MetricSample$Schema)",
     ] {
         assert!(
@@ -2266,6 +2393,460 @@ fn test_chrono_alias_keyed_maps_name_the_alias_as_the_key_type() {
     assert!(
         zod_schema.contains("by_day: z.record(DayKeyType$Schema, z.number().int())"),
         "got: {zod_schema}"
+    );
+}
+
+/// The value every `bool`-keyed assertion below is read off, and the object serde writes for it.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn bool_keyed_maps() -> BoolKeyedMaps {
+    BoolKeyedMaps {
+        alias_of_brand: HashMap::from([(Enabled(true), 1)]),
+        aliased: HashMap::from([(true, 2)]),
+        aliased_chain: HashMap::from([(true, 3)]),
+        bare: HashMap::from([(true, 4), (false, 5)]),
+        branded: HashMap::from([(Enabled(false), 6)]),
+        branded_chain: HashMap::from([(EnabledRef(Enabled(true)), 7)]),
+        listed: vec![HashMap::from([(false, 8)])],
+        nested: HashMap::from([("outer".to_owned(), HashMap::from([(true, 9)]))]),
+        optional: Some(HashMap::from([(true, 10)])),
+        samples: HashMap::from([(
+            true,
+            MetricSample {
+                label: "s".to_owned(),
+            },
+        )]),
+    }
+}
+
+/// The premise: serde writes `"true"` and `"false"` for every one of these keys, whichever name the
+/// key was written under, and reads them back.
+#[test]
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn test_bool_keyed_maps_write_the_two_string_keys() {
+    let maps = bool_keyed_maps();
+    let payload = serde_json::to_value(&maps).unwrap();
+    assert_eq!(
+        payload["alias_of_brand"],
+        serde_json::json!({ "true": 1_u64 })
+    );
+    assert_eq!(payload["aliased"], serde_json::json!({ "true": 2_u64 }));
+    assert_eq!(
+        payload["aliased_chain"],
+        serde_json::json!({ "true": 3_u64 })
+    );
+    assert_eq!(
+        payload["bare"],
+        serde_json::json!({ "true": 4_u64, "false": 5_u64 })
+    );
+    assert_eq!(payload["branded"], serde_json::json!({ "false": 6_u64 }));
+    assert_eq!(
+        payload["branded_chain"],
+        serde_json::json!({ "true": 7_u64 })
+    );
+    assert_eq!(payload["listed"], serde_json::json!([{ "false": 8_u64 }]));
+    assert_eq!(
+        payload["nested"],
+        serde_json::json!({ "outer": { "true": 9_u64 } })
+    );
+    assert_eq!(payload["optional"], serde_json::json!({ "true": 10_u64 }));
+    assert_eq!(
+        payload["samples"],
+        serde_json::json!({ "true": { "label": "s" } })
+    );
+
+    let read_back: BoolKeyedMaps = serde_json::from_value(payload).unwrap();
+    assert_eq!(read_back, maps);
+}
+
+/// `boolean` is not a TypeScript property key, so the key renders as the pair of strings serde
+/// writes — bare, branded or aliased alike, the name being spent where it spells no property key.
+///
+/// Recorded against tsc 6.0.3 under `--strict`: `Partial<Record<boolean, Leaf>>` and every branded
+/// and aliased spelling of it fail with `error TS2344: Type 'boolean' does not satisfy the
+/// constraint 'string | number | symbol'`, while `Partial<Record<"true" | "false", Leaf>>`
+/// compiles.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_bool_keyed_maps_render_the_two_string_keys_on_typescript() {
+    let ts_definition = BoolKeyedMaps::ts_definition();
+    for expected in [
+        "alias_of_brand: Partial<Record<\"true\" | \"false\", number>>;",
+        "aliased: Partial<Record<\"true\" | \"false\", number>>;",
+        "aliased_chain: Partial<Record<\"true\" | \"false\", number>>;",
+        "bare: Partial<Record<\"true\" | \"false\", number>>;",
+        "branded: Partial<Record<\"true\" | \"false\", number>>;",
+        "branded_chain: Partial<Record<\"true\" | \"false\", number>>;",
+        "listed: Array<Partial<Record<\"true\" | \"false\", number>>>;",
+        "nested: Partial<Record<string, Partial<Record<\"true\" | \"false\", number>>>>;",
+        "samples: Partial<Record<\"true\" | \"false\", MetricSample>>;",
+    ] {
+        assert!(
+            ts_definition.contains(expected),
+            "{expected} missing: {ts_definition}"
+        );
+    }
+    assert!(
+        ts_definition
+            .contains("optional: Partial<Record<\"true\" | \"false\", number>> | undefined;"),
+        "got: {ts_definition}"
+    );
+    for spent in ["Record<boolean", "Record<Enabled", "Record<EnabledKeyType"] {
+        assert!(
+            !ts_definition.contains(spent),
+            "{spent} is no property key: {ts_definition}"
+        );
+    }
+}
+
+/// `z.record` over an enumerated key demands every member, so the constructor moves with the key:
+/// `z.partialRecord` admits a one-entry map and an empty one alike.
+///
+/// Recorded against zod 4.4.3 under node v26.2.0: `z.record(z.boolean(), Leaf)` rejects the payload
+/// serde writes with `invalid_key` at path `["true"]` (`Invalid input: expected boolean, received
+/// string`), while `z.partialRecord(z.enum(["true", "false"]), Leaf)` accepts `{"true": …}`,
+/// `{"true": …, "false": …}` and `{}`, rejects `{"True": …}`, and preserves every key.
+#[test]
+#[cfg(feature = "zod")]
+fn test_bool_keyed_maps_render_the_two_string_keys_on_zod() {
+    let zod_schema = BoolKeyedMaps::zod_schema();
+    for expected in [
+        "alias_of_brand: z.partialRecord(z.enum([\"true\", \"false\"]), z.number().int())",
+        "aliased: z.partialRecord(z.enum([\"true\", \"false\"]), z.number().int())",
+        "aliased_chain: z.partialRecord(z.enum([\"true\", \"false\"]), z.number().int())",
+        "bare: z.partialRecord(z.enum([\"true\", \"false\"]), z.number().int())",
+        "branded: z.partialRecord(z.enum([\"true\", \"false\"]), z.number().int())",
+        "branded_chain: z.partialRecord(z.enum([\"true\", \"false\"]), z.number().int())",
+        "listed: z.array(z.partialRecord(z.enum([\"true\", \"false\"]), z.number().int()))",
+        "nested: z.record(z.string(), z.partialRecord(z.enum([\"true\", \"false\"]), \
+         z.number().int()))",
+        "samples: z.partialRecord(z.enum([\"true\", \"false\"]), MetricSample$Schema)",
+        "optional: z.union([z.null().transform(() => undefined), \
+         z.partialRecord(z.enum([\"true\", \"false\"]), z.number().int()), z.undefined()])",
+    ] {
+        assert!(
+            zod_schema.contains(expected),
+            "{expected} missing: {zod_schema}"
+        );
+    }
+    for spent in [
+        "z.record(z.boolean()",
+        "z.record(Enabled$Schema",
+        "z.record(EnabledKeyType$Schema",
+    ] {
+        assert!(
+            !zod_schema.contains(spent),
+            "{spent} rejects the string serde writes: {zod_schema}"
+        );
+    }
+}
+
+/// The structural surface says nothing about a key, so it stays exactly what it was: the open
+/// object every stringified key already described as.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_bool_keyed_maps_describe_as_the_open_object() {
+    let schema = BoolKeyedMaps::json_schema();
+    let open = serde_json::json!({ "type": "object", "additionalProperties": true });
+    for field_name in [
+        "alias_of_brand",
+        "aliased",
+        "aliased_chain",
+        "bare",
+        "branded",
+        "branded_chain",
+        "samples",
+    ] {
+        assert_eq!(schema["properties"][field_name], open, "for {field_name}");
+    }
+    assert_eq!(
+        schema["properties"]["optional"],
+        serde_json::json!({ "anyOf": [open, { "type": "null" }] })
+    );
+    assert_eq!(
+        schema["properties"]["listed"],
+        serde_json::json!({ "type": "array", "items": open })
+    );
+    assert_eq!(
+        schema["properties"]["nested"],
+        serde_json::json!({ "type": "object", "additionalProperties": open })
+    );
+}
+
+/// The value every `DateTime<Tz>`-keyed assertion below is read off.
+#[cfg(all(
+    feature = "chrono",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+fn date_time_keyed_maps() -> DateTimeKeyedMaps {
+    let stamp = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+    DateTimeKeyedMaps {
+        alias_of_brand: HashMap::from([(Stamp(stamp), 1)]),
+        aliased: HashMap::from([(stamp, 2)]),
+        aliased_chain: HashMap::from([(stamp, 3)]),
+        bare: HashMap::from([(stamp, 4)]),
+        branded: HashMap::from([(Stamp(stamp), 5)]),
+        branded_chain: HashMap::from([(StampRef(Stamp(stamp)), 6)]),
+        listed: vec![HashMap::from([(stamp, 7)])],
+        nested: HashMap::from([("outer".to_owned(), HashMap::from([(stamp, 8)]))]),
+        optional: Some(HashMap::from([(stamp, 9)])),
+        samples: HashMap::from([(
+            stamp,
+            MetricSample {
+                label: "s".to_owned(),
+            },
+        )]),
+    }
+}
+
+/// The premise: serde renders the timestamp into an RFC 3339 string with an offset, whichever name
+/// the key was written under, and reads it back.
+#[test]
+#[cfg(all(
+    feature = "chrono",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+fn test_date_time_keyed_maps_write_the_rfc_3339_key() {
+    let maps = date_time_keyed_maps();
+    let payload = serde_json::to_value(&maps).unwrap();
+    for (field_name, value) in [
+        ("alias_of_brand", 1_u64),
+        ("aliased", 2_u64),
+        ("aliased_chain", 3_u64),
+        ("bare", 4_u64),
+        ("branded", 5_u64),
+        ("branded_chain", 6_u64),
+        ("optional", 9_u64),
+    ] {
+        assert_eq!(
+            payload[field_name],
+            serde_json::json!({ "2023-11-14T22:13:20Z": value }),
+            "for {field_name}"
+        );
+    }
+    assert_eq!(
+        payload["listed"],
+        serde_json::json!([{ "2023-11-14T22:13:20Z": 7_u64 }])
+    );
+    assert_eq!(
+        payload["nested"],
+        serde_json::json!({ "outer": { "2023-11-14T22:13:20Z": 8_u64 } })
+    );
+    assert_eq!(
+        payload["samples"],
+        serde_json::json!({ "2023-11-14T22:13:20Z": { "label": "s" } })
+    );
+
+    let read_back: DateTimeKeyedMaps = serde_json::from_value(payload).unwrap();
+    assert_eq!(read_back, maps);
+}
+
+/// `Date` is not a TypeScript property key, so the key renders as the string serde wrote it as.
+///
+/// Recorded against tsc 6.0.3 under `--strict`: `Partial<Record<Date, Leaf>>` and every branded and
+/// aliased spelling of it fail with `error TS2344: Type 'Date' does not satisfy the constraint
+/// 'string | number | symbol'`, while `Partial<Record<string, Leaf>>` compiles.
+#[test]
+#[cfg(all(feature = "chrono", feature = "typescript"))]
+fn test_date_time_keyed_maps_render_a_string_key_on_typescript() {
+    let ts_definition = DateTimeKeyedMaps::ts_definition();
+    for expected in [
+        "alias_of_brand: Partial<Record<string, number>>;",
+        "aliased: Partial<Record<string, number>>;",
+        "aliased_chain: Partial<Record<string, number>>;",
+        "bare: Partial<Record<string, number>>;",
+        "branded: Partial<Record<string, number>>;",
+        "branded_chain: Partial<Record<string, number>>;",
+        "listed: Array<Partial<Record<string, number>>>;",
+        "nested: Partial<Record<string, Partial<Record<string, number>>>>;",
+        "samples: Partial<Record<string, MetricSample>>;",
+        "optional: Partial<Record<string, number>> | undefined;",
+    ] {
+        assert!(
+            ts_definition.contains(expected),
+            "{expected} missing: {ts_definition}"
+        );
+    }
+    for spent in ["Record<Date", "Record<Stamp", "Record<StampKeyType"] {
+        assert!(
+            !ts_definition.contains(spent),
+            "{spent} is no property key: {ts_definition}"
+        );
+    }
+}
+
+/// `z.coerce.date()` in key position accepts the payload and rewrites every key into a
+/// locale-dependent rendering, so the key validates as the string it is.
+///
+/// Recorded against zod 4.4.3 under node v26.2.0: `z.record(z.coerce.date(), Leaf).safeParse({
+/// "2023-11-14T22:13:20Z": {…} })` succeeds with the key rewritten to `"Tue Nov 14 2023 18:13:20
+/// GMT-0400 (Atlantic Standard Time)"`, while `z.record(z.iso.datetime({ offset: true }), Leaf)`
+/// accepts `2023-11-14T22:13:20Z`, `…+05:00` and `…-04:00`, rejects an offsetless string, and
+/// preserves every key it accepts.
+#[test]
+#[cfg(all(feature = "chrono", feature = "zod"))]
+fn test_date_time_keyed_maps_render_an_iso_string_key_on_zod() {
+    let zod_schema = DateTimeKeyedMaps::zod_schema();
+    let key = "z.iso.datetime({ offset: true })";
+    for expected in [
+        format!("alias_of_brand: z.record({key}, z.number().int())"),
+        format!("aliased: z.record({key}, z.number().int())"),
+        format!("aliased_chain: z.record({key}, z.number().int())"),
+        format!("bare: z.record({key}, z.number().int())"),
+        format!("branded: z.record({key}, z.number().int())"),
+        format!("branded_chain: z.record({key}, z.number().int())"),
+        format!("listed: z.array(z.record({key}, z.number().int()))"),
+        format!("nested: z.record(z.string(), z.record({key}, z.number().int()))"),
+        format!("samples: z.record({key}, MetricSample$Schema)"),
+        format!(
+            "optional: z.union([z.null().transform(() => undefined), \
+             z.record({key}, z.number().int()), z.undefined()])"
+        ),
+    ] {
+        assert!(
+            zod_schema.contains(&expected),
+            "{expected} missing: {zod_schema}"
+        );
+    }
+    for spent in [
+        "z.record(z.coerce.date()",
+        "z.record(Stamp$Schema",
+        "z.record(StampKeyType$Schema",
+    ] {
+        assert!(
+            !zod_schema.contains(spent),
+            "{spent} rewrites every key it accepts: {zod_schema}"
+        );
+    }
+}
+
+#[test]
+#[cfg(all(feature = "chrono", feature = "jsonschema"))]
+fn test_date_time_keyed_maps_describe_as_the_open_object() {
+    let schema = DateTimeKeyedMaps::json_schema();
+    let open = serde_json::json!({ "type": "object", "additionalProperties": true });
+    for field_name in [
+        "alias_of_brand",
+        "aliased",
+        "aliased_chain",
+        "bare",
+        "branded",
+        "branded_chain",
+        "samples",
+    ] {
+        assert_eq!(schema["properties"][field_name], open, "for {field_name}");
+    }
+    assert_eq!(
+        schema["properties"]["optional"],
+        serde_json::json!({ "anyOf": [open, { "type": "null" }] })
+    );
+    assert_eq!(
+        schema["properties"]["listed"],
+        serde_json::json!({ "type": "array", "items": open })
+    );
+    assert_eq!(
+        schema["properties"]["nested"],
+        serde_json::json!({ "type": "object", "additionalProperties": open })
+    );
+}
+
+#[test]
+#[cfg(all(feature = "chrono", feature = "typescript"))]
+fn test_property_keyed_maps_keep_their_own_type_on_typescript() {
+    let ts_definition = PropertyKeyedMaps::ts_definition();
+    for expected in [
+        "chars: Partial<Record<string, number>>;",
+        "dates: Partial<Record<string, number>>;",
+        "datetimes: Partial<Record<string, number>>;",
+        "numbers: Partial<Record<number, number>>;",
+        "slots: Partial<Record<MetricSlot, number>>;",
+        "strings: Partial<Record<string, number>>;",
+        "times: Partial<Record<string, number>>;",
+    ] {
+        assert!(
+            ts_definition.contains(expected),
+            "{expected} missing: {ts_definition}"
+        );
+    }
+}
+
+#[test]
+#[cfg(all(feature = "chrono", feature = "zod"))]
+fn test_property_keyed_maps_keep_their_own_schema_on_zod() {
+    let zod_schema = PropertyKeyedMaps::zod_schema();
+    for expected in [
+        "chars: z.record(z.string().length(1), z.number().int())",
+        "dates: z.record(z.iso.date(), z.number().int())",
+        "datetimes: z.record(z.iso.datetime({ local: true }), z.number().int())",
+        "numbers: z.record(z.number().int(), z.number().int())",
+        "slots: z.record(MetricSlot$Schema, z.number().int())",
+        "strings: z.record(z.string(), z.number().int())",
+        "times: z.record(z.preprocess((arg) => {",
+        ", z.iso.time()), z.number().int())",
+    ] {
+        assert!(
+            zod_schema.contains(expected),
+            "{expected} missing: {zod_schema}"
+        );
+    }
+    assert!(
+        !zod_schema.contains("z.partialRecord"),
+        "no key here writes a form its own type does not spell: {zod_schema}"
+    );
+}
+
+#[test]
+#[cfg(all(feature = "chrono", feature = "jsonschema"))]
+fn test_property_keyed_maps_write_the_keys_they_describe() {
+    let maps = PropertyKeyedMaps {
+        chars: HashMap::from([('a', 1)]),
+        dates: HashMap::from([(NaiveDate::from_ymd_opt(2020, 1, 2).unwrap(), 2)]),
+        datetimes: HashMap::from([(
+            NaiveDate::from_ymd_opt(2020, 1, 2)
+                .unwrap()
+                .and_hms_opt(3, 4, 5)
+                .unwrap(),
+            3,
+        )]),
+        numbers: HashMap::from([(7, 4)]),
+        slots: HashMap::from([(MetricSlot::Daily, 5)]),
+        strings: HashMap::from([("s".to_owned(), 6)]),
+        times: HashMap::from([(NaiveTime::from_hms_opt(3, 4, 5).unwrap(), 7)]),
+    };
+    let payload = serde_json::to_value(&maps).unwrap();
+    assert_eq!(payload["chars"], serde_json::json!({ "a": 1_u64 }));
+    assert_eq!(payload["dates"], serde_json::json!({ "2020-01-02": 2_u64 }));
+    assert_eq!(
+        payload["datetimes"],
+        serde_json::json!({ "2020-01-02T03:04:05": 3_u64 })
+    );
+    assert_eq!(payload["numbers"], serde_json::json!({ "7": 4_u64 }));
+    assert_eq!(payload["slots"], serde_json::json!({ "Daily": 5_u64 }));
+    assert_eq!(payload["strings"], serde_json::json!({ "s": 6_u64 }));
+    assert_eq!(payload["times"], serde_json::json!({ "03:04:05": 7_u64 }));
+
+    let read_back: PropertyKeyedMaps = serde_json::from_value(payload).unwrap();
+    assert_eq!(read_back, maps);
+}
+
+/// The brands and aliases themselves are untouched: only the key position spends their names, and
+/// the value surface each publishes is the one it always published.
+#[test]
+#[cfg(all(feature = "typescript", feature = "zod"))]
+fn test_bool_brand_and_alias_keep_their_value_surface() {
+    assert!(
+        Enabled::ts_definition().contains("export type Enabled = boolean & $brand<\"Enabled\">;"),
+        "got: {}",
+        Enabled::ts_definition()
+    );
+    assert!(
+        Enabled::zod_schema().contains("z.boolean().brand<\"Enabled\">()"),
+        "got: {}",
+        Enabled::zod_schema()
+    );
+    assert!(
+        enabled_key_schema::Schema::zod_schema().contains("z.boolean()"),
+        "got: {}",
+        enabled_key_schema::Schema::zod_schema()
     );
 }
 

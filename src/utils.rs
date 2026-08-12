@@ -94,10 +94,26 @@ pub enum AliasKind {
     /// No `enum_members()` and no bare string either, but serde stringifies it into a key all the
     /// same — a number, a `bool`, a chrono rendering, or a brand over one of those. The map is an
     /// object with nothing said about its members, which is what the bare inner already describes
-    /// as; the brand's own name still stands on the nominal surfaces.
+    /// as. Which of those wire forms it stands for is [`MapKeyWire`]'s answer, not this one.
     Stringified,
     /// Undecidable at this expansion — an alias naming a type that was not registered before it.
     Unknown,
+}
+
+/// The form a map key is written in on the two nominal surfaces. The name a key is written under
+/// stands wherever its value form spells a TypeScript property key, and is spent where it does not:
+/// `boolean` and `Date` are no property keys, and the only bindings a brand or alias over one
+/// publishes are the value-shaped schemas Zod refuses or rewrites in key position. Recorded on
+/// [`AliasInfo`] as each brand and alias registers, so a chain forwards its target's answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MapKeyWire {
+    /// serde writes `"true"` or `"false"`.
+    Boolean,
+    /// The value form already spells a property key, so the name written stands.
+    Named,
+    /// serde writes an RFC 3339 timestamp carrying an offset.
+    #[cfg(feature = "chrono")]
+    Timestamp,
 }
 
 /// The `str` method call a `pattern` says the same thing as, for the patterns a regex engine is
@@ -220,6 +236,10 @@ pub struct AliasInfo {
     /// Filled by [`record_flatten_variants`] once that enum's own expansion has rendered them.
     #[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod")))]
     pub flatten_variants: Vec<FlattenVariant>,
+    /// The form a key written under this name renders in, which [`AliasKind::Stringified`] alone
+    /// does not separate. Filled by [`record_key_wire`] for the two shapes that can carry a wire
+    /// form other than their own name — a brand and an alias.
+    pub key_wire: MapKeyWire,
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     pub kind: AliasKind,
     #[cfg(feature = "jsonschema")]
@@ -645,6 +665,7 @@ pub fn register_alias_info(
                 export_name: export_name.to_owned(),
                 #[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod")))]
                 flatten_variants: Vec::new(),
+                key_wire: MapKeyWire::Named,
                 kind,
                 #[cfg(feature = "jsonschema")]
                 module_name: module_name.to_owned(),
@@ -657,6 +678,17 @@ pub fn register_alias_info(
                 zod_union_members: Vec::new(),
             },
         );
+    });
+}
+
+/// Records the form a key written under a name renders in, on the entry that name has just
+/// registered.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+pub fn record_key_wire(rust_ident: &str, wire: MapKeyWire) {
+    ALIAS_INFO.with(|map| {
+        if let Some(info) = map.borrow_mut().get_mut(rust_ident) {
+            info.key_wire = wire;
+        }
     });
 }
 
