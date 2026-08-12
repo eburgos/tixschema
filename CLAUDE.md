@@ -427,7 +427,7 @@ const CorrelationId$RawSchema = z.string().brand<"CorrelationId">().meta({
   description: "CorrelationId",
 });
 
-export const CorrelationId$Schema: $ZodBranded<ZodString, "CorrelationId"> = CorrelationId$RawSchema;
+export const CorrelationId$Schema: typeof CorrelationId$RawSchema = CorrelationId$RawSchema;
 ```
 
 A brand with a type parameter publishes `X$SchemaFactory` plus `X$SchemaDefault` instead, exactly
@@ -469,7 +469,9 @@ export function UserId$SchemaFactory(
   return schema;
 }
 
-export const UserId$SchemaDefault: $ZodBranded<ZodString, "UserId"> = UserId$SchemaFactory(z.string());
+const UserId$RawSchemaDefault = UserId$SchemaFactory(z.string());
+
+export const UserId$SchemaDefault: typeof UserId$RawSchemaDefault = UserId$RawSchemaDefault;
 ```
 
 With `typescript` only (no `zod`):
@@ -481,8 +483,14 @@ export type UserId<IdType> = IdType & { readonly [__brand_UserId]: true };
 Rules:
 - Generic parameter names are preserved exactly (`IdType` stays `IdType` in TypeScript)
 - A brand with no type parameter publishes the `$RawSchema`/`$Schema` const pair; a brand with a
-  type parameter publishes `$SchemaFactory`/`$SchemaDefault` instead — the parameter's inner
-  composes the factory's bound argument (`idType`), never the opaque `z.unknown()`
+  type parameter publishes `$SchemaFactory`/`$SchemaDefault` instead, the default binding its
+  factory call to `{Name}$RawSchemaDefault` first — the parameter's inner composes the factory's
+  bound argument (`idType`), never the opaque `z.unknown()`
+- Either binding is annotated `typeof` the raw `const` beneath it, never a Zod class: `.brand()`
+  narrows at the value position, and the class an inner renders to is zod's to decide
+  (`z.coerce.date()` is a `ZodCoercedDate`, `z.iso.date()` a `ZodISODate`, a brand over a brand a
+  `$ZodBranded` of a `$ZodBranded`). Reading the annotation off the value is the one spelling that
+  stays true of all of them
 - Serde transparent serialization works normally — the newtype is invisible in JSON
 - The slot takes no `#[model_schema_prop(...)]`: a brand publishes its inner's own schema with a
   `.brand()` written onto it, so no key written there reaches any surface, and one written there is
