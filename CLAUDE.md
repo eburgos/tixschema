@@ -243,7 +243,8 @@ reading `FieldDef::map_key_wire`, so the surfaces cannot drift:
 
 | key reached | TypeScript | Zod |
 |-------------|------------|-----|
-| `String`, `char`, `PathBuf`, plain enum, type parameter | own type (`string`, `MetricSlot`, …) | own schema |
+| `String`, `char`, `PathBuf`, type parameter | own type (`string`, …) | own schema |
+| plain enum | own type (`MetricSlot`) | `z.partialRecord(MetricSlot$Schema, V)` |
 | the integer types | `number` | `z.record(z.number().int(), V)` |
 | `NaiveDate` / `NaiveTime` / `NaiveDateTime` | `string` | own schema |
 | `bool` | `"true" \| "false"` | `z.partialRecord(z.enum(["true", "false"]), V)` |
@@ -255,8 +256,11 @@ rejected by `Record`'s own constraint, `z.boolean()` rejects the string serde wr
 alias over one of those loses its name at a key position for the same reason — the only binding it
 publishes is that value-shaped schema — while a brand or alias over any other row keeps its name
 exactly as before. The constructor moves with the key because `z.record` over an enumerated key
-demands every member. JSON Schema is unaffected at every position: a stringified key describes as
-`{"type": "object", "additionalProperties": true}` whatever its wire form.
+demands every member: a key whose published Zod binding enumerates — a plain enum, and any brand or
+alias over one, `.brand()` being type-level only — is written with `z.partialRecord`, which admits
+the subset a `HashMap` holds while still refusing a key outside the enumeration. JSON Schema is
+unaffected at every position: a stringified key describes as `{"type": "object",
+"additionalProperties": true}` whatever its wire form.
 
 ### 4. Type Mappings (Rust → TypeScript)
 

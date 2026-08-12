@@ -525,7 +525,9 @@ impl FieldDef {
             return MapKeyWire::Named;
         };
         if arguments.is_empty() {
-            lookup_alias_info(name).map_or(MapKeyWire::Named, |info| info.key_wire)
+            // A name the registry has no entry for is one declared below this map, which
+            // `map_key_path` already reads as an enumeration.
+            lookup_alias_info(name).map_or(MapKeyWire::Enumerated, |info| info.key_wire)
         } else {
             MapKeyWire::Named
         }
@@ -982,7 +984,7 @@ impl FieldDef {
             MapKeyWire::Boolean => BOOLEAN_KEY_TYPESCRIPT.to_owned(),
             #[cfg(feature = "chrono")]
             MapKeyWire::Timestamp => "string".to_owned(),
-            MapKeyWire::Named => self.typescript_typename(),
+            MapKeyWire::Enumerated | MapKeyWire::Named => self.typescript_typename(),
         }
     }
 
@@ -1180,9 +1182,9 @@ impl FieldDef {
     }
 
     /// The whole record call a map is written as, read off its key: the constructor moves with the
-    /// key schema, because `z.record` over an enumerated key demands every member and the two
-    /// strings a `bool` writes are exactly such an enumeration — a map holding one of them has to
-    /// parse.
+    /// key schema, because `z.record` over an enumerated key demands every member — the two strings
+    /// a `bool` writes and the members of a plain enum are both such an enumeration — and a map
+    /// holding one of them has to parse.
     #[cfg(feature = "zod")]
     fn zod_map_record_call(&self, value_schema: &str) -> String {
         if self.parameter_shape_name().is_some() {
@@ -1191,6 +1193,9 @@ impl FieldDef {
         match self.map_key_wire() {
             MapKeyWire::Boolean => {
                 format!("z.partialRecord({BOOLEAN_KEY_ZOD}, {value_schema})")
+            }
+            MapKeyWire::Enumerated => {
+                format!("z.partialRecord({}, {value_schema})", self.zod_type())
             }
             #[cfg(feature = "chrono")]
             MapKeyWire::Timestamp => format!("z.record({TIMESTAMP_KEY_ZOD}, {value_schema})"),

@@ -692,7 +692,7 @@ fn test_non_recursive_enum_keyed_map_member_keeps_mapped_record() {
 fn test_recursive_enum_keyed_map_member_zod_defers_self_reference() {
     let zod = BucketTreeUnion::zod_schema();
     assert!(
-        zod.contains("z.lazy(() => z.record(Bucket$Schema, BucketTreeUnion$Schema))"),
+        zod.contains("z.lazy(() => z.partialRecord(Bucket$Schema, BucketTreeUnion$Schema))"),
         "Got:\n{zod}"
     );
 }
@@ -1054,7 +1054,9 @@ fn test_untagged_map_member_keys_typescript() {
 fn test_untagged_map_member_keys_zod() {
     let zod = KeyedUnion::zod_schema();
     assert!(
-        zod.contains("z.strictObject({ counts: z.record(Bucket$Schema, z.number().int()), })"),
+        zod.contains(
+            "z.strictObject({ counts: z.partialRecord(Bucket$Schema, z.number().int()), })"
+        ),
         "Got:\n{zod}"
     );
     assert!(
