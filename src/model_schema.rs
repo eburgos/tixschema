@@ -649,6 +649,17 @@ struct ZodDefaultInputs<'defaults> {
     brand: Option<BrandedAnnotation<'defaults>>,
     constrained: Option<(&'defaults str, &'defaults BrandedDefaultChecks)>,
     default_types: &'defaults [(syn::Ident, syn::Type)],
+    #[cfg(feature = "typescript")]
+    republished: bool,
+}
+
+/// What [`zod_published_binding`] needs beside the item's own name, parameters and expression.
+#[cfg(feature = "zod")]
+struct PublishedBinding<'binding> {
+    default_types: &'binding [(syn::Ident, syn::Type)],
+    /// Whether the published expression *is* a sibling's own binding — see
+    /// [`republishes_sibling_binding`].
+    republished: bool,
 }
 
 /// What a branded newtype's `$SchemaDefault` is annotated with, read off the shape of the brand's
@@ -4078,18 +4089,12 @@ fn build_tuple_struct_zod_schema_method(
     item_name: &str,
     rust_ident: &str,
     parameters: &[String],
-    default_types: &[(syn::Ident, syn::Type)],
+    published: &PublishedBinding<'_>,
     zod_body: &str,
 ) -> proc_macro2::TokenStream {
     let reexport = zod_binding_reexport(rust_ident, item_name, parameters);
     let schema_str = zod_published_binding(
-        item_name,
-        rust_ident,
-        parameters,
-        default_types,
-        "",
-        zod_body,
-        &reexport,
+        item_name, rust_ident, parameters, published, "", zod_body, &reexport,
     );
     quote! {
         pub fn zod_schema() -> String {
@@ -4167,7 +4172,10 @@ fn process_tuple_struct(
             &item_name,
             &name.to_string(),
             &type_parameters_in_scope(&item_struct.generics),
-            &args.default_types,
+            &PublishedBinding {
+                default_types: &args.default_types,
+                republished: tuple_struct_republishes_slot(&shape),
+            },
             &tuple_struct_zod_body(&shape),
         ),
     ];
@@ -4826,6 +4834,9 @@ fn build_branded_zod_schema_method(
             brand,
             constrained: constrained_default,
             default_types: &args.default_types,
+            // A brand writes `.brand()` onto whatever it publishes, so it never republishes.
+            #[cfg(feature = "typescript")]
+            republished: false,
         };
         zod_factory_block(
             item_name,
@@ -11881,9 +11892,25 @@ fn zod_default_block(
         })
         .collect();
 
+    let call = format!("{item_name}$SchemaFactory({})", arguments.join(", "));
+
+    #[cfg(feature = "typescript")]
+    if defaults.republished {
+        return republished_default_block(item_name, &call);
+    }
+
+    format!("\n\nexport const {item_name}$SchemaDefault{annotation} = {call};")
+}
+
+/// The `$SchemaDefault` of an item whose factory republishes another item's: the call is bound to a
+/// raw `const` first so the export can read its type back, the same two lines [`zod_const_block`]
+/// writes one level up. A generic item has no `$RawSchema` of its own to name.
+#[cfg(all(feature = "zod", feature = "typescript"))]
+fn republished_default_block(item_name: &str, call: &str) -> String {
     format!(
-        "\n\nexport const {item_name}$SchemaDefault{annotation} = {item_name}$SchemaFactory({});",
-        arguments.join(", ")
+        "\n\nconst {item_name}$RawSchemaDefault = {call};\n\nexport const \
+         {item_name}$SchemaDefault: typeof {item_name}$RawSchemaDefault = \
+         {item_name}$RawSchemaDefault;"
     )
 }
 
@@ -11990,20 +12017,57 @@ fn zod_factory_block(
     format!("{built}\n\n{declarations}{declaration} {{\n{body}\n}}{default_block}{reexport}")
 }
 
+/// Whether an item's published Zod expression *is* a sibling's own binding rather than an
+/// expression built around one. `array_depth == 0` excludes a sequence, whose element the parser
+/// collapses onto without leaving the wrapper under its own name, and `!is_optional()` excludes an
+/// `Option`, which renders as a union of its own; either way the schema is newly built and states
+/// the item's own type. This is not [`FieldDef::names_a_sibling_binding`], which walks the whole
+/// tree and answers for a wrapped sibling too.
+#[cfg(feature = "zod")]
+fn republishes_sibling_binding(field: &FieldDef) -> bool {
+    field.array_depth == 0
+        && !field.is_optional()
+        && matches!(field.field_type, FieldDefType::SiblingType(..))
+}
+
+/// [`republishes_sibling_binding`] for a tuple struct: serde writes a one-slot struct as the slot's
+/// value alone, so a bare sibling slot is published verbatim; every other arity builds a `z.tuple`.
+#[cfg(feature = "zod")]
+fn tuple_struct_republishes_slot(shape: &TupleStructShape) -> bool {
+    match shape {
+        TupleStructShape::Array(_) => false,
+        TupleStructShape::BareValue(slot) => republishes_sibling_binding(slot),
+    }
+}
+
 /// The binding a type that declares no parameter publishes: the raw schema, then the exported
 /// `const` annotated with the type it validates. The annotation is the only place a TypeScript
 /// type is named, so a build without `typescript` writes the same value under a bare `const`.
 #[cfg(feature = "zod")]
-fn zod_const_block(item_name: &str, preamble: &str, expression: &str, reexport: &str) -> String {
+fn zod_const_block(
+    item_name: &str,
+    preamble: &str,
+    expression: &str,
+    reexport: &str,
+    republished: bool,
+) -> String {
     #[cfg(feature = "typescript")]
     {
+        // A republished binding reads its annotation back off what it published: `.brand()`
+        // narrows at the value position, which restating the item's own type discards.
+        let annotation = if republished {
+            format!("typeof {item_name}$RawSchema")
+        } else {
+            format!("ZodType<{item_name}>")
+        };
         format!(
             "{preamble}const {item_name}$RawSchema = {expression};\n\nexport const \
-             {item_name}$Schema: ZodType<{item_name}> = {item_name}$RawSchema;{reexport}"
+             {item_name}$Schema: {annotation} = {item_name}$RawSchema;{reexport}"
         )
     }
     #[cfg(not(feature = "typescript"))]
     {
+        let _: &_ = &republished;
         format!("{preamble}export const {item_name}$Schema = {expression};{reexport}")
     }
 }
@@ -12015,19 +12079,27 @@ fn zod_published_binding(
     item_name: &str,
     rust_ident: &str,
     parameters: &[String],
-    default_types: &[(syn::Ident, syn::Type)],
+    published: &PublishedBinding<'_>,
     preamble: &str,
     expression: &str,
     reexport: &str,
 ) -> String {
     if parameters.is_empty() {
-        zod_const_block(item_name, preamble, expression, reexport)
+        zod_const_block(
+            item_name,
+            preamble,
+            expression,
+            reexport,
+            published.republished,
+        )
     } else {
         let defaults = ZodDefaultInputs {
             #[cfg(feature = "typescript")]
             brand: None,
             constrained: None,
-            default_types,
+            default_types: published.default_types,
+            #[cfg(feature = "typescript")]
+            republished: published.republished,
         };
         zod_factory_block(
             item_name, rust_ident, parameters, &defaults, preamble, expression, reexport,
@@ -12163,7 +12235,11 @@ fn generate_zod_schema_method(
             item_name,
             rust_ident,
             parameters,
-            default_types,
+            // A struct always closes an object of its own, so it publishes no sibling's binding.
+            &PublishedBinding {
+                default_types,
+                republished: false,
+            },
             &preamble,
             &expression,
             &reexport,
@@ -12379,7 +12455,11 @@ fn generate_discriminated_enum_zod_schema_method(
             item_name,
             rust_ident,
             parameters,
-            default_types,
+            // A union over its variants is an expression of its own, never a sibling's binding.
+            &PublishedBinding {
+                default_types,
+                republished: false,
+            },
             "",
             schema_code,
             &reexport,
@@ -12514,14 +12594,18 @@ fn generate_alias_zod_method(
         // The alias's rendered Zod is its FieldDef expression (a tuple alias yields
         // the null-flavored `z.tuple([...])`, a scalar yields `z.string()`, a sibling
         // yields `Name$Schema`).
-        let schema_code = surface_field_def(&alias.generics, field_def).zod_type();
+        let surface = surface_field_def(&alias.generics, field_def);
+        let schema_code = surface.zod_type();
         let parameters = type_parameters_in_scope(&alias.generics);
         let reexport = zod_binding_reexport(rust_ident, export_name, &parameters);
         let body = zod_published_binding(
             export_name,
             rust_ident,
             &parameters,
-            default_types,
+            &PublishedBinding {
+                default_types,
+                republished: republishes_sibling_binding(&surface),
+            },
             "",
             &schema_code,
             &reexport,
