@@ -490,6 +490,10 @@ Rules:
   combination — with the item re-emitted stripped of it. The three checks a brand does carry are
   written on the type: `#[model_schema(pattern = "...", minLength = N, maxLength = N)]`. A
   `#[serde(transparent)]` struct with a *named* field is no brand and is untouched
+- An item whose published expression *is* another item's binding — an alias of a brand, a one-slot
+  tuple struct over one, and the `$SchemaDefault` of either where it declares a parameter — is
+  annotated `typeof {Name}$RawSchema` rather than `ZodType<{Name}>`, so the brand's narrowing
+  survives the republish. An item that builds an expression of its own keeps `ZodType<{Name}>`
 
 ### Generic Types and Zod Factories
 
