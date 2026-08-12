@@ -263,6 +263,60 @@ struct StringKeyedEnumBrandTwin {
     samples: HashMap<String, MetricSample>,
 }
 
+/// A brand over the brand over a plain enum: every link publishes the enum's own schema with one
+/// more `.brand()` written onto it, so every link enumerates.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[model_schema(no_display)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+struct SlotBrandRef(SlotBrand);
+
+/// An alias of a plain enum, an alias of that alias, and an alias of the brand over the enum.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[model_schema()]
+type SlotAliasKey = MetricSlot;
+
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[model_schema()]
+type SlotAliasKeyRef = SlotAliasKey;
+
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[model_schema()]
+type SlotBrandAliasKey = SlotBrand;
+
+/// Every spelling that reaches a key whose published Zod binding enumerates its members, in the
+/// positions a map is written in. A `HashMap` holds any subset of those members and serde writes
+/// the subset, so the Zod constructor has to admit one — while the name each key is written under
+/// keeps standing on TypeScript, an enum member name being a property key already.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct EnumeratedKeyedMaps {
+    alias_of_brand: HashMap<SlotBrandAliasKey, u64>,
+    aliased: HashMap<SlotAliasKey, u64>,
+    aliased_chain: HashMap<SlotAliasKeyRef, u64>,
+    bare: HashMap<MetricSlot, u64>,
+    branded: HashMap<SlotBrand, u64>,
+    branded_chain: HashMap<SlotBrandRef, u64>,
+    forward: HashMap<LaterSlot, u64>,
+    listed: Vec<HashMap<MetricSlot, u64>>,
+    nested: HashMap<MetricSlot, HashMap<MetricSlot, u64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    optional: Option<HashMap<MetricSlot, u64>>,
+    samples: HashMap<MetricSlot, MetricSample>,
+}
+
+/// The key of `EnumeratedKeyedMaps::forward`, declared below the map that keys by it: the registry
+/// holds no entry for it while that map expands, so the key's wire form is the one an unregistered
+/// name is guessed at.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[model_schema()]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum LaterSlot {
+    First,
+    Second,
+}
+
 /// A brand over a chrono value: serde renders the inner into the key — `{"2020-01-02": …}` — the
 /// way it does for the bare chrono key.
 #[cfg(feature = "chrono")]
@@ -1226,19 +1280,20 @@ fn test_enum_keyed_scalar_value_maps_typescript_generation() {
 
     let zod_schema = EnumKeyedScalarValueMaps::zod_schema();
     assert!(
-        zod_schema.contains("string_value: z.record(MetricSlot$Schema, z.string())"),
+        zod_schema.contains("string_value: z.partialRecord(MetricSlot$Schema, z.string())"),
         "Got: {zod_schema}"
     );
     assert!(
-        zod_schema.contains("u64_value: z.record(MetricSlot$Schema, z.number().int())"),
+        zod_schema.contains("u64_value: z.partialRecord(MetricSlot$Schema, z.number().int())"),
         "Got: {zod_schema}"
     );
     assert!(
-        zod_schema.contains("bool_value: z.record(MetricSlot$Schema, z.boolean())"),
+        zod_schema.contains("bool_value: z.partialRecord(MetricSlot$Schema, z.boolean())"),
         "Got: {zod_schema}"
     );
     assert!(
-        zod_schema.contains("string_array: z.record(MetricSlot$Schema, z.array(z.string()))"),
+        zod_schema
+            .contains("string_array: z.partialRecord(MetricSlot$Schema, z.array(z.string()))"),
         "Got: {zod_schema}"
     );
 }
@@ -1432,10 +1487,10 @@ fn test_enum_keyed_nested_map_values_typescript_generation() {
 
     let zod_schema = EnumKeyedNestedMapValues::zod_schema();
     for expected in [
-        "counts: z.record(MetricSlot$Schema, z.record(z.string(), z.number().int())),",
-        "labels: z.record(MetricSlot$Schema, z.record(z.string(), z.string())),",
-        "rows: z.record(MetricSlot$Schema, z.array(z.record(z.string(), z.string()))),",
-        "samples: z.record(MetricSlot$Schema, z.record(z.string(), MetricSample$Schema)),",
+        "counts: z.partialRecord(MetricSlot$Schema, z.record(z.string(), z.number().int())),",
+        "labels: z.partialRecord(MetricSlot$Schema, z.record(z.string(), z.string())),",
+        "rows: z.partialRecord(MetricSlot$Schema, z.array(z.record(z.string(), z.string()))),",
+        "samples: z.partialRecord(MetricSlot$Schema, z.record(z.string(), MetricSample$Schema)),",
     ] {
         assert!(
             zod_schema.contains(expected),
@@ -1578,11 +1633,11 @@ fn test_nested_enum_keyed_map_values_typescript_generation() {
 
     let zod_schema = NestedEnumKeyedMapValues::zod_schema();
     for expected in [
-        "arrayed: z.record(z.string(), z.array(z.record(MetricBucket$Schema, z.number().int()))),",
-        "enum_keyed_outer: z.record(MetricSlot$Schema, z.record(MetricBucket$Schema, z.number().int())),",
-        "optional: z.record(z.string(), z.nullable(z.record(MetricBucket$Schema, z.number().int()))),",
-        "siblings: z.record(MetricSlot$Schema, z.record(MetricBucket$Schema, MetricSample$Schema)),",
-        "string_keyed_outer: z.record(z.string(), z.record(MetricBucket$Schema, z.number().int())),",
+        "arrayed: z.record(z.string(), z.array(z.partialRecord(MetricBucket$Schema, z.number().int()))),",
+        "enum_keyed_outer: z.partialRecord(MetricSlot$Schema, z.partialRecord(MetricBucket$Schema, z.number().int())),",
+        "optional: z.record(z.string(), z.nullable(z.partialRecord(MetricBucket$Schema, z.number().int()))),",
+        "siblings: z.partialRecord(MetricSlot$Schema, z.partialRecord(MetricBucket$Schema, MetricSample$Schema)),",
+        "string_keyed_outer: z.record(z.string(), z.partialRecord(MetricBucket$Schema, z.number().int())),",
     ] {
         assert!(
             zod_schema.contains(expected),
@@ -1607,12 +1662,14 @@ fn test_enum_keyed_sibling_value_maps_typescript_generation() {
 
     let zod_schema = EnumKeyedSiblingValueMaps::zod_schema();
     assert!(
-        zod_schema.contains("sample_value: z.record(MetricSlot$Schema, MetricSample$Schema)"),
+        zod_schema
+            .contains("sample_value: z.partialRecord(MetricSlot$Schema, MetricSample$Schema)"),
         "Got: {zod_schema}"
     );
     assert!(
-        zod_schema
-            .contains("sample_array: z.record(MetricSlot$Schema, z.array(MetricSample$Schema))"),
+        zod_schema.contains(
+            "sample_array: z.partialRecord(MetricSlot$Schema, z.array(MetricSample$Schema))"
+        ),
         "Got: {zod_schema}"
     );
 }
@@ -2145,7 +2202,7 @@ fn test_enum_brand_keyed_maps_name_the_brand_as_the_key_type() {
     );
     let zod_schema = EnumBrandKeyedMaps::zod_schema();
     assert!(
-        zod_schema.contains("samples: z.record(SlotBrand$Schema, MetricSample$Schema)"),
+        zod_schema.contains("samples: z.partialRecord(SlotBrand$Schema, MetricSample$Schema)"),
         "got: {zod_schema}"
     );
 }
@@ -2572,6 +2629,207 @@ fn test_bool_keyed_maps_describe_as_the_open_object() {
     );
 }
 
+/// The value every enumerated-key assertion below is read off: one member of two in every map, and
+/// the other member in the maps whose value is a sibling, so no assertion can pass by holding the
+/// whole enumeration.
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn enumerated_keyed_maps() -> EnumeratedKeyedMaps {
+    EnumeratedKeyedMaps {
+        alias_of_brand: HashMap::from([(SlotBrand(MetricSlot::Daily), 1)]),
+        aliased: HashMap::from([(MetricSlot::Daily, 2)]),
+        aliased_chain: HashMap::from([(MetricSlot::Weekly, 3)]),
+        bare: HashMap::from([(MetricSlot::Daily, 4)]),
+        branded: HashMap::from([(SlotBrand(MetricSlot::Weekly), 5)]),
+        branded_chain: HashMap::from([(SlotBrandRef(SlotBrand(MetricSlot::Daily)), 6)]),
+        forward: HashMap::from([(LaterSlot::First, 7)]),
+        listed: vec![HashMap::from([(MetricSlot::Daily, 8)])],
+        nested: HashMap::from([(MetricSlot::Daily, HashMap::from([(MetricSlot::Weekly, 9)]))]),
+        optional: Some(HashMap::from([(MetricSlot::Daily, 10)])),
+        samples: HashMap::from([(
+            MetricSlot::Weekly,
+            MetricSample {
+                label: "s".to_owned(),
+            },
+        )]),
+    }
+}
+
+/// The premise: serde writes the members the map holds and no others, whichever name the key was
+/// written under, and reads them back.
+#[test]
+#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+fn test_enumerated_keyed_maps_write_only_the_members_they_hold() {
+    let maps = enumerated_keyed_maps();
+    let payload = serde_json::to_value(&maps).unwrap();
+    assert_eq!(
+        payload["alias_of_brand"],
+        serde_json::json!({ "Daily": 1_u64 })
+    );
+    assert_eq!(payload["aliased"], serde_json::json!({ "Daily": 2_u64 }));
+    assert_eq!(
+        payload["aliased_chain"],
+        serde_json::json!({ "Weekly": 3_u64 })
+    );
+    assert_eq!(payload["bare"], serde_json::json!({ "Daily": 4_u64 }));
+    assert_eq!(payload["branded"], serde_json::json!({ "Weekly": 5_u64 }));
+    assert_eq!(
+        payload["branded_chain"],
+        serde_json::json!({ "Daily": 6_u64 })
+    );
+    assert_eq!(payload["forward"], serde_json::json!({ "First": 7_u64 }));
+    assert_eq!(payload["listed"], serde_json::json!([{ "Daily": 8_u64 }]));
+    assert_eq!(
+        payload["nested"],
+        serde_json::json!({ "Daily": { "Weekly": 9_u64 } })
+    );
+    assert_eq!(payload["optional"], serde_json::json!({ "Daily": 10_u64 }));
+    assert_eq!(
+        payload["samples"],
+        serde_json::json!({ "Weekly": { "label": "s" } })
+    );
+
+    let read_back: EnumeratedKeyedMaps = serde_json::from_value(payload).unwrap();
+    assert_eq!(read_back, maps);
+}
+
+/// An enum member name is a property key already, so every key here keeps the name it was written
+/// under and every member of it stays optional.
+#[test]
+#[cfg(feature = "typescript")]
+fn test_enumerated_keyed_maps_keep_the_written_key_on_typescript() {
+    let ts_definition = EnumeratedKeyedMaps::ts_definition();
+    for expected in [
+        "alias_of_brand: Partial<Record<SlotBrandAliasKeyType, number>>;",
+        "aliased: Partial<Record<SlotAliasKeyType, number>>;",
+        "aliased_chain: Partial<Record<SlotAliasKeyRefType, number>>;",
+        "bare: Partial<Record<MetricSlot, number>>;",
+        "branded: Partial<Record<SlotBrand, number>>;",
+        "branded_chain: Partial<Record<SlotBrandRef, number>>;",
+        "forward: Partial<Record<LaterSlot, number>>;",
+        "listed: Array<Partial<Record<MetricSlot, number>>>;",
+        "nested: Partial<Record<MetricSlot, Partial<Record<MetricSlot, number>>>>;",
+        "optional: Partial<Record<MetricSlot, number>> | undefined;",
+        "samples: Partial<Record<MetricSlot, MetricSample>>;",
+    ] {
+        assert!(
+            ts_definition.contains(expected),
+            "{expected} missing: {ts_definition}"
+        );
+    }
+}
+
+/// `z.record` over an enumerated key demands every member, and every key here publishes a Zod
+/// binding that enumerates: a plain enum, a brand over one, a brand over that brand, an alias over
+/// either, and a name whose enum is declared below the map. A `HashMap` holds any subset and serde
+/// writes the subset, so the constructor moves with the key.
+///
+/// Recorded against zod 4.4.3 under node v26.2.0, on this fixture's own emission before the
+/// constructor moved. The partial payload serde writes for it is rejected with `invalid_type:
+/// Invalid input: expected number, received undefined` at `["alias_of_brand","Weekly"]`,
+/// `["aliased","Weekly"]`, `["aliased_chain","Daily"]`, `["bare","Weekly"]`, `["branded","Daily"]`,
+/// `["branded_chain","Weekly"]`, `["forward","Second"]`, `["listed",0,"Weekly"]` and
+/// `["nested","Daily","Daily"]`, with `invalid_type: Invalid input: expected record, received
+/// undefined` at `["nested","Weekly"]`, `invalid_type: Invalid input: expected object, received
+/// undefined` at `["samples","Daily"]`, and `invalid_union: Invalid input` at `["optional"]`. The
+/// empty payload is rejected at both members of every one of those maps. Only the full payload
+/// parses. ajv 8 with `strict` off and `allErrors` on accepts the partial, the full and the empty
+/// payload alike against the same fixture's JSON Schema document, and rejects a key outside the
+/// enumeration with `{"keyword":"additionalProperties","params":{"additionalProperty":"Hourly"},
+/// "message":"must NOT have additional properties"}` at `/bare` — so of the three surfaces only
+/// Zod was wrong.
+///
+/// After the move, zod 4.4.3 parses the partial, the full and the empty payload with every key
+/// preserved byte for byte, and still rejects `"Hourly"` under `bare` with `invalid_key: Invalid
+/// key in record @ ["bare","Hourly"]`.
+#[test]
+#[cfg(feature = "zod")]
+fn test_enumerated_keyed_maps_admit_the_members_they_hold_on_zod() {
+    let zod_schema = EnumeratedKeyedMaps::zod_schema();
+    for expected in [
+        "alias_of_brand: z.partialRecord(SlotBrandAliasKeyType$Schema, z.number().int())",
+        "aliased: z.partialRecord(SlotAliasKeyType$Schema, z.number().int())",
+        "aliased_chain: z.partialRecord(SlotAliasKeyRefType$Schema, z.number().int())",
+        "bare: z.partialRecord(MetricSlot$Schema, z.number().int())",
+        "branded: z.partialRecord(SlotBrand$Schema, z.number().int())",
+        "branded_chain: z.partialRecord(SlotBrandRef$Schema, z.number().int())",
+        "get forward() { return z.partialRecord(LaterSlot$Schema, z.number().int()); }",
+        "listed: z.array(z.partialRecord(MetricSlot$Schema, z.number().int()))",
+        "nested: z.partialRecord(MetricSlot$Schema, z.partialRecord(MetricSlot$Schema, \
+         z.number().int()))",
+        "samples: z.partialRecord(MetricSlot$Schema, MetricSample$Schema)",
+        "optional: z.union([z.null().transform(() => undefined), \
+         z.partialRecord(MetricSlot$Schema, z.number().int()), z.undefined()])",
+    ] {
+        assert!(
+            zod_schema.contains(expected),
+            "{expected} missing: {zod_schema}"
+        );
+    }
+    for spent in [
+        "z.record(MetricSlot$Schema",
+        "z.record(LaterSlot$Schema",
+        "z.record(SlotAliasKeyType$Schema",
+        "z.record(SlotAliasKeyRefType$Schema",
+        "z.record(SlotBrand$Schema",
+        "z.record(SlotBrandRef$Schema",
+        "z.record(SlotBrandAliasKeyType$Schema",
+    ] {
+        assert!(
+            !zod_schema.contains(spent),
+            "{spent} demands every member: {zod_schema}"
+        );
+    }
+}
+
+/// The structural surface already admits the subset serde wrote: one property per member and no
+/// `required`, whether the key enumerates its members on this surface too or describes as the open
+/// object a brand over one describes as.
+#[test]
+#[cfg(feature = "jsonschema")]
+fn test_enumerated_keyed_maps_keep_the_document_that_admits_a_subset() {
+    let schema = EnumeratedKeyedMaps::json_schema();
+    let counted = serde_json::json!({
+        "type": "object",
+        "properties": { "Daily": { "type": "integer" }, "Weekly": { "type": "integer" } },
+        "additionalProperties": false,
+    });
+    let open = serde_json::json!({
+        "type": "object",
+        "additionalProperties": { "type": "integer" },
+    });
+    for field_name in ["aliased", "aliased_chain", "bare"] {
+        assert_eq!(
+            schema["properties"][field_name], counted,
+            "for {field_name}"
+        );
+    }
+    for field_name in ["alias_of_brand", "branded", "branded_chain"] {
+        assert_eq!(schema["properties"][field_name], open, "for {field_name}");
+    }
+    assert_eq!(
+        schema["properties"]["forward"],
+        serde_json::json!({
+            "type": "object",
+            "properties": { "First": { "type": "integer" }, "Second": { "type": "integer" } },
+            "additionalProperties": false,
+        })
+    );
+    assert_eq!(
+        schema["properties"]["listed"],
+        serde_json::json!({ "type": "array", "items": counted })
+    );
+    assert_eq!(
+        schema["properties"]["optional"],
+        serde_json::json!({ "anyOf": [counted, { "type": "null" }] })
+    );
+    for field_name in ["aliased", "bare", "forward", "nested", "samples"] {
+        assert!(
+            schema["properties"][field_name]["required"].is_null(),
+            "{field_name} demands a member: {schema}"
+        );
+    }
+}
+
 /// The value every `DateTime<Tz>`-keyed assertion below is read off.
 #[cfg(all(
     feature = "chrono",
@@ -2778,7 +3036,7 @@ fn test_property_keyed_maps_keep_their_own_schema_on_zod() {
         "dates: z.record(z.iso.date(), z.number().int())",
         "datetimes: z.record(z.iso.datetime({ local: true }), z.number().int())",
         "numbers: z.record(z.number().int(), z.number().int())",
-        "slots: z.record(MetricSlot$Schema, z.number().int())",
+        "slots: z.partialRecord(MetricSlot$Schema, z.number().int())",
         "strings: z.record(z.string(), z.number().int())",
         "times: z.record(z.preprocess((arg) => {",
         ", z.iso.time()), z.number().int())",
@@ -2788,10 +3046,15 @@ fn test_property_keyed_maps_keep_their_own_schema_on_zod() {
             "{expected} missing: {zod_schema}"
         );
     }
-    assert!(
-        !zod_schema.contains("z.partialRecord"),
-        "no key here writes a form its own type does not spell: {zod_schema}"
-    );
+    for spent in [
+        "z.enum([\"true\", \"false\"])",
+        "z.iso.datetime({ offset: true })",
+    ] {
+        assert!(
+            !zod_schema.contains(spent),
+            "no key here writes a form its own type does not spell: {zod_schema}"
+        );
+    }
 }
 
 #[test]
@@ -2959,7 +3222,8 @@ fn test_optional_map_values_are_null_flavored_on_both_key_paths() {
 
     let zod_schema = OptionalMapValues::zod_schema();
     assert!(
-        zod_schema.contains("enum_keyed: z.record(MetricSlot$Schema, z.nullable(z.string()))"),
+        zod_schema
+            .contains("enum_keyed: z.partialRecord(MetricSlot$Schema, z.nullable(z.string()))"),
         "Got: {zod_schema}"
     );
     assert!(
@@ -3116,9 +3380,9 @@ fn test_wrapped_map_fields_typescript_generation() {
 
     let zod_schema = WrappedMapFields::zod_schema();
     for expected in [
-        "bucket_counts: z.record(MetricBucket$Schema, z.number().int()),",
+        "bucket_counts: z.partialRecord(MetricBucket$Schema, z.number().int()),",
         "labels: z.record(z.string(), z.string()),",
-        "wrapped_bucket_counts: z.array(z.record(MetricBucket$Schema, z.number().int())),",
+        "wrapped_bucket_counts: z.array(z.partialRecord(MetricBucket$Schema, z.number().int())),",
         "wrapped_labels: z.array(z.record(z.string(), z.string())),",
     ] {
         assert!(
@@ -3699,7 +3963,7 @@ fn test_set_slots_validate_as_the_vec_slot_twin() {
     let zod_schema = SetSlotValues::zod_schema();
     for spelling in [
         "aliased_tags: z.record(z.string(), z.array(MetricTagRefType$Schema)),",
-        "enum_keyed_tags: z.record(MetricSlot$Schema, z.array(MetricTag$Schema)),",
+        "enum_keyed_tags: z.partialRecord(MetricSlot$Schema, z.array(MetricTag$Schema)),",
         "optional_element_ids: z.record(z.string(), z.array(z.nullable(z.number().int()))),",
         "optional_ids: z.record(z.string(), z.nullable(z.array(z.number().int()))),",
         "tuple_ids: z.tuple([z.string(), z.array(z.number().int())]),",
@@ -3906,7 +4170,7 @@ fn test_nested_sequences_validate_at_the_depth_they_are_written() {
 
     let slot_schema = NestedSequenceSlots::zod_schema();
     for spelling in [
-        "enum_keyed_rows: z.record(MetricSlot$Schema, z.array(z.array(z.number().int()))),",
+        "enum_keyed_rows: z.partialRecord(MetricSlot$Schema, z.array(z.array(z.number().int()))),",
         "optional_rows: z.record(z.string(), z.nullable(z.array(z.array(z.number().int())))),",
         "rows: z.record(z.string(), z.array(z.array(z.number().int()))),",
         "set_rows: z.record(z.string(), z.array(z.array(z.number().int()))),",

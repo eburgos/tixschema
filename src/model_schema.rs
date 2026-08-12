@@ -3708,6 +3708,11 @@ fn enum_module_idents(
     let module_name = ident_schema_module_name(&name.to_string());
     let module_ident = Ident::new(&module_name, name.span());
     register_alias_info(&name.to_string(), item_name, &module_name, kind);
+    // The `z.enum` a plain enum publishes is the one enumeration a key can be written under
+    // directly; every other shape reaches one only through a brand or an alias.
+    if kind == AliasKind::EnumMembers {
+        record_key_wire(&name.to_string(), MapKeyWire::Enumerated);
+    }
     surface.record(&name.to_string());
     (module_name, module_ident)
 }

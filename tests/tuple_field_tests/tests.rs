@@ -501,8 +501,8 @@ fn test_enum_keyed_map_element_tuple_field_ts_and_zod() {
     {
         let zod = EnumKeyedMapSlotRow::zod_schema();
         for expected in [
-            "slot: z.tuple([z.string(), z.record(SlotKind$Schema, z.number().int())])",
-            "nested_slot: z.tuple([z.string(), z.record(z.string(), z.record(SlotKind$Schema, z.number().int()))])",
+            "slot: z.tuple([z.string(), z.partialRecord(SlotKind$Schema, z.number().int())])",
+            "nested_slot: z.tuple([z.string(), z.record(z.string(), z.partialRecord(SlotKind$Schema, z.number().int()))])",
         ] {
             assert!(zod.contains(expected), "missing {expected}, got: {zod}");
         }

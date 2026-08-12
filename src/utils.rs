@@ -104,11 +104,15 @@ pub enum AliasKind {
 /// stands wherever its value form spells a TypeScript property key, and is spent where it does not:
 /// `boolean` and `Date` are no property keys, and the only bindings a brand or alias over one
 /// publishes are the value-shaped schemas Zod refuses or rewrites in key position. Recorded on
-/// [`AliasInfo`] as each brand and alias registers, so a chain forwards its target's answer.
+/// [`AliasInfo`] as a plain enum, a brand and an alias register, so a chain forwards its target's
+/// answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MapKeyWire {
     /// serde writes `"true"` or `"false"`.
     Boolean,
+    /// The name written stands, but the schema it publishes admits a closed set of members, so the
+    /// record constructor has to be the one that does not demand all of them.
+    Enumerated,
     /// The value form already spells a property key, so the name written stands.
     Named,
     /// serde writes an RFC 3339 timestamp carrying an offset.
@@ -237,8 +241,8 @@ pub struct AliasInfo {
     #[cfg(all(feature = "serde", any(feature = "typescript", feature = "zod")))]
     pub flatten_variants: Vec<FlattenVariant>,
     /// The form a key written under this name renders in, which [`AliasKind::Stringified`] alone
-    /// does not separate. Filled by [`record_key_wire`] for the two shapes that can carry a wire
-    /// form other than their own name — a brand and an alias.
+    /// does not separate. Filled by [`record_key_wire`] for the three shapes that can carry a wire
+    /// form other than the plain name — a plain enum, a brand and an alias.
     pub key_wire: MapKeyWire,
     #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
     pub kind: AliasKind,
