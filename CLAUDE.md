@@ -1001,9 +1001,7 @@ tixschema/
 │   └── ...
 ├── justfile                      # Task runner (commands)
 ├── Cargo.toml                    # Dependencies, features
-├── README.md                     # User documentation
-├── CURSORRULES.md                # Detailed usage rules
-└── .cursorrules                  # Original cursor rules
+└── README.md                     # User documentation
 ```
 
 ## Common Pitfalls
@@ -1042,5 +1040,4 @@ println!("Enabled: {:?}", Features::enabled_features());
 ## Related Documentation
 
 - [README.md](README.md) - User guide, examples, troubleshooting
-- [CURSORRULES.md](CURSORRULES.md) - Detailed usage rules and patterns
 - [justfile](justfile) - All available commands with descriptions
