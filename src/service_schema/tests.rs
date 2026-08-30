@@ -44,11 +44,23 @@ fn declared(source: &str) -> ItemTrait {
     syn::parse_str::<ItemTrait>(source).unwrap()
 }
 
+fn expanded(source: &str) -> String {
+    exec_service_schema(TokenStream::new(), declared(source).to_token_stream()).to_string()
+}
+
 fn generated_inputs(operation: &OperationDef) -> Option<&[(Ident, Type)]> {
     match &operation.inputs {
         OperationInputs::Generated(carried) => Some(carried.as_slice()),
         OperationInputs::Empty | OperationInputs::Named(_) => None,
     }
+}
+
+fn message_names(service: &ServiceDef) -> Vec<String> {
+    service
+        .generated_messages
+        .iter()
+        .map(|declared| declared.ident.to_string())
+        .collect()
 }
 
 fn named_input(operation: &OperationDef) -> Option<&Type> {
@@ -461,5 +473,156 @@ fn a_result_arm_naming_the_context_is_refused_too() {
         reported[0].contains("puts the context type `Ctx` on the wire"),
         "got: {}",
         reported[0]
+    );
+}
+
+#[test]
+fn a_message_is_declared_for_every_operation_that_named_none_and_for_no_other() {
+    assert_eq!(
+        message_names(&service(MIXED_SERVICE)),
+        vec!["ExpireCreditRequest", "SweepRequest"],
+        "the argument-list operation and the zero-argument one, and neither of the three that \
+         named a message of their own"
+    );
+}
+
+#[test]
+fn a_declared_message_records_the_arguments_in_declaration_order() {
+    let read = service(MIXED_SERVICE);
+    let declared_message = &read.generated_messages[0];
+    assert_eq!(
+        declared_message.declared_for.to_string(),
+        "expire_credit",
+        "the message knows the operation it was declared for, which its documentation names"
+    );
+    let carried: Vec<(String, String)> = declared_message
+        .fields
+        .iter()
+        .map(|(name, declared_type)| (name.to_string(), spelled(declared_type)))
+        .collect();
+    assert_eq!(
+        carried,
+        vec![
+            ("organization_id".to_owned(), "OrganizationId".to_owned()),
+            ("credit_id".to_owned(), "CreditId".to_owned()),
+        ],
+        "the emitter writes the fields off this list rather than reading the operation again"
+    );
+}
+
+#[test]
+fn a_message_declared_for_an_operation_taking_nothing_carries_no_fields() {
+    let read = service(MIXED_SERVICE);
+    let declared_message = &read.generated_messages[1];
+    assert_eq!(declared_message.ident.to_string(), "SweepRequest");
+    assert!(
+        declared_message.fields.is_empty(),
+        "an empty message, not the absence of one"
+    );
+}
+
+#[test]
+fn a_declared_message_is_emitted_with_everything_a_hand_written_type_carries() {
+    let emitted = expanded(MIXED_SERVICE);
+    assert!(
+        emitted.contains("pub struct ExpireCreditRequest"),
+        "got: {emitted}"
+    );
+    assert!(
+        emitted.contains("pub organization_id : OrganizationId"),
+        "got: {emitted}"
+    );
+    assert!(
+        emitted.contains("pub credit_id : CreditId"),
+        "got: {emitted}"
+    );
+    assert!(
+        emitted.contains(":: tixschema :: model_schema ()"),
+        "a client on the far side has to construct one, so it gets every schema a declared type \
+         gets. Got: {emitted}"
+    );
+    assert!(
+        emitted.contains(":: serde :: Serialize") && emitted.contains(":: serde :: Deserialize"),
+        "the author never wrote the type and has nowhere to put a derive. Got: {emitted}"
+    );
+    assert!(
+        emitted.contains("rename_all = \"camelCase\""),
+        "an argument is snake_case in Rust and camelCase on the wire. Got: {emitted}"
+    );
+}
+
+#[test]
+fn an_operation_taking_nothing_is_emitted_an_empty_message_rather_than_none() {
+    let emitted = expanded(MIXED_SERVICE);
+    assert!(
+        emitted.contains("pub struct SweepRequest { }"),
+        "got: {emitted}"
+    );
+}
+
+#[test]
+fn nothing_is_emitted_for_the_operation_whose_argument_already_is_the_message() {
+    let emitted = expanded(MIXED_SERVICE);
+    assert!(
+        !emitted.contains("GetAvailableBalanceRequest"),
+        "the argument is the author's own type, reusable and versionable, and a second declaration \
+         over it would take that away. Got: {emitted}"
+    );
+    assert!(
+        !emitted.contains("CanGenerateRequest") && !emitted.contains("ApplyBundleRequest {"),
+        "got: {emitted}"
+    );
+}
+
+#[test]
+fn a_declared_message_says_in_its_own_documentation_what_its_field_names_cost() {
+    let emitted = expanded(MIXED_SERVICE);
+    assert!(
+        emitted.contains("field names are the operation's parameter names"),
+        "renaming a parameter moves a key on the wire, and the rustdoc is where an author meets \
+         that before choosing the form. Got: {emitted}"
+    );
+    assert!(
+        emitted.contains("no compiler will flag it"),
+        "got: {emitted}"
+    );
+}
+
+#[test]
+fn a_declared_message_colliding_with_a_type_the_service_names_is_refused() {
+    let reported = refusals(
+        "pub trait UsageService<Ctx> {
+            async fn sweep(&self, ctx: &Ctx) -> Result<SweepReport, UsageError>;
+            async fn replay(&self, ctx: &Ctx, req: SweepRequest) -> Result<SweepReport, UsageError>;
+        }",
+    );
+    assert_eq!(reported.len(), 1, "got: {reported:?}");
+    assert_eq!(
+        reported[0],
+        "service_schema: operation `sweep` names no message, so `SweepRequest` is declared for \
+         it, and operation `replay` already names a type spelled `SweepRequest`\n       \
+         one name cannot carry two declarations; rename the operation, or have it take the \
+         existing `SweepRequest` as its one argument",
+        "the refusal names both declarations, rather than leaving the compiler to report a \
+         duplicate definition against a type the author never wrote"
+    );
+}
+
+#[test]
+fn a_declared_message_sharing_a_name_with_a_type_written_elsewhere_is_not_refused() {
+    assert!(
+        refusals(
+            "pub trait UsageService<Ctx> {
+                async fn sweep(&self, ctx: &Ctx) -> Result<SweepReport, UsageError>;
+                async fn replay(
+                    &self,
+                    ctx: &Ctx,
+                    req: crate::messages::SweepRequest,
+                ) -> Result<SweepReport, UsageError>;
+            }"
+        )
+        .is_empty(),
+        "a qualified spelling names a type in another module, which a declaration beside the \
+         trait does not collide with"
     );
 }

@@ -864,6 +864,21 @@ pub fn model_schema_prop(_args: TokenStream, input: TokenStream) -> TokenStream 
 /// else an implementation needs that has no business being on the wire. Every operation takes it
 /// as its first argument after `&self`. It reaches no message and no schema.
 ///
+/// An operation receives exactly one message. Where it takes one argument after the context, that
+/// argument *is* the message — a type the author declared, reusable and versionable from anywhere,
+/// and the form to reach for. Where it takes several, or none, the macro declares
+/// `<Operation>Request` for it: `expire_credit` gets an `ExpireCreditRequest` with one field per
+/// argument in declaration order, and `sweep` gets an empty `SweepRequest` rather than no message,
+/// so an operation that later needs a field gains one instead of changing from carrying no payload
+/// to carrying one and breaking every caller. A declared message carries `#[model_schema()]`, the
+/// serde derives and `#[serde(rename_all = "camelCase")]`, so it publishes the same TypeScript
+/// type, Zod schema and JSON Schema a hand-written message publishes and writes the same camelCase
+/// keys — a client on the far side has to be able to construct one.
+///
+/// The multi-argument form costs something: a field name is a parameter name, so renaming a
+/// parameter moves a key on the wire and no compiler flags it. Every declared message says so in
+/// its own rustdoc.
+///
 /// An operation returns `Result<Success, Error>`, with both arms declared, unless it is marked
 /// `#[service_schema_op(one_way)]`, in which case it returns nothing. The two are checked against
 /// each other in both directions, so a forgotten `Result` is a build failure naming both choices

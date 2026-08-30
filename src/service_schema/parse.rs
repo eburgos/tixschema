@@ -17,7 +17,9 @@
 //!   derive.
 //! - **What it receives.** One message, always. [`OperationInputs`] records which of the three
 //!   ways it was declared: the argument that already is the message, the argument list a message
-//!   is declared from, or nothing, which gets an empty message.
+//!   is declared from, or nothing, which gets an empty message. Where the macro declares one,
+//!   [`OperationDef::generated_message_ident`] is what it is called, derived here rather than at
+//!   each emitter so the messages, the dispatcher and the client cannot disagree about the name.
 //! - **What it answers with.** [`OperationOutcome::Reply`] carries the two declared arms, or
 //!   [`OperationOutcome::OneWay`] says there is no reply to carry.
 //!
@@ -26,17 +28,13 @@
 //!
 //! # What is deliberately not here
 //!
-//! The **name of a message the macro declares** is not a field. `<Operation>Request` is the
-//! convention, and the task that first emits one derives it here so the messages, the dispatcher
-//! and the client cannot disagree about what the type is called.
-//!
-//! **Nothing about how a message is annotated** is here either. Every ident and every type below
-//! is the author's own, carried verbatim, so an emitter is free to write whatever derives and
-//! serde attributes a generated message needs onto them.
+//! **Nothing about how a message is annotated** is here. Every ident and every type below is the
+//! author's own, carried verbatim, so an emitter is free to write whatever derives and serde
+//! attributes a generated message needs onto them.
 
 use crate::rename_rule::RenameRule;
 use proc_macro2::TokenTree;
-use quote::ToTokens as _;
+use quote::{ToTokens as _, format_ident};
 use std::collections::HashMap;
 use syn::spanned::Spanned as _;
 use syn::{
@@ -56,9 +54,26 @@ const UNKNOWN_DIRECTIVE_MESSAGE: &str = concat!(
 pub struct ServiceDef {
     /// The trait's type parameter, which every operation takes and no message carries.
     pub context_param: Ident,
+    /// Every message the macro declares for this service, in declaration order: one per operation
+    /// that named none. Recorded so the emitter that writes them and the emitter that registers
+    /// the service's published artifacts read one list rather than each deciding again what the
+    /// macro declared, and so nothing the macro wrote can be left out of that registration.
+    pub generated_messages: Vec<GeneratedMessage>,
     /// The trait as declared: `UsageService`.
     pub ident: Ident,
     pub operations: Vec<OperationDef>,
+}
+
+/// One message the macro declares, for an operation that named none. Everything the type needs to
+/// be written and to be registered, so neither reader re-reads the operation it came from.
+pub struct GeneratedMessage {
+    /// The operation it was declared for: `expire_credit`. Its rustdoc names it.
+    pub declared_for: Ident,
+    /// One field per argument, in declaration order, or none at all where the operation takes
+    /// nothing after the context.
+    pub fields: Vec<(Ident, Type)>,
+    /// The type declared: `ExpireCreditRequest`.
+    pub ident: Ident,
 }
 
 /// One operation: a name in three spellings, a message in, and either a reply or nothing.
@@ -71,6 +86,26 @@ pub struct OperationDef {
     pub ts_name: String,
     /// What the wire carries: `get-available-balance`, or the `message = "..."` override.
     pub wire_name: String,
+}
+
+impl OperationDef {
+    /// What the message declared for this operation is called: `expire_credit` becomes
+    /// `ExpireCreditRequest`. Nothing for the operation whose one argument already is the
+    /// message, since none is declared for it.
+    ///
+    /// Spanned on the method name, so every error about the declared type — this crate's own
+    /// refusals and the compiler's duplicate-definition report alike — points at the operation
+    /// that declared it rather than at a call site of the macro.
+    pub fn generated_message_ident(&self) -> Option<Ident> {
+        match self.inputs {
+            OperationInputs::Named(_) => None,
+            OperationInputs::Empty | OperationInputs::Generated(_) => Some(format_ident!(
+                "{}Request",
+                RenameRule::PascalCase.apply_to_field(&self.ident.to_string()),
+                span = self.ident.span()
+            )),
+        }
+    }
 }
 
 /// How the incoming message was declared. Which one it is decides who declares the message, never
@@ -152,6 +187,7 @@ pub fn parse_service(declared: &ItemTrait) -> Result<ServiceDef, syn::Error> {
     }
     let service = ServiceDef {
         context_param,
+        generated_messages: operations.iter().filter_map(generated_message).collect(),
         ident: declared.ident.clone(),
         operations,
     };
@@ -368,6 +404,78 @@ fn duplicate_wire_name_message(
     )
 }
 
+/// The message declared for one operation, or nothing where its one argument already is the
+/// message.
+fn generated_message(operation: &OperationDef) -> Option<GeneratedMessage> {
+    let fields = match &operation.inputs {
+        OperationInputs::Named(_) => return None,
+        OperationInputs::Empty => Vec::new(),
+        OperationInputs::Generated(arguments) => arguments.clone(),
+    };
+    Some(GeneratedMessage {
+        declared_for: operation.ident.clone(),
+        fields,
+        ident: operation.generated_message_ident()?,
+    })
+}
+
+fn generated_message_collision_message(
+    operation: &Ident,
+    declared: &Ident,
+    taken: &Ident,
+) -> String {
+    format!(
+        "service_schema: operation `{operation}` names no message, so `{declared}` is declared \
+         for it, and operation `{taken}` already names a type spelled `{declared}`\n       \
+         one name cannot carry two declarations; rename the operation, or have it take the \
+         existing `{declared}` as its one argument"
+    )
+}
+
+/// A message the macro declares lands beside the trait, so a type of that name written there
+/// already would be declared twice, and the compiler would report a duplicate definition against
+/// a declaration the author never wrote. What is visible from here is the service itself: a name
+/// another operation writes as its message or as a result arm is a type the author declared, and
+/// colliding with one is refused by name.
+///
+/// Two operations declaring the same message need no rule of their own — the `<Operation>Request`
+/// name and the TypeScript spelling are the same derivation but for the leading letter's case, so
+/// a pair that collides in one collides in the other, and the TypeScript rule above refuses it.
+///
+/// A type declared in the module but named nowhere in the service is out of reach of any rule
+/// written here; what covers that case is the span
+/// [`OperationDef::generated_message_ident`] writes, which puts the compiler's own
+/// duplicate-definition report on the operation the second declaration came from.
+fn generated_message_collisions(service: &ServiceDef) -> Option<syn::Error> {
+    let mut refusals: Option<syn::Error> = None;
+    for declared in &service.generated_messages {
+        let Some(taken) = service
+            .operations
+            .iter()
+            .filter(|other| other.ident != declared.declared_for)
+            .find(|other| {
+                wire_types(other)
+                    .into_iter()
+                    .any(|named| unqualified_name(named) == Some(&declared.ident))
+            })
+        else {
+            continue;
+        };
+        refusals = Some(combined(
+            refusals.take(),
+            syn::Error::new(
+                declared.ident.span(),
+                generated_message_collision_message(
+                    &declared.declared_for,
+                    &declared.ident,
+                    &taken.ident,
+                ),
+            ),
+        ));
+    }
+    refusals
+}
+
 /// Whether a type names the context anywhere inside it, `Ctx` and `Vec<Ctx>` alike. The context is
 /// a type parameter of the trait, so an occurrence of its name in a message or a result arm is the
 /// context itself rather than a coincidence.
@@ -443,7 +551,25 @@ fn service_refusals(service: &ServiceDef) -> Option<syn::Error> {
             }
         }
     }
+    if let Some(collisions) = generated_message_collisions(service) {
+        refusals = Some(combined(refusals.take(), collisions));
+    }
     refusals
+}
+
+/// The name a type is written with, where that name is the one that resolves in the scope a
+/// generated message lands in: a path of one segment, unqualified and carrying no arguments.
+/// Anything else — `crate::messages::SweepRequest`, `Vec<SweepRequest>` — names something a
+/// declaration beside the trait does not collide with.
+fn unqualified_name(declared: &Type) -> Option<&Ident> {
+    let Type::Path(named) = declared else {
+        return None;
+    };
+    if named.qself.is_some() || named.path.segments.len() != 1 {
+        return None;
+    }
+    let only = named.path.segments.first()?;
+    only.arguments.is_none().then_some(&only.ident)
 }
 
 /// Every type an operation puts on the wire: the message it receives, and both arms of the reply
