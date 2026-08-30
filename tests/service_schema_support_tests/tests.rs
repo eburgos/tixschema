@@ -10,20 +10,22 @@
 use core::future::{Future, ready};
 use core::pin::pin;
 use core::task::{Context as PollContext, Poll, Waker};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tixschema::service_schema;
 
+#[derive(Deserialize, Serialize)]
 pub struct PurgeRequest {
     pub organization_id: String,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case", tag = "errorCode")]
 pub enum SweepError {
     DbError,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 pub struct SweepReport {
     pub swept: u32,
 }

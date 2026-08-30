@@ -940,6 +940,9 @@ pub fn model_schema_prop(_args: TokenStream, input: TokenStream) -> TokenStream 
 ///     #[service_schema_op(one_way)]
 ///     async fn apply_bundle(&self, ctx: &Ctx, req: BalanceRequest);
 /// }
+///
+/// // Declared at module scope, which is where the generated module reaches for them.
+/// fn main() {}
 /// ```
 #[proc_macro_attribute]
 pub fn service_schema(args: TokenStream, input: TokenStream) -> TokenStream {
@@ -976,6 +979,8 @@ pub fn service_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 ///     #[service_schema_op(one_way)]
 ///     async fn apply_bundle(&self, ctx: &Ctx, req: ApplyBundleRequest);
 /// }
+///
+/// fn main() {}
 /// ```
 #[proc_macro_attribute]
 pub fn service_schema_op(_args: TokenStream, input: TokenStream) -> TokenStream {

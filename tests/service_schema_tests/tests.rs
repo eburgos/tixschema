@@ -6,19 +6,21 @@
 use core::future::{Future, ready};
 use core::pin::pin;
 use core::task::{Context as PollContext, Poll, Waker};
+use serde::{Deserialize, Serialize};
 use tixschema::service_schema;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct BalanceRequest {
     pub organization_id: String,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct BalanceResponse {
     pub credits: u32,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case", tag = "errorCode")]
 pub enum ProbeError {
     DbError,
     InsufficientBalance,

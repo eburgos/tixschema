@@ -626,3 +626,153 @@ fn a_declared_message_sharing_a_name_with_a_type_written_elsewhere_is_not_refuse
          trait does not collide with"
     );
 }
+
+#[test]
+fn dispatch_is_generic_over_the_implementing_type_and_answers_through_the_handle() {
+    let emitted = expanded(MIXED_SERVICE);
+    assert!(
+        emitted.contains(
+            "pub fn dispatch < S , Ctx , R > (svc : & S , ctx : & Ctx , message : & \
+             IncomingMessage , reply : & R ,) -> impl :: core :: future :: Future < Output = () > \
+             + Send where S : super :: UsageService < Ctx > + Sync , Ctx : Sync , R : Reply + Sync"
+        ),
+        "it returns nothing, and a trait with `async fn` has no `dyn` form to offer. Got: \
+         {emitted}"
+    );
+    assert!(
+        !emitted.contains("& dyn"),
+        "no `&dyn` form exists to offer, so none is emitted. Got: {emitted}"
+    );
+}
+
+#[test]
+fn the_dispatcher_and_the_client_are_emitted_inside_the_module_the_constructors_are_private_to() {
+    let emitted = expanded(MIXED_SERVICE);
+    let module = emitted.find("pub mod usage_service_schema").unwrap();
+    let contract = emitted.find("pub trait UsageService").unwrap();
+    for inside in ["pub fn dispatch", "pub struct UsageServiceClient"] {
+        let at = emitted.find(inside).unwrap();
+        assert!(
+            at > module && at < contract,
+            "`{inside}` has to sit between the module opening and the trait that follows it, or \
+             it is not inside the module at all. Got: {emitted}"
+        );
+    }
+}
+
+#[test]
+fn every_arm_is_keyed_on_the_wire_name_and_never_on_anything_in_the_payload() {
+    let emitted = expanded(MIXED_SERVICE);
+    for carried in [
+        "\"get-available-balance\" =>",
+        "\"expire-credit\" =>",
+        "\"sweep\" =>",
+        "\"usage-generation-request\" =>",
+        "\"apply-bundle\" =>",
+    ] {
+        assert!(emitted.contains(carried), "got: {emitted}");
+    }
+    assert!(
+        emitted.contains("match message . operation . as_str ()"),
+        "the operation is the one the transport read off the wire. Got: {emitted}"
+    );
+}
+
+#[test]
+fn an_arm_validates_before_it_calls_and_faults_on_both_ways_the_message_can_be_wrong() {
+    let emitted = expanded(MIXED_SERVICE);
+    let deserialized = emitted
+        .find("serde_json :: from_slice :: < AvailableBalanceRequest >")
+        .unwrap();
+    let validated = emitted.find("received . validate ()").unwrap();
+    let called = emitted.find("svc . get_available_balance").unwrap();
+    assert!(
+        deserialized < validated && validated < called,
+        "an implementation may assume its incoming message is valid, which only holds if the \
+         validator runs before it is entered. Got: {emitted}"
+    );
+    assert!(
+        emitted.contains("ServiceFault :: undeserializable_payload")
+            && emitted.contains("ServiceFault :: failed_validation")
+            && emitted.contains("ServiceFault :: unknown_operation"),
+        "got: {emitted}"
+    );
+}
+
+#[test]
+fn a_one_way_arm_settles_the_delivery_rather_than_skipping_the_handle() {
+    let emitted = expanded(MIXED_SERVICE);
+    let called = emitted.find("svc . apply_bundle").unwrap();
+    let settled = emitted[called..].find("reply . done ()").unwrap();
+    let next_arm = emitted[called..]
+        .find("=>")
+        .unwrap_or(emitted.len() - called);
+    assert!(
+        settled < next_arm,
+        "a one-way arm that touched nothing would leave its delivery unacknowledged forever. \
+         Got: {emitted}"
+    );
+}
+
+#[test]
+fn the_client_carries_one_method_per_operation_under_the_operation_s_own_wire_name() {
+    let emitted = expanded(MIXED_SERVICE);
+    assert!(
+        emitted.contains("pub struct UsageServiceClient < T : Transport >"),
+        "got: {emitted}"
+    );
+    for named in [
+        "pub fn get_available_balance < Ctx >",
+        "pub fn expire_credit < Ctx >",
+        "pub fn sweep < Ctx >",
+        "pub fn can_generate < Ctx >",
+        "pub fn apply_bundle < Ctx >",
+    ] {
+        assert!(emitted.contains(named), "got: {emitted}");
+    }
+    assert!(
+        emitted.contains("self . transport . request (\"usage-generation-request\" , sending)"),
+        "the name the wire carries is the one the transport is handed, beside the payload. Got: \
+         {emitted}"
+    );
+    assert!(
+        emitted.contains("self . transport . notify (\"apply-bundle\" , sending)"),
+        "a one-way operation is sent rather than called. Got: {emitted}"
+    );
+}
+
+#[test]
+fn a_client_method_validates_before_it_reaches_the_transport() {
+    let emitted = expanded(MIXED_SERVICE);
+    let validated = emitted.find("sending . validate ()").unwrap();
+    let sent = emitted.find("self . transport .").unwrap();
+    assert!(
+        validated < sent,
+        "a message the client refuses never becomes a remote error a round trip later. Got: \
+         {emitted}"
+    );
+    assert!(
+        emitted.contains("return Err (CallError :: Fault (ServiceFault :: failed_validation ("),
+        "the operation never ran, so it is not one of its declared errors. Got: {emitted}"
+    );
+}
+
+#[test]
+fn a_fault_is_read_back_through_a_private_mirror_rather_than_by_widening_the_fault() {
+    let emitted = expanded(MIXED_SERVICE);
+    assert!(
+        emitted.contains("struct FaultOnTheWire") && !emitted.contains("pub struct FaultOnTheWire"),
+        "the mirror is the seam, and it is private to the module. Got: {emitted}"
+    );
+    assert!(
+        emitted.contains("fn into_fault (self) -> ServiceFault"),
+        "got: {emitted}"
+    );
+    let fault = emitted.find("pub struct ServiceFault").unwrap();
+    let derives = &emitted[fault.saturating_sub(200)..fault];
+    assert!(
+        !derives.contains("Deserialize"),
+        "a public `Deserialize` on the fault is a public constructor by another name. Got: \
+         {derives}"
+    );
+}

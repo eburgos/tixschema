@@ -25,11 +25,11 @@
 //! the wire. Reading one back off the wire is the generated client's business and therefore
 //! happens inside the module, where the constructors are.
 //!
-//! **What follows for the emitters still to be written:** the dispatcher (svcschema-05) and the
-//! Rust client (svcschema-06) are the only two places a fault is built, so both must be emitted
-//! *inside* this module rather than beside it. Today `exec_service_schema` splices every emitter's
-//! tokens at the trait's own scope; landing either of those two means composing them into the
-//! module this file opens, and the four constructors below have no caller until then.
+//! **The dispatcher and the Rust client are emitted inside this module**, which is why [`emit`]
+//! takes their tokens rather than being spliced beside them. They are the only two places a fault
+//! is built, so the constructors below stay private and reachable from nowhere else. The module
+//! also opens with `use super::*;`, since both of them name the trait's own message types, which
+//! the author declared beside the trait.
 //!
 //! # Why `Reply` has three methods
 //!
@@ -49,7 +49,10 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::Ident;
 
-pub fn emit(service: &ServiceDef) -> TokenStream {
+/// `generated` is what [`dispatch`](super::dispatch) and [`client`](super::client) wrote: it
+/// lands inside the module rather than beside it, because both reach constructors that are private
+/// to it.
+pub fn emit(service: &ServiceDef, generated: &TokenStream) -> TokenStream {
     let declared = &service.ident;
     // The trait ident snake-cased under the same `_schema` suffix a `#[model_schema]` type's
     // generated module carries. Derived through `RenameRule`, as the other two spellings of an
@@ -73,12 +76,15 @@ pub fn emit(service: &ServiceDef) -> TokenStream {
     quote! {
         #[doc = #module_doc]
         pub mod #module {
+            use super::*;
+
             #fault
             #call_error
             #reply
             #accessors
             #constructors
             #renderings
+            #generated
         }
     }
 }
@@ -91,9 +97,13 @@ pub fn emit(service: &ServiceDef) -> TokenStream {
 /// ```rust
 /// use tixschema::service_schema;
 ///
+/// #[derive(serde::Deserialize, serde::Serialize)]
 /// pub struct BalanceRequest;
+///
+/// #[derive(serde::Deserialize, serde::Serialize)]
 /// pub struct BalanceResponse;
 ///
+/// #[derive(serde::Deserialize, serde::Serialize)]
 /// pub enum BalanceError {
 ///     DbError,
 /// }
@@ -116,6 +126,9 @@ pub fn emit(service: &ServiceDef) -> TokenStream {
 ///         Err(CallError::Fault(_defect)) => "reported, and a human paged",
 ///     }
 /// }
+///
+/// // Declared at module scope, which is where the generated module reaches for them.
+/// fn main() {}
 /// ```
 fn call_error_declaration(declared: &Ident) -> TokenStream {
     let call_error_doc = format!(
@@ -148,6 +161,7 @@ fn call_error_declaration(declared: &Ident) -> TokenStream {
 /// ```rust
 /// use tixschema::service_schema;
 ///
+/// #[derive(serde::Deserialize, serde::Serialize)]
 /// pub struct PurgeRequest;
 ///
 /// #[service_schema()]
@@ -171,6 +185,8 @@ fn call_error_declaration(declared: &Ident) -> TokenStream {
 ///         fault.detail(),
 ///     )
 /// }
+///
+/// fn main() {}
 /// ```
 fn fault_accessors() -> TokenStream {
     quote! {
@@ -213,6 +229,7 @@ fn fault_accessors() -> TokenStream {
 /// ```rust,compile_fail
 /// use tixschema::service_schema;
 ///
+/// #[derive(serde::Deserialize, serde::Serialize)]
 /// pub struct PurgeRequest;
 ///
 /// #[service_schema()]
@@ -228,14 +245,16 @@ fn fault_accessors() -> TokenStream {
 ///         let _refused = sweep_service_schema::ServiceFault::unknown_operation("purge");
 ///     }
 /// }
+///
+/// fn main() {}
 /// ```
 fn fault_constructors() -> TokenStream {
     quote! {
         impl ServiceFault {
-            fn failed_validation(operation: &str, field: &str, detail: &str) -> Self {
+            fn failed_validation(operation: &str, field: Option<&str>, detail: &str) -> Self {
                 Self {
                     detail: detail.to_owned(),
-                    field: Some(field.to_owned()),
+                    field: field.map(str::to_owned),
                     kind: ServiceFaultKind::FailedValidation,
                     operation: operation.to_owned(),
                 }
@@ -321,6 +340,7 @@ fn fault_declaration(declared: &Ident) -> TokenStream {
 /// use std::sync::Mutex;
 /// use tixschema::service_schema;
 ///
+/// #[derive(serde::Deserialize, serde::Serialize)]
 /// pub struct PurgeRequest;
 ///
 /// #[service_schema()]
@@ -350,6 +370,8 @@ fn fault_declaration(declared: &Ident) -> TokenStream {
 ///         self.settled.lock().unwrap().push(serde_json::to_string(&value).unwrap());
 ///     }
 /// }
+///
+/// fn main() {}
 /// ```
 fn reply_declaration(declared: &Ident) -> TokenStream {
     let reply_doc = format!(
