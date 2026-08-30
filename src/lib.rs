@@ -856,11 +856,23 @@ pub fn model_schema_prop(_args: TokenStream, input: TokenStream) -> TokenStream 
 
 /// # `service_schema`
 ///
-/// Spike scaffolding, not the shipping macro. Annotates a trait whose first type parameter is the
-/// service's context, re-emits it with `async fn` desugared to `-> impl Future + Send`, and
-/// declares a `<Operation>Request` message — carrying `#[model_schema()]` — for every operation
-/// that did not already name one. The context is threaded through the trait and appears in no
-/// generated message.
+/// Declares a service as a trait: one trait, one context, and one message in and one message out
+/// per operation. Failing to implement an operation is a compile error, which is the whole reason
+/// the construct is a trait rather than a table of handlers.
+///
+/// The trait carries a type parameter that is the service's **context** — a logger, and whatever
+/// else an implementation needs that has no business being on the wire. Every operation takes it
+/// as its first argument after `&self`. It reaches no message and no schema.
+///
+/// An operation returns `Result<Success, Error>`, with both arms declared, unless it is marked
+/// `#[service_schema_op(one_way)]`, in which case it returns nothing. The two are checked against
+/// each other in both directions, so a forgotten `Result` is a build failure naming both choices
+/// rather than a silent fire-and-forget.
+///
+/// The trait is emitted as declared, except that `async fn` is desugared to
+/// `-> impl Future<Output = …> + Send` — the desugaring the compiler's own `async_fn_in_trait`
+/// warning recommends. A trait with `async fn` is not dyn compatible, so a dispatcher generated
+/// from it is generic over the implementing type rather than taking `&dyn`.
 ///
 /// ```rust
 /// use tixschema::{model_schema, service_schema};
@@ -871,18 +883,86 @@ pub fn model_schema_prop(_args: TokenStream, input: TokenStream) -> TokenStream 
 ///     pub organization_id: String,
 /// }
 ///
+/// #[model_schema()]
+/// #[derive(serde::Serialize, serde::Deserialize)]
+/// pub struct BalanceResponse {
+///     pub credits: u32,
+/// }
+///
+/// #[model_schema()]
+/// #[derive(serde::Serialize, serde::Deserialize)]
+/// #[serde(tag = "errorCode", rename_all = "kebab-case")]
+/// pub enum UsageError {
+///     DbError,
+/// }
+///
 /// #[service_schema()]
-/// pub trait ProbeService<Ctx> {
-///     async fn get_balance(&self, ctx: &Ctx, req: BalanceRequest) -> BalanceRequest;
+/// pub trait UsageService<Ctx> {
+///     /// One argument after the context: that argument already is the message.
+///     async fn get_balance(
+///         &self,
+///         ctx: &Ctx,
+///         req: BalanceRequest,
+///     ) -> Result<BalanceResponse, UsageError>;
+///
+///     /// Several arguments: the message is declared from the argument list.
 ///     async fn expire_credit(
 ///         &self,
 ///         ctx: &Ctx,
 ///         organization_id: String,
 ///         credit_id: String,
-///     ) -> BalanceRequest;
+///     ) -> Result<BalanceResponse, UsageError>;
+///
+///     /// Carried on the wire as `usage-generation-request` rather than `can-generate`.
+///     #[service_schema_op(message = "usage-generation-request")]
+///     async fn can_generate(
+///         &self,
+///         ctx: &Ctx,
+///         req: BalanceRequest,
+///     ) -> Result<BalanceResponse, UsageError>;
+///
+///     /// No reply, so no return type and no error arm.
+///     #[service_schema_op(one_way)]
+///     async fn apply_bundle(&self, ctx: &Ctx, req: BalanceRequest);
 /// }
 /// ```
 #[proc_macro_attribute]
 pub fn service_schema(args: TokenStream, input: TokenStream) -> TokenStream {
     exec_service_schema(args.into(), input.into()).into()
+}
+
+/// # `service_schema_op`
+///
+/// The per-operation directive inside a `#[service_schema()]` trait. `service_schema` reads it and
+/// strips it before emitting the trait; reached on its own it expands to the operation unchanged.
+///
+/// ## Directives
+///
+/// - `message = "..."` — what this operation is called **on the wire**, replacing the kebab-cased
+///   method name. It moves nothing else: Rust still calls the operation by its method name and
+///   TypeScript by the camelCased one. It exists because services already ship wire names nobody
+///   would derive — `can_generate` dispatches today as `usage-generation-request`, and the two
+///   share no substring. A greenfield operation writes no attribute at all.
+/// - `one_way` — the operation expects no reply, and therefore declares no return type. An
+///   operation without the flag must return `Result<Success, Error>`. There is no error arm on a
+///   one-way operation, because there is no reply to carry one.
+///
+/// ```rust
+/// use tixschema::{model_schema, service_schema};
+///
+/// #[model_schema()]
+/// #[derive(serde::Serialize, serde::Deserialize)]
+/// pub struct ApplyBundleRequest {
+///     pub organization_id: String,
+/// }
+///
+/// #[service_schema()]
+/// pub trait OrganizationService<Ctx> {
+///     #[service_schema_op(one_way)]
+///     async fn apply_bundle(&self, ctx: &Ctx, req: ApplyBundleRequest);
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn service_schema_op(_args: TokenStream, input: TokenStream) -> TokenStream {
+    input
 }
