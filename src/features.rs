@@ -23,6 +23,9 @@ pub mod chrono;
 /// Module for parsing model_schema_prop attributes
 pub mod model_schema_prop;
 
+#[cfg(feature = "typescript")]
+pub mod service_schema;
+
 /// Feature detection utilities.
 #[cfg(test)]
 pub struct Features;

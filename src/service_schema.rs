@@ -9,9 +9,11 @@
 mod client;
 mod dispatch;
 mod messages;
-mod parse;
+pub mod parse;
 mod support;
 
+#[cfg(feature = "typescript")]
+use crate::features::service_schema::emit as emit_typescript;
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{ItemTrait, ReturnType, TraitItem};
@@ -31,12 +33,14 @@ pub fn exec_service_schema(_args: TokenStream, input: TokenStream) -> TokenStrea
             let support = support::emit(&service);
             let dispatch = dispatch::emit(&service);
             let client = client::emit(&service);
+            let typescript = typescript(&service);
             quote! {
                 #messages
                 #support
                 #contract
                 #dispatch
                 #client
+                #typescript
             }
         }
         Err(refusal) => {
@@ -71,6 +75,18 @@ fn emitted_trait(declared: &ItemTrait) -> ItemTrait {
         }
     }
     emitted
+}
+
+/// The service's TypeScript, which only a build that writes TypeScript at all has anything to say
+/// for.
+#[cfg(feature = "typescript")]
+fn typescript(service: &parse::ServiceDef) -> TokenStream {
+    emit_typescript(service)
+}
+
+#[cfg(not(feature = "typescript"))]
+fn typescript(_service: &parse::ServiceDef) -> TokenStream {
+    TokenStream::new()
 }
 
 #[cfg(test)]
