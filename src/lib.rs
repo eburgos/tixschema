@@ -2,10 +2,12 @@ mod features;
 mod field_type;
 mod model_schema;
 mod rename_rule;
+mod service_schema;
 mod utils;
 
 use model_schema::exec_model_schema;
 use proc_macro::TokenStream;
+use service_schema::exec_service_schema;
 
 /// # `model_schema`
 ///
@@ -850,4 +852,37 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 pub fn model_schema_prop(_args: TokenStream, input: TokenStream) -> TokenStream {
     // For now, simply pass through the input
     input
+}
+
+/// # `service_schema`
+///
+/// Spike scaffolding, not the shipping macro. Annotates a trait whose first type parameter is the
+/// service's context, re-emits it with `async fn` desugared to `-> impl Future + Send`, and
+/// declares a `<Operation>Request` message — carrying `#[model_schema()]` — for every operation
+/// that did not already name one. The context is threaded through the trait and appears in no
+/// generated message.
+///
+/// ```rust
+/// use tixschema::{model_schema, service_schema};
+///
+/// #[model_schema()]
+/// #[derive(serde::Serialize, serde::Deserialize)]
+/// pub struct BalanceRequest {
+///     pub organization_id: String,
+/// }
+///
+/// #[service_schema()]
+/// pub trait ProbeService<Ctx> {
+///     async fn get_balance(&self, ctx: &Ctx, req: BalanceRequest) -> BalanceRequest;
+///     async fn expire_credit(
+///         &self,
+///         ctx: &Ctx,
+///         organization_id: String,
+///         credit_id: String,
+///     ) -> BalanceRequest;
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn service_schema(args: TokenStream, input: TokenStream) -> TokenStream {
+    exec_service_schema(args.into(), input.into()).into()
 }
