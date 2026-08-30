@@ -9,9 +9,11 @@
 mod client;
 mod dispatch;
 mod messages;
-mod parse;
+pub mod parse;
 mod support;
 
+#[cfg(feature = "typescript")]
+use crate::features::service_schema::emit as emit_typescript;
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{ItemTrait, ReturnType, TraitItem};
@@ -32,10 +34,14 @@ pub fn exec_service_schema(_args: TokenStream, input: TokenStream) -> TokenStrea
             // only two builders of a fault, and the constructors are private to it.
             let inside = [dispatch::emit(&service), client::emit(&service)];
             let support = support::emit(&service, &quote! { #(#inside)* });
+            // The TypeScript artifacts are strings rather than callers of anything private, so they
+            // stay at the trait's scope where a bundle can name them.
+            let typescript = typescript(&service);
             quote! {
                 #messages
                 #support
                 #contract
+                #typescript
             }
         }
         Err(refusal) => {
@@ -70,6 +76,18 @@ fn emitted_trait(declared: &ItemTrait) -> ItemTrait {
         }
     }
     emitted
+}
+
+/// The service's TypeScript, which only a build that writes TypeScript at all has anything to say
+/// for.
+#[cfg(feature = "typescript")]
+fn typescript(service: &parse::ServiceDef) -> TokenStream {
+    emit_typescript(service)
+}
+
+#[cfg(not(feature = "typescript"))]
+fn typescript(_service: &parse::ServiceDef) -> TokenStream {
+    TokenStream::new()
 }
 
 #[cfg(test)]
