@@ -108,7 +108,7 @@ mod a_bound_the_fields_own_type_declares {
     }
 
     impl enrol_service_schema::Transport for EnrolLoopback {
-        async fn notify<T>(&self, operation: &str, payload: T)
+        async fn notify<T>(&self, operation: &str, payload: T) -> Result<(), String>
         where
             T: Serialize + Send,
         {
@@ -120,9 +120,10 @@ mod a_bound_the_fields_own_type_declares {
                 &capture,
             )
             .await;
+            Ok(())
         }
 
-        async fn request<T>(&self, operation: &str, payload: T) -> Vec<u8>
+        async fn request<T>(&self, operation: &str, payload: T) -> Result<Vec<u8>, String>
         where
             T: Serialize + Send,
         {
@@ -134,29 +135,30 @@ mod a_bound_the_fields_own_type_declares {
                 &capture,
             )
             .await;
-            capture.answered()
+            Ok(capture.answered())
         }
     }
 
     /// The file's probe transport, answering a second service: a `Transport` is generated per
     /// service, so serving another one means implementing another.
     impl enrol_service_schema::Transport for ProbeTransport {
-        async fn notify<T>(&self, operation: &str, payload: T)
+        async fn notify<T>(&self, operation: &str, payload: T) -> Result<(), String>
         where
             T: Serialize + Send,
         {
             ready(()).await;
             self.record(operation, &payload);
             self.answer();
+            Ok(())
         }
 
-        async fn request<T>(&self, operation: &str, payload: T) -> Vec<u8>
+        async fn request<T>(&self, operation: &str, payload: T) -> Result<Vec<u8>, String>
         where
             T: Serialize + Send,
         {
             ready(()).await;
             self.record(operation, &payload);
-            self.answer()
+            Ok(self.answer())
         }
     }
 
