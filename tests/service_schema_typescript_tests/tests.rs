@@ -265,6 +265,104 @@ mod the_bundle_one_registration_line_produces {
         );
     }
 
+    /// The seal on the published fault, read off the bundle a consuming codebase writes.
+    ///
+    /// **What this proves and what it cannot.** No TypeScript toolchain is reachable from this
+    /// repository, so nothing here compiles the bundle. What it reads is the structure the refusal
+    /// rests on: `ProbeServiceFault` is not an object type but an intersection, one half of which is
+    /// a required property keyed on a symbol the bundle declares and exports nowhere. An object
+    /// literal cannot carry that property, because a module outside the bundle cannot name the
+    /// symbol to write it and a module inside has no value to write. Whether `tsc` then rejects a
+    /// given fabrication is a claim only `tsc` can settle.
+    #[test]
+    fn the_published_fault_is_the_fields_under_a_brand_the_bundle_exports_nowhere() {
+        let (_, written) = written_bundle("tixschema_service_bundle_seal.ts");
+        assert!(
+            written.contains("declare const probeServiceFaultSeal: unique symbol;"),
+            "the brand is keyed on a symbol, and a `unique symbol` is one no other declaration \
+             spells. Got: {written}"
+        );
+        assert!(
+            !written.contains("export declare const probeServiceFaultSeal"),
+            "an exported symbol is one an implementation can name, and a property it can write. \
+             Got: {written}"
+        );
+        assert!(
+            written.contains(
+                "export type ProbeServiceFault = ProbeServiceFaultFields & {\n  readonly \
+                 [probeServiceFaultSeal]: true;\n};"
+            ),
+            "the fault a caller names is the fields the Rust declaration published, plus the \
+             brand. Got: {written}"
+        );
+        assert!(
+            written.contains("export type ProbeServiceFaultFields = {"),
+            "the members still come from the Rust declaration and are still readable. \
+             Got: {written}"
+        );
+    }
+
+    /// Every fault the bundle builds is minted the one way: the fields, then the assertion into the
+    /// sealed type. Read off the emitted text, so a constructor added later is compared without
+    /// this test being edited.
+    ///
+    /// The assertion is what the seal costs. TypeScript cannot write a property keyed on a symbol
+    /// with no runtime value, so the generated code asserts from the fields type — the one
+    /// direction an assertion is unambiguously sound in, the sealed type being assignable to the
+    /// type it is asserted from. Keeping every mint to this form is what makes fabricating a fault
+    /// a greppable act rather than something an annotated literal does silently.
+    #[cfg(feature = "zod")]
+    #[test]
+    fn every_fault_the_bundle_builds_is_minted_from_the_fields_and_sealed() {
+        let (_, written) = written_bundle("tixschema_service_bundle_mint.ts");
+        let answering = written.matches("): ProbeServiceFault {").count();
+        assert_eq!(
+            answering, 3,
+            "the client refuses an outbound message, and the dispatcher answers an unrecognised \
+             operation and a payload that failed. Got: {written}"
+        );
+        assert_eq!(
+            written
+                .matches("const built: ProbeServiceFaultFields = {")
+                .count(),
+            answering,
+            "every constructor builds the fields the Rust declaration published. Got: {written}"
+        );
+        assert_eq!(
+            written
+                .matches("return built as ProbeServiceFault;")
+                .count(),
+            answering,
+            "one assertion per constructor and nowhere else. Got: {written}"
+        );
+        assert_eq!(
+            written.matches(" as ProbeServiceFault").count(),
+            answering,
+            "an assertion anywhere else in the bundle is a fault built outside the two places \
+             entitled to build one. Got: {written}"
+        );
+    }
+
+    /// The brand is a type and never a value, so nothing the wire carries changed: the symbol's
+    /// name appears in no reply the dispatcher writes, and the keys a fault carries are the ones
+    /// the *fields* type declares.
+    #[test]
+    fn the_brand_reaches_no_reply_the_dispatcher_writes() {
+        let encoded = super::dispatched("nothing-answers-to-this", b"{}", "probe");
+        let written = String::from_utf8_lossy(&encoded).into_owned();
+        assert!(
+            !written.contains("probeServiceFaultSeal") && !written.contains("Symbol("),
+            "a brand with a runtime value would be a key on the wire the Rust side never writes. \
+             Got: {written}"
+        );
+        let (_, bundle) = written_bundle("tixschema_service_bundle_brand_offwire.ts");
+        assert!(
+            bundle.contains("declare const probeServiceFaultSeal"),
+            "`declare const` is what makes the symbol a type-level name with nothing emitted for \
+             it. Got: {bundle}"
+        );
+    }
+
     /// The bundle a consuming codebase with more than one service writes. Every published name
     /// carries its service, so nothing here is declared twice — which is the whole reason for the
     /// prefix, TypeScript having no per-service scope to lean on.
@@ -289,6 +387,7 @@ mod the_bundle_one_registration_line_produces {
                     .or_else(|| line.strip_prefix("export interface "))
                     .or_else(|| line.strip_prefix("export function "))
                     .or_else(|| line.strip_prefix("export const "))
+                    .or_else(|| line.strip_prefix("declare const "))
                     .or_else(|| line.strip_prefix("function "))
                     .or_else(|| line.strip_prefix("const "))
             })
@@ -308,6 +407,14 @@ mod the_bundle_one_registration_line_produces {
         assert!(
             declared.contains(&"ProbeServiceFault") && declared.contains(&"AuditServiceFault"),
             "got: {declared:?}"
+        );
+        // The seal is a declaration in the flat file like any other, so two services carry two of
+        // them and the dedup above is what says so. A shared symbol would let one service's
+        // generated code mint the other's fault.
+        assert!(
+            declared.contains(&"probeServiceFaultSeal")
+                && declared.contains(&"auditServiceFaultSeal"),
+            "each service brands its own fault with its own symbol. Got: {declared:?}"
         );
         assert!(
             declared.contains(&"ProbeServiceGetBalanceResult")
@@ -594,7 +701,7 @@ mod the_envelope_typescript_declares_is_the_one_rust_writes {
     fn a_fault_carries_exactly_the_keys_its_typescript_declares() {
         let encoded = dispatched("nothing-answers-to-this", b"{}", "probe");
         let carried = keys(&encoded);
-        let declared = object_members("ProbeServiceFault");
+        let declared = object_members("ProbeServiceFaultFields");
         for named in &carried {
             assert!(
                 declared.contains(named),

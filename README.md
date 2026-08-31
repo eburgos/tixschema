@@ -1788,13 +1788,34 @@ export type UsageServiceGetAvailableBalanceOutcome =
   | { ok: false; error: BalanceError };
 ```
 
+**And the fault type itself refuses to be written.** An outcome with no fault member stops a fault being *returned*; it does not stop one being *built*, and a plain structural object type is writable by anyone who can name it. So the fault's fields publish under a name of their own and the name a caller reads is those fields under a brand keyed on a symbol the bundle declares and exports nowhere:
+
+```typescript
+export type UsageServiceFaultFields = {
+  detail: string;
+  field: string | undefined;
+  kind: UsageServiceFaultKind;
+  operation: string;
+};
+
+declare const usageServiceFaultSeal: unique symbol;
+
+export type UsageServiceFault = UsageServiceFaultFields & {
+  readonly [usageServiceFaultSeal]: true;
+};
+```
+
+The fields still come from the Rust declaration, so nothing about the wire moved and nothing a caller reads changed -- narrow on `isServiceFault`, then read `kind`, `detail`, `field` and `operation`, or switch over `kind` exhaustively. The brand is a type and never a value: `declare const` emits nothing, and a fault carries no extra key.
+
+What stops compiling is writing one. An object literal under a `UsageServiceFault` annotation cannot carry the branded property, and neither can a structurally-equal value assigned into a `UsageServiceFault` position -- a module outside the bundle cannot name the symbol, and a module inside has no value to write. What it does **not** stop is a deliberate type assertion: `built as UsageServiceFault` compiles, as does anything laundered through `any` or `unknown`, and TypeScript has no construct that refuses those. The generated constructors mint through exactly that assertion, from the fields type, which is the one direction an assertion is unambiguously sound in. So the seal makes fabricating a fault a deliberate, greppable act rather than something an annotated literal does silently -- it is not the `E0451` Rust gives, because TypeScript has none to give.
+
 Exactly two generated places build one: the dispatcher, when an incoming message cannot be turned into a valid request or names an operation nothing recognises, and the client, when the message *it* is about to send fails its own validation or the transport reports that the call never landed. In Rust a client call answers `Result<Success, CallError<Error>>`, `CallError` being `Operation(E)` for the error the operation declared and `Fault(ServiceFault)` for a defect that reached the caller.
 
 #### What a Service Generates
 
 On the Rust side, beside the trait, in a module named for the service (`usage_service_schema`):
 
-- `ServiceFault` and `ServiceFaultKind` -- readable by anyone, constructible by nothing outside the module.
+- `ServiceFault` and `ServiceFaultKind` -- readable by anyone, constructible by nothing outside the module. `ServiceFault` is the alias; the struct is declared as `<Service>FaultFields`, which is the name its *fields* publish under in TypeScript, `<Service>Fault` there being the sealed type written over them.
 - `Reply` -- the handle a transport implements to answer one message, with `send` and `fault`.
 - `Transport` -- the seam a client is bound to, with `notify` and `request`. Both answer a `Result`, whose failure arm carries in words what stopped a call from travelling; the client turns it into a fault of kind `transport-failure`.
 - `CallError<E>` -- `Operation(E)` or `Fault(ServiceFault)`.
@@ -1865,7 +1886,7 @@ export function createUsageServiceDispatcher<Ctx>(
 ): (ctx: Ctx, operation: string, payload: unknown) => Promise<unknown> {
 ```
 
-Every member is required, so an implementation missing one is refused where it reaches `createUsageServiceDispatcher`. Every emitted name carries the service -- `UsageServiceFault`, `UsageServiceGetAvailableBalanceResult`, `UsageServiceClient` -- because TypeScript has no per-service scope and a bundle is one flat file. Rust needs no such prefix, the generated module being the scope TypeScript lacks.
+Every member is required, so an implementation missing one is refused where it reaches `createUsageServiceDispatcher`. Every emitted name carries the service -- `UsageServiceFault`, `UsageServiceGetAvailableBalanceResult`, `UsageServiceClient`, and the fault's own brand symbol `usageServiceFaultSeal` -- because TypeScript has no per-service scope and a bundle is one flat file. Rust needs no such prefix, the generated module being the scope TypeScript lacks.
 
 #### Transports
 

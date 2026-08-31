@@ -217,3 +217,42 @@ fn members_of(written: &str) -> String {
         .and_then(|(_, rest)| rest.split_once("\n};"))
         .map_or_else(String::new, |(declared, _)| declared.to_owned())
 }
+
+/// The client's one constructor mints the same way the dispatcher's two do — the fields the Rust
+/// declaration published, then the assertion into the sealed type.
+#[test]
+fn the_fault_the_client_builds_is_minted_from_the_fields_and_sealed() {
+    let written = client_of(MIXED_SERVICE);
+    assert_eq!(
+        written.matches("): UsageServiceFault {").count(),
+        1,
+        "the client builds a fault in one place: the message it refused. Got: {written}"
+    );
+    assert!(
+        written.find("const built: UsageServiceFaultFields = {")
+            < written.find("return built as UsageServiceFault;"),
+        "the fields are built, then sealed. Got: {written}"
+    );
+    assert!(
+        !written.contains("usageServiceFaultSeal"),
+        "the seal is declared beside the fault, not written into the client: a bundle declaring \
+         it twice does not compile. Got: {written}"
+    );
+}
+
+/// A refusal carries a fault, so a hand-written refusal needs a hand-written fault — which is what
+/// the seal stops. The type is unchanged; what it now demands is a value only the generated code
+/// can produce.
+#[test]
+fn the_refusal_a_one_way_method_throws_carries_a_sealed_fault() {
+    let written = client_of(MIXED_SERVICE);
+    assert!(
+        written.contains("export type UsageServiceRefusal = Error & { fault: UsageServiceFault };"),
+        "got: {written}"
+    );
+    assert!(
+        written.contains("throw usageServiceRefused(usageServiceOutboundFault("),
+        "the thrower is handed a fault the client minted, never one written at the throw site. \
+         Got: {written}"
+    );
+}

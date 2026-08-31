@@ -32,6 +32,7 @@
 //! trait. The code owning the transport constructs one per message and hands it to the dispatcher.
 //! It appears in no message and no schema.
 
+use super::fault;
 use super::message;
 use super::result::result_name;
 use crate::field_type::get_field_def;
@@ -127,14 +128,16 @@ fn fault_helpers(service: &ServiceDef) -> Vec<String> {
              the\n \
              * one that arrived, not one the service declares.\n \
              */\n\
-             function {prefix}UnknownOperation(operation: string): {named}Fault {{\n  \
-             return {{\n    \
-             detail: \"the service answers to no operation by that name\",\n    \
-             field: undefined,\n    \
-             kind: \"unknown-operation\",\n    \
-             operation,\n  \
-             }};\n\
-             }}"
+             function {prefix}UnknownOperation(operation: string): {named}Fault {{\n\
+             {minted}\n\
+             }}",
+            minted = fault::minted(
+                &named,
+                "    detail: \"the service answers to no operation by that name\",\n    \
+                 field: undefined,\n    \
+                 kind: \"unknown-operation\",\n    \
+                 operation,"
+            )
         ),
     ];
     helpers.extend(inbound_fault(service));
@@ -162,19 +165,21 @@ fn inbound_fault(service: &ServiceDef) -> Vec<String> {
          issues: ReadonlyArray<{{ path: ReadonlyArray<PropertyKey>; message: string }}>,\n\
          ): {named}Fault {{\n  \
          const [first] = issues;\n  \
-         const failedAt = first === undefined ? \"\" : first.path.join(\".\");\n  \
-         return {{\n    \
-         detail: issues\n      \
-         .map((issue) =>\n        \
-         issue.path.length === 0 ? issue.message : `'${{issue.path.join(\".\")}}': \
-         ${{issue.message}}`,\n      \
-         )\n      \
-         .join(\"; \"),\n    \
-         field: failedAt === \"\" ? undefined : failedAt,\n    \
-         kind: failedAt === \"\" ? \"undeserializable-payload\" : \"failed-validation\",\n    \
-         operation,\n  \
-         }};\n\
-         }}"
+         const failedAt = first === undefined ? \"\" : first.path.join(\".\");\n\
+         {minted}\n\
+         }}",
+        minted = fault::minted(
+            &named,
+            "    detail: issues\n      \
+             .map((issue) =>\n        \
+             issue.path.length === 0 ? issue.message : `'${issue.path.join(\".\")}': \
+             ${issue.message}`,\n      \
+             )\n      \
+             .join(\"; \"),\n    \
+             field: failedAt === \"\" ? undefined : failedAt,\n    \
+             kind: failedAt === \"\" ? \"undeserializable-payload\" : \"failed-validation\",\n    \
+             operation,"
+        )
     )]
 }
 

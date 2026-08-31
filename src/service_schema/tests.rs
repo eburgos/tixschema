@@ -1041,7 +1041,7 @@ fn a_fault_is_read_back_through_a_private_mirror_rather_than_by_widening_the_fau
     );
     // Declared under the name its TypeScript is published as, `ServiceFault` being the alias the
     // module's own generated code writes.
-    let fault = emitted.find("pub struct UsageServiceFault").unwrap();
+    let fault = emitted.find("pub struct UsageServiceFaultFields").unwrap();
     let derives = &emitted[fault.saturating_sub(200)..fault];
     assert!(
         !derives.contains("Deserialize"),
@@ -1049,9 +1049,30 @@ fn a_fault_is_read_back_through_a_private_mirror_rather_than_by_widening_the_fau
          {derives}"
     );
     assert!(
-        emitted.contains("pub type ServiceFault = UsageServiceFault ;"),
+        emitted.contains("pub type ServiceFault = UsageServiceFaultFields ;"),
         "the module keeps the unstuttering spelling; only TypeScript needs the prefix. Got: \
          {emitted}"
+    );
+}
+
+/// The ident the fault is declared under, which is also the name it publishes to TypeScript.
+///
+/// It carries `Fields` because in TypeScript `UsageServiceFault` is taken by the sealed type
+/// written over these members — the same members plus a brand a hand-written object cannot spell.
+/// Rust needs no such pair, the fields here being private and the constructors with them, so the
+/// one declaration answers to both names.
+#[test]
+fn the_fault_is_declared_under_the_name_its_fields_publish_as() {
+    let emitted = expanded(MIXED_SERVICE);
+    assert!(
+        emitted.contains("pub struct UsageServiceFaultFields"),
+        "the sealed TypeScript type takes `UsageServiceFault`, so the fields publish beside it. \
+         Got: {emitted}"
+    );
+    assert!(
+        !emitted.contains("pub struct UsageServiceFault {")
+            && !emitted.contains("pub struct UsageServiceFault ("),
+        "two declarations under one flat name is what a bundle cannot compile. Got: {emitted}"
     );
 }
 

@@ -207,6 +207,28 @@ pub fn module_ident(service: &ServiceDef) -> Ident {
     )
 }
 
+/// What the fault's *fields* publish as in TypeScript: `UsageService` becomes
+/// `UsageServiceFaultFields`.
+///
+/// It is also the ident the struct is declared under, a type publishing under the ident it was
+/// declared with. `UsageServiceFault` belongs to the sealed type the TypeScript emitter writes over
+/// these fields, so the two halves — this declaration and that alias — read one spelling and cannot
+/// name different types.
+pub fn fault_fields_typescript_name(declared: &str) -> String {
+    format!("{declared}FaultFields")
+}
+
+/// The Rust ident the fault is declared under, which is also the name it publishes to TypeScript.
+/// Read through [`fault_fields_typescript_name`] rather than spelled again, so the declaration and
+/// the sealed alias the TypeScript emitter writes over it cannot name different types.
+fn fault_fields_ident(declared: &Ident) -> Ident {
+    format_ident!(
+        "{}",
+        fault_fields_typescript_name(&declared.to_string()),
+        span = declared.span()
+    )
+}
+
 /// `CallError<E>`, the failure arm of every generated client call.
 ///
 /// A call site matches at both levels, which is the price of not pretending a fault is an ordinary
@@ -446,12 +468,21 @@ fn fault_constructors() -> TokenStream {
 ///
 /// # Two names for one type, and why
 ///
-/// The declaration carries the service's own name, `UsageServiceFault`, because that is the name
-/// its TypeScript is published under and a type publishes under the ident it was declared with.
-/// TypeScript has no per-service scope: a bundle is one flat file, and a consuming codebase with
-/// ten services would otherwise declare `ServiceFault` ten times over and not compile.
+/// The declaration carries `UsageServiceFaultFields`, and a type publishes under the ident it was
+/// declared with, so that is what its TypeScript is called. The prefix is there because TypeScript
+/// has no per-service scope — a bundle is one flat file, and a consuming codebase with ten services
+/// would otherwise declare one fault type ten times over and not compile. The `Fields` is there
+/// because the name a TypeScript *caller* reads, `UsageServiceFault`, belongs to the sealed type
+/// the TypeScript emitter writes over these fields: the same members plus a brand keyed on a symbol
+/// the bundle exports nowhere. That brand is what stops a TypeScript implementation writing a fault
+/// as an object literal, the way private fields stop a Rust one with `E0451`. In Rust there is
+/// nothing to draw that distinction against — the fields below are private and the constructors
+/// with them — so Rust has the one type and TypeScript has the two names.
 ///
-/// Rust needs no such prefix, this module being the scope TypeScript lacks, so `ServiceFault` is
+/// The fields themselves come from this declaration and from nowhere else, in both languages, which
+/// is what keeps the type a caller narrows on and the value the wire carries from drifting apart.
+///
+/// Rust needs no prefix at all, this module being the scope TypeScript lacks, so `ServiceFault` is
 /// bound beside it as an alias — the unstuttering spelling everything generated here writes, and
 /// the one a transport implementing [`Reply`](reply_declaration) names. An alias reaches Rust
 /// alone and publishes nothing, so the flat name stays claimed exactly once per service.
@@ -459,7 +490,7 @@ fn fault_constructors() -> TokenStream {
 /// The kind is declared before the fault that carries it, so the field walk resolves its name off
 /// the registry rather than falling back to a spelling written before the type expanded.
 fn fault_declaration(declared: &Ident) -> TokenStream {
-    let fault = format_ident!("{declared}Fault", span = declared.span());
+    let fields = fault_fields_ident(declared);
     let kind = format_ident!("{declared}FaultKind", span = declared.span());
     let fault_doc = format!(
         "A failure `{declared}` never declared: a payload that would not deserialize, a message \
@@ -468,13 +499,17 @@ fn fault_declaration(declared: &Ident) -> TokenStream {
          It is a defect rather than a condition, so it is logged at error level and meant to page \
          a human. No implementation of [`{declared}`] can produce one — an operation's signature \
          admits only its own error type, and the constructors are private to this module, which \
-         only the generated dispatcher and the generated client are written inside."
+         only the generated dispatcher and the generated client are written inside.\n\n\
+         In TypeScript this publishes as `{fields}`, which is the fault's fields and nothing else. \
+         What a caller reads there is `{declared}Fault`: those same fields under a brand the bundle \
+         declares and exports nowhere, so an object written by hand is not one. That brand is the \
+         TypeScript answer to the private constructors above."
     );
     let kind_doc = format!("Which kind of defect a `{declared}` fault reports.");
     let alias_doc = format!(
-        "The fault under the name everything generated inside this module writes. `{fault}` is \
-         the same type, declared under the name its TypeScript is published as — this module is \
-         the scope TypeScript has no equivalent of."
+        "The fault under the name everything generated inside this module writes. `{fields}` is \
+         the same type, declared under the name its *fields* are published as in TypeScript — this \
+         module is the scope TypeScript has no equivalent of."
     );
     let kind_alias_doc =
         format!("Which kind of defect a [`ServiceFault`] reports. The same type as [`{kind}`].");
@@ -503,7 +538,7 @@ fn fault_declaration(declared: &Ident) -> TokenStream {
         #[::tixschema::model_schema()]
         #[derive(Clone, Debug, Eq, PartialEq, ::serde::Serialize)]
         #[serde(rename_all = "camelCase")]
-        pub struct #fault {
+        pub struct #fields {
             detail: String,
             // Omitted rather than written as `null` when there is no field to name, which is the
             // same convention the reply envelope follows and what lets the generated TypeScript
@@ -515,7 +550,7 @@ fn fault_declaration(declared: &Ident) -> TokenStream {
         }
 
         #[doc = #alias_doc]
-        pub type ServiceFault = #fault;
+        pub type ServiceFault = #fields;
 
         #[doc = #kind_alias_doc]
         pub type ServiceFaultKind = #kind;

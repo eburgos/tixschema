@@ -39,6 +39,7 @@
 //! emitted body, so it is named: `<Service>Refusal`, an `Error` carrying the fault on a `fault`
 //! property. The method's own `JSDoc` names it too, `Promise<void>` having no room to say it.
 
+use super::fault;
 use super::message;
 use super::result::result_name;
 use crate::rename_rule::RenameRule;
@@ -135,19 +136,21 @@ fn fault_helpers(service: &ServiceDef) -> Vec<String> {
          issues: ReadonlyArray<{{ path: ReadonlyArray<PropertyKey>; message: string }}>,\n\
          ): {named}Fault {{\n  \
          const [first] = issues;\n  \
-         const failedAt = first === undefined ? \"\" : first.path.join(\".\");\n  \
-         return {{\n    \
-         detail: issues\n      \
-         .map((issue) =>\n        \
-         issue.path.length === 0 ? issue.message : `'${{issue.path.join(\".\")}}': \
-         ${{issue.message}}`,\n      \
-         )\n      \
-         .join(\"; \"),\n    \
-         field: failedAt === \"\" ? undefined : failedAt,\n    \
-         kind: \"failed-validation\",\n    \
-         operation,\n  \
-         }};\n\
-         }}"
+         const failedAt = first === undefined ? \"\" : first.path.join(\".\");\n\
+         {minted}\n\
+         }}",
+        minted = fault::minted(
+            &named,
+            "    detail: issues\n      \
+             .map((issue) =>\n        \
+             issue.path.length === 0 ? issue.message : `'${issue.path.join(\".\")}': \
+             ${issue.message}`,\n      \
+             )\n      \
+             .join(\"; \"),\n    \
+             field: failedAt === \"\" ? undefined : failedAt,\n    \
+             kind: \"failed-validation\",\n    \
+             operation,"
+        )
     )];
     if service
         .operations

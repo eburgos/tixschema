@@ -63,11 +63,18 @@
 //! # The fault's TypeScript is generated, not written
 //!
 //! The Rust `ServiceFault` carries `#[model_schema()]`, so its TypeScript comes from the same
-//! declaration as the Rust type and the two cannot drift. Nothing here writes a fault type; the
-//! registration below asks the Rust type for its own, exactly as it does for every message.
+//! declaration as the Rust type and the two cannot drift. Nothing here writes a fault's fields; the
+//! registration below asks the Rust type for them, exactly as it does for every message.
+//!
+//! What the registration adds is the seal. The fields publish under a name of their own,
+//! `<Service>FaultFields`, and [`fault`] declares `<Service>Fault` over them as those fields plus a
+//! brand keyed on a symbol the bundle exports nowhere. Rust refuses a fabricated fault twice over —
+//! `E0451` on the fields, `E0624` on the constructors — and this is what TypeScript can be given in
+//! their place: a type a caller reads exactly as before and an implementation cannot write.
 
 #[cfg(feature = "zod")]
 mod client;
+mod fault;
 #[cfg(feature = "zod")]
 mod message;
 mod result;
@@ -75,7 +82,7 @@ mod result;
 mod service;
 
 use crate::service_schema::parse::ServiceDef;
-use crate::service_schema::support::module_ident;
+use crate::service_schema::support::{fault_fields_typescript_name, module_ident};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
@@ -135,10 +142,12 @@ fn seam(_service: &ServiceDef) -> TokenStream {
 /// written into the bundle: every declared message first, so the types the result envelopes name
 /// are read before the envelopes themselves, then the fault, then the results.
 ///
-/// The fault and the kind it reports are asked for by name rather than written here. Both are
-/// ordinary `#[model_schema()]` types inside the service's own module, so their TypeScript comes
-/// from the declarations the Rust dispatcher and the Rust client build faults from — the one thing
-/// that keeps the type a caller narrows on and the value the wire carries from drifting apart.
+/// The fault's fields and the kind it reports are asked for by name rather than written here. Both
+/// are ordinary `#[model_schema()]` types inside the service's own module, so their TypeScript
+/// comes from the declarations the Rust dispatcher and the Rust client build faults from — the one
+/// thing that keeps the type a caller narrows on and the value the wire carries from drifting
+/// apart. What [`fault`] adds beside them is the seal and nothing else: no field, no kind, no
+/// spelling of either.
 ///
 /// A message's Zod schema is one of those artifacts and is registered here for the same reason its
 /// type is — nobody else has a line to write it on. It is asked for only in a build that writes
@@ -152,10 +161,18 @@ fn published(service: &ServiceDef) -> Vec<TokenStream> {
         #[cfg(feature = "zod")]
         collected.push(quote! { #message::zod_schema() });
     }
-    let fault = format_ident!("{}Fault", service.ident);
+    let fields = format_ident!(
+        "{}",
+        fault_fields_typescript_name(&service.ident.to_string())
+    );
     let kind = format_ident!("{}FaultKind", service.ident);
     collected.push(quote! { #module::#kind::ts_definition() });
-    collected.push(quote! { #module::#fault::ts_definition() });
+    collected.push(quote! { #module::#fields::ts_definition() });
+    collected.extend(
+        fault::emit(service)
+            .iter()
+            .map(|rendered| quote! { #rendered.to_owned() }),
+    );
     collected.extend(
         result::emit(service)
             .iter()

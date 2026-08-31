@@ -109,10 +109,10 @@ fn the_bundle_line_hangs_off_a_struct_named_for_the_service() {
 }
 
 #[test]
-fn the_fault_is_asked_for_rather_than_written_here() {
+fn the_fault_s_fields_are_asked_for_rather_than_written_here() {
     let rendered = registration(MIXED_SERVICE);
     for asked in [
-        "usage_service_schema :: UsageServiceFault :: ts_definition",
+        "usage_service_schema :: UsageServiceFaultFields :: ts_definition",
         "usage_service_schema :: UsageServiceFaultKind :: ts_definition",
     ] {
         assert!(
@@ -124,6 +124,52 @@ fn the_fault_is_asked_for_rather_than_written_here() {
     assert!(
         !rendered.contains("export type ServiceFault ="),
         "a hand-maintained literal beside a generated type is how the two drift. Got: {rendered}"
+    );
+    // The seal is written here and the fields are not, so the sealed alias names the asked-for
+    // type and spells no member of its own. A field written here is a field that can drift.
+    for member in ["detail:", "field:", "kind:", "operation:"] {
+        assert!(
+            !rendered.contains(&format!("export type UsageServiceFault = {{\\n  {member}")),
+            "the seal adds a brand and nothing else; the members stay the Rust declaration's. \
+             Got: {rendered}"
+        );
+    }
+}
+
+/// The two declarations the seal is: a symbol the bundle exports nowhere, and the fault a caller
+/// names, declared as the asked-for fields plus one property keyed on that symbol.
+///
+/// This is what TypeScript is given in place of the read-without-construct split Rust has. The Rust
+/// fault refuses both routes an implementation would take — `E0451` on the private fields, `E0624`
+/// on the private constructors — and a plain structural object type refuses neither.
+#[test]
+fn the_published_fault_is_the_asked_for_fields_under_a_brand_the_bundle_exports_nowhere() {
+    let rendered = registration(MIXED_SERVICE);
+    assert!(
+        rendered.contains("declare const usageServiceFaultSeal: unique symbol;"),
+        "a brand keyed on an exported name is a brand anyone can write. Got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("export declare const usageServiceFaultSeal"),
+        "an exported symbol is one an implementation can name, and a property it can write. \
+         Got: {rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "export type UsageServiceFault = UsageServiceFaultFields & {\\n  readonly \
+             [usageServiceFaultSeal]: true;\\n};"
+        ),
+        "the fault a caller names is the fields the Rust declaration published, plus the brand. \
+         Got: {rendered}"
+    );
+    // The README states both halves where it documents the fault — what the seal stops, and the
+    // assertion it does not — so the two cannot drift.
+    let readme = include_str!("../../../README.md");
+    assert!(
+        readme.contains("**And the fault type itself refuses to be written.**")
+            && readme.contains("declare const usageServiceFaultSeal: unique symbol;")
+            && readme.contains("`built as UsageServiceFault` compiles"),
+        "the README no longer says what the seal is, or that a type assertion still gets past it"
     );
 }
 
@@ -274,7 +320,8 @@ fn a_build_that_publishes_no_client_still_publishes_every_type_the_wire_carries(
     let rendered = registration(MIXED_SERVICE);
     for asked in [
         "ExpireCreditRequest :: ts_definition",
-        "usage_service_schema :: UsageServiceFault :: ts_definition",
+        "usage_service_schema :: UsageServiceFaultFields :: ts_definition",
+        "declare const usageServiceFaultSeal: unique symbol;",
         "export type UsageServiceGetAvailableBalanceResult =",
     ] {
         assert!(
