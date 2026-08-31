@@ -205,7 +205,13 @@ fn fault_accessors() -> TokenStream {
                 &self.detail
             }
 
-            /// The field that failed validation, and `None` for every other kind.
+            /// The field the failure named, where it named one.
+            ///
+            /// A message that failed validation names the field that failed, and so does a
+            /// payload refused by the serde hook a constrained field carries — that hook runs
+            /// the same check and reports it in the same words. Everything else leaves it empty:
+            /// a payload refused for its shape rather than its values, an operation name nothing
+            /// answers to, a handler that panicked.
             #[must_use]
             pub fn field(&self) -> Option<&str> {
                 self.field.as_deref()
@@ -283,7 +289,13 @@ fn fault_constructors() -> TokenStream {
             fn undeserializable_payload(operation: &str, detail: &str) -> Self {
                 Self {
                     detail: detail.to_owned(),
-                    field: None,
+                    // A field carrying a constraint is refused by a serde hook running the very
+                    // check `validate()` runs, and the hook hands serde that check's message
+                    // verbatim. So the refusal that stopped the payload from ever becoming a
+                    // message still names the field it got wrong, and reading it back is reading
+                    // the same report a violation is read from. A refusal written any other way —
+                    // a type mismatch, a missing key — names none.
+                    field: named_field(detail).map(str::to_owned),
                     kind: ServiceFaultKind::UndeserializablePayload,
                     operation: operation.to_owned(),
                 }

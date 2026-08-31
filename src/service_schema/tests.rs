@@ -702,6 +702,92 @@ fn an_arm_validates_before_it_calls_and_faults_on_both_ways_the_message_can_be_w
 }
 
 #[test]
+fn every_kind_the_fault_publishes_is_one_the_generated_code_has_a_caller_for() {
+    let emitted = expanded(MIXED_SERVICE);
+    // Both halves, so the comparison cannot be satisfied by a kind that was quietly dropped: every
+    // variant the enum declares, and a constructor call for each of them. A kind with no caller is
+    // a shape a TypeScript consumer narrows on and nothing ever produces.
+    for (variant, built) in [
+        ("FailedValidation", "ServiceFault :: failed_validation"),
+        ("HandlerPanic", "ServiceFault :: handler_panic"),
+        (
+            "UndeserializablePayload",
+            "ServiceFault :: undeserializable_payload",
+        ),
+        ("UnknownOperation", "ServiceFault :: unknown_operation"),
+    ] {
+        assert!(
+            emitted.contains(variant),
+            "`{variant}` is declared on the kind and this expansion does not carry it. Got: \
+             {emitted}"
+        );
+        assert!(
+            emitted.contains(built),
+            "`{variant}` is published as a kind a receiver can be handed, and `{built}` is called \
+             from nowhere, so nothing ever produces one. Got: {emitted}"
+        );
+    }
+}
+
+#[test]
+fn every_arm_calls_its_implementation_behind_the_panic_guard() {
+    let emitted = expanded(MIXED_SERVICE);
+    for method in [
+        "get_available_balance",
+        "expire_credit",
+        "sweep",
+        "can_generate",
+        "apply_bundle",
+    ] {
+        assert!(
+            emitted.contains(&format!("caught (move || svc . {method} (")),
+            "the transport acknowledges after `dispatch` returns, so a panic in `{method}` that \
+             unwound past it would leave the delivery unacknowledged on a bus with no `nack`, no \
+             dead-letter exchange, no message TTL and no timeout. Got: {emitted}"
+        );
+    }
+    assert!(
+        !emitted.contains("Answered :: answering (svc ."),
+        "a call that is not behind the guard is one whose panic escapes. Got: {emitted}"
+    );
+}
+
+#[test]
+fn a_request_and_reply_arm_answers_a_caught_panic_with_a_fault_naming_its_own_wire_name() {
+    let emitted = expanded(MIXED_SERVICE);
+    assert!(
+        emitted.contains(
+            "Err (panicked) => { reply . fault (ServiceFault :: handler_panic \
+             (\"usage-generation-request\" , & panicked)) . await }"
+        ),
+        "the arm that answered to the name is the one that reports the defect, and it reports it \
+         under the wire name rather than under the Rust ident. Got: {emitted}"
+    );
+}
+
+#[test]
+fn a_refusal_and_a_violation_are_read_for_a_field_name_by_the_same_reader() {
+    let emitted = expanded(MIXED_SERVICE);
+    assert!(
+        emitted.contains("fn named_field (reported : & str)"),
+        "got: {emitted}"
+    );
+    assert!(
+        emitted.contains(
+            "fn violated_field (reported : & [String]) -> Option < & str > { \
+                          named_field (reported . first () ?) }"
+        ),
+        "a violation report's field is the first line's, read by the one reader. Got: {emitted}"
+    );
+    assert!(
+        emitted.contains("field : named_field (detail) . map (str :: to_owned)"),
+        "a field carrying a constraint is refused by a serde hook running the very check \
+         `validate()` runs, and the hook hands serde that check's message verbatim — so the \
+         refusal names the field and a fault built from it has the name to carry. Got: {emitted}"
+    );
+}
+
+#[test]
 fn a_one_way_arm_calls_the_implementation_and_then_touches_the_handle_with_nothing() {
     let emitted = expanded(MIXED_SERVICE);
     // From the call to the end of the arm: the two fault guards sit above the call, so anything
@@ -716,8 +802,9 @@ fn a_one_way_arm_calls_the_implementation_and_then_touches_the_handle_with_nothi
     );
     assert!(
         !tail.contains("reply ."),
-        "nothing about replying belongs on a path that never replies; acknowledgement is the \
-         transport adapter's, after `dispatch` returns. Got: {emitted}"
+        "nothing about replying belongs on a path that never replies, a caught panic included: \
+         the operation declared no reply and the delivery carries no queue for one to go to. \
+         Acknowledgement is the transport adapter's, after `dispatch` returns. Got: {emitted}"
     );
 }
 

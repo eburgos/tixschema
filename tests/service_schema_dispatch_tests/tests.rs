@@ -1,6 +1,7 @@
 //! One service covering every input shape and both outcomes, dispatched over payloads that take
 //! every path through an arm: the answer, the operation's own error, an undeserializable payload,
-//! a name nothing answers to, and a one-way operation that settles without publishing.
+//! a name nothing answers to, a handler that panicked, and a one-way operation that settles
+//! without publishing.
 //!
 //! The probe reply handle records which of `send` and `fault` was called, so a test can assert not
 //! only what was answered but that a request-and-reply arm answered exactly once and that a
@@ -17,6 +18,13 @@
 /// the arm never reaches its `validate()` and the fault reports an undeserializable payload. The
 /// implementation is not reached either way, which is the guarantee that matters; the arm's own
 /// validator is read outside this module, over a message that validates itself.
+///
+/// The kind differs between the two paths and the field does not. A constrained field's serde hook
+/// runs the very check `validate()` runs and hands serde that check's message verbatim, so the
+/// refusal names the field in the same words a violation report does and the fault reads the name
+/// back off either. That is what makes "a payload failing validation produces a fault naming the
+/// field" true on the path a service written with annotations actually takes — which is every
+/// service, the annotation being how a constraint is declared.
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
@@ -155,6 +163,44 @@ mod a_message_annotated_with_a_constraint {
             "got: {}",
             reported[0].detail()
         );
+        assert_eq!(
+            reported[0].field(),
+            Some("organization_id"),
+            "the caller has to be told which field it got wrong, and which of the two guards \
+             caught it is not the caller's business. The hook serde ran is the constraint's own \
+             check and its message is that check's, so the name is there to be read. Got: {}",
+            reported[0].detail()
+        );
+    }
+
+    #[test]
+    fn a_payload_wrong_about_the_field_s_type_rather_than_its_value_names_no_field() {
+        let service = GateBackEnd::new();
+        let reply = GateReply::new();
+        poll_once(gate_service_schema::dispatch(
+            &service,
+            &(),
+            &gate_service_schema::IncomingMessage {
+                operation: "admit".to_owned(),
+                payload: br#"{"organization_id":42}"#.to_vec(),
+            },
+            &reply,
+        ))
+        .unwrap();
+        assert!(service.reached().is_empty(), "got: {:?}", service.reached());
+        let reported = reply.faults();
+        assert_eq!(
+            reported[0].kind(),
+            gate_service_schema::ServiceFaultKind::UndeserializablePayload
+        );
+        assert_eq!(
+            reported[0].field(),
+            None,
+            "serde refused the shape rather than the value, so no constraint's check ran and \
+             there is no field name to carry. A fault that named one here would be naming it out \
+             of a message it never read. Got: {}",
+            reported[0].detail()
+        );
     }
 }
 
@@ -235,6 +281,15 @@ pub trait ProbeService<Ctx> {
     #[service_schema_op(one_way)]
     async fn apply_bundle(&self, ctx: &Ctx, req: BalanceRequest);
 
+    /// An implementation that comes apart rather than answering. Nothing the operation declared
+    /// covers it, so what the arm does with it is the fault.
+    async fn collapse(&self, ctx: &Ctx, req: BalanceRequest)
+    -> Result<BalanceResponse, ProbeError>;
+
+    /// The same, on an arm that declared no reply.
+    #[service_schema_op(one_way)]
+    async fn discard(&self, ctx: &Ctx, req: BalanceRequest);
+
     /// Several arguments after the context: the message is unpacked back into them.
     async fn expire_credit(
         &self,
@@ -264,6 +319,23 @@ impl ProbeService<String> for ProbeBackEnd {
     async fn apply_bundle(&self, ctx: &String, req: BalanceRequest) {
         let _read = ready(ctx.len()).await;
         self.reach(format!("apply_bundle {}", req.organization_id));
+    }
+
+    async fn collapse(
+        &self,
+        _ctx: &String,
+        req: BalanceRequest,
+    ) -> Result<BalanceResponse, ProbeError> {
+        ready(()).await;
+        self.reach(format!("collapse {}", req.organization_id));
+        come_apart(req.organization_id == "formatted", &req.organization_id);
+        Ok(BalanceResponse { credits: 0 })
+    }
+
+    async fn discard(&self, _ctx: &String, req: BalanceRequest) {
+        ready(()).await;
+        self.reach(format!("discard {}", req.organization_id));
+        come_apart(false, &req.organization_id);
     }
 
     async fn expire_credit(
@@ -343,6 +415,22 @@ impl ProbeReply {
     fn settled(&self) -> Vec<Settled> {
         self.settled.lock().unwrap().clone()
     }
+}
+
+/// Comes apart the way a handler does when something the compiler was expected to prevent gets
+/// through.
+///
+/// The two conditions are exact negations, so one of them always fires. Which one decides the shape
+/// of the panic payload: `assert!` panics with exactly the message it was given and nothing around
+/// it, so a formatted message reaches the panic hook as a `String` and a literal one as a `&str`.
+/// A fault's detail has to read back off either, and a reader that knew only one shape would report
+/// nothing for half the panics a service can raise.
+fn come_apart(formatted: bool, organization_id: &str) {
+    assert!(
+        !formatted,
+        "the ledger for {organization_id} is not a ledger"
+    );
+    assert!(formatted, "the ledger is not a ledger");
 }
 
 /// Dispatches one message and answers with what the service saw and how the message was settled.
@@ -534,17 +622,104 @@ fn a_message_that_fails_its_own_validator_never_reaches_it_and_the_fault_names_t
 }
 
 #[test]
+fn a_handler_that_panics_becomes_a_fault_rather_than_unwinding_out_of_dispatch() {
+    let (reached, settled) = dispatched("collapse", r#"{"organization_id":"acme"}"#);
+    assert_eq!(
+        reached,
+        vec!["collapse acme".to_owned()],
+        "the message was valid and the implementation was entered; what it did after that is the \
+         defect this reports"
+    );
+    assert_eq!(settled.len(), 1, "got: {settled:?}");
+    let reported = only_fault(&settled).unwrap();
+    assert_eq!(
+        reported.kind(),
+        probe_service_schema::ServiceFaultKind::HandlerPanic,
+        "a panic is a failure the operation never declared, which is what the kind is for"
+    );
+    assert_eq!(reported.operation(), "collapse");
+    assert_eq!(reported.field(), None, "a panic names no field");
+    assert_eq!(
+        reported.detail(),
+        "the ledger is not a ledger",
+        "a literal panic message arrives as a `&str`, and the detail is what a receiver has to \
+         page a human with"
+    );
+}
+
+#[test]
+fn dispatch_returns_after_a_handler_panics_so_the_transport_can_still_settle_the_delivery() {
+    let service = ProbeBackEnd::new();
+    let reply = ProbeReply::new();
+    let ctx = "probe".to_owned();
+    let returned = poll_once(probe_service_schema::dispatch(
+        &service,
+        &ctx,
+        &probe_service_schema::IncomingMessage {
+            operation: "collapse".to_owned(),
+            payload: br#"{"organization_id":"acme"}"#.to_vec(),
+        },
+        &reply,
+    ));
+    assert_eq!(
+        returned,
+        Some(()),
+        "the transport acknowledges after `dispatch` returns, so a panic that unwound past it \
+         would never be acknowledged at all. There is no `nack` on the bus this was measured \
+         against, no dead-letter exchange, no message TTL and no timeout, so that delivery would \
+         sit outstanding against the prefetch until the channel closed."
+    );
+}
+
+#[test]
+fn a_formatted_panic_message_reaches_the_fault_as_the_message_rather_than_as_its_shape() {
+    let (_reached, settled) = dispatched("collapse", r#"{"organization_id":"formatted"}"#);
+    let reported = only_fault(&settled).unwrap();
+    assert_eq!(
+        reported.kind(),
+        probe_service_schema::ServiceFaultKind::HandlerPanic
+    );
+    assert_eq!(
+        reported.detail(),
+        "the ledger for formatted is not a ledger",
+        "a formatted panic message arrives as a `String`, and a fault that could only read a \
+         `&str` would report nothing for the half of panics that carry one"
+    );
+}
+
+#[test]
+fn a_one_way_handler_that_panics_still_answers_nothing_and_still_lets_dispatch_return() {
+    let (reached, settled) = dispatched("discard", r#"{"organization_id":"acme"}"#);
+    assert_eq!(
+        reached,
+        vec!["discard acme".to_owned()],
+        "the implementation was entered, which is what makes this the one-way case rather than a \
+         refusal before it"
+    );
+    assert!(
+        settled.is_empty(),
+        "a one-way arm has answered once its implementation was entered, a panic included: the \
+         operation declared no reply and the delivery carries no queue for one to go to. What the \
+         guard buys here is the return itself, which is what the transport settles on. Got: \
+         {settled:?}"
+    );
+}
+
+#[test]
 fn every_arm_answers_exactly_the_number_of_times_its_outcome_allows() {
     // Every arm the service has, on every path through it: the answer, the operation's own error,
-    // a message its validator refuses, bytes that were never the message at all, and a name
-    // nothing answers to. The last field is how many times the handle may be reached — once for a
-    // request-and-reply arm however it goes, and for a one-way arm only where the message was
-    // refused before the implementation ever ran.
+    // a message its validator refuses, bytes that were never the message at all, a name nothing
+    // answers to, and an implementation that came apart. The last field is how many times the
+    // handle may be reached — once for a request-and-reply arm however it goes, and for a one-way
+    // arm only where the message was refused before the implementation ever ran.
     for (operation, payload, answers) in [
         ("admit", r#"{"organization_id":"acme"}"#, 1),
         ("admit", r#"{"organization_id":"ab"}"#, 1),
         ("apply-bundle", r#"{"organization_id":"acme"}"#, 0),
         ("apply-bundle", r#"{"organization_id":42}"#, 1),
+        ("collapse", r#"{"organization_id":"acme"}"#, 1),
+        ("discard", r#"{"organization_id":"acme"}"#, 0),
+        ("discard", r#"{"organization_id":42}"#, 1),
         (
             "expire-credit",
             r#"{"organizationId":"acme","creditId":"cr-1"}"#,
@@ -566,11 +741,11 @@ fn every_arm_answers_exactly_the_number_of_times_its_outcome_allows() {
              reply for puts a reply on a queue nothing is reading. Got: {settled:?}",
             settled.len()
         );
-        if operation == "apply-bundle" {
+        if operation == "apply-bundle" || operation == "discard" {
             assert!(
                 !settled.iter().any(|what| matches!(*what, Settled::Sent(_))),
                 "a one-way arm publishes nothing on any path, whether the message reached the \
-                 implementation or was refused before it. Got: {settled:?}"
+                 implementation, came apart inside it, or was refused before it. Got: {settled:?}"
             );
         }
     }
