@@ -84,7 +84,10 @@ use crate::field_type::{parse_serde_field_attributes, parse_serde_type_attribute
 use crate::field_type::is_sequence_wrapper;
 
 #[cfg(feature = "serde")]
-use crate::field_type::{is_interior_mutability_wrapper, is_ownership_wrapper};
+use crate::field_type::{
+    is_interior_mutability_wrapper, is_ownership_wrapper, is_refused_sequence_wrapper,
+    is_transparent_wrapper,
+};
 
 use crate::features::model_schema_prop::{
     LiteralValue, ModelSchemaPropMeta, parse_model_schema_prop_attributes,
@@ -350,7 +353,7 @@ enum ConstraintGate {
     Validator,
 }
 
-/// What the end of a walk does with a violation: `validate()` collects every one, a
+/// What the end of a constraint walk does with a violation: `validate()` collects every one, a
 /// `Deserializer` fails at the first.
 #[cfg(feature = "serde")]
 #[derive(Clone, Copy)]
@@ -3645,21 +3648,6 @@ fn collect_struct_fields(
 
         guard_errors.extend(field_guard_errors);
 
-        // Emitted for a flattened field too, and there under no name: its members are the
-        // enclosing object's own keys, so a violation beneath it already reads as one of them.
-        #[cfg(feature = "serde")]
-        if let Some(ident) = field.ident.as_ref()
-            && let Some(wraps) = nested_message_shape(&field.ty, &type_parameters)
-        {
-            let named = ident.to_string();
-            validate_bodies.push(build_nested_validation(
-                &wraps,
-                MemberAccess::SelfField,
-                ident,
-                (!is_flatten).then_some(named.as_str()),
-            ));
-        }
-
         if is_flatten {
             let _: (&_, &_) = (&validation_fn, &validate_body);
             flattened_fields.push(f_def);
@@ -6001,9 +5989,6 @@ fn collect_discriminated_variants(
             );
             guard_errors.extend(field_guard_errors);
 
-            #[cfg(feature = "serde")]
-            push_nested_member_walk(field, &type_parameters, is_flatten, &mut bound, &mut checks);
-
             if is_flatten {
                 let _: (&_, &_) = (&validation_fn, &validate_body);
                 flattened_fields.push(f_def);
@@ -7774,22 +7759,8 @@ fn collect_untagged_variant_members(
         // Pushed for every field, flattened or not: `apply_deferred_field_attrs` zips this against
         // the declaration's own fields, so a skipped push shifts every later field's attributes.
         walked.deferred_attrs.push(injected_attrs);
-        // A member's own bound is enforced on the read here, because it is what picks the variant.
-        // What lies beneath the member is not: no read has ever checked it, so the walk is the same
-        // one a struct field gets.
-        push_nested_member_walk(
-            field,
-            type_parameters,
-            is_flatten,
-            &mut walked.bound,
-            &mut walked.checks,
-        );
         if !is_flatten {
             walked.validation_fns.extend(validation_fn);
-            if let (Some(body), Some(ident)) = (validate_body, field.ident.as_ref()) {
-                walked.bound.push((ident.clone(), member_binding(ident)));
-                walked.checks.push(body);
-            }
         }
 
         let member_ctx = untagged_variant_context(
@@ -7809,6 +7780,19 @@ fn collect_untagged_variant_members(
             field_validation_guard_error,
         );
         walked.guard_errors.extend(member_guard_errors);
+        // Read once the member's def exists, since that is what says whether the member names a
+        // type that could publish a validator. A member's *own* bound is the read's here — the
+        // carve-out this walk exists for — but a bound its type declares is still the validator's:
+        // the arm runs after the variant has been chosen, so nothing it reports can move a payload
+        // from one member to another.
+        if !is_flatten
+            && let Some(body) =
+                validate_body.or_else(|| nested_validate_body(field, &member_def, true))
+            && let Some(ident) = field.ident.as_ref()
+        {
+            walked.bound.push((ident.clone(), member_binding(ident)));
+            walked.checks.push(body);
+        }
         if is_flatten {
             walked.flattened_fields.push(member_def);
             continue;
@@ -10016,7 +10000,12 @@ fn build_field_validation(
         };
     }
     let head = wrap_binding(0);
-    let walk = walk_wraps(wraps, &head, 1, validate_value_fn_ident, CheckSink::Collect);
+    let leaf = constraint_leaf(
+        CheckSink::Collect,
+        &walked_value(wraps),
+        validate_value_fn_ident,
+    );
+    let walk = walk_wraps(wraps, &head, 1, &leaf);
     quote! {
         {
             let #head = #checked;
@@ -10025,42 +10014,46 @@ fn build_field_validation(
     }
 }
 
-/// Emits the reach-through for one wrapper and, at the end of the chain, the check itself.
+/// The binding a walk over `wraps` hands its leaf: the head is depth zero and each wrapper
+/// introduces one more, so the last step's binding is named from the count.
+#[cfg(feature = "serde")]
+fn walked_value(wraps: &[ConstraintWrap]) -> proc_macro2::Ident {
+    wrap_binding(wraps.len())
+}
+
+/// The constraint check a walk ends on, written for whichever of the two ends takes it.
+#[cfg(feature = "serde")]
+fn constraint_leaf(
+    sink: CheckSink,
+    value: &proc_macro2::Ident,
+    validate_value_fn_ident: &proc_macro2::Ident,
+) -> proc_macro2::TokenStream {
+    match sink {
+        CheckSink::Collect => quote! {
+            if let Err(e) = #validate_value_fn_ident(#value) {
+                errors.push(e);
+            }
+        },
+        CheckSink::Fail => quote! {
+            #validate_value_fn_ident(#value)?;
+        },
+    }
+}
+
+/// Emits the reach-through for one wrapper and, at the end of the chain, `leaf` — which its caller
+/// wrote against [`walked_value`], the binding the last step introduces.
 #[cfg(feature = "serde")]
 fn walk_wraps(
     wraps: &[ConstraintWrap],
     value: &proc_macro2::Ident,
     depth: usize,
-    validate_value_fn_ident: &proc_macro2::Ident,
-    sink: CheckSink,
-) -> proc_macro2::TokenStream {
-    let leaf = |reached: &proc_macro2::Ident| match sink {
-        CheckSink::Collect => quote! {
-            if let Err(e) = #validate_value_fn_ident(#reached) {
-                errors.push(e);
-            }
-        },
-        CheckSink::Fail => quote! {
-            #validate_value_fn_ident(#reached)?;
-        },
-    };
-    walk_wraps_with(wraps, value, depth, &leaf)
-}
-
-/// The wrapper reach-through itself, with what happens at the end of the chain left to the caller.
-/// A constraint runs its field's own validator there; a nested walk runs the value's `validate()`.
-#[cfg(feature = "serde")]
-fn walk_wraps_with(
-    wraps: &[ConstraintWrap],
-    value: &proc_macro2::Ident,
-    depth: usize,
-    leaf: &dyn Fn(&proc_macro2::Ident) -> proc_macro2::TokenStream,
+    leaf: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
     let Some((wrap, rest)) = wraps.split_first() else {
-        return leaf(value);
+        return leaf.clone();
     };
     let next = wrap_binding(depth);
-    let inner = walk_wraps_with(rest, &next, depth.saturating_add(1), leaf);
+    let inner = walk_wraps(rest, &next, depth.saturating_add(1), leaf);
     match *wrap {
         // A `None` writes nothing, so there is nothing for the constraint to describe.
         ConstraintWrap::Optional => quote! {
@@ -10080,180 +10073,76 @@ fn walk_wraps_with(
     }
 }
 
-/// The fallback a nested walk asks its value through, written inside the walk's own block.
+/// Builds the `validate()` contribution for a field the enclosing type declares no bound on, whose
+/// own type may publish one — a constrained brand, or a nested `#[model_schema()]` type.
 ///
-/// `NestedValidation` is how a value with nothing declared to check answers `Ok(())`. An inherent
-/// method takes precedence over a trait's, so a nested type that publishes a `validate()` runs it
-/// and one that publishes none — a `String`, a type declaring no constraint anywhere beneath it —
-/// passes here. It is the mechanism the dispatcher's own fallback rests on, written into each walk
-/// rather than imported, since nothing of tixschema's is in scope at runtime.
-///
-/// The precedence is why every check reaches its value as `(*value)` rather than `value`: the walk
-/// hands the leaf a `&T`, and the blanket impl answers for `&T` before an inherent method on `T` is
-/// ever looked for. It is also why the trait is written per walk rather than once per `validate()`:
-/// a second blanket `validate()` in scope makes every call ambiguous, so each one is kept inside
-/// the block that reads it.
-#[cfg(feature = "serde")]
-fn nested_validation_fallback() -> proc_macro2::TokenStream {
-    quote! {
-        trait NestedValidation {
-            fn validate(&self) -> Result<(), Vec<String>> {
-                Ok(())
-            }
-        }
-
-        impl<T: ?Sized> NestedValidation for T {}
-    }
-}
-
-/// Rewrites a nested violation to name the path it was reached through, emitted only for a walk
-/// that has a name to put there.
-#[cfg(feature = "serde")]
-fn nested_renaming() -> proc_macro2::TokenStream {
-    quote! {
-        fn nested_under(field: &str, violation: &str) -> String {
-            match violation
-                .strip_prefix('\'')
-                .and_then(|rest| rest.split_once('\''))
-            {
-                Some((named, tail)) => format!("'{field}.{named}'{tail}"),
-                None => format!("'{field}': {violation}"),
-            }
-        }
-    }
-}
-
-/// Builds the `validate()` contribution that reaches a nested value's own `validate()`, so a
-/// constraint declared one level down is enforced where the message is judged rather than nowhere.
-///
-/// `under` is the field the value was reached through, and `None` says the field was written
-/// `#[serde(flatten)]` — its members are the enclosing object's own keys, so a violation beneath it
-/// is reported under the name it already carries rather than under a key no payload writes.
+/// The fallback rides inside the block rather than once per validator so that a nested check is the
+/// same tokens wherever it lands: a struct's method body, or one arm of an enum's `match`, where a
+/// once-per-validator item would sit in the wrong scope.
 #[cfg(feature = "serde")]
 fn build_nested_validation(
     wraps: &[ConstraintWrap],
     access: MemberAccess,
     field_ident_tok: &proc_macro2::Ident,
-    under: Option<&str>,
 ) -> proc_macro2::TokenStream {
-    let leaf = |reached: &proc_macro2::Ident| {
-        under.map_or_else(
-            || {
-                quote! {
-                    if let Err(reported) = (*#reached).validate() {
-                        errors.extend(reported);
-                    }
-                }
-            },
-            |field| {
-                quote! {
-                    if let Err(reported) = (*#reached).validate() {
-                        errors.extend(
-                            reported
-                                .iter()
-                                .map(|violation| nested_under(#field, violation)),
-                        );
-                    }
-                }
-            },
-        )
-    };
-    let fallback = nested_validation_fallback();
-    let renaming = under.map(|_| nested_renaming());
-    let head = wrap_binding(0);
     let checked = member_access_expr(access, field_ident_tok);
-    let walk = walk_wraps_with(wraps, &head, 1, &leaf);
+    let head = wrap_binding(0);
+    let leaf = nested_leaf(&walked_value(wraps), field_ident_tok);
+    let walk = walk_wraps(wraps, &head, 1, &leaf);
+    let fallback = unpublished_validate_fallback();
     quote! {
         {
             #fallback
-            #renaming
             let #head = #checked;
             #walk
         }
     }
 }
 
-/// Adds a variant member's nested walk to the arm being built.
+/// What a field's type answers when it publishes no `validate()` of its own.
 ///
-/// Shared by the two enum walks — a discriminated variant's members and an untagged member — which
-/// reach a member the same way once the arm has bound it. A positional slot has no name for the arm
-/// to bind, which is the same reason a constrained one is refused outright.
+/// An inherent method takes precedence over a trait's, so a type that declared constraints runs
+/// them and one that declared none passes. It is declared inside the block that calls it, which is
+/// what keeps a blanket `validate()` out of every scope but the one line that needs it.
+///
+/// Implemented for `&T` rather than for `T` so that it sits one autoref step *below* any ordinary
+/// blanket `validate()` the call site can also see — the dispatcher publishes exactly such a
+/// fallback, and two of them answering at the same step is an ambiguity rather than a fallback.
+/// Losing that race costs nothing: whatever wins is another way of spelling the same `Ok(())`.
 #[cfg(feature = "serde")]
-fn push_nested_member_walk(
-    field: &Field,
-    type_parameters: &[String],
-    is_flatten: bool,
-    bound: &mut Vec<(proc_macro2::Ident, proc_macro2::Ident)>,
-    checks: &mut Vec<proc_macro2::TokenStream>,
-) {
-    let Some(ident) = field.ident.as_ref() else {
-        return;
-    };
-    let Some(wraps) = nested_message_shape(&field.ty, type_parameters) else {
-        return;
-    };
-    let named = ident.to_string();
-    bound.push((ident.clone(), member_binding(ident)));
-    checks.push(build_nested_validation(
-        &wraps,
-        MemberAccess::VariantBinding,
-        ident,
-        (!is_flatten).then_some(named.as_str()),
-    ));
+fn unpublished_validate_fallback() -> proc_macro2::TokenStream {
+    quote! {
+        trait UnpublishedValidate {
+            fn validate(&self) -> Result<(), Vec<String>> {
+                Ok(())
+            }
+        }
+        impl<T: ?Sized> UnpublishedValidate for &T {}
+    }
 }
 
-/// Reads a field's type down to the value a nested walk would run `validate()` on, collecting the
-/// wrappers on the way, or `None` where nothing beneath the field can carry a constraint.
+/// The nested check a walk ends on: whatever the field's own type reported, attributed to the field
+/// that holds it.
 ///
-/// The same wrappers a constraint reaches through, and the opposite leaf: a field bottoming out in
-/// a primitive carries its constraints on the field itself and has already been checked, while a
-/// field bottoming out in a declared type is where the composed Zod schema keeps checking and this
-/// one stopped.
+/// A type's own report names its own members and not the field it was reached through — a brand's
+/// names nothing at all, saying only `value is too short: …`. The field name is the enclosing
+/// type's to supply, and it is written in the shape a reader of these reports already reads a name
+/// out of: first, in single quotes.
 #[cfg(feature = "serde")]
-fn nested_message_shape(ty: &syn::Type, type_parameters: &[String]) -> Option<Vec<ConstraintWrap>> {
-    let mut wraps = Vec::new();
-    let mut current = ty;
-    loop {
-        current = written_type(current);
-        if let syn::Type::Array(array) = current {
-            wraps.push(ConstraintWrap::Sequence);
-            current = &array.elem;
-        } else if let syn::Type::Slice(slice) = current {
-            wraps.push(ConstraintWrap::Sequence);
-            current = &slice.elem;
-        } else if let syn::Type::Path(path) = current {
-            let segment = path.path.segments.last()?;
-            if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                wraps.push(generic_wrap(&segment.ident.to_string())?);
-                current = sole_type_argument(args)?;
-            } else if matches!(segment.arguments, syn::PathArguments::None) {
-                return carries_own_validator(&segment.ident.to_string(), type_parameters)
-                    .then_some(wraps);
-            } else {
-                return None;
-            }
-        } else {
-            return None;
+fn nested_leaf(
+    value: &proc_macro2::Ident,
+    field_ident_tok: &proc_macro2::Ident,
+) -> proc_macro2::TokenStream {
+    let field_name_lit = field_ident_tok.to_string();
+    quote! {
+        if let Err(reported) = #value.validate() {
+            errors.extend(
+                reported
+                    .into_iter()
+                    .map(|violation| format!("'{}': {}", #field_name_lit, violation)),
+            );
         }
     }
-}
-
-/// Whether a bare type name is one a nested walk asks to validate itself.
-///
-/// A primitive answers no because a constraint on one is written on the field and run there. One of
-/// the enclosing item's own parameters answers no because the walk would reach whatever a caller
-/// substituted, which is a value this declaration never described. Every other name answers yes and
-/// is asked: what a name resolves to is not knowable here, so the fallback in
-/// [`nested_validation_fallback`] is what a name that publishes no `validate()` meets.
-#[cfg(feature = "serde")]
-fn carries_own_validator(ident: &str, type_parameters: &[String]) -> bool {
-    if leaf_for_ident(ident).is_some() || type_parameters.iter().any(|param| param == ident) {
-        return false;
-    }
-    !matches!(
-        ident,
-        "NaiveDate" | "NaiveDateTime" | "NaiveTime" | "ObjectId" | "Value" | "bool" | "char"
-    )
 }
 
 /// Builds the serde hook for a field written under wrappers: it deserializes the field's own
@@ -10268,7 +10157,12 @@ fn build_wrapped_deserializer(
     wraps: &[ConstraintWrap],
 ) -> proc_macro2::TokenStream {
     let head = wrap_binding(0);
-    let walk = walk_wraps(wraps, &head, 1, validate_value_fn_ident, CheckSink::Fail);
+    let leaf = constraint_leaf(
+        CheckSink::Fail,
+        &walked_value(wraps),
+        validate_value_fn_ident,
+    );
+    let walk = walk_wraps(wraps, &head, 1, &leaf);
     quote! {
         pub fn #deserialize_fn_ident<'de, #(#lifetimes,)* D>(deserializer: D) -> Result<#field_ty, D::Error>
         where
@@ -10630,6 +10524,59 @@ fn constrained_shape(ty: &syn::Type) -> Option<ConstrainedShape> {
             return None;
         }
     }
+}
+
+/// Reads a field's type down to the value whose own type would publish the validator, collecting
+/// the same wrappers a constraint is reached through.
+///
+/// The walk ends on the first name the crate does not read *through*: a bare path, or a generic one
+/// that is not a std container, which is how `RoleId<String>` is reached rather than walked into.
+/// `None` where there is no reach at all — an interior-mutability wrapper, a map, a tuple — which
+/// is the reach a constraint's own walk has, and for the same reason.
+#[cfg(feature = "serde")]
+fn nested_shape(ty: &syn::Type) -> Option<Vec<ConstraintWrap>> {
+    let mut wraps = Vec::new();
+    let mut current = ty;
+    loop {
+        current = written_type(current);
+        if let syn::Type::Array(array) = current {
+            wraps.push(ConstraintWrap::Sequence);
+            current = &array.elem;
+        } else if let syn::Type::Slice(slice) = current {
+            wraps.push(ConstraintWrap::Sequence);
+            current = &slice.elem;
+        } else if let syn::Type::Path(path) = current {
+            let segment = path.path.segments.last()?;
+            let ident = segment.ident.to_string();
+            if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                let Some(wrap) = generic_wrap(&ident) else {
+                    return (!reads_through(&ident)).then_some(wraps);
+                };
+                wraps.push(wrap);
+                current = sole_type_argument(args)?;
+            } else if matches!(segment.arguments, syn::PathArguments::None) {
+                return Some(wraps);
+            } else {
+                return None;
+            }
+        } else {
+            return None;
+        }
+    }
+}
+
+/// Whether a generic name stands for a std container the crate describes by what it holds, rather
+/// than for a declared type of the author's own.
+///
+/// Consulted only for the names [`generic_wrap`] found no reach through, so half of what it names
+/// is already unreachable from there. Written as the whole set on purpose: narrowing that reach
+/// should turn a container into one this walk stops short of, never into a type it walks into.
+#[cfg(feature = "serde")]
+fn reads_through(ident: &str) -> bool {
+    is_transparent_wrapper(ident)
+        || is_sequence_wrapper(ident)
+        || is_refused_sequence_wrapper(ident)
+        || matches!(ident, "BTreeMap" | "HashMap" | "Option")
 }
 
 /// The interior-mutability wrapper on a field's constrained path, when there is one.
@@ -11398,7 +11345,44 @@ fn process_field(
 
     apply_model_schema_prop_meta(&mut field_def, model_schema_prop_meta, &final_name);
 
-    (field_def, validation_fn, validate_body, guard_errors)
+    // A field the enclosing type declares no bound on may still hold a type that declares one. The
+    // two are mutually exclusive: a constraint lands only on a value the crate renders itself, and
+    // a validator is published only by a type someone declared.
+    #[cfg(feature = "serde")]
+    let body = validate_body
+        .or_else(|| nested_validate_body(field, &field_def, ctx.variant_ident.is_some()));
+    #[cfg(not(feature = "serde"))]
+    let body = validate_body;
+
+    (field_def, validation_fn, body, guard_errors)
+}
+
+/// The `validate()` contribution for a field whose *own type* carries the bound — a constrained
+/// brand, or a nested `#[model_schema()]` type — or `None` where nothing below the field could
+/// publish a validator to run.
+///
+/// Which types those are is the crate's own answer rather than a second list: every leaf a surface
+/// renders itself — a primitive, a date, an `ObjectId`, a map, a tuple, one of the item's own
+/// parameters — is not a reference to a declared type and publishes nothing. A positional slot is
+/// left alone for the reason a constrained one is refused: the report and the arm that would run it
+/// are both named from a field ident it has none of.
+#[cfg(feature = "serde")]
+fn nested_validate_body(
+    field: &Field,
+    field_def: &FieldDef,
+    in_variant: bool,
+) -> Option<proc_macro2::TokenStream> {
+    let field_ident_tok = field.ident.as_ref()?;
+    if !matches!(field_def.field_type, FieldDefType::SiblingType(_, _)) {
+        return None;
+    }
+    let wraps = nested_shape(&field.ty)?;
+    let access = if in_variant {
+        MemberAccess::VariantBinding
+    } else {
+        MemberAccess::SelfField
+    };
+    Some(build_nested_validation(&wraps, access, field_ident_tok))
 }
 
 /// Whether the field needs a `#[serde(default)]` written for it alongside the `deserialize_with`.

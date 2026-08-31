@@ -8,8 +8,243 @@
 //! `Loopback` sends the message straight into the generated dispatcher and hands back what the
 //! reply handle captured. It is the only place both halves of the seam meet, and it is where the
 //! envelope one writes and the other reads is proven to be one envelope.
+//!
+//! `DeadlineTransport` is the bus this design has to live on when a reply does not come: it records
+//! the call, waits out a deadline it imposed itself, and reports that nothing landed. It is the
+//! only transport here that answers in the failure arm, and it is what the fault a caller reads
+//! for a call that never completed is measured against.
 
 #![cfg(feature = "serde")]
+
+/// A service whose message carries no bound of its own, only one its field's *type* declares.
+///
+/// Its own service rather than an operation on the file's: a constrained brand needs a surface
+/// feature to be declared at all, so everything reading one is gated together — the same gate the
+/// dispatcher's constraint module carries, and for the same reason.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+mod a_bound_the_fields_own_type_declares {
+    use super::{ProbeTransport, poll_once};
+    use core::future::ready;
+    use serde::{Deserialize, Serialize};
+    use std::sync::Mutex;
+    use tixschema::{model_schema, service_schema};
+
+    #[model_schema(minLength = 3)]
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(transparent)]
+    pub struct Slug(pub String);
+
+    #[model_schema()]
+    #[derive(Deserialize, Serialize)]
+    pub struct EnrolRequest {
+        pub slug: Slug,
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+    pub struct Enrolled {
+        pub credits: u32,
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(rename_all = "kebab-case", tag = "errorCode")]
+    pub enum EnrolError {
+        DbError,
+    }
+
+    #[service_schema()]
+    pub trait EnrolService<Ctx> {
+        async fn enrol(&self, ctx: &Ctx, req: EnrolRequest) -> Result<Enrolled, EnrolError>;
+    }
+
+    /// Answers with the length of the slug it was handed, which a test reads back to say the
+    /// message reached it whole.
+    pub struct EnrolBackEnd;
+
+    /// What one dispatch settled, encoded as a transport would put it on the wire.
+    pub struct EnrolCapture {
+        answered: Mutex<Vec<Vec<u8>>>,
+    }
+
+    /// A transport that answers by dispatching straight into the service.
+    pub struct EnrolLoopback;
+
+    impl EnrolService<()> for EnrolBackEnd {
+        async fn enrol(&self, _ctx: &(), req: EnrolRequest) -> Result<Enrolled, EnrolError> {
+            ready(()).await;
+            Ok(Enrolled {
+                credits: u32::try_from(req.slug.0.len()).unwrap(),
+            })
+        }
+    }
+
+    impl enrol_service_schema::Reply for EnrolCapture {
+        async fn fault(&self, fault: enrol_service_schema::ServiceFault) {
+            ready(()).await;
+            let framed = serde_json::json!({
+                "ok": false,
+                "error": { "isServiceFault": true, "fault": fault },
+            });
+            self.answered
+                .lock()
+                .unwrap()
+                .push(serde_json::to_vec(&framed).unwrap());
+        }
+
+        async fn send<T>(&self, value: T)
+        where
+            T: Serialize + Send,
+        {
+            ready(()).await;
+            self.answered
+                .lock()
+                .unwrap()
+                .push(serde_json::to_vec(&value).unwrap());
+        }
+    }
+
+    impl enrol_service_schema::Transport for EnrolLoopback {
+        async fn notify<T>(&self, operation: &str, payload: T) -> Result<(), String>
+        where
+            T: Serialize + Send,
+        {
+            let capture = EnrolCapture::new();
+            enrol_service_schema::dispatch(
+                &EnrolBackEnd,
+                &(),
+                &incoming(operation, &payload),
+                &capture,
+            )
+            .await;
+            Ok(())
+        }
+
+        async fn request<T>(&self, operation: &str, payload: T) -> Result<Vec<u8>, String>
+        where
+            T: Serialize + Send,
+        {
+            let capture = EnrolCapture::new();
+            enrol_service_schema::dispatch(
+                &EnrolBackEnd,
+                &(),
+                &incoming(operation, &payload),
+                &capture,
+            )
+            .await;
+            Ok(capture.answered())
+        }
+    }
+
+    /// The file's probe transport, answering a second service: a `Transport` is generated per
+    /// service, so serving another one means implementing another.
+    impl enrol_service_schema::Transport for ProbeTransport {
+        async fn notify<T>(&self, operation: &str, payload: T) -> Result<(), String>
+        where
+            T: Serialize + Send,
+        {
+            ready(()).await;
+            self.record(operation, &payload);
+            self.answer();
+            Ok(())
+        }
+
+        async fn request<T>(&self, operation: &str, payload: T) -> Result<Vec<u8>, String>
+        where
+            T: Serialize + Send,
+        {
+            ready(()).await;
+            self.record(operation, &payload);
+            Ok(self.answer())
+        }
+    }
+
+    impl EnrolCapture {
+        fn answered(&self) -> Vec<u8> {
+            self.answered.lock().unwrap().pop().unwrap()
+        }
+
+        fn new() -> Self {
+            Self {
+                answered: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    /// The message shape is generated per service, so this service builds its own.
+    fn incoming<T>(operation: &str, payload: &T) -> enrol_service_schema::IncomingMessage
+    where
+        T: Serialize,
+    {
+        enrol_service_schema::IncomingMessage {
+            operation: operation.to_owned(),
+            payload: serde_json::to_vec(payload).unwrap(),
+        }
+    }
+
+    /// The outbound half of a brand's bound, and the half its serde hook cannot cover: a message
+    /// built in Rust was never deserialized, so the hook never ran on it. Until the message's own
+    /// validator reached the field, this call put a `Slug` violating its own declared pattern on
+    /// the wire and the caller learned nothing about it.
+    #[test]
+    fn a_message_whose_bound_its_fields_type_declares_is_refused_naming_the_field() {
+        // Built with no answers: reaching the transport panics, so this test passing at all is the
+        // proof it was not touched.
+        let transport = ProbeTransport::new(&[]);
+        let client = enrol_service_schema::EnrolServiceClient::new(transport);
+        let answered = poll_once(client.enrol(EnrolRequest {
+            slug: Slug("ab".to_owned()),
+        }))
+        .unwrap();
+        let reported = match &answered {
+            Err(enrol_service_schema::CallError::Fault(reported)) => Some(reported),
+            Ok(_) | Err(enrol_service_schema::CallError::Operation(_)) => None,
+        }
+        .unwrap();
+        assert_eq!(
+            reported.kind(),
+            enrol_service_schema::ServiceFaultKind::FailedValidation,
+            "the operation never ran, so this is not one of its declared errors"
+        );
+        assert_eq!(
+            reported.field(),
+            Some("slug"),
+            "the brand's own report names nothing, so the message is what supplies the field. \
+             Got: {}",
+            reported.detail()
+        );
+        assert_eq!(
+            reported.detail(),
+            "'slug': value is too short: minimum length is 3, got 2"
+        );
+        assert_eq!(reported.operation(), "enrol");
+        assert!(
+            client.transport().calls().is_empty(),
+            "got: {:?}",
+            client.transport().calls()
+        );
+    }
+
+    /// The same message with a value the bound admits goes out, is read back on the other side and
+    /// is answered — which is what says the check refuses something rather than everything, on
+    /// both halves of the seam at once.
+    #[test]
+    fn a_message_whose_bound_its_fields_type_declares_is_satisfiable_end_to_end() {
+        let client = enrol_service_schema::EnrolServiceClient::new(EnrolLoopback);
+        let answered = poll_once(client.enrol(EnrolRequest {
+            slug: Slug("abcd".to_owned()),
+        }))
+        .unwrap();
+        assert_eq!(
+            answered.unwrap(),
+            Enrolled { credits: 4 },
+            "the implementation answered from the slug it was handed, so the message crossed whole"
+        );
+    }
+}
 
 use core::future::{Future, ready};
 use core::pin::pin;
@@ -41,6 +276,13 @@ pub struct BalanceResponse {
 /// What a reply handle captured, encoded as the transport would put it on the wire.
 pub struct Capture {
     answered: Mutex<Vec<Vec<u8>>>,
+}
+
+/// A transport that imposed a deadline of its own and hit it: the call went out and no reply came
+/// back. It records what it was asked to carry, so a test can tell a call that never landed from
+/// one that was never made.
+pub struct DeadlineTransport {
+    calls: Mutex<Vec<String>>,
 }
 
 /// A transport that answers by dispatching into the service itself.
@@ -179,22 +421,28 @@ impl probe_service_schema::Reply for Capture {
     }
 }
 
-impl probe_service_schema::Transport for Loopback {
-    async fn notify<T>(&self, operation: &str, payload: T)
+impl probe_service_schema::Transport for DeadlineTransport {
+    async fn notify<T>(&self, operation: &str, _payload: T) -> Result<(), String>
     where
         T: Serialize + Send,
     {
-        let capture = Capture::new();
-        probe_service_schema::dispatch(
-            &self.service,
-            &"probe".to_owned(),
-            &incoming(operation, &payload),
-            &capture,
-        )
-        .await;
+        ready(()).await;
+        self.record(operation);
+        Err("no confirmation within 30s".to_owned())
     }
 
-    async fn request<T>(&self, operation: &str, payload: T) -> Vec<u8>
+    async fn request<T>(&self, operation: &str, _payload: T) -> Result<Vec<u8>, String>
+    where
+        T: Serialize + Send,
+    {
+        ready(()).await;
+        self.record(operation);
+        Err("no reply within 30s".to_owned())
+    }
+}
+
+impl probe_service_schema::Transport for Loopback {
+    async fn notify<T>(&self, operation: &str, payload: T) -> Result<(), String>
     where
         T: Serialize + Send,
     {
@@ -206,27 +454,43 @@ impl probe_service_schema::Transport for Loopback {
             &capture,
         )
         .await;
-        capture.answered()
+        Ok(())
+    }
+
+    async fn request<T>(&self, operation: &str, payload: T) -> Result<Vec<u8>, String>
+    where
+        T: Serialize + Send,
+    {
+        let capture = Capture::new();
+        probe_service_schema::dispatch(
+            &self.service,
+            &"probe".to_owned(),
+            &incoming(operation, &payload),
+            &capture,
+        )
+        .await;
+        Ok(capture.answered())
     }
 }
 
 impl probe_service_schema::Transport for ProbeTransport {
-    async fn notify<T>(&self, operation: &str, payload: T)
+    async fn notify<T>(&self, operation: &str, payload: T) -> Result<(), String>
     where
         T: Serialize + Send,
     {
         ready(()).await;
         self.record(operation, &payload);
         self.answer();
+        Ok(())
     }
 
-    async fn request<T>(&self, operation: &str, payload: T) -> Vec<u8>
+    async fn request<T>(&self, operation: &str, payload: T) -> Result<Vec<u8>, String>
     where
         T: Serialize + Send,
     {
         ready(()).await;
         self.record(operation, &payload);
-        self.answer()
+        Ok(self.answer())
     }
 }
 
@@ -239,6 +503,22 @@ impl Capture {
         Self {
             answered: Mutex::new(Vec::new()),
         }
+    }
+}
+
+impl DeadlineTransport {
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    const fn new() -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn record(&self, operation: &str) {
+        self.calls.lock().unwrap().push(operation.to_owned());
     }
 }
 
@@ -527,6 +807,105 @@ fn a_one_way_message_failing_its_own_validation_is_a_fault_and_sends_nothing() {
     assert!(
         client.transport().calls().is_empty(),
         "a defect it can see for itself is not something to publish"
+    );
+}
+
+#[test]
+fn a_call_the_transport_could_not_carry_comes_back_as_a_fault_rather_than_never_answering() {
+    let client = probe_service_schema::ProbeServiceClient::new(DeadlineTransport::new());
+    let answered = poll_once(client.get_balance(BalanceRequest {
+        organization_id: "acme".to_owned(),
+    }))
+    .unwrap();
+    let reported = reported_fault(&answered).unwrap();
+    assert_eq!(
+        reported.kind(),
+        probe_service_schema::ServiceFaultKind::TransportFailure,
+        "a reply that is never coming is a defect the caller has to be told about, not a call \
+         left to sit"
+    );
+    assert_eq!(
+        reported.operation(),
+        "get-balance",
+        "the fault names the call that did not land, not the transport"
+    );
+    assert_eq!(
+        reported.detail(),
+        "no reply within 30s",
+        "what the transport said is what the log line carries: the client knows nothing about \
+         why a call did not travel"
+    );
+    assert_eq!(
+        reported.field(),
+        None,
+        "nothing in the message was wrong, so there is no field to name"
+    );
+    assert_eq!(
+        client.transport().calls(),
+        vec!["get-balance".to_owned()],
+        "the message passed its own validator and went out, which is what tells this fault apart \
+         from a refusal"
+    );
+}
+
+#[test]
+fn a_one_way_send_the_transport_could_not_put_out_comes_back_as_a_fault() {
+    let client = probe_service_schema::ProbeServiceClient::new(DeadlineTransport::new());
+    let answered = poll_once(client.apply_bundle(AdmitRequest {
+        organization_id: "acme".to_owned(),
+    }))
+    .unwrap();
+    let reported = answered.unwrap_err();
+    assert_eq!(
+        reported.kind(),
+        probe_service_schema::ServiceFaultKind::TransportFailure,
+        "a one-way operation has no reply to carry an error, and the send itself failing is still \
+         something the caller is owed"
+    );
+    assert_eq!(reported.operation(), "apply-bundle");
+    assert_eq!(reported.detail(), "no confirmation within 30s");
+    assert_eq!(
+        client.transport().calls(),
+        vec!["apply-bundle".to_owned()],
+        "the transport was reached, unlike the message this client refuses for itself"
+    );
+}
+
+#[test]
+fn a_transport_failure_reads_the_same_way_to_a_caller_as_every_other_defect() {
+    let client = probe_service_schema::ProbeServiceClient::new(DeadlineTransport::new());
+    let answered = poll_once(client.get_balance(BalanceRequest {
+        organization_id: "acme".to_owned(),
+    }))
+    .unwrap();
+    assert!(
+        !matches!(answered, Err(probe_service_schema::CallError::Operation(_))),
+        "a call that never landed is not one of the things the operation said it could fail at"
+    );
+    assert_eq!(
+        reported_fault(&answered).unwrap().to_string(),
+        "transport failure in operation `get-balance`: no reply within 30s",
+        "the one line a fault renders to names the kind before the operation and the detail"
+    );
+}
+
+#[test]
+fn a_transport_failure_is_reported_only_for_a_message_the_client_did_not_refuse_first() {
+    let client = probe_service_schema::ProbeServiceClient::new(DeadlineTransport::new());
+    let answered = poll_once(client.admit(AdmitRequest {
+        organization_id: "ab".to_owned(),
+    }))
+    .unwrap();
+    assert_eq!(
+        reported_fault(&answered).unwrap().kind(),
+        probe_service_schema::ServiceFaultKind::FailedValidation,
+        "the outbound check still runs first, so a message this client can see is wrong never \
+         becomes a transport failure a round trip later"
+    );
+    assert!(
+        client.transport().calls().is_empty(),
+        "got: {:?}",
+        client.transport().calls()
     );
 }
 

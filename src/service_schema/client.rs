@@ -1,5 +1,7 @@
 //! The Rust client: one method per operation, returning the operation's success type or a call
-//! error that is either the operation's own error or a fault the remote produced.
+//! error that is either the operation's own error or a fault — one the remote produced, one this
+//! client raised against its own outgoing message, or one the transport reported about a call that
+//! never landed.
 //!
 //! # Three outcomes, two arms
 //!
@@ -16,6 +18,16 @@
 //! came from its own validator or from the far end. This is the second of the two generated places
 //! allowed to build a fault, which is why it is emitted inside the module the constructors are
 //! private to.
+//!
+//! # A transport that could not carry the call has somewhere to say so
+//!
+//! Both transport methods answer a `Result`, the failure arm carrying whatever the transport wants
+//! to say in words. Without one, a transport that knows its reply is never coming — a deadline it
+//! imposed, a connection that went away — can only panic or hang, and the caller is left holding a
+//! call that never completes and no fault to report. The client turns that arm into
+//! `ServiceFaultKind::TransportFailure`, so a caller reads a call that did not travel the same way
+//! it reads every other defect. Whether a deadline exists at all, and how long it is, stays the
+//! transport's: this is where the answer is reported, not where it is decided.
 //!
 //! # Reading a fault back
 //!
@@ -54,7 +66,7 @@ pub fn emit(service: &ServiceDef) -> TokenStream {
          nothing else: the context is the implementation's and never reaches a caller. A \
          request-and-reply operation answers `Result<Success, CallError<Error>>`; a \
          one-way operation answers nothing beyond the send, save for the fault it owes when the \
-         message it was handed fails its own validation."
+         message it was handed fails its own validation or the transport could not put it out."
     );
     let transport = transport_trait(contract);
     let mirror = fault_mirror();
@@ -176,6 +188,7 @@ fn fault_mirror() -> TokenStream {
         enum FaultKindOnTheWire {
             FailedValidation,
             HandlerPanic,
+            TransportFailure,
             UndeserializablePayload,
             UnknownOperation,
         }
@@ -208,6 +221,7 @@ fn fault_mirror() -> TokenStream {
                     kind: match self.kind {
                         FaultKindOnTheWire::FailedValidation => ServiceFaultKind::FailedValidation,
                         FaultKindOnTheWire::HandlerPanic => ServiceFaultKind::HandlerPanic,
+                        FaultKindOnTheWire::TransportFailure => ServiceFaultKind::TransportFailure,
                         FaultKindOnTheWire::UndeserializablePayload => {
                             ServiceFaultKind::UndeserializablePayload
                         }
@@ -244,11 +258,19 @@ fn method(operation: &OperationDef) -> TokenStream {
     let refusal = outbound_refusal(operation);
     let answered = match &operation.outcome {
         OperationOutcome::OneWay => quote! {
-            self.transport.notify(#wire, sending).await;
-            Ok(())
+            self.transport
+                .notify(#wire, sending)
+                .await
+                .map_err(|uncarried| ServiceFault::transport_failure(#wire, &uncarried))
         },
         OperationOutcome::Reply { .. } => quote! {
-            read_answer(#wire, &self.transport.request(#wire, sending).await)
+            match self.transport.request(#wire, sending).await {
+                Ok(encoded) => read_answer(#wire, &encoded),
+                Err(uncarried) => Err(CallError::Fault(ServiceFault::transport_failure(
+                    #wire,
+                    &uncarried,
+                ))),
+            }
         },
     };
     let answers = answers(operation);
@@ -289,17 +311,19 @@ fn method_doc(operation: &OperationDef) -> String {
     match operation.outcome {
         OperationOutcome::OneWay => format!(
             " Sends `{carried}`, which expects no reply.\n\n\
-             Nothing is awaited beyond the send, there being no reply to carry an error. The one \
-             failure it can report is its own: a message that fails its own `validate()` never \
-             reaches the transport, and the fault names the field.\n\n\
+             Nothing is awaited beyond the send, there being no reply to carry an error. The two \
+             failures it can report are both about the send itself: a message that fails its own \
+             `validate()` never reaches the transport, and the fault names the field; a message \
+             the transport could not put out comes back as a `transport-failure` fault carrying \
+             what the transport said.\n\n\
             {context}"
         ),
         OperationOutcome::Reply { .. } => format!(
             " Calls `{carried}` and waits for the answer.\n\n\
              `Err(CallError::Operation(…))` is the error `{named}` declared. \
-             `Err(CallError::Fault(…))` is a defect: the remote produced one, or this client \
-             refused the message it was about to send, in which case the transport was never \
-             reached.\n\n\
+             `Err(CallError::Fault(…))` is a defect: the remote produced one, this client refused \
+             the message it was about to send, in which case the transport was never reached, or \
+             the transport reported that the call never landed.\n\n\
             {context}"
         ),
     }
@@ -330,26 +354,33 @@ fn transport_trait(contract: &Ident) -> TokenStream {
          has to reserve a key for routing. The payload is handed over as a value rather than as \
          bytes, for the same reason [`Reply::send`] is: a transport merges its own fields — a \
          correlation id, an error flag — into the object before serializing it, and neither is \
-         reachable behind an encoded buffer."
+         reachable behind an encoded buffer.\n\n\
+         Both methods answer a `Result`. `Err` is for a call that did not travel — a deadline the \
+         transport imposed, a connection that went away — and carries whatever the transport wants \
+         to say about it in words; the client turns it into a fault of kind `transport-failure`. \
+         Deadlines, retries and backpressure are the transport's own: this arm is where the answer \
+         is reported, not where it is decided."
     );
     quote! {
         #[doc = #transport_doc]
         pub trait Transport {
-            /// Sends a message no reply is expected for.
+            /// Sends a message no reply is expected for, answering `Err` with what stopped it in
+            /// words if the message never went out.
             fn notify<T>(
                 &self,
                 operation: &str,
                 payload: T,
-            ) -> impl ::core::future::Future<Output = ()> + Send
+            ) -> impl ::core::future::Future<Output = Result<(), String>> + Send
             where
                 T: ::serde::Serialize + Send;
 
-            /// Sends a message and answers with the encoded reply.
+            /// Sends a message and answers with the encoded reply, or `Err` with what stopped it
+            /// in words if the call never landed and no reply is coming.
             fn request<T>(
                 &self,
                 operation: &str,
                 payload: T,
-            ) -> impl ::core::future::Future<Output = Vec<u8>> + Send
+            ) -> impl ::core::future::Future<Output = Result<Vec<u8>, String>> + Send
             where
                 T: ::serde::Serialize + Send;
         }

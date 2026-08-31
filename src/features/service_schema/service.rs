@@ -18,6 +18,14 @@
 //! failure the operation never declared, and the two places entitled to build one are both
 //! generated — this dispatcher and the client.
 //!
+//! # The dispatcher exists only beside a schema
+//!
+//! An arm parses the payload before it calls, which is what entitles an implementation to assume
+//! its message is valid. The parse is against the `<Message>$Schema` const `#[model_schema()]`
+//! publishes, so this module is gated with the Zod surface that writes one: a build without it
+//! publishes no dispatcher rather than one that narrows an unread payload with `as` and hands it to
+//! an implementation written against a guarantee nothing checked.
+//!
 //! # The context is explicit and generic
 //!
 //! The interface carries a context type parameter and every method takes it, mirroring the Rust
@@ -44,33 +52,15 @@ fn arm(service: &ServiceDef, operation: &OperationDef) -> String {
     let wire = &operation.wire_name;
     let call = &operation.ts_name;
     let received = payload_check(service, operation);
-    let unchecked = received.is_empty();
-    let taken = if unchecked {
-        "payload"
-    } else {
-        "received.data"
-    };
     let answering = match operation.outcome {
-        OperationOutcome::OneWay => format!(
-            "        await impl.{call}(ctx, {taken}{});\n        return undefined;",
-            cast(operation, unchecked)
-        ),
-        OperationOutcome::Reply { .. } => format!(
-            "        return impl.{call}(ctx, {taken}{});",
-            cast(operation, unchecked)
-        ),
+        OperationOutcome::OneWay => {
+            format!("        await impl.{call}(ctx, received.data);\n        return undefined;")
+        }
+        OperationOutcome::Reply { .. } => {
+            format!("        return impl.{call}(ctx, received.data);")
+        }
     };
     format!("      case \"{wire}\": {{\n{received}{answering}\n      }}")
-}
-
-/// What an unchecked payload has to be narrowed with. A build that publishes a schema narrows by
-/// parsing; one that does not has only the assertion, and says so.
-fn cast(operation: &OperationDef, unchecked: bool) -> String {
-    if unchecked {
-        format!(" as {}", message::typename(operation))
-    } else {
-        String::new()
-    }
 }
 
 /// The factory: an implementation in, a dispatch function out. It answers with what the transport
@@ -113,9 +103,6 @@ fn dispatcher(service: &ServiceDef) -> String {
 
 /// The three readers the dispatcher answers through: the framing a fault crosses in, the fault an
 /// unrecognised operation gets, and the one a payload that failed its schema gets.
-///
-/// The last is emitted only where a schema exists to fail against, which is a build with the Zod
-/// surface on.
 fn fault_helpers(service: &ServiceDef) -> Vec<String> {
     let named = service.ident.to_string();
     let prefix = RenameRule::CamelCase.apply_to_variant(&named);
@@ -157,7 +144,6 @@ fn fault_helpers(service: &ServiceDef) -> Vec<String> {
 /// The fault a payload that will not become the operation's message produces, split the way the
 /// Rust dispatcher splits it: a payload that failed at no key at all was never the message, and one
 /// that failed at a key failed the message's own validation.
-#[cfg(feature = "zod")]
 fn inbound_fault(service: &ServiceDef) -> Vec<String> {
     let named = service.ident.to_string();
     let prefix = RenameRule::CamelCase.apply_to_variant(&named);
@@ -190,11 +176,6 @@ fn inbound_fault(service: &ServiceDef) -> Vec<String> {
          }};\n\
          }}"
     )]
-}
-
-#[cfg(not(feature = "zod"))]
-const fn inbound_fault(_service: &ServiceDef) -> Vec<String> {
-    Vec::new()
 }
 
 /// The interface an implementation satisfies. Every member is required and none is optional, so an
@@ -296,9 +277,8 @@ fn outcome_type(service: &str, operation: &OperationDef) -> Option<String> {
     ))
 }
 
-/// The parse that runs before the implementation is called, and nothing at all in a build that
-/// publishes no schema to parse against.
-#[cfg(feature = "zod")]
+/// The parse that runs before the implementation is called. It runs in every arm, this module
+/// being emitted only where there is a schema to parse against.
 fn payload_check(service: &ServiceDef, operation: &OperationDef) -> String {
     let named = service.ident.to_string();
     let prefix = RenameRule::CamelCase.apply_to_variant(&named);
@@ -310,9 +290,4 @@ fn payload_check(service: &ServiceDef, operation: &OperationDef) -> String {
          return {prefix}Framed({prefix}InboundFault(\"{wire}\", received.error.issues));\n        \
          }}\n"
     )
-}
-
-#[cfg(not(feature = "zod"))]
-const fn payload_check(_service: &ServiceDef, _operation: &OperationDef) -> String {
-    String::new()
 }

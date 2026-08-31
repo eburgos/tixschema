@@ -1463,6 +1463,56 @@ service_schema: a service needs tixschema's `serde` feature, and this build does
        add `features = ["serde"]` to the tixschema dependency in Cargo.toml
 ```
 
+**A service that publishes TypeScript needs the `zod` feature too.** A message validates when it is
+constructed, in both directions: the generated client parses what it is about to send before it
+reaches a transport, and the generated dispatcher parses what arrived before it enters an
+implementation, so an implementation may assume its message is valid. On the TypeScript side both
+checks are the same parse, against the `<Message>$Schema` const `#[model_schema()]` publishes — and
+only a build with the `zod` feature publishes one.
+
+So a build with `typescript` on and `zod` off publishes the service's **types** and neither seam
+artifact: no `<Service>Schema::ts_client()` and no `<Service>Schema::ts_service()`. The types are
+published as they always are, because they describe what the Rust dispatcher and the Rust client put
+on the wire, and that half validates in either build. The two that are withheld are withheld rather
+than emitted without their check: a client that forwards whatever it is handed and a dispatcher that
+narrows an unread payload with `as` both compile and both read exactly like the checked ones, while
+the Rust half of the same service goes on validating — two halves of one service disagreeing about
+what they accept, with nothing to say so.
+
+A bundle that names either one in such a build is refused where it names it, which is the one place
+the choice of features can still be acted on:
+
+```text
+error[E0599]: no associated function or constant named `ts_client` found for struct `UsageServiceSchema` in the current scope
+   |
+23 | #[service_schema()]
+   | ------------------- associated function or constant `ts_client` not found for this struct
+...
+34 |     let _ = UsageServiceSchema::ts_client();
+   |                                 ^^^^^^^^^ associated function or constant not found in `UsageServiceSchema`
+```
+
+**A service is declared at module scope, never inside a function body.** The module the macro
+generates opens with `use super::*;`, which is how the dispatcher and the client reach the trait and
+the message types declared beside it. A module written inside a function body has the enclosing
+*module* as its parent rather than the function, so `super` from there reaches past every name that
+function declared. `#[model_schema()]` carries the same requirement, for the same reason.
+
+The macro cannot refuse the placement: an attribute macro is handed the annotated item's own tokens
+and nothing about the scope it was written in, and a trait written inside a function is the same
+tokens as one written beside it. A function-scoped declaration earns the compiler's own resolution
+errors instead — one for the trait, and one for each type an operation named:
+
+```text
+error[E0405]: cannot find trait `UsageService` in module `super`
+error[E0425]: cannot find type `BalanceRequest` in this scope
+error[E0425]: cannot find type `BalanceResponse` in this scope
+error[E0425]: cannot find type `BalanceError` in this scope
+```
+
+One consequence is worth knowing before it costs anyone an afternoon: rustdoc wraps a doctest with
+no explicit `fn main` in one, so a doctest that declares a service writes `fn main() {}` of its own.
+
 #### The Shape of a Service
 
 A service names a **context** type parameter, and every operation takes it as its first argument after `&self`. An operation receives one message and answers `Result<Success, Error>`.
@@ -1703,7 +1753,7 @@ A one-way method runs the same check and has nowhere to put the result of it, so
 
 #### Service Faults
 
-A payload that will not deserialize, a message that fails validation, an operation name nothing recognises and a handler that panicked are none of the things an operation declared it could fail at. Folding them into a service's domain errors would put transport concerns in every signature, so they come back as a **fault**: a defect rather than a condition, meant to be logged at error level and to page a human.
+A payload that will not deserialize, a message that fails validation, an operation name nothing recognises, a handler that panicked and a call the transport could not carry are none of the things an operation declared it could fail at. Folding them into a service's domain errors would put transport concerns in every signature, so they come back as a **fault**: a defect rather than a condition, meant to be logged at error level and to page a human.
 
 A result therefore keeps two arms, with the fault riding inside the failure arm behind a literal a caller can narrow on:
 
@@ -1738,9 +1788,7 @@ export type UsageServiceGetAvailableBalanceOutcome =
   | { ok: false; error: BalanceError };
 ```
 
-Exactly two generated places build one: the dispatcher, when an incoming message cannot be turned into a valid request or names an operation nothing recognises, and the client, when the message *it* is about to send fails its own validation. In Rust a client call answers `Result<Success, CallError<Error>>`, `CallError` being `Operation(E)` for the error the operation declared and `Fault(ServiceFault)` for a defect that reached the caller.
-
-Which kind a refused payload is reported under is `serde_json`'s own classification of the refusal, not the shape of the sentence it wrote. `undeserializable-payload` means the bytes are not a document at all -- not JSON, or a document that ends early -- which is a sender whose serialization is broken, and such a refusal names no field because nothing was read far enough for a key to be what went wrong. `failed-validation` means the bytes read as a document and did not match the message: a field carrying the wrong type of value, a key that is missing, a value a bound refuses. That is a value someone supplied, and it is where the TypeScript service serving the same operation draws the line too -- its reader parses the payload and its schema then judges what was read -- so one defect reaches a call site under one kind whichever language served it. The field is named wherever the refusal named one: a validator's report names it in single quotes, and serde names it in backticks for a missing or unknown key. A type mismatch says what serde expected and not where, so that fault carries no field. The byte offset serde appends is dropped, it being a position inside an encoding the caller never saw.
+Exactly two generated places build one: the dispatcher, when an incoming message cannot be turned into a valid request or names an operation nothing recognises, and the client, when the message *it* is about to send fails its own validation or the transport reports that the call never landed. In Rust a client call answers `Result<Success, CallError<Error>>`, `CallError` being `Operation(E)` for the error the operation declared and `Fault(ServiceFault)` for a defect that reached the caller.
 
 #### What a Service Generates
 
@@ -1748,7 +1796,7 @@ On the Rust side, beside the trait, in a module named for the service (`usage_se
 
 - `ServiceFault` and `ServiceFaultKind` -- readable by anyone, constructible by nothing outside the module.
 - `Reply` -- the handle a transport implements to answer one message, with `send` and `fault`.
-- `Transport` -- the seam a client is bound to, with `notify` and `request`.
+- `Transport` -- the seam a client is bound to, with `notify` and `request`. Both answer a `Result`, whose failure arm carries in words what stopped a call from travelling; the client turns it into a fault of kind `transport-failure`.
 - `CallError<E>` -- `Operation(E)` or `Fault(ServiceFault)`.
 - `IncomingMessage` and `dispatch(svc, ctx, message, reply)` -- the dispatcher, generic over the implementing type.
 - `UsageServiceClient` -- one method per operation, over any `Transport`. Each takes that operation's arguments and no context: a context is what an implementation needs, and a caller has nothing to hand one to.
@@ -1826,6 +1874,7 @@ tixschema generates no transport. What it emits is the seam either side of one:
 - **The operation name arrives from the transport**, beside the payload and never inside it, so no message type has to reserve a key for routing. `dispatch` is handed the name and matches on it; a gRPC method name or an HTTP path serves the same role on those transports.
 - **The encoding lives behind `Reply`.** `Reply::send` is handed a value rather than bytes, because a transport merges its own fields -- a correlation id, an error flag -- into the object before serializing it, and neither is reachable behind an encoded buffer.
 - **Queues, retries, timeouts, acknowledgement, connection handling and reconnection belong to the caller.** `dispatch` returns nothing, so the adapter that called it still holds the delivery when the arm finishes, and acknowledges there -- for every message, including a one-way one. That placement is what lets the handle carry replying and nothing else: a path that never replies names nothing about replying.
+- **A call that never landed has a place to be reported.** `Transport::notify` and `Transport::request` both answer a `Result`, and `Err` carries whatever the transport wants to say about a message that did not go out or a reply that is not coming. Without it a transport that hit its own deadline could only panic or hang, and a caller would be left holding a call that never completes and no fault to report. Whether there is a deadline, and how long it is, stays the transport's decision -- the arm is where the answer is reported, not where it is decided.
 
 A request-and-reply arm answers exactly once, through `send` or `fault`, whichever way it goes. A one-way arm that reached its implementation calls neither; one whose payload was refused before it got there answers with a fault, that being the only thing it can say about a message it never ran.
 
@@ -2022,27 +2071,37 @@ A constraint describes the value, not the shape. A payload carrying a value it r
 A field still generates both helpers into its schema module: `validate_{field}_value()`, which `validate()` calls, and `deserialize_{field}`, a serde hook an author may hang on a field of their own accord. Two positions carry a check on the read without being asked to, and both have to:
 
 - **A member of an `#[serde(untagged)]` enum**, where whether the member is admissible is what chooses which variant the payload is. The check is part of reading the value rather than part of judging it -- exactly as it is under `anyOf` and `z.union` on the two schema surfaces the same type publishes -- and `validate()` cannot stand in for it, since by the time it runs the variant has already been chosen. A wrapped member's hook deserializes the member's own declared type and then runs the same walk `validate()` runs over it; the two differ in that `validate()` answers with every violation in the instance while a `Deserializer` answers with one error, so the read stops at the first.
-- **A constrained brand.** Its bound is enforced on the read, which is the one automatic hook that is not about choosing a variant. A message holding a branded *named field* also reaches it through the walk below, so the two overlap there; the read is what still covers the positions the walk does not reach -- a positional slot, which has no name for a violation to be reported under, and a field written under a wrapper the walk does not read through.
+- **A constrained brand**, where the same reasoning applies wherever the brand is used as an untagged member. The hook is on the brand's type rather than on the field, so it is one hook covering every position the brand appears in.
 
 A field whose key may be left out keeps that reading. Where a member is hung with the hook -- an untagged variant's, which is the one position that is -- an `Option` written outermost (under any number of transparent wrappers) is given `#[serde(default)]` alongside it, since a `deserialize_with` otherwise turns a missing key into an error; a field that writes its own `default` keeps the one it wrote. Off the hook there is nothing to put back and no `default` is written, so a required key that goes missing is still the error it always was.
 
-### What a validator reaches
+#### A bound the field's own type declares
 
-Its own constrained fields, and then whatever each of its other fields holds.
+A field carrying no `model_schema_prop` of its own may still hold a type that declares one -- a constrained brand, or a nested `#[model_schema()]` type. The enclosing `validate()` runs whatever validator that type published and writes its report under the field that held it:
 
-A bound declared on a nested message is a bound on the message that carries it. The Zod schema the same declaration publishes is composed -- validating the outer schema validates the inner one with it -- so a `validate()` that stopped at the top level would make the two ends of one declaration disagree about whether a payload is valid, and a Rust service would run an operation the TypeScript one refuses.
+```rust
+#[model_schema(minLength = 3)]
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Slug(pub String);
 
-So every field bottoming out in a declared type is walked, through the same wrappers a constraint is reached through (`Option`, a sequence, `Box`/`Rc`/`Arc`/`Cow`), and the value's own `validate()` is run. A field bottoming out in a primitive is not: its bounds are declared on the field and already run there. A type that publishes no `validate()` -- because nothing beneath it declares a bound -- answers `Ok(())` through a fallback written inside the walk.
-
-A violation is reported under the path it was reached through, so the field a fault names is the key a caller looks for in the payload it sent:
-
-```text
-'account.claims.jti' is too short: minimum length is 1, got 0
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+pub struct Enrolment {
+    pub slug: Slug,
+}
 ```
 
-A `#[serde(flatten)]` hop writes no key, so it contributes no segment: a bound under a flattened `claims` inside `account` is reported as `'account.jti'`. A violation naming no field of its own -- a constrained brand's, which says `value is too short` and has no field to name -- is reported under the field the walk reached it through: `'slug': value is too short: minimum length is 3, got 2`.
+```rust
+Enrolment { slug: Slug("a".to_string()) }.validate();
+// Err(["'slug': value is too short: minimum length is 3, got 1"])
+```
 
-A type declaring no bound of its own publishes a `validate()` when something beneath it does. A type holding nothing but primitives publishes none, and the dispatcher's own fallback is what answers for it.
+The brand's own report says `value is too short: ...` and names nothing, the brand being the value rather than a field of anything -- so the field name is the message's to supply, written first and in single quotes, which is where a reader of these reports already looks for one. A nested type's report already names its own member, and the field name goes in front of it: `'holds': 'name' is too short: ...`.
+
+This reaches through the same wrappers a constraint is reached through -- `Option`, sequences, `Box`/`Cow`/`Rc`/`Arc`, fixed arrays -- and applies to a struct's field and to a named member of an enum variant, tagged or untagged. It reaches nothing through a map or a tuple, and nothing at all through a positional slot, which has no name to report under; those are the same limits a constraint's own walk has.
+
+The brand's read-time hook stands unchanged beside this, so a brand's bound is now enforced in both places. They answer different questions: a payload arriving over the wire is refused on the read, and a message built in Rust -- where no read ever ran, which is every outbound message a generated client sends -- is refused by `validate()`. A nested type's bound has no hook at all, so its enclosing `validate()` is the only thing that enforces it.
 
 ### Literal Values
 
