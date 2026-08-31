@@ -3650,6 +3650,15 @@ fn collect_struct_fields(
 
         if is_flatten {
             let _: (&_, &_) = (&validation_fn, &validate_body);
+            // The walk is rebuilt here rather than taken from the body above, which is discarded
+            // with the rest of a flattened field's — and dropping the walk with it would leave a
+            // bound below the hop enforced by nothing at all. It is rebuilt under no name: the hop
+            // writes no key, so its members are this object's own and a violation beneath it
+            // already reads as one of them.
+            #[cfg(feature = "serde")]
+            if let Some(body) = nested_validate_body(field, &f_def, false, true) {
+                validate_bodies.push(body);
+            }
             flattened_fields.push(f_def);
             continue;
         }
@@ -5991,6 +6000,9 @@ fn collect_discriminated_variants(
 
             if is_flatten {
                 let _: (&_, &_) = (&validation_fn, &validate_body);
+                // Rebuilt under no name, as a struct's flattened field is — see there.
+                #[cfg(feature = "serde")]
+                flattened_member_walk(field, &f_def, &mut bound, &mut checks);
                 flattened_fields.push(f_def);
                 continue;
             }
@@ -7785,9 +7797,13 @@ fn collect_untagged_variant_members(
         // carve-out this walk exists for — but a bound its type declares is still the validator's:
         // the arm runs after the variant has been chosen, so nothing it reports can move a payload
         // from one member to another.
-        if !is_flatten
-            && let Some(body) =
-                validate_body.or_else(|| nested_validate_body(field, &member_def, true))
+        // A flattened member keeps the walk and loses the name, the hop writing no key of its own.
+        let member_body = if is_flatten {
+            nested_validate_body(field, &member_def, true, true)
+        } else {
+            validate_body.or_else(|| nested_validate_body(field, &member_def, true, false))
+        };
+        if let Some(body) = member_body
             && let Some(ident) = field.ident.as_ref()
         {
             walked.bound.push((ident.clone(), member_binding(ident)));
@@ -10084,10 +10100,11 @@ fn build_nested_validation(
     wraps: &[ConstraintWrap],
     access: MemberAccess,
     field_ident_tok: &proc_macro2::Ident,
+    under: Option<&str>,
 ) -> proc_macro2::TokenStream {
     let checked = member_access_expr(access, field_ident_tok);
     let head = wrap_binding(0);
-    let leaf = nested_leaf(&walked_value(wraps), field_ident_tok);
+    let leaf = nested_leaf(&walked_value(wraps), under);
     let walk = walk_wraps(wraps, &head, 1, &leaf);
     let fallback = unpublished_validate_fallback();
     quote! {
@@ -10126,20 +10143,45 @@ fn unpublished_validate_fallback() -> proc_macro2::TokenStream {
 ///
 /// A type's own report names its own members and not the field it was reached through — a brand's
 /// names nothing at all, saying only `value is too short: …`. The field name is the enclosing
-/// type's to supply, and it is written in the shape a reader of these reports already reads a name
-/// out of: first, in single quotes.
+/// type's to supply, and it is written into the name the report already carries rather than in
+/// front of it: `'jti' is too short` reached through `account` reads `'account.jti' is too short`,
+/// which is one quoted run holding the whole path.
+///
+/// That spelling is what a reader of these reports takes a name out of — it reads the first quoted
+/// run — and it is the string the TypeScript schema published from the same declaration reports for
+/// the same payload. Two runs would give a reader the outer hop and leave it naming a field that is
+/// not the one that was wrong.
+///
+/// `under` is the field the value was reached through, and `None` says the field was written
+/// `#[serde(flatten)]`: its members are the enclosing object's own keys, so a violation beneath it
+/// already reads as one of them and a segment for the hop would name a key no payload carries.
+///
+/// A report naming no field of its own, as a brand's does, has nothing to write into, so the field
+/// goes in front of it instead — that being the only place left to put it.
 #[cfg(feature = "serde")]
-fn nested_leaf(
-    value: &proc_macro2::Ident,
-    field_ident_tok: &proc_macro2::Ident,
-) -> proc_macro2::TokenStream {
-    let field_name_lit = field_ident_tok.to_string();
+fn nested_leaf(value: &proc_macro2::Ident, under: Option<&str>) -> proc_macro2::TokenStream {
+    let Some(field_name_lit) = under else {
+        return quote! {
+            if let Err(reported) = #value.validate() {
+                errors.extend(reported);
+            }
+        };
+    };
     quote! {
         if let Err(reported) = #value.validate() {
+            fn nested_under(field: &str, violation: &str) -> String {
+                match violation
+                    .strip_prefix('\'')
+                    .and_then(|rest| rest.split_once('\''))
+                {
+                    Some((named, tail)) => format!("'{field}.{named}'{tail}"),
+                    None => format!("'{field}': {violation}"),
+                }
+            }
             errors.extend(
                 reported
-                    .into_iter()
-                    .map(|violation| format!("'{}': {}", #field_name_lit, violation)),
+                    .iter()
+                    .map(|violation| nested_under(#field_name_lit, violation)),
             );
         }
     }
@@ -11350,7 +11392,7 @@ fn process_field(
     // a validator is published only by a type someone declared.
     #[cfg(feature = "serde")]
     let body = validate_body
-        .or_else(|| nested_validate_body(field, &field_def, ctx.variant_ident.is_some()));
+        .or_else(|| nested_validate_body(field, &field_def, ctx.variant_ident.is_some(), false));
     #[cfg(not(feature = "serde"))]
     let body = validate_body;
 
@@ -11371,6 +11413,7 @@ fn nested_validate_body(
     field: &Field,
     field_def: &FieldDef,
     in_variant: bool,
+    flattened: bool,
 ) -> Option<proc_macro2::TokenStream> {
     let field_ident_tok = field.ident.as_ref()?;
     if !matches!(field_def.field_type, FieldDefType::SiblingType(_, _)) {
@@ -11382,7 +11425,35 @@ fn nested_validate_body(
     } else {
         MemberAccess::SelfField
     };
-    Some(build_nested_validation(&wraps, access, field_ident_tok))
+    let named = field_ident_tok.to_string();
+    let under = (!flattened).then_some(named.as_str());
+    Some(build_nested_validation(
+        &wraps,
+        access,
+        field_ident_tok,
+        under,
+    ))
+}
+
+/// The walk a flattened variant member keeps, bound under the name the arm will match it by.
+///
+/// A flattened member's body is discarded with the rest of what the surfaces do not read off it, so
+/// the walk is rebuilt here rather than taken from that body — and rebuilt under no name, the hop
+/// writing no key of its own.
+#[cfg(feature = "serde")]
+fn flattened_member_walk(
+    field: &Field,
+    field_def: &FieldDef,
+    bound: &mut Vec<(proc_macro2::Ident, proc_macro2::Ident)>,
+    checks: &mut Vec<proc_macro2::TokenStream>,
+) {
+    if let (Some(body), Some(ident)) = (
+        nested_validate_body(field, field_def, true, true),
+        field.ident.as_ref(),
+    ) {
+        bound.push((ident.clone(), member_binding(ident)));
+        checks.push(body);
+    }
 }
 
 /// Whether the field needs a `#[serde(default)]` written for it alongside the `deserialize_with`.

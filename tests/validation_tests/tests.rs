@@ -10,6 +10,8 @@
 ))]
 mod a_bound_the_fields_own_type_declares {
     use super::UnpublishedValidate;
+    use alloc::borrow::Cow;
+    use alloc::sync::Arc;
     use serde::{Deserialize, Serialize};
     use tixschema::model_schema;
 
@@ -37,7 +39,7 @@ mod a_bound_the_fields_own_type_declares {
     }
 
     #[model_schema()]
-    #[derive(Debug, Deserialize, Serialize)]
+    #[derive(Clone, Debug, Deserialize, Serialize)]
     pub struct Held {
         #[model_schema_prop(minLength = 3)]
         pub name: String,
@@ -75,6 +77,93 @@ mod a_bound_the_fields_own_type_declares {
     }
 
     impl UnpublishedValidate for RenderedThroughout {}
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct WrappedHeld {
+        /// A plain unconstrained sibling, so no row of the matrix is measured on a type whose
+        /// every field is a declared one. `aud` beside `claims` is the shape an account context
+        /// is written in, and a walk that only survived where it was the type's sole field would
+        /// pass a matrix built without one.
+        pub aud: String,
+        pub boxed: Box<Held>,
+        pub cow: Cow<'static, Held>,
+        pub listed: Vec<Held>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub maybe: Option<Held>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub maybe_listed: Option<Vec<Held>>,
+        pub plain: Held,
+        pub shared: Arc<Held>,
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct Claims {
+        #[model_schema_prop(minLength = 1)]
+        pub jti: String,
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct PlainAccount {
+        pub aud: String,
+        pub claims: Claims,
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct SoleField {
+        pub claims: Claims,
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct DeepAccount {
+        pub claims: Claims,
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct DeepEnvelope {
+        pub account: DeepAccount,
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct FlatAccount {
+        pub aud: String,
+        #[serde(flatten)]
+        pub claims: Claims,
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct FlatEnvelope {
+        pub account: FlatAccount,
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    #[serde(untagged)]
+    pub enum UntaggedFlat {
+        Bearer {
+            aud: String,
+            #[serde(flatten)]
+            claims: Claims,
+        },
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    #[serde(tag = "kind")]
+    pub enum TaggedFlat {
+        Bearer {
+            aud: String,
+            #[serde(flatten)]
+            claims: Claims,
+        },
+    }
 
     fn long() -> Slug {
         Slug("abc".to_owned())
@@ -157,9 +246,14 @@ mod a_bound_the_fields_own_type_declares {
     }
 
     /// The same reach, over a field whose type is an ordinary `#[model_schema()]` type rather than
-    /// a brand. That type's report already names its own member, so the holder's name goes in front
-    /// of it rather than over it: a reader takes `holds`, the field of the message it was handed,
-    /// and the detail still carries the member inside it that was actually wrong.
+    /// a brand. That type's report already names its own member, and the holder's name is written
+    /// *into* that name rather than in front of it, so one quoted run carries the whole path.
+    ///
+    /// Which run it is decides what a caller is told. A reader of these reports takes the first,
+    /// so two runs would hand it `holds` — an object in the payload it sent, rather than the value
+    /// that was out of range. `holds.name` is the member that was actually wrong, and it is the
+    /// string the TypeScript schema published from this same declaration reports for this same
+    /// payload.
     #[test]
     fn test_a_nested_types_own_report_is_carried_up_under_the_field_that_held_it() {
         // The payload reads: a nested bound is enforced nowhere on the read, which is what leaves
@@ -171,7 +265,7 @@ mod a_bound_the_fields_own_type_declares {
         );
         assert_eq!(
             read.validate().unwrap_err(),
-            vec!["'holds': 'name' is too short: minimum length is 3, got 1".to_owned()]
+            vec!["'holds.name' is too short: minimum length is 3, got 1".to_owned()]
         );
 
         let good: Holder = serde_json::from_str(r#"{"holds":{"name":"abc"}}"#).unwrap();
@@ -179,7 +273,7 @@ mod a_bound_the_fields_own_type_declares {
 
         let readme = include_str!("../../README.md");
         assert!(
-            readme.contains("`'holds': 'name' is too short: ...`"),
+            readme.contains("`'holds.name' is too short: ...`"),
             "the README no longer shows what a nested report reads as"
         );
     }
@@ -243,6 +337,194 @@ mod a_bound_the_fields_own_type_declares {
             }
             .validate(),
             "no inherent validate()"
+        );
+    }
+
+    /// A bound beneath a field is reached through every wrapper the field is written under.
+    ///
+    /// The brand matrix above proves the walk reaches a *brand* through each shape; this proves it
+    /// reaches an ordinary nested type through the same ones, which is the shape a message carries
+    /// an account context in. Both directions per row: a shape whose bad value passed would be one
+    /// whose bound is decorative, and one that refused a good value would be one no caller could
+    /// satisfy.
+    #[test]
+    fn test_a_nested_types_bound_is_reached_through_every_wrapper_the_field_is_written_under() {
+        fn held(name: &str) -> Held {
+            Held {
+                name: name.to_owned(),
+            }
+        }
+        fn all_good() -> WrappedHeld {
+            WrappedHeld {
+                aud: "acme".to_owned(),
+                boxed: Box::new(held("abc")),
+                cow: Cow::Owned(held("abc")),
+                listed: vec![held("abc")],
+                maybe: Some(held("abc")),
+                maybe_listed: Some(vec![held("abc")]),
+                plain: held("abc"),
+                shared: Arc::new(held("abc")),
+            }
+        }
+
+        assert_eq!(all_good().validate(), Ok(()));
+
+        let mut boxed = all_good();
+        boxed.boxed = Box::new(held("a"));
+        let mut cow = all_good();
+        cow.cow = Cow::Owned(held("a"));
+        let mut listed = all_good();
+        // Only the second element breaks its bound, so an element past the first has to be walked
+        // for this to be reported at all.
+        listed.listed = vec![held("abc"), held("a")];
+        let mut maybe = all_good();
+        maybe.maybe = Some(held("a"));
+        let mut maybe_listed = all_good();
+        maybe_listed.maybe_listed = Some(vec![held("a")]);
+        let mut plain = all_good();
+        plain.plain = held("a");
+        let mut shared = all_good();
+        shared.shared = Arc::new(held("a"));
+
+        for (field, broken) in [
+            ("boxed", boxed),
+            ("cow", cow),
+            ("listed", listed),
+            ("maybe", maybe),
+            ("maybe_listed", maybe_listed),
+            ("plain", plain),
+            ("shared", shared),
+        ] {
+            assert_eq!(
+                broken.validate().unwrap_err(),
+                vec![format!(
+                    "'{field}.name' is too short: minimum length is 3, got 1"
+                )],
+                "`{field}` holds a type whose own bound was broken and validate() said nothing"
+            );
+        }
+
+        let none_written = WrappedHeld {
+            maybe: None,
+            maybe_listed: None,
+            ..all_good()
+        };
+        assert_eq!(
+            none_written.validate(),
+            Ok(()),
+            "a None writes nothing, so there is nothing for the bound to describe"
+        );
+    }
+
+    /// A nested field keeps its walk beside a plain unconstrained sibling, and beside none.
+    ///
+    /// The pair is the point. A type whose nested field is its *only* field is the shape a probe
+    /// reaches for, and a walk that survived only there would look correct while every real
+    /// message — which carries plain fields beside its nested ones — lost its bound.
+    #[test]
+    fn test_a_nested_field_keeps_its_walk_beside_a_plain_sibling() {
+        assert_eq!(
+            serde_json::from_str::<PlainAccount>(r#"{"aud":"acme","claims":{"jti":""}}"#)
+                .unwrap()
+                .validate()
+                .unwrap_err(),
+            vec!["'claims.jti' is too short: minimum length is 1, got 0".to_owned()]
+        );
+        assert_eq!(
+            serde_json::from_str::<PlainAccount>(r#"{"aud":"acme","claims":{"jti":"a"}}"#)
+                .unwrap()
+                .validate(),
+            Ok(())
+        );
+        assert_eq!(
+            serde_json::from_str::<SoleField>(r#"{"claims":{"jti":""}}"#)
+                .unwrap()
+                .validate()
+                .unwrap_err(),
+            vec!["'claims.jti' is too short: minimum length is 1, got 0".to_owned()],
+            "the sole-field shape has to keep answering what it always did"
+        );
+    }
+
+    /// One hop working is what made this look closed, so the walk is pinned at two.
+    #[test]
+    fn test_a_bound_two_hops_down_is_reached_and_names_the_whole_path() {
+        assert_eq!(
+            serde_json::from_str::<DeepEnvelope>(r#"{"account":{"claims":{"jti":""}}}"#)
+                .unwrap()
+                .validate()
+                .unwrap_err(),
+            vec!["'account.claims.jti' is too short: minimum length is 1, got 0".to_owned()]
+        );
+        assert_eq!(
+            serde_json::from_str::<DeepEnvelope>(r#"{"account":{"claims":{"jti":"a"}}}"#)
+                .unwrap()
+                .validate(),
+            Ok(())
+        );
+    }
+
+    /// A `#[serde(flatten)]` hop keeps the walk and contributes no segment.
+    ///
+    /// Both halves matter and they fail in opposite directions. A flattened field's body is
+    /// discarded with the rest of what the surfaces do not read off it, and a walk dropped there
+    /// leaves the bound below the hop enforced by nothing — the value reaches the implementation.
+    /// A segment written for the hop would name a key no payload carries, since the hop writes
+    /// none: this is the shape an account context is declared in, and `account.jti` is what both
+    /// the wire and the TypeScript schema call the field that was wrong.
+    #[test]
+    fn test_a_flattened_hop_keeps_the_walk_and_contributes_no_segment() {
+        assert_eq!(
+            serde_json::from_str::<FlatEnvelope>(r#"{"account":{"aud":"acme","jti":""}}"#)
+                .unwrap()
+                .validate()
+                .unwrap_err(),
+            vec!["'account.jti' is too short: minimum length is 1, got 0".to_owned()]
+        );
+        assert_eq!(
+            serde_json::from_str::<FlatEnvelope>(r#"{"account":{"aud":"acme","jti":"a"}}"#)
+                .unwrap()
+                .validate(),
+            Ok(())
+        );
+    }
+
+    /// The same, over an untagged member's flattened field — the third place a body is discarded,
+    /// and so the third place the walk has to be rebuilt. The member's *own* bound still runs on
+    /// the read, which is the carve-out; a bound its type declares is the validator's either way.
+    #[test]
+    fn test_an_untagged_members_flattened_field_keeps_its_walk() {
+        assert_eq!(
+            serde_json::from_str::<UntaggedFlat>(r#"{"aud":"acme","jti":""}"#)
+                .unwrap()
+                .validate()
+                .unwrap_err(),
+            vec!["'jti' is too short: minimum length is 1, got 0".to_owned()]
+        );
+        assert_eq!(
+            serde_json::from_str::<UntaggedFlat>(r#"{"aud":"acme","jti":"a"}"#)
+                .unwrap()
+                .validate(),
+            Ok(())
+        );
+    }
+
+    /// The same, over a tagged variant's flattened member, which is a second place the body is
+    /// discarded and so a second place the walk has to be rebuilt.
+    #[test]
+    fn test_a_tagged_variants_flattened_member_keeps_its_walk() {
+        assert_eq!(
+            serde_json::from_str::<TaggedFlat>(r#"{"kind":"Bearer","aud":"acme","jti":""}"#)
+                .unwrap()
+                .validate()
+                .unwrap_err(),
+            vec!["'jti' is too short: minimum length is 1, got 0".to_owned()]
+        );
+        assert_eq!(
+            serde_json::from_str::<TaggedFlat>(r#"{"kind":"Bearer","aud":"acme","jti":"a"}"#)
+                .unwrap()
+                .validate(),
+            Ok(())
         );
     }
 }

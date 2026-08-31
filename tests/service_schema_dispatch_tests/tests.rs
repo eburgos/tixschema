@@ -15,15 +15,18 @@
 /// written, only when `serde` is on beside a surface that reads the constraint.
 ///
 /// **The two answers a payload can earn here are different answers, and the arm gives whichever
-/// one is true.** A payload that is not a message at all — a field carrying the wrong type of
-/// value, a key that is missing — never deserializes, and the fault says so. A payload that *is* a
-/// message, carrying a value the constraint refuses, deserializes and then fails the arm's own
-/// `validate()`, and the fault says that instead and names the field.
+/// one is true.** Bytes that are not a document at all never become anything, and the fault says
+/// the sender's serialization is broken. Everything that *does* read as a document and is then
+/// turned away — a field carrying the wrong type of value, a key that is missing, a value a
+/// constraint refuses — is a value someone supplied that the message does not admit, and the fault
+/// says that instead and names the field wherever the refusal named one.
 ///
-/// A receiver acts differently on each. Unparseable means the sender's serialization is broken.
-/// Failed validation means a person supplied something out of range. Constraints are therefore
-/// enforced by the validator alone and never as the payload is read, so the two never arrive under
-/// one name.
+/// A receiver acts differently on each, and the line between them is `serde_json`'s own
+/// classification of its refusal rather than the shape of the sentence it wrote. It is also where
+/// the TypeScript service serving the same operation draws it: its reader parses the payload and
+/// its schema then judges what was read, so a type mismatch and a broken bound are one kind there
+/// and are one kind here. Constraints stay enforced by the validator alone and never as the
+/// payload is read, which is what lets a broken bound name its field at all.
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
@@ -255,15 +258,27 @@ mod a_message_annotated_with_a_constraint {
     }
 
     #[test]
-    fn a_payload_that_is_not_a_message_at_all_is_still_answered_as_one_that_would_not_read() {
+    fn a_payload_that_is_not_a_message_is_refused_under_the_class_of_failure_it_is() {
         // Wrong about the type its field declared, missing the key entirely, and not a document
         // in the first place. None of the three is a message, and moving the constraint checks to
         // the validator moved none of them with it — a required key in particular must not have
         // become defaultable on the way.
-        for payload in [
-            br#"{"organization_id":42}"#.to_vec(),
-            b"{}".to_vec(),
-            b"not a document at all".to_vec(),
+        for (payload, kind, field) in [
+            (
+                br#"{"organization_id":42}"#.to_vec(),
+                gate_service_schema::ServiceFaultKind::FailedValidation,
+                None,
+            ),
+            (
+                b"{}".to_vec(),
+                gate_service_schema::ServiceFaultKind::FailedValidation,
+                Some("organization_id"),
+            ),
+            (
+                b"not a document at all".to_vec(),
+                gate_service_schema::ServiceFaultKind::UndeserializablePayload,
+                None,
+            ),
         ] {
             let service = GateBackEnd::new();
             let reply = GateReply::new();
@@ -286,16 +301,22 @@ mod a_message_annotated_with_a_constraint {
             let reported = reply.faults();
             assert_eq!(
                 reported[0].kind(),
-                gate_service_schema::ServiceFaultKind::UndeserializablePayload,
-                "`{sent}` is not a message, and the sender has to be told that rather than that \
-                 some value of its was out of range. Got detail: {}",
+                kind,
+                "`{sent}` was answered under the wrong class of failure, and the class is what a \
+                 caller branches on. Got detail: {}",
                 reported[0].detail()
             );
             assert_eq!(
                 reported[0].field(),
-                None,
-                "no constraint's check ran on `{sent}`, so there is no field name to carry. A \
-                 fault that named one would be naming it out of a message it never read. Got: {}",
+                field,
+                "`{sent}` must name the field its refusal named and no other: a name invented for \
+                 a refusal that carried none would be read out of a message nobody read. Got: {}",
+                reported[0].detail()
+            );
+            assert!(
+                !reported[0].detail().contains("at line"),
+                "the byte offset serde appends locates the failure inside an encoding the caller \
+                 never saw. Got: {}",
                 reported[0].detail()
             );
         }
@@ -335,14 +356,16 @@ mod a_message_annotated_with_a_constraint {
         );
         assert_eq!(
             reported[0].field(),
-            Some("holds"),
-            "the field of the message the caller sent, with the member inside it that was wrong \
-             still carried in the detail. Got: {}",
+            Some("holds.name"),
+            "the path to the member that was actually wrong, and not the hop above it: a caller \
+             looks the name up in the payload it sent, where `holds` is an object rather than the \
+             thing out of range. It is also the string the TypeScript schema published from this \
+             same declaration reports. Got: {}",
             reported[0].detail()
         );
         assert_eq!(
             reported[0].detail(),
-            "'holds': 'name' is too short: minimum length is 3, got 1"
+            "'holds.name' is too short: minimum length is 3, got 1"
         );
     }
 
@@ -366,12 +389,16 @@ mod a_message_annotated_with_a_constraint {
         assert!(reply.faults().is_empty(), "got: {:?}", reply.settled());
     }
 
-    /// The brand's hook was not removed, and this is what says so. A brand's bound still refuses
-    /// the payload as it is read, so a value out of range still comes back as one that would not
-    /// deserialize rather than as one that failed validation.
+    /// The brand's hook was not removed, and this is what says so: the refusal still carries the
+    /// brand's own message, which only the read produces.
     ///
-    /// Moving that check is a separate ruling from reaching it, and the order matters: taking the
-    /// hook off before the validator could reach the field would have left the bound enforced by
+    /// Where it is *reported* is a separate question from where it is caught. The bytes read as a
+    /// document and the value inside broke a bound, so the fault says the value someone supplied
+    /// was not admitted — which is the kind the TypeScript service answers the same payload under.
+    /// A brand's message names no field, having no field, so this fault carries none.
+    ///
+    /// Moving the check itself is a further ruling again, and the order matters: taking the hook
+    /// off before the validator could reach the field would have left the bound enforced by
     /// nothing at all.
     #[test]
     fn a_brands_bound_still_refuses_the_payload_on_the_read() {
@@ -391,13 +418,25 @@ mod a_message_annotated_with_a_constraint {
         let reported = reply.faults();
         assert_eq!(
             reported[0].kind(),
-            gate_service_schema::ServiceFaultKind::UndeserializablePayload,
+            gate_service_schema::ServiceFaultKind::FailedValidation,
             "got detail: {}",
             reported[0].detail()
         );
         assert!(
             reported[0].detail().contains("is too short"),
             "the hook hands serde the brand's own message verbatim. Got: {}",
+            reported[0].detail()
+        );
+        assert_eq!(
+            reported[0].field(),
+            None,
+            "a brand's report names no field, having no field of its own to name. Got: {}",
+            reported[0].detail()
+        );
+        assert!(
+            !reported[0].detail().contains("at line"),
+            "the byte offset locates the failure inside an encoding the caller never saw. \
+             Got: {}",
             reported[0].detail()
         );
     }
@@ -420,9 +459,11 @@ mod a_message_annotated_with_a_constraint {
         let reported = reply.faults();
         assert_eq!(
             reported[0].kind(),
-            gate_service_schema::ServiceFaultKind::UndeserializablePayload,
-            "the author put this check on the read, so the payload really did not deserialize \
-             and the fault says the thing that happened"
+            gate_service_schema::ServiceFaultKind::FailedValidation,
+            "the author put this check on the read, but what it refused is a value out of range \
+             inside a document that read perfectly well — the class serde_json reports it under, \
+             and the one a caller acts on. Got detail: {}",
+            reported[0].detail()
         );
         assert_eq!(
             reported[0].field(),
@@ -888,17 +929,32 @@ fn a_one_way_operation_runs_and_answers_nothing_on_the_handle() {
 }
 
 #[test]
-fn a_payload_that_will_not_deserialize_becomes_a_fault_and_reaches_no_implementation() {
+fn a_payload_carrying_the_wrong_type_of_value_becomes_a_fault_and_reaches_no_implementation() {
     let (reached, settled) = dispatched("get-balance", r#"{"organization_id":42}"#);
     assert!(reached.is_empty(), "got: {reached:?}");
     assert_eq!(settled.len(), 1, "got: {settled:?}");
     let reported = only_fault(&settled).unwrap();
     assert_eq!(
         reported.kind(),
-        probe_service_schema::ServiceFaultKind::UndeserializablePayload
+        probe_service_schema::ServiceFaultKind::FailedValidation,
+        "the bytes read as a document and did not match the message, which is a value someone \
+         supplied rather than a sender whose serialization is broken — and is the kind the \
+         TypeScript service serving the same operation answers it under. Got detail: {}",
+        reported.detail()
     );
     assert_eq!(reported.operation(), "get-balance");
-    assert_eq!(reported.field(), None);
+    assert_eq!(
+        reported.field(),
+        None,
+        "a type mismatch says what serde expected and not where, so there is no name to carry and \
+         one carried anyway would be invented. Got: {}",
+        reported.detail()
+    );
+    assert!(
+        !reported.detail().contains("at line"),
+        "the byte offset locates the failure inside an encoding the caller never saw. Got: {}",
+        reported.detail()
+    );
 }
 
 #[test]
@@ -1184,7 +1240,7 @@ fn a_one_way_message_refused_before_it_ran_is_the_one_thing_that_arm_answers() {
     let reported = only_fault(&refused).unwrap();
     assert_eq!(
         reported.kind(),
-        probe_service_schema::ServiceFaultKind::UndeserializablePayload,
+        probe_service_schema::ServiceFaultKind::FailedValidation,
         "the operation never ran, so the defect is the arm's to report even though the operation \
          itself declares no reply"
     );

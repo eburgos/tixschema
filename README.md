@@ -1811,6 +1811,8 @@ What stops compiling is writing one. An object literal under a `UsageServiceFaul
 
 Exactly two generated places build one: the dispatcher, when an incoming message cannot be turned into a valid request or names an operation nothing recognises, and the client, when the message *it* is about to send fails its own validation or the transport reports that the call never landed. In Rust a client call answers `Result<Success, CallError<Error>>`, `CallError` being `Operation(E)` for the error the operation declared and `Fault(ServiceFault)` for a defect that reached the caller.
 
+Which kind a refused payload is reported under is `serde_json`'s own classification of the refusal, not the shape of the sentence it wrote. `undeserializable-payload` means the bytes are not a document at all -- not JSON, or a document that ends early -- which is a sender whose serialization is broken, and such a refusal names no field because nothing was read far enough for a key to be what went wrong. `failed-validation` means the bytes read as a document and did not match the message: a field carrying the wrong type of value, a key that is missing, a value a bound refuses. That is a value someone supplied, and it is where the TypeScript service serving the same operation draws the line too -- its reader parses the payload and its schema then judges what was read -- so one defect reaches a call site under one kind whichever language served it. The field is named wherever the refusal named one: a validator's report names it in single quotes, and serde names it in backticks for a missing or unknown key. A type mismatch says what serde expected and not where, so that fault carries no field. The byte offset serde appends is dropped, it being a position inside an encoding the caller never saw.
+
 #### What a Service Generates
 
 On the Rust side, beside the trait, in a module named for the service (`usage_service_schema`):
@@ -2118,7 +2120,9 @@ Enrolment { slug: Slug("a".to_string()) }.validate();
 // Err(["'slug': value is too short: minimum length is 3, got 1"])
 ```
 
-The brand's own report says `value is too short: ...` and names nothing, the brand being the value rather than a field of anything -- so the field name is the message's to supply, written first and in single quotes, which is where a reader of these reports already looks for one. A nested type's report already names its own member, and the field name goes in front of it: `'holds': 'name' is too short: ...`.
+The brand's own report says `value is too short: ...` and names nothing, the brand being the value rather than a field of anything -- so the field name is the message's to supply, written first and in single quotes, which is where a reader of these reports already looks for one: `'slug': value is too short: ...`. A nested type's report already names its own member, and the field name is written *into* that name rather than in front of it: `'holds.name' is too short: ...`. One quoted run carries the whole path, so a reader taking the first one gets the member that was actually wrong rather than the hop above it -- and it is the string the TypeScript schema published from the same declaration reports for the same payload.
+
+A `#[serde(flatten)]` hop writes no key, so it contributes no segment: a bound under a flattened `claims` inside `account` reads `'account.jti' is too short: ...`, which is what the wire carries and what TypeScript names.
 
 This reaches through the same wrappers a constraint is reached through -- `Option`, sequences, `Box`/`Cow`/`Rc`/`Arc`, fixed arrays -- and applies to a struct's field and to a named member of an enum variant, tagged or untagged. It reaches nothing through a map or a tuple, and nothing at all through a positional slot, which has no name to report under; those are the same limits a constraint's own walk has.
 
