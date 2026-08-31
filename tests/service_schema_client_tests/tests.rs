@@ -11,6 +11,234 @@
 
 #![cfg(feature = "serde")]
 
+/// A service whose message carries no bound of its own, only one its field's *type* declares.
+///
+/// Its own service rather than an operation on the file's: a constrained brand needs a surface
+/// feature to be declared at all, so everything reading one is gated together — the same gate the
+/// dispatcher's constraint module carries, and for the same reason.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+mod a_bound_the_fields_own_type_declares {
+    use super::{ProbeTransport, poll_once};
+    use core::future::ready;
+    use serde::{Deserialize, Serialize};
+    use std::sync::Mutex;
+    use tixschema::{model_schema, service_schema};
+
+    #[model_schema(minLength = 3)]
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(transparent)]
+    pub struct Slug(pub String);
+
+    #[model_schema()]
+    #[derive(Deserialize, Serialize)]
+    pub struct EnrolRequest {
+        pub slug: Slug,
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+    pub struct Enrolled {
+        pub credits: u32,
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(rename_all = "kebab-case", tag = "errorCode")]
+    pub enum EnrolError {
+        DbError,
+    }
+
+    #[service_schema()]
+    pub trait EnrolService<Ctx> {
+        async fn enrol(&self, ctx: &Ctx, req: EnrolRequest) -> Result<Enrolled, EnrolError>;
+    }
+
+    /// Answers with the length of the slug it was handed, which a test reads back to say the
+    /// message reached it whole.
+    pub struct EnrolBackEnd;
+
+    /// What one dispatch settled, encoded as a transport would put it on the wire.
+    pub struct EnrolCapture {
+        answered: Mutex<Vec<Vec<u8>>>,
+    }
+
+    /// A transport that answers by dispatching straight into the service.
+    pub struct EnrolLoopback;
+
+    impl EnrolService<()> for EnrolBackEnd {
+        async fn enrol(&self, _ctx: &(), req: EnrolRequest) -> Result<Enrolled, EnrolError> {
+            ready(()).await;
+            Ok(Enrolled {
+                credits: u32::try_from(req.slug.0.len()).unwrap(),
+            })
+        }
+    }
+
+    impl enrol_service_schema::Reply for EnrolCapture {
+        async fn fault(&self, fault: enrol_service_schema::ServiceFault) {
+            ready(()).await;
+            let framed = serde_json::json!({
+                "ok": false,
+                "error": { "isServiceFault": true, "fault": fault },
+            });
+            self.answered
+                .lock()
+                .unwrap()
+                .push(serde_json::to_vec(&framed).unwrap());
+        }
+
+        async fn send<T>(&self, value: T)
+        where
+            T: Serialize + Send,
+        {
+            ready(()).await;
+            self.answered
+                .lock()
+                .unwrap()
+                .push(serde_json::to_vec(&value).unwrap());
+        }
+    }
+
+    impl enrol_service_schema::Transport for EnrolLoopback {
+        async fn notify<T>(&self, operation: &str, payload: T)
+        where
+            T: Serialize + Send,
+        {
+            let capture = EnrolCapture::new();
+            enrol_service_schema::dispatch(
+                &EnrolBackEnd,
+                &(),
+                &incoming(operation, &payload),
+                &capture,
+            )
+            .await;
+        }
+
+        async fn request<T>(&self, operation: &str, payload: T) -> Vec<u8>
+        where
+            T: Serialize + Send,
+        {
+            let capture = EnrolCapture::new();
+            enrol_service_schema::dispatch(
+                &EnrolBackEnd,
+                &(),
+                &incoming(operation, &payload),
+                &capture,
+            )
+            .await;
+            capture.answered()
+        }
+    }
+
+    /// The file's probe transport, answering a second service: a `Transport` is generated per
+    /// service, so serving another one means implementing another.
+    impl enrol_service_schema::Transport for ProbeTransport {
+        async fn notify<T>(&self, operation: &str, payload: T)
+        where
+            T: Serialize + Send,
+        {
+            ready(()).await;
+            self.record(operation, &payload);
+            self.answer();
+        }
+
+        async fn request<T>(&self, operation: &str, payload: T) -> Vec<u8>
+        where
+            T: Serialize + Send,
+        {
+            ready(()).await;
+            self.record(operation, &payload);
+            self.answer()
+        }
+    }
+
+    impl EnrolCapture {
+        fn answered(&self) -> Vec<u8> {
+            self.answered.lock().unwrap().pop().unwrap()
+        }
+
+        fn new() -> Self {
+            Self {
+                answered: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    /// The message shape is generated per service, so this service builds its own.
+    fn incoming<T>(operation: &str, payload: &T) -> enrol_service_schema::IncomingMessage
+    where
+        T: Serialize,
+    {
+        enrol_service_schema::IncomingMessage {
+            operation: operation.to_owned(),
+            payload: serde_json::to_vec(payload).unwrap(),
+        }
+    }
+
+    /// The outbound half of a brand's bound, and the half its serde hook cannot cover: a message
+    /// built in Rust was never deserialized, so the hook never ran on it. Until the message's own
+    /// validator reached the field, this call put a `Slug` violating its own declared pattern on
+    /// the wire and the caller learned nothing about it.
+    #[test]
+    fn a_message_whose_bound_its_fields_type_declares_is_refused_naming_the_field() {
+        // Built with no answers: reaching the transport panics, so this test passing at all is the
+        // proof it was not touched.
+        let transport = ProbeTransport::new(&[]);
+        let client = enrol_service_schema::EnrolServiceClient::new(transport);
+        let answered = poll_once(client.enrol(EnrolRequest {
+            slug: Slug("ab".to_owned()),
+        }))
+        .unwrap();
+        let reported = match &answered {
+            Err(enrol_service_schema::CallError::Fault(reported)) => Some(reported),
+            Ok(_) | Err(enrol_service_schema::CallError::Operation(_)) => None,
+        }
+        .unwrap();
+        assert_eq!(
+            reported.kind(),
+            enrol_service_schema::ServiceFaultKind::FailedValidation,
+            "the operation never ran, so this is not one of its declared errors"
+        );
+        assert_eq!(
+            reported.field(),
+            Some("slug"),
+            "the brand's own report names nothing, so the message is what supplies the field. \
+             Got: {}",
+            reported.detail()
+        );
+        assert_eq!(
+            reported.detail(),
+            "'slug': value is too short: minimum length is 3, got 2"
+        );
+        assert_eq!(reported.operation(), "enrol");
+        assert!(
+            client.transport().calls().is_empty(),
+            "got: {:?}",
+            client.transport().calls()
+        );
+    }
+
+    /// The same message with a value the bound admits goes out, is read back on the other side and
+    /// is answered — which is what says the check refuses something rather than everything, on
+    /// both halves of the seam at once.
+    #[test]
+    fn a_message_whose_bound_its_fields_type_declares_is_satisfiable_end_to_end() {
+        let client = enrol_service_schema::EnrolServiceClient::new(EnrolLoopback);
+        let answered = poll_once(client.enrol(EnrolRequest {
+            slug: Slug("abcd".to_owned()),
+        }))
+        .unwrap();
+        assert_eq!(
+            answered.unwrap(),
+            Enrolled { credits: 4 },
+            "the implementation answered from the slug it was handed, so the message crossed whole"
+        );
+    }
+}
+
 use core::future::{Future, ready};
 use core::pin::pin;
 use core::task::{Context as PollContext, Poll, Waker};

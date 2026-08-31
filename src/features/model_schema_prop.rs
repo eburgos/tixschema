@@ -101,8 +101,16 @@ pub enum LiteralValue {
 /// publishes, and `validate()` cannot stand in for it — by the time it runs the variant has
 /// already been chosen.
 ///
-/// A constrained *brand* is the remaining exception and is enforced on the read: a message holding
-/// one publishes no `validate()` that reaches into it, so the read is the only thing there is.
+/// A constrained *brand* is checked in both places, and the two answer different questions. A
+/// message holding a branded field publishes a `validate()` that runs the brand's own validator and
+/// reports what it said under the field that held it — `'slug': value is too short: …`, the name
+/// being the message's to supply since the brand names none of its own. That is what holds a caller
+/// building a message in Rust, where no read ever ran. The brand's read-time hook stands unchanged
+/// beside it, so a payload arriving over the wire is still refused there.
+///
+/// The same reach applies to a field whose type is an ordinary `#[model_schema()]` type: the
+/// enclosing `validate()` runs the one that type published and writes its report under the field.
+/// Nothing else enforces a nested bound, the read carrying no check for one at all.
 ///
 /// ## Type overrides
 ///

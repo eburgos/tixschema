@@ -1,3 +1,252 @@
+/// What a message's own validator does about a bound declared not on one of its fields but on a
+/// field's *type* — a constrained brand, or a nested `#[model_schema()]` type of its own.
+///
+/// The types live in a module rather than in the test bodies because a reference to a sibling type
+/// is written against that type's schema module, which a type declared inside a `fn` does not
+/// publish anywhere a sibling can name.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+mod a_bound_the_fields_own_type_declares {
+    use super::UnpublishedValidate;
+    use serde::{Deserialize, Serialize};
+    use tixschema::model_schema;
+
+    #[model_schema(minLength = 3)]
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(transparent)]
+    pub struct Slug(pub String);
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct BrandHolder {
+        pub slug: Slug,
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct Wrapped {
+        pub boxed: Box<Slug>,
+        pub fixed: [Slug; 2],
+        pub listed: Vec<Slug>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub maybe: Option<Slug>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub maybe_listed: Option<Vec<Slug>>,
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct Held {
+        #[model_schema_prop(minLength = 3)]
+        pub name: String,
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct Holder {
+        pub holds: Held,
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    #[serde(tag = "kind")]
+    pub enum Tagged {
+        Named { slug: Slug },
+        Plain { count: u32 },
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    #[serde(untagged)]
+    pub enum CheckedThenLoose {
+        Checked { slug: Slug },
+        Loose { slug: String },
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct RenderedThroughout {
+        pub count: u32,
+        pub name: String,
+        pub tags: Vec<String>,
+        pub whether: bool,
+    }
+
+    impl UnpublishedValidate for RenderedThroughout {}
+
+    fn long() -> Slug {
+        Slug("abc".to_owned())
+    }
+
+    fn short() -> Slug {
+        Slug("a".to_owned())
+    }
+
+    /// A bound declared on a brand is reached from the message that holds one, and reported under
+    /// the field that holds it.
+    ///
+    /// The brand's own report names nothing — it says `value is too short: …`, the brand being the
+    /// value rather than a field of anything — so the name is the holder's to supply, written where
+    /// a reader of these reports already looks for one: first, and in single quotes.
+    #[test]
+    fn test_a_message_holding_a_constrained_brand_is_refused_by_its_own_validator() {
+        assert_eq!(
+            short().validate().unwrap_err(),
+            vec!["value is too short: minimum length is 3, got 1".to_owned()],
+            "the brand names no field of its own, which is the whole reason the holder has to"
+        );
+        assert_eq!(
+            BrandHolder { slug: short() }.validate().unwrap_err(),
+            vec!["'slug': value is too short: minimum length is 3, got 1".to_owned()],
+            "a message publishing no validator would have answered Ok(()) and handed an \
+             implementation a Slug violating its own declared pattern"
+        );
+
+        // The other direction, over the wire the brand is actually written on: a value the bound
+        // admits reads back as the message and then validates clean.
+        let read: BrandHolder = serde_json::from_str(r#"{"slug":"abc"}"#).unwrap();
+        assert_eq!(read.slug, long());
+        read.validate().unwrap();
+
+        // The README prints this report beside the declaration it comes from, so it is held to a
+        // run of the generator rather than to memory.
+        let readme = include_str!("../../README.md");
+        let shown = "// Err([\"'slug': value is too short: minimum length is 3, got 1\"])";
+        assert!(readme.contains(shown), "the README no longer shows {shown}");
+    }
+
+    /// The brand's bound is reached through the same wrappers a field's own bound is reached
+    /// through, and each shape is read both ways: a shape whose validator passed a bad value would
+    /// be one whose bound is decorative, and one that refused a good value would be one no caller
+    /// could satisfy.
+    #[test]
+    fn test_a_brands_bound_is_reached_through_every_wrapper_the_field_is_written_under() {
+        assert_eq!(
+            Wrapped {
+                boxed: Box::new(long()),
+                fixed: [long(), long()],
+                listed: vec![long()],
+                maybe: None,
+                maybe_listed: None,
+            }
+            .validate(),
+            Ok(()),
+            "a None writes nothing, so there is nothing for the bound to describe"
+        );
+
+        assert_eq!(
+            Wrapped {
+                boxed: Box::new(short()),
+                fixed: [long(), short()],
+                listed: vec![long(), short()],
+                maybe: Some(short()),
+                maybe_listed: Some(vec![short()]),
+            }
+            .validate()
+            .unwrap_err(),
+            vec![
+                "'boxed': value is too short: minimum length is 3, got 1".to_owned(),
+                "'fixed': value is too short: minimum length is 3, got 1".to_owned(),
+                "'listed': value is too short: minimum length is 3, got 1".to_owned(),
+                "'maybe': value is too short: minimum length is 3, got 1".to_owned(),
+                "'maybe_listed': value is too short: minimum length is 3, got 1".to_owned(),
+            ],
+        );
+    }
+
+    /// The same reach, over a field whose type is an ordinary `#[model_schema()]` type rather than
+    /// a brand. That type's report already names its own member, so the holder's name goes in front
+    /// of it rather than over it: a reader takes `holds`, the field of the message it was handed,
+    /// and the detail still carries the member inside it that was actually wrong.
+    #[test]
+    fn test_a_nested_types_own_report_is_carried_up_under_the_field_that_held_it() {
+        // The payload reads: a nested bound is enforced nowhere on the read, which is what leaves
+        // the message's own validator as the only thing that can enforce it at all.
+        let read: Holder = serde_json::from_str(r#"{"holds":{"name":"a"}}"#).unwrap();
+        assert_eq!(
+            read.holds.validate().unwrap_err(),
+            vec!["'name' is too short: minimum length is 3, got 1".to_owned()]
+        );
+        assert_eq!(
+            read.validate().unwrap_err(),
+            vec!["'holds': 'name' is too short: minimum length is 3, got 1".to_owned()]
+        );
+
+        let good: Holder = serde_json::from_str(r#"{"holds":{"name":"abc"}}"#).unwrap();
+        good.validate().unwrap();
+
+        let readme = include_str!("../../README.md");
+        assert!(
+            readme.contains("`'holds': 'name' is too short: ...`"),
+            "the README no longer shows what a nested report reads as"
+        );
+    }
+
+    /// A tagged variant's member reaches its type's validator exactly as a struct's field does, and
+    /// the arm that runs it is the one the value matched.
+    #[test]
+    fn test_a_tagged_variants_branded_member_is_reached_by_the_enums_validator() {
+        assert_eq!(
+            Tagged::Named { slug: short() }.validate().unwrap_err(),
+            vec!["'slug': value is too short: minimum length is 3, got 1".to_owned()]
+        );
+        Tagged::Named { slug: long() }.validate().unwrap();
+        assert_eq!(
+            Tagged::Plain { count: 0 }.validate(),
+            Ok(()),
+            "a variant carrying nothing to reach is left unread by the arm"
+        );
+    }
+
+    /// The carve-out is untouched: an untagged member's *own* bound still runs on the read, where
+    /// it decides which variant the payload is rather than merely whether the value is admissible.
+    /// The brand's hook is what makes that work, and nothing here removed it.
+    ///
+    /// The validator reaching a member's *type* is a different question and does not disturb it:
+    /// the arm runs after the variant has been chosen, so it can report a violation but never move
+    /// a payload from one member to another.
+    #[test]
+    fn test_an_untagged_members_brand_still_chooses_the_variant_on_the_read() {
+        let checked: CheckedThenLoose = serde_json::from_str(r#"{"slug":"abc"}"#).unwrap();
+        assert!(
+            matches!(&checked, CheckedThenLoose::Checked { slug } if *slug == long()),
+            "got: {checked:?}"
+        );
+        checked.validate().unwrap();
+
+        let loose: CheckedThenLoose = serde_json::from_str(r#"{"slug":"a"}"#).unwrap();
+        assert!(
+            matches!(&loose, CheckedThenLoose::Loose { slug } if slug == "a"),
+            "the bound took the first member out of the running rather than ending the read. \
+             Got: {loose:?}"
+        );
+        assert_eq!(
+            loose.validate(),
+            Ok(()),
+            "the member that was chosen declares no bound of its own"
+        );
+    }
+
+    /// Parity, from the other side: a field whose value the crate renders itself has no validator
+    /// to reach, so a message made only of those still publishes none. The trait's method is
+    /// reached only because no inherent one shadows it.
+    #[test]
+    fn test_a_message_made_of_values_the_crate_renders_itself_publishes_no_validator() {
+        assert_eq!(
+            RenderedThroughout {
+                count: 0,
+                name: String::new(),
+                tags: Vec::new(),
+                whether: false,
+            }
+            .validate(),
+            "no inherent validate()"
+        );
+    }
+}
+
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
