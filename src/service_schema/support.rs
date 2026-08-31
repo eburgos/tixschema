@@ -54,14 +54,7 @@ use syn::Ident;
 /// to it.
 pub fn emit(service: &ServiceDef, generated: &TokenStream) -> TokenStream {
     let declared = &service.ident;
-    // The trait ident snake-cased under the same `_schema` suffix a `#[model_schema]` type's
-    // generated module carries. Derived through `RenameRule`, as the other two spellings of an
-    // operation's name are, rather than through the casing helper in `utils` — that one is gated
-    // on the surface features, and this module carries nothing a feature writes.
-    let module = format_ident!(
-        "{}_schema",
-        RenameRule::SnakeCase.apply_to_variant(&declared.to_string())
-    );
+    let module = module_ident(service);
     let module_doc = format!(
         "What `#[service_schema]` generates for [`{declared}`] beside the trait itself.\n\n\
          Every type here belongs to this service alone: the crate that declares `{declared}` \
@@ -87,6 +80,20 @@ pub fn emit(service: &ServiceDef, generated: &TokenStream) -> TokenStream {
             #generated
         }
     }
+}
+
+/// The module a service's generated types land in: `UsageService` becomes `usage_service_schema`.
+///
+/// The trait ident snake-cased under the same `_schema` suffix a `#[model_schema]` type's
+/// generated module carries. Derived through `RenameRule`, as the other two spellings of an
+/// operation's name are, rather than through the casing helper in `utils` — that one is gated on
+/// the surface features, and this module carries nothing a feature writes. Public because the
+/// TypeScript emitters name types inside it and must spell it the same way.
+pub fn module_ident(service: &ServiceDef) -> Ident {
+    format_ident!(
+        "{}_schema",
+        RenameRule::SnakeCase.apply_to_variant(&service.ident.to_string())
+    )
 }
 
 /// `CallError<E>`, the failure arm of every generated client call.
@@ -224,7 +231,10 @@ fn fault_accessors() -> TokenStream {
 /// only the dispatcher and the client — the two emitters written inside it — can reach them.
 ///
 /// A service implementation cannot construct one. This is the run above with a single line added,
-/// so the refusal can only be the constructor's privacy:
+/// so the refusal can only be the constructor's privacy. Which refusal it is was read by compiling
+/// the snippet on its own rather than assumed: `E0624`, the associated function being private.
+/// `compile_fail` asserts only that *some* error is raised, and this toolchain does not check the
+/// error code a doctest names.
 ///
 /// ```rust,compile_fail
 /// use tixschema::service_schema;
@@ -293,7 +303,30 @@ fn fault_constructors() -> TokenStream {
 /// `ServiceFault` and the kind it reports. Both derive `Serialize`, which is what the transport
 /// needs to put a fault on the wire, and neither derives `Deserialize`, which would be a public
 /// constructor by another name.
+///
+/// Both also carry `#[model_schema()]`, so the TypeScript a caller narrows on comes from this
+/// declaration rather than from a literal written beside it: one wire, one source. `model_schema`
+/// writes reading surfaces only — a TypeScript string, a schema — so it widens nothing: the fields
+/// stay private, no `Deserialize` appears, and the constructors below remain the only way a fault
+/// comes into being.
+///
+/// # Two names for one type, and why
+///
+/// The declaration carries the service's own name, `UsageServiceFault`, because that is the name
+/// its TypeScript is published under and a type publishes under the ident it was declared with.
+/// TypeScript has no per-service scope: a bundle is one flat file, and a consuming codebase with
+/// ten services would otherwise declare `ServiceFault` ten times over and not compile.
+///
+/// Rust needs no such prefix, this module being the scope TypeScript lacks, so `ServiceFault` is
+/// bound beside it as an alias — the unstuttering spelling everything generated here writes, and
+/// the one a transport implementing [`Reply`](reply_declaration) names. An alias reaches Rust
+/// alone and publishes nothing, so the flat name stays claimed exactly once per service.
+///
+/// The kind is declared before the fault that carries it, so the field walk resolves its name off
+/// the registry rather than falling back to a spelling written before the type expanded.
 fn fault_declaration(declared: &Ident) -> TokenStream {
+    let fault = format_ident!("{declared}Fault", span = declared.span());
+    let kind = format_ident!("{declared}FaultKind", span = declared.span());
     let fault_doc = format!(
         "A failure `{declared}` never declared: a payload that would not deserialize, a message \
          that failed validation, an operation name nothing recognises, a handler that \
@@ -303,21 +336,20 @@ fn fault_declaration(declared: &Ident) -> TokenStream {
          admits only its own error type, and the constructors are private to this module, which \
          only the generated dispatcher and the generated client are written inside."
     );
+    let kind_doc = format!("Which kind of defect a `{declared}` fault reports.");
+    let alias_doc = format!(
+        "The fault under the name everything generated inside this module writes. `{fault}` is \
+         the same type, declared under the name its TypeScript is published as — this module is \
+         the scope TypeScript has no equivalent of."
+    );
+    let kind_alias_doc =
+        format!("Which kind of defect a [`ServiceFault`] reports. The same type as [`{kind}`].");
     quote! {
-        #[doc = #fault_doc]
-        #[derive(Clone, Debug, Eq, PartialEq, ::serde::Serialize)]
-        #[serde(rename_all = "camelCase")]
-        pub struct ServiceFault {
-            detail: String,
-            field: Option<String>,
-            kind: ServiceFaultKind,
-            operation: String,
-        }
-
-        /// Which kind of defect a [`ServiceFault`] reports.
+        #[doc = #kind_doc]
+        #[::tixschema::model_schema()]
         #[derive(Clone, Copy, Debug, Eq, PartialEq, ::serde::Serialize)]
         #[serde(rename_all = "kebab-case")]
-        pub enum ServiceFaultKind {
+        pub enum #kind {
             /// A message reached its operation and did not satisfy the operation's schema. The
             /// fault names the field that failed.
             FailedValidation,
@@ -328,6 +360,27 @@ fn fault_declaration(declared: &Ident) -> TokenStream {
             /// Nothing on this service answers to the operation name that arrived.
             UnknownOperation,
         }
+
+        #[doc = #fault_doc]
+        #[::tixschema::model_schema()]
+        #[derive(Clone, Debug, Eq, PartialEq, ::serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        pub struct #fault {
+            detail: String,
+            // Omitted rather than written as `null` when there is no field to name, which is the
+            // same convention the reply envelope follows and what lets the generated TypeScript
+            // spell it `string | undefined` and be right about the wire.
+            #[serde(skip_serializing_if = "Option::is_none")]
+            field: Option<String>,
+            kind: #kind,
+            operation: String,
+        }
+
+        #[doc = #alias_doc]
+        pub type ServiceFault = #fault;
+
+        #[doc = #kind_alias_doc]
+        pub type ServiceFaultKind = #kind;
     }
 }
 

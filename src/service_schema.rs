@@ -10,7 +10,7 @@ mod client;
 mod dispatch;
 mod messages;
 pub mod parse;
-mod support;
+pub mod support;
 
 #[cfg(feature = "typescript")]
 use crate::features::service_schema::emit as emit_typescript;

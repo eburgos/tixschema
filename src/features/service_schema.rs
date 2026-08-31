@@ -26,16 +26,34 @@
 //!
 //! # What each artifact is
 //!
-//! - `ts_definition()`: every generated message's type and schema, the [`fault`] type, and one
-//!   [`result`] type per operation that answers.
-//! - `ts_client()` and `ts_service()`: empty until the tasks that write the client and the
-//!   implementable service fill them. They exist now so those tasks change a body rather than
-//!   invent a registration surface, and so a bundle written against this one keeps compiling.
+//! - `ts_definition()`: every generated message's type and schema, the fault type and the kind it
+//!   reports, and one [`result`] type per operation that answers.
+//! - [`ts_client()`](client): the transport seam, the client type and the factory that binds one.
+//! - [`ts_service()`](service): the interface an implementation satisfies in full, the outcome
+//!   types it answers with, and the dispatcher factory.
+//!
+//! # Every emitted name carries the service
+//!
+//! TypeScript has no per-service scope. Rust puts each service's supporting types in a module of
+//! its own, and a bundle is one flat file — so a consuming codebase with ten services in one
+//! bundle would declare `ServiceFault` ten times and would not compile, and two services sharing
+//! an operation name would collide on the result type the same way. Every name emitted here is
+//! therefore prefixed with the service: `UsageServiceFault`, `UsageServiceGetBalanceResult`,
+//! `UsageServiceClient`. The prefix makes TypeScript say what Rust already means.
+//!
+//! # The fault's TypeScript is generated, not written
+//!
+//! The Rust `ServiceFault` carries `#[model_schema()]`, so its TypeScript comes from the same
+//! declaration as the Rust type and the two cannot drift. Nothing here writes a fault type; the
+//! registration below asks the Rust type for its own, exactly as it does for every message.
 
-mod fault;
+mod client;
+mod message;
 mod result;
+mod service;
 
 use crate::service_schema::parse::ServiceDef;
+use crate::service_schema::support::module_ident;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
@@ -44,14 +62,17 @@ pub fn emit(service: &ServiceDef) -> TokenStream {
     let registry = format_ident!("{named}Schema", span = service.ident.span());
     let rustdoc = registry_rustdoc(&named);
     let published = published(service);
+    let client = client::emit(service).join("\n\n");
+    let service_side = service::emit(service).join("\n\n");
     quote! {
         #(#[doc = #rustdoc])*
         pub struct #registry;
 
         impl #registry {
-            #[doc = " The service's generated TypeScript client. Empty until that emitter lands."]
+            #[doc = " The service's generated TypeScript client: the transport seam it is bound"]
+            #[doc = " to, the type its methods are declared on, and the factory that binds one."]
             pub fn ts_client() -> String {
-                String::new()
+                #client.to_owned()
             }
 
             #[doc = " Every TypeScript type this service publishes: the messages the macro declared"]
@@ -61,10 +82,10 @@ pub fn emit(service: &ServiceDef) -> TokenStream {
                 [#(#published),*].join("\n\n")
             }
 
-            #[doc = " The service's implementable TypeScript interface and its dispatcher factory."]
-            #[doc = " Empty until that emitter lands."]
+            #[doc = " The service's implementable TypeScript interface, the outcome types an"]
+            #[doc = " implementation answers with, and the dispatcher factory that drives one."]
             pub fn ts_service() -> String {
-                String::new()
+                #service_side.to_owned()
             }
         }
     }
@@ -74,10 +95,16 @@ pub fn emit(service: &ServiceDef) -> TokenStream {
 /// written into the bundle: every declared message first, so the types the result envelopes name
 /// are read before the envelopes themselves, then the fault, then the results.
 ///
+/// The fault and the kind it reports are asked for by name rather than written here. Both are
+/// ordinary `#[model_schema()]` types inside the service's own module, so their TypeScript comes
+/// from the declarations the Rust dispatcher and the Rust client build faults from — the one thing
+/// that keeps the type a caller narrows on and the value the wire carries from drifting apart.
+///
 /// A message's Zod schema is one of those artifacts and is registered here for the same reason its
 /// type is — nobody else has a line to write it on. It is asked for only in a build that writes
 /// Zod at all.
 fn published(service: &ServiceDef) -> Vec<TokenStream> {
+    let module = module_ident(service);
     let mut collected = Vec::new();
     for declared in &service.generated_messages {
         let message = &declared.ident;
@@ -85,8 +112,10 @@ fn published(service: &ServiceDef) -> Vec<TokenStream> {
         #[cfg(feature = "zod")]
         collected.push(quote! { #message::zod_schema() });
     }
-    let fault = fault::TYPESCRIPT;
-    collected.push(quote! { #fault.to_owned() });
+    let fault = format_ident!("{}Fault", service.ident);
+    let kind = format_ident!("{}FaultKind", service.ident);
+    collected.push(quote! { #module::#kind::ts_definition() });
+    collected.push(quote! { #module::#fault::ts_definition() });
     collected.extend(
         result::emit(service)
             .iter()

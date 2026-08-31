@@ -768,11 +768,18 @@ fn a_fault_is_read_back_through_a_private_mirror_rather_than_by_widening_the_fau
         emitted.contains("fn into_fault (self) -> ServiceFault"),
         "got: {emitted}"
     );
-    let fault = emitted.find("pub struct ServiceFault").unwrap();
+    // Declared under the name its TypeScript is published as, `ServiceFault` being the alias the
+    // module's own generated code writes.
+    let fault = emitted.find("pub struct UsageServiceFault").unwrap();
     let derives = &emitted[fault.saturating_sub(200)..fault];
     assert!(
         !derives.contains("Deserialize"),
         "a public `Deserialize` on the fault is a public constructor by another name. Got: \
          {derives}"
+    );
+    assert!(
+        emitted.contains("pub type ServiceFault = UsageServiceFault ;"),
+        "the module keeps the unstuttering spelling; only TypeScript needs the prefix. Got: \
+         {emitted}"
     );
 }
