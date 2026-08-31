@@ -163,12 +163,14 @@ fn test_max_length_rust_invalid() {
     }
 
     let invalid = r#"{"name": "too long value"}"#;
-    let result: Result<MaxLengthInvalid, _> = serde_json::from_str(invalid);
-    assert!(result.is_err(), "String exceeding maxLength should fail");
-    let err_str = result.unwrap_err().to_string();
+    // A value out of range is still structurally a message: every key is present and
+    // every value is of the type its field declared. The read says so, and the validator
+    // is what answers for the range.
+    let read = serde_json::from_str::<MaxLengthInvalid>(invalid).unwrap();
+    let errors = read.validate().unwrap_err();
     assert!(
-        err_str.contains("too long"),
-        "Error should mention 'too long': {err_str}"
+        errors[0].contains("too long"),
+        "Error should mention 'too long': {errors:?}"
     );
 }
 
@@ -208,12 +210,14 @@ fn test_min_length_rust_invalid() {
     }
 
     let invalid = r#"{"name": "hi"}"#;
-    let result: Result<MinLengthRustInvalid, _> = serde_json::from_str(invalid);
-    assert!(result.is_err(), "String shorter than minLength should fail");
-    let err_str = result.unwrap_err().to_string();
+    // A value out of range is still structurally a message: every key is present and
+    // every value is of the type its field declared. The read says so, and the validator
+    // is what answers for the range.
+    let read = serde_json::from_str::<MinLengthRustInvalid>(invalid).unwrap();
+    let errors = read.validate().unwrap_err();
     assert!(
-        err_str.contains("too short"),
-        "Error should mention 'too short': {err_str}"
+        errors[0].contains("too short"),
+        "Error should mention 'too short': {errors:?}"
     );
 }
 
@@ -253,8 +257,16 @@ fn test_combined_string_constraints_too_short() {
     }
 
     let invalid = r#"{"id": "ab"}"#;
-    let result: Result<CombinedStringShort, _> = serde_json::from_str(invalid);
-    assert!(result.is_err(), "Too short value should fail");
+    // Structurally a message either way; which of the three constraints it breaks is
+    // the validator's to say, and it says which one.
+    let errors = serde_json::from_str::<CombinedStringShort>(invalid)
+        .unwrap()
+        .validate()
+        .unwrap_err();
+    assert!(
+        errors[0].contains("too short"),
+        "Too short value should be refused for that: {errors:?}"
+    );
 }
 
 #[cfg(all(
@@ -271,8 +283,16 @@ fn test_combined_string_constraints_pattern_fail() {
     }
 
     let invalid = r#"{"id": "Hello123"}"#;
-    let result: Result<CombinedStringPattern, _> = serde_json::from_str(invalid);
-    assert!(result.is_err(), "Value failing pattern should fail");
+    // Structurally a message either way; which of the three constraints it breaks is
+    // the validator's to say, and it says which one.
+    let errors = serde_json::from_str::<CombinedStringPattern>(invalid)
+        .unwrap()
+        .validate()
+        .unwrap_err();
+    assert!(
+        errors[0].contains("does not match pattern"),
+        "Value failing pattern should be refused for that: {errors:?}"
+    );
 }
 
 #[cfg(all(
@@ -484,12 +504,14 @@ fn test_minimum_rust_invalid() {
     }
 
     let invalid = r#"{"count": 3}"#;
-    let result: Result<MinimumRustInvalid, _> = serde_json::from_str(invalid);
-    assert!(result.is_err(), "Value below minimum should fail");
-    let err_str = result.unwrap_err().to_string();
+    // A value out of range is still structurally a message: every key is present and
+    // every value is of the type its field declared. The read says so, and the validator
+    // is what answers for the range.
+    let read = serde_json::from_str::<MinimumRustInvalid>(invalid).unwrap();
+    let errors = read.validate().unwrap_err();
     assert!(
-        err_str.contains("too small"),
-        "Error should mention 'too small': {err_str}"
+        errors[0].contains("too small"),
+        "Error should mention 'too small': {errors:?}"
     );
 }
 
@@ -529,12 +551,14 @@ fn test_maximum_rust_invalid() {
     }
 
     let invalid = r#"{"count": 99}"#;
-    let result: Result<MaximumRustInvalid, _> = serde_json::from_str(invalid);
-    assert!(result.is_err(), "Value exceeding maximum should fail");
-    let err_str = result.unwrap_err().to_string();
+    // A value out of range is still structurally a message: every key is present and
+    // every value is of the type its field declared. The read says so, and the validator
+    // is what answers for the range.
+    let read = serde_json::from_str::<MaximumRustInvalid>(invalid).unwrap();
+    let errors = read.validate().unwrap_err();
     assert!(
-        err_str.contains("too large"),
-        "Error should mention 'too large': {err_str}"
+        errors[0].contains("too large"),
+        "Error should mention 'too large': {errors:?}"
     );
 }
 
@@ -866,12 +890,14 @@ fn test_minimum_float_rust_invalid() {
     }
 
     let invalid = r#"{"ratio": -0.5}"#;
-    let result: Result<MinFloatInvalid, _> = serde_json::from_str(invalid);
-    assert!(result.is_err(), "Float below minimum should fail");
-    let err_str = result.unwrap_err().to_string();
+    // A value out of range is still structurally a message: every key is present and
+    // every value is of the type its field declared. The read says so, and the validator
+    // is what answers for the range.
+    let read = serde_json::from_str::<MinFloatInvalid>(invalid).unwrap();
+    let errors = read.validate().unwrap_err();
     assert!(
-        err_str.contains("too small"),
-        "Error should mention 'too small': {err_str}"
+        errors[0].contains("too small"),
+        "Error should mention 'too small': {errors:?}"
     );
 }
 
@@ -911,12 +937,14 @@ fn test_maximum_float_rust_invalid() {
     }
 
     let invalid = r#"{"value": 15.0}"#;
-    let result: Result<MaxFloatInvalid, _> = serde_json::from_str(invalid);
-    assert!(result.is_err(), "Float above maximum should fail");
-    let err_str = result.unwrap_err().to_string();
+    // A value out of range is still structurally a message: every key is present and
+    // every value is of the type its field declared. The read says so, and the validator
+    // is what answers for the range.
+    let read = serde_json::from_str::<MaxFloatInvalid>(invalid).unwrap();
+    let errors = read.validate().unwrap_err();
     assert!(
-        err_str.contains("too large"),
-        "Error should mention 'too large': {err_str}"
+        errors[0].contains("too large"),
+        "Error should mention 'too large': {errors:?}"
     );
 }
 
@@ -1467,15 +1495,19 @@ fn test_validate_boxed_option_string() {
     );
 }
 
-/// The gate every consumer reaches first. A constraint describes the value the field puts on the
-/// wire, so a payload carrying a value the constraint rejects is rejected as it is read — at the
-/// same place, and with the same message, that `validate()` would answer with.
+/// What a bound means on a field: the read admits the value and the validator refuses it.
+///
+/// A constraint describes the value, not the shape. A payload carrying one the constraint rejects
+/// is still structurally the message it claims to be — every key present, every value of its
+/// field's declared type — so the read says so and the validator is what answers for the bound,
+/// naming the field. Enforcing it as the payload was read made the two indistinguishable to a
+/// receiver, which is a worse answer than either.
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
 ))]
 #[test]
-fn test_deserialize_optional_string_rejects_a_short_some() {
+fn test_an_optional_string_is_read_and_then_held_to_its_bound_by_validate() {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug)]
     pub struct WireOptional {
@@ -1484,16 +1516,16 @@ fn test_deserialize_optional_string_rejects_a_short_some() {
         pub nickname: Option<String>,
     }
 
-    let error = serde_json::from_str::<WireOptional>(r#"{"nickname":"a"}"#).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("'nickname' is too short: minimum length is 3, got 1"),
-        "Unexpected error: {error}"
+    let read = serde_json::from_str::<WireOptional>(r#"{"nickname":"a"}"#).unwrap();
+    assert_eq!(
+        read.validate().unwrap_err(),
+        vec!["'nickname' is too short: minimum length is 3, got 1"],
+        "the bound reaches through the Option, and names the field"
     );
 
     let accepted = serde_json::from_str::<WireOptional>(r#"{"nickname":"abc"}"#).unwrap();
     assert_eq!(accepted.nickname.as_deref(), Some("abc"));
+    accepted.validate().unwrap();
 }
 
 /// A `None` puts no string on the wire, so neither spelling of its absence has anything to reject.
@@ -1527,7 +1559,7 @@ fn test_deserialize_optional_string_still_admits_an_absent_key() {
     );
 }
 
-/// A field that writes its own default keeps it: the hook is given no second one.
+/// A field that writes its own default keeps it, nothing being injected beside it.
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
@@ -1556,14 +1588,14 @@ fn test_deserialize_optional_string_keeps_a_written_default() {
     );
 }
 
-/// A transparent wrapper writes its inner value and nothing else, so the wire the constraint
-/// describes is the same one a bare field writes.
+/// A transparent wrapper writes its inner value and nothing else, so the value the constraint
+/// describes is the one a bare field holds and the walk reaches it through the wrapper.
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
 ))]
 #[test]
-fn test_deserialize_boxed_string_rejects_a_short_value() {
+fn test_a_boxed_string_is_read_and_then_held_to_its_bound_by_validate() {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug)]
     pub struct WireBoxed {
@@ -1571,12 +1603,10 @@ fn test_deserialize_boxed_string_rejects_a_short_value() {
         pub label: Box<str>,
     }
 
-    let error = serde_json::from_str::<WireBoxed>(r#"{"label":"a"}"#).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("'label' is too short: minimum length is 3, got 1"),
-        "Unexpected error: {error}"
+    let read = serde_json::from_str::<WireBoxed>(r#"{"label":"a"}"#).unwrap();
+    assert_eq!(
+        read.validate().unwrap_err(),
+        vec!["'label' is too short: minimum length is 3, got 1"]
     );
     assert_eq!(
         &*serde_json::from_str::<WireBoxed>(r#"{"label":"abc"}"#)
@@ -1586,13 +1616,13 @@ fn test_deserialize_boxed_string_rejects_a_short_value() {
     );
 }
 
-/// A `Cow` arrives as the `Box` does, its lifetime being no part of what it writes.
+/// A `Cow` is reached as the `Box` is, its lifetime being no part of what it holds.
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
 ))]
 #[test]
-fn test_deserialize_cow_string_rejects_a_short_value() {
+fn test_a_cow_string_is_read_and_then_held_to_its_bound_by_validate() {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug)]
     pub struct WireCow {
@@ -1600,12 +1630,10 @@ fn test_deserialize_cow_string_rejects_a_short_value() {
         pub label: Cow<'static, str>,
     }
 
-    let error = serde_json::from_str::<WireCow>(r#"{"label":"a"}"#).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("'label' is too short: minimum length is 3, got 1"),
-        "Unexpected error: {error}"
+    let read = serde_json::from_str::<WireCow>(r#"{"label":"a"}"#).unwrap();
+    assert_eq!(
+        read.validate().unwrap_err(),
+        vec!["'label' is too short: minimum length is 3, got 1"]
     );
     assert_eq!(
         serde_json::from_str::<WireCow>(r#"{"label":"abc"}"#)
@@ -1615,13 +1643,14 @@ fn test_deserialize_cow_string_rejects_a_short_value() {
     );
 }
 
-/// A sequence writes an array of the constrained value, so one failing element fails the read.
+/// A sequence holds an array of the constrained value, so the walk visits every element and one
+/// failing element fails the validator.
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
 ))]
 #[test]
-fn test_deserialize_vec_string_rejects_a_short_element() {
+fn test_a_vec_of_strings_is_read_and_then_held_to_its_bound_by_validate() {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug)]
     pub struct WireVec {
@@ -1629,12 +1658,11 @@ fn test_deserialize_vec_string_rejects_a_short_element() {
         pub tags: Vec<String>,
     }
 
-    let error = serde_json::from_str::<WireVec>(r#"{"tags":["ok!","a"]}"#).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("'tags' is too short: minimum length is 3, got 1"),
-        "Unexpected error: {error}"
+    let read = serde_json::from_str::<WireVec>(r#"{"tags":["ok!","a"]}"#).unwrap();
+    assert_eq!(
+        read.validate().unwrap_err(),
+        vec!["'tags' is too short: minimum length is 3, got 1"],
+        "the element that broke the bound is the one reported, and the good one beside it is not"
     );
     assert_eq!(
         serde_json::from_str::<WireVec>(r#"{"tags":["ok!","two"]}"#)
@@ -1651,13 +1679,13 @@ fn test_deserialize_vec_string_rejects_a_short_element() {
     );
 }
 
-/// The wrappers compose on the wire in the order they were written.
+/// The wrappers compose in the order they were written, and the walk goes through them in it.
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
 ))]
 #[test]
-fn test_deserialize_optional_vec_string_rejects_a_short_element() {
+fn test_an_optional_vec_is_read_and_then_held_to_its_bound_by_validate() {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug)]
     pub struct WireOptionalVec {
@@ -1666,12 +1694,10 @@ fn test_deserialize_optional_vec_string_rejects_a_short_element() {
         pub tags: Option<Vec<String>>,
     }
 
-    let error = serde_json::from_str::<WireOptionalVec>(r#"{"tags":["ok!","a"]}"#).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("'tags' is too short: minimum length is 3, got 1"),
-        "Unexpected error: {error}"
+    let read = serde_json::from_str::<WireOptionalVec>(r#"{"tags":["ok!","a"]}"#).unwrap();
+    assert_eq!(
+        read.validate().unwrap_err(),
+        vec!["'tags' is too short: minimum length is 3, got 1"]
     );
     assert!(
         serde_json::from_str::<WireOptionalVec>("{}")
@@ -1682,14 +1708,14 @@ fn test_deserialize_optional_vec_string_rejects_a_short_element() {
     );
 }
 
-/// A range describes the number on the wire wherever the field wrote it, exactly as a length
-/// describes the string.
+/// A range describes the number wherever the field holds it, exactly as a length describes the
+/// string, and the walk reaches it the same way.
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
 ))]
 #[test]
-fn test_deserialize_optional_numeric_rejects_an_out_of_range_some() {
+fn test_an_optional_number_is_read_and_then_held_to_its_range_by_validate() {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug)]
     pub struct WireNumeric {
@@ -1700,36 +1726,40 @@ fn test_deserialize_optional_numeric_rejects_an_out_of_range_some() {
         pub counts: Vec<u32>,
     }
 
-    let out_of_range =
-        serde_json::from_str::<WireNumeric>(r#"{"age":5,"counts":[1]}"#).unwrap_err();
-    assert!(
-        out_of_range
-            .to_string()
-            .contains("'age' is too small: minimum is 18, got 5"),
-        "Unexpected error: {out_of_range}"
+    assert_eq!(
+        serde_json::from_str::<WireNumeric>(r#"{"age":5,"counts":[1]}"#)
+            .unwrap()
+            .validate()
+            .unwrap_err(),
+        vec!["'age' is too small: minimum is 18, got 5"]
     );
 
-    let under_element =
-        serde_json::from_str::<WireNumeric>(r#"{"age":21,"counts":[1,0]}"#).unwrap_err();
-    assert!(
-        under_element
-            .to_string()
-            .contains("'counts' is too small: minimum is 1, got 0"),
-        "Unexpected error: {under_element}"
+    assert_eq!(
+        serde_json::from_str::<WireNumeric>(r#"{"age":21,"counts":[1,0]}"#)
+            .unwrap()
+            .validate()
+            .unwrap_err(),
+        vec!["'counts' is too small: minimum is 1, got 0"]
     );
 
     let accepted = serde_json::from_str::<WireNumeric>(r#"{"age":21,"counts":[1]}"#).unwrap();
     assert_eq!(accepted.age, Some(21));
+    accepted.validate().unwrap();
 }
 
-/// What the wire admits and what `validate()` admits are the same set — a value one accepts and the
-/// other rejects is the disagreement this covers.
+/// The whole matrix in one place: on every wrapped shape, a value that breaks the bound is read
+/// and then refused by `validate()`, naming its field.
+///
+/// The read admits it because it is structurally the message it claims to be. The validator
+/// refuses it because the bound describes the value, not the shape. A shape where the read
+/// refused instead would be one whose caller is told its serialization is broken when it is not —
+/// and a shape where neither refused would be one whose bound is decorative.
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
 ))]
 #[test]
-fn test_deserialize_and_validate_agree_on_every_wrapped_shape() {
+fn test_every_wrapped_shape_is_read_and_then_refused_by_validate() {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug)]
     pub struct WireAgreement {
@@ -1755,7 +1785,8 @@ fn test_deserialize_and_validate_agree_on_every_wrapped_shape() {
     let accepted = serde_json::from_str::<WireAgreement>(GOOD).unwrap();
     assert!(
         accepted.validate().is_ok(),
-        "A payload the wire admits must be one validate() admits"
+        "the payload every bound admits has to pass: {:?}",
+        accepted.validate().err()
     );
 
     for (field, short) in [
@@ -1768,12 +1799,18 @@ fn test_deserialize_and_validate_agree_on_every_wrapped_shape() {
     ] {
         let mut payload: serde_json::Value = serde_json::from_str(GOOD).unwrap();
         payload[field] = serde_json::from_str(short).unwrap();
-        let error = serde_json::from_str::<WireAgreement>(&payload.to_string()).unwrap_err();
-        assert!(
-            error.to_string().contains(&format!(
+        let admitted =
+            serde_json::from_str::<WireAgreement>(&payload.to_string()).map_err(|refused| {
+                format!("`{field}` broke a bound and the read refused it: {refused}")
+            });
+        assert_eq!(admitted.as_ref().err(), None);
+        let read = admitted.unwrap();
+        assert_eq!(
+            read.validate().unwrap_err(),
+            vec![format!(
                 "'{field}' is too short: minimum length is 3, got 1"
-            )),
-            "field {field} was admitted by the wire but is rejected by validate(): {error}"
+            )],
+            "`{field}` broke its bound and validate() did not say so"
         );
     }
 }
@@ -1800,29 +1837,35 @@ fn test_two_variants_naming_one_field_keep_their_own_constraints() {
         },
     }
 
-    let too_short_for_delete =
-        serde_json::from_str::<Action>(r#"{"kind":"Delete","note":"abc"}"#).unwrap_err();
-    assert!(
-        too_short_for_delete
-            .to_string()
-            .contains("'note' is too short: minimum length is 5, got 3"),
-        "Unexpected error: {too_short_for_delete}"
+    // The tag names the variant before its members are read, so the value that arrives is never
+    // in doubt and the bound is the validator's to apply — the variant's own bound, and only it.
+    assert_eq!(
+        serde_json::from_str::<Action>(r#"{"kind":"Delete","note":"abc"}"#)
+            .unwrap()
+            .validate()
+            .unwrap_err(),
+        vec!["'note' is too short: minimum length is 5, got 3"]
     );
     assert!(
-        serde_json::from_str::<Action>(r#"{"kind":"Delete","note":"abcde"}"#).is_ok(),
+        serde_json::from_str::<Action>(r#"{"kind":"Delete","note":"abcde"}"#)
+            .unwrap()
+            .validate()
+            .is_ok(),
         "Delete admits its own minimum"
     );
 
-    let too_short_for_upload =
-        serde_json::from_str::<Action>(r#"{"kind":"Upload","note":"ab"}"#).unwrap_err();
-    assert!(
-        too_short_for_upload
-            .to_string()
-            .contains("'note' is too short: minimum length is 3, got 2"),
-        "Unexpected error: {too_short_for_upload}"
+    assert_eq!(
+        serde_json::from_str::<Action>(r#"{"kind":"Upload","note":"ab"}"#)
+            .unwrap()
+            .validate()
+            .unwrap_err(),
+        vec!["'note' is too short: minimum length is 3, got 2"]
     );
     assert!(
-        serde_json::from_str::<Action>(r#"{"kind":"Upload","note":"abc"}"#).is_ok(),
+        serde_json::from_str::<Action>(r#"{"kind":"Upload","note":"abc"}"#)
+            .unwrap()
+            .validate()
+            .is_ok(),
         "A value Upload admits is not held to Delete's minimum"
     );
 }

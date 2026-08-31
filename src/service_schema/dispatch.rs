@@ -5,23 +5,28 @@
 //! # What one arm does, and in what order
 //!
 //! Deserialize the payload into the operation's message, run *that message's own* `validate()`,
-//! call the implementation, answer. The order is the point: **an implementation may assume its
-//! incoming message is valid, because an invalid one never reaches it.** A payload that will not
-//! deserialize, a message that fails validation and an operation name nothing recognises are all
-//! faults, and a fault goes through the reply handle like any other answer rather than becoming a
-//! return value the transport has to interpret.
+//! call the implementation behind a panic guard, answer. The order is the point: **an
+//! implementation may assume its incoming message is valid, because an invalid one never reaches
+//! it.** A payload that will not deserialize, a message that fails validation, an operation name
+//! nothing recognises and a handler that panicked are all faults, and a fault goes through the
+//! reply handle like any other answer rather than becoming a return value the transport has to
+//! interpret.
 //!
-//! A request-and-reply arm calls exactly one of `send` and `fault`. A one-way arm calls neither:
-//! it runs the implementation and returns, so nothing about replying appears on a path that never
-//! replies. Acknowledgement is the transport's, not the handle's — `dispatch` returns nothing, so
-//! the adapter that called it still holds the delivery and acknowledges once dispatch is done.
+//! A request-and-reply arm calls exactly one of `send` and `fault`. A one-way arm calls neither
+//! once its implementation has been entered, so nothing about replying appears on a path that
+//! never replies. Acknowledgement is the transport's, not the handle's — `dispatch` returns
+//! nothing, so the adapter that called it still holds the delivery and acknowledges once dispatch
+//! is done. That placement is why the panic guard exists rather than being an extra: a panic
+//! unwinding out of `dispatch` never reaches the acknowledgement, and the bus this was measured
+//! against has no `nack`, no dead-letter exchange, no message TTL and no timeout to settle the
+//! delivery in its place.
 //!
 //! # What this file emits beside `dispatch`, and who else reads it
 //!
-//! Three things land here that the [`client`](super::client) also reads, both being spliced into
+//! Four things land here that the [`client`](super::client) also reads, both being spliced into
 //! the one module [`support`](super::support) opens: the `Answered` envelope, the
-//! `MessageValidation` fallback, and the two readers that turn a violation report into the field
-//! and the detail a fault carries.
+//! `MessageValidation` fallback, the readers that turn a violation report into the field and the
+//! detail a fault carries, and the reader for the field a single line names.
 //!
 //! `Answered` is the `{ ok, value }` / `{ ok, error }` envelope the design ratified, and the
 //! dispatcher hands it to `send` rather than handing over a bare `Result`. Serde writes a `Result`
@@ -58,11 +63,13 @@ pub fn emit(service: &ServiceDef) -> TokenStream {
     let envelope = answered_envelope();
     let validation = message_validation();
     let readers = violation_readers();
+    let guard = panic_guard();
     quote! {
         #incoming
         #envelope
         #validation
         #readers
+        #guard
 
         #[doc = #dispatch_doc]
         pub fn dispatch<S, Ctx, R>(
@@ -124,21 +131,34 @@ fn answered_envelope() -> TokenStream {
     }
 }
 
-/// One arm: deserialize, validate, call, answer. Both fault paths name the wire name rather than
-/// what arrived, this arm being the one that answered to it.
+/// One arm: deserialize, validate, call behind the panic guard, record and answer. Every fault path
+/// names the wire name rather than what arrived, this arm being the one that answered to it.
+///
+/// A one-way arm answers nothing once the implementation has been entered, a panic included: the
+/// operation declared no reply and the delivery carries no queue for one to go to. What the guard
+/// buys there is the return itself — the transport acknowledges after `dispatch` returns, and a
+/// panic that unwound past it would leave the delivery outstanding. The record is what keeps that
+/// return from being silent, so a panic is written down on both outcomes.
 fn arm(operation: &OperationDef) -> TokenStream {
     let wire = &operation.wire_name;
     let message = message_type(operation);
     let call = call_arguments(operation);
     let method = &operation.ident;
+    let called = quote! { caught(move || svc.#method(ctx #(, #call)*)).await };
     let settled = match operation.outcome {
         OperationOutcome::OneWay => quote! {
-            svc.#method(ctx #(, #call)*).await
+            if let Err(panicked) = #called {
+                record_panic(#wire, &panicked);
+            }
         },
         OperationOutcome::Reply { .. } => quote! {
-            reply
-                .send(Answered::answering(svc.#method(ctx #(, #call)*).await))
-                .await
+            match #called {
+                Ok(answered) => reply.send(Answered::answering(answered)).await,
+                Err(panicked) => {
+                    record_panic(#wire, &panicked);
+                    reply.fault(ServiceFault::handler_panic(#wire, &panicked)).await
+                }
+            }
         },
     };
     quote! {
@@ -234,21 +254,126 @@ fn message_type(operation: &OperationDef) -> TokenStream {
     }
 }
 
-/// The two readers that turn a violation report into what a fault carries.
+/// The readers that turn a violation report — or a deserializer's own refusal — into what a fault
+/// carries.
 fn violation_readers() -> TokenStream {
     quote! {
+        /// The field one line names, where it is written in the shape every validator
+        /// `#[model_schema()]` generates: the field first and in single quotes —
+        /// `'organization_id' is too short: …`. A line written any other way names none.
+        ///
+        /// It is read off a deserializer's refusal as well as off a validator's report, because
+        /// those are the same message. A field carrying a constraint gets a serde
+        /// `deserialize_with` hook running the very check `validate()` runs, and the hook hands
+        /// serde that check's message verbatim — so a payload refused before it ever became a
+        /// message still names the field it got wrong.
+        fn named_field(reported: &str) -> Option<&str> {
+            let (field, _rest) = reported.strip_prefix('\'')?.split_once('\'')?;
+            Some(field)
+        }
+
         /// Everything that failed, in one line, for the fault's detail.
         fn violation_detail(reported: &[String]) -> String {
             reported.join("; ")
         }
 
-        /// The field a violation names. Every validator `#[model_schema()]` generates writes the
-        /// field first and in single quotes — `'organization_id' is too short: …` — so the name is
-        /// read back off the report rather than tracked beside it. A violation naming no field, as
-        /// a constrained newtype's does, leaves the fault's field empty.
+        /// The field a violation report names, which is its first line's. A violation naming no
+        /// field, as a constrained newtype's does, leaves the fault's field empty.
         fn violated_field(reported: &[String]) -> Option<&str> {
-            let (field, _rest) = reported.first()?.strip_prefix('\'')?.split_once('\'')?;
-            Some(field)
+            named_field(reported.first()?)
+        }
+    }
+}
+
+/// The guard a handler is called behind, the record a caught panic leaves, and the reader that
+/// turns one into a detail.
+///
+/// Two things make this the arm's business rather than the transport's. The delivery is
+/// acknowledged after `dispatch` returns, so a panic that unwound past it is never acknowledged at
+/// all — and the consumer this was measured against asks for manual acknowledgement with no
+/// `nack`, no dead-letter exchange, no message TTL and no timeout, so that delivery stays
+/// outstanding against the prefetch until the channel closes. And a handler that panicked failed at
+/// something its operation never declared, which is exactly what a fault reports.
+///
+/// Catching a panic without writing it down would trade a stalled consumer for a silent one, so
+/// every caught panic is recorded through `tracing::error!`. That is the third runtime crate a
+/// crate declaring a service names in its own manifest, beside `serde` and `serde_json`, and it is
+/// named for the same reason they are: the generated code calls it. See the
+/// [module documentation](super) for what that costs.
+fn panic_guard() -> TokenStream {
+    quote! {
+        /// Runs a handler, answering `Err` with what it said where it panicked rather than letting
+        /// the panic unwind out through `dispatch`.
+        ///
+        /// The handler is taken as the closure that makes its future rather than as the future, so
+        /// that a panic raised while the call is set up is caught beside one raised while it runs:
+        /// the trait's `async fn` is emitted desugared, and an implementation may answer it with an
+        /// ordinary `fn` that does work before handing back a future.
+        ///
+        /// Unwind safety is asserted rather than proved. What a caught panic leaves behind is the
+        /// implementation's own state, which nothing here can examine; the alternative is a
+        /// delivery that is never settled, and a caller owed an answer either way. Under
+        /// `panic = "abort"` nothing is caught and the process ends, that being the profile's
+        /// decision rather than this one's.
+        async fn caught<Making, Running>(making: Making) -> Result<Running::Output, String>
+        where
+            Making: FnOnce() -> Running,
+            Running: ::core::future::Future,
+        {
+            let running =
+                match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(making)) {
+                    Ok(running) => running,
+                    Err(panicked) => return Err(panic_detail(&*panicked)),
+                };
+            let mut running = ::core::pin::pin!(running);
+            ::core::future::poll_fn(move |polling| {
+                match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
+                    ::core::future::Future::poll(running.as_mut(), polling)
+                })) {
+                    Ok(::core::task::Poll::Pending) => ::core::task::Poll::Pending,
+                    Ok(::core::task::Poll::Ready(answered)) => {
+                        ::core::task::Poll::Ready(Ok(answered))
+                    }
+                    Err(panicked) => ::core::task::Poll::Ready(Err(panic_detail(&*panicked))),
+                }
+            })
+            .await
+        }
+
+        /// Writes down that a handler came apart, so that catching a panic is not the same as
+        /// losing it.
+        ///
+        /// It runs on both outcomes. A one-way operation declared no reply and its delivery
+        /// carries no queue for one to go to, so without this the panic is visible to nobody at
+        /// all. A request-and-reply operation answers its caller a fault, and that is the
+        /// *caller's* record rather than the operator's — the two are frequently not the same
+        /// party, and a panic is a defect in this service whichever way its operation was
+        /// declared. So both write the same event, and a service reads its handlers' failures off
+        /// one place.
+        ///
+        /// `tracing` is named because the operator's subscriber is where a service's records
+        /// already go. The default panic hook has printed the panic to stderr by the time this
+        /// runs, but that line carries no operation name, is not structured, and is gone entirely
+        /// under a hook the service replaced.
+        fn record_panic(operation: &str, detail: &str) {
+            ::tracing::error!(
+                operation = operation,
+                detail = detail,
+                "the handler for this operation panicked"
+            );
+        }
+
+        /// What a caught panic said, for the fault's detail. A panic payload is whatever reached
+        /// `panic!` — a `&str` for a literal message and a `String` for a formatted one — and
+        /// anything else carries nothing a reader could be shown.
+        fn panic_detail(panicked: &(dyn ::core::any::Any + Send)) -> String {
+            if let Some(said) = panicked.downcast_ref::<&str>() {
+                return (*said).to_owned();
+            }
+            if let Some(said) = panicked.downcast_ref::<String>() {
+                return said.clone();
+            }
+            "the handler panicked, and said nothing that reads back".to_owned()
         }
     }
 }

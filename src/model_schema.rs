@@ -322,6 +322,34 @@ enum ConstraintLeaf {
     Str,
 }
 
+/// Where a field's constraints are enforced.
+///
+/// Both readings publish the same two helpers into the schema module. What differs is whether the
+/// field itself is hung with the `#[serde(deserialize_with = …)]` that runs the check as the
+/// payload is read.
+#[cfg(feature = "serde")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConstraintGate {
+    /// The deserializer as well as the validator, because here whether the member is admissible is
+    /// what chooses which variant the payload is.
+    ///
+    /// An untagged union's read tries its variants in order and takes a member the constraint
+    /// rejects out of the running — the same thing `anyOf` and `z.union` do on the two schema
+    /// surfaces the same type publishes. Move the check off the read here and the three stop
+    /// agreeing about which variant a payload is, which is not an error message changing but a
+    /// value changing. `validate()` cannot answer this one: by the time it runs the variant has
+    /// already been chosen.
+    Deserializer,
+    /// The validator alone, which is every position where a constraint decides only whether a
+    /// value is admissible and never what it is.
+    ///
+    /// A constraint describes the value rather than the shape, so a payload that breaks one is a
+    /// message that failed validation and not a payload that would not deserialize — and only the
+    /// validator can answer that way, naming the field. Enforcing it as the payload is read makes
+    /// the two indistinguishable to a receiver, which is what this reading exists to stop.
+    Validator,
+}
+
 /// What the end of a walk does with a violation: `validate()` collects every one, a
 /// `Deserializer` fails at the first.
 #[cfg(feature = "serde")]
@@ -7718,6 +7746,10 @@ fn collect_untagged_variant_members(
                 &field_name,
                 Some(&variant_name),
                 &prop_meta,
+                // The one position where the read is also the gate: an untagged union picks the
+                // variant by which one accepts the payload, so a member's constraint decides what
+                // the value *is* and not merely whether it is admissible.
+                ConstraintGate::Deserializer,
                 &mut injected_attrs,
             );
         field.attrs = new_attrs;
@@ -11085,6 +11117,10 @@ fn process_field(
         &raw_field_ident,
         ctx.variant_ident,
         &model_schema_prop_meta,
+        // A struct's field, or a tagged variant's: the shape of the payload says which type it is,
+        // so a constraint here decides only whether the value is admissible. That is the
+        // validator's answer to give, and only the validator can give it naming the field.
+        ConstraintGate::Validator,
         &mut injected_attrs,
     );
 
@@ -11207,9 +11243,10 @@ fn interior_mutability_constraint_guard_error(
     .to_compile_error()
 }
 
-/// Generates per-field serde validation code (static validator + `deserialize_with`) and, when
-/// constraints apply, collects the corresponding `#[serde(deserialize_with = ...)]` attribute into
-/// `injected_attrs` — plus the `#[serde(default)]` that keeps an optional key optional under one.
+/// Generates per-field serde validation code — the static validator and the `deserialize_with`
+/// hook, both published into the schema module either way — and, where `gate` says the read is
+/// also a gate, collects the `#[serde(deserialize_with = ...)]` attribute into `injected_attrs`,
+/// plus the `#[serde(default)]` that keeps an optional key optional under one.
 #[cfg(feature = "serde")]
 fn generate_field_validation(
     field: &Field,
@@ -11217,6 +11254,7 @@ fn generate_field_validation(
     raw_field_ident: &str,
     variant_ident: Option<&str>,
     model_schema_prop_meta: &ModelSchemaPropMeta,
+    gate: ConstraintGate,
     injected_attrs: &mut Vec<syn::Attribute>,
 ) -> (
     Option<proc_macro2::TokenStream>,
@@ -11291,15 +11329,22 @@ fn generate_field_validation(
         return (None, None, None);
     };
 
-    let deserialize_with_path = format!("{module_name}::deserialize_{helper_stem}");
-    let path_lit = syn::LitStr::new(&deserialize_with_path, proc_macro2::Span::call_site());
-    injected_attrs.push(syn::parse_quote! {
-        #[serde(deserialize_with = #path_lit)]
-    });
-    if needs_injected_default(&shape.wraps, has_serde_default(&field.attrs)) {
+    if gate == ConstraintGate::Deserializer {
+        let deserialize_with_path = format!("{module_name}::deserialize_{helper_stem}");
+        let path_lit = syn::LitStr::new(&deserialize_with_path, proc_macro2::Span::call_site());
         injected_attrs.push(syn::parse_quote! {
-            #[serde(default)]
+            #[serde(deserialize_with = #path_lit)]
         });
+        // Only alongside the hook. A `deserialize_with` turns off serde's own reading of an
+        // `Option`, under which a missing key is `None` without anything being written for it; the
+        // `default` puts that reading back. Off the hook there is nothing to put back, and writing
+        // one anyway would let a *required* key go missing and be defaulted, which is a payload
+        // that really is not a message being read as though it were.
+        if needs_injected_default(&shape.wraps, has_serde_default(&field.attrs)) {
+            injected_attrs.push(syn::parse_quote! {
+                #[serde(default)]
+            });
+        }
     }
 
     (

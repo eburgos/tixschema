@@ -140,7 +140,7 @@ fn test_path_fields_render_as_strings_in_json_schema() {
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
 ))]
 #[test]
-fn test_a_constrained_path_is_rejected_on_the_wire_and_by_validate() {
+fn test_a_constrained_path_is_read_and_then_refused_by_validate() {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug)]
     struct ConstrainedPath {
@@ -148,20 +148,22 @@ fn test_a_constrained_path_is_rejected_on_the_wire_and_by_validate() {
         owned: PathBuf,
     }
 
-    let too_short = serde_json::from_str::<ConstrainedPath>(r#"{"owned":"/a"}"#).unwrap_err();
-    assert!(
-        too_short
-            .to_string()
-            .contains("'owned' is too short: minimum length is 3, got 2"),
-        "Unexpected error: {too_short}"
+    // A path that breaks a bound is still a string where a string was declared, so the read
+    // admits it and the validator is what answers for the bound.
+    assert_eq!(
+        serde_json::from_str::<ConstrainedPath>(r#"{"owned":"/a"}"#)
+            .unwrap()
+            .validate()
+            .unwrap_err(),
+        vec!["'owned' is too short: minimum length is 3, got 2"]
     );
 
-    let unmatched = serde_json::from_str::<ConstrainedPath>(r#"{"owned":"etc"}"#).unwrap_err();
-    assert!(
-        unmatched
-            .to_string()
-            .contains("'owned' does not match pattern '^/[a-z]+$'"),
-        "Unexpected error: {unmatched}"
+    assert_eq!(
+        serde_json::from_str::<ConstrainedPath>(r#"{"owned":"etc"}"#)
+            .unwrap()
+            .validate()
+            .unwrap_err(),
+        vec!["'owned' does not match pattern '^/[a-z]+$'"]
     );
 
     let accepted = serde_json::from_str::<ConstrainedPath>(r#"{"owned":"/etc"}"#).unwrap();
@@ -223,19 +225,24 @@ fn test_every_constrained_path_spelling_is_held_to_its_bound() {
     let accepted = serde_json::from_str::<ConstrainedPaths>(GOOD).unwrap();
     assert!(
         accepted.validate().is_ok(),
-        "A payload the wire admits must be one validate() admits: {:?}",
+        "the payload every bound admits has to pass: {:?}",
         accepted.validate().err()
     );
 
     for (field, short) in SPELLINGS {
         let mut payload: serde_json::Value = serde_json::from_str(GOOD).unwrap();
         payload[field] = serde_json::from_str(short).unwrap();
-        let error = serde_json::from_str::<ConstrainedPaths>(&payload.to_string()).unwrap_err();
-        assert!(
-            error.to_string().contains(&format!(
+        let admitted =
+            serde_json::from_str::<ConstrainedPaths>(&payload.to_string()).map_err(|refused| {
+                format!("spelling `{field}` broke a bound and the read refused it: {refused}")
+            });
+        assert_eq!(admitted.as_ref().err(), None);
+        assert_eq!(
+            admitted.unwrap().validate().unwrap_err(),
+            vec![format!(
                 "'{field}' is too short: minimum length is 3, got 1"
-            )),
-            "spelling {field} was admitted by the wire: {error}"
+            )],
+            "spelling {field} broke its bound and validate() did not say so"
         );
     }
 
@@ -259,10 +266,11 @@ fn test_every_constrained_path_spelling_is_held_to_its_bound() {
 }
 
 /// The bound rendered for a path field and the bound enforced for it are one bound — the
-/// disagreement this covers is a schema that constrains what nothing checks.
+/// disagreement this covers is a schema that constrains what nothing checks. The enforcing is the
+/// validator's; the read admits the value and says nothing about the bound.
 #[cfg(all(feature = "serde", feature = "zod"))]
 #[test]
-fn test_the_zod_bound_on_a_path_is_the_bound_the_wire_enforces() {
+fn test_the_zod_bound_on_a_path_is_the_bound_validate_enforces() {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug)]
     struct RenderedBound {
@@ -272,9 +280,13 @@ fn test_the_zod_bound_on_a_path_is_the_bound_the_wire_enforces() {
 
     let schema = RenderedBound::zod_schema();
     assert!(schema.contains("owned: z.string().min(3)"), "got: {schema}");
-    assert!(
-        serde_json::from_str::<RenderedBound>(r#"{"owned":"/a"}"#).is_err(),
-        "the rendered minimum admits no shorter value on the wire"
+    assert_eq!(
+        serde_json::from_str::<RenderedBound>(r#"{"owned":"/a"}"#)
+            .unwrap()
+            .validate()
+            .unwrap_err(),
+        vec!["'owned' is too short: minimum length is 3, got 2"],
+        "the rendered minimum is one the validator holds the value to"
     );
 }
 

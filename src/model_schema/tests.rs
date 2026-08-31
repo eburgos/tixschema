@@ -7,13 +7,13 @@ use super::{
 
 #[cfg(feature = "serde")]
 use super::{
-    ConstraintLeaf, MemberAccess, adjacent_collapsed_slot_guard_errors, build_field_validation,
-    cfg_attr_guard_error, check_nullable_field_serialization, check_omitted_key_is_readable,
-    check_optional_field_serialization, collect_untagged_members, constrained_shape,
-    enum_cfg_attr_guard_errors, generate_field_validation, generate_numeric_validation_code,
-    generate_string_validation_code, has_serde_default, helper_name_stem,
-    internally_tagged_guard_errors, needs_injected_default, parse_serde_field_attributes,
-    parse_serde_type_attributes, render_untagged_variant,
+    ConstraintGate, ConstraintLeaf, MemberAccess, adjacent_collapsed_slot_guard_errors,
+    build_field_validation, cfg_attr_guard_error, check_nullable_field_serialization,
+    check_omitted_key_is_readable, check_optional_field_serialization, collect_untagged_members,
+    constrained_shape, enum_cfg_attr_guard_errors, generate_field_validation,
+    generate_numeric_validation_code, generate_string_validation_code, has_serde_default,
+    helper_name_stem, internally_tagged_guard_errors, needs_injected_default,
+    parse_serde_field_attributes, parse_serde_type_attributes, render_untagged_variant,
 };
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -2485,11 +2485,18 @@ fn a_refused_map_key_leaves_no_hook_naming_the_dropped_module() {
     assert_eq!(rendered, "", "got: {rendered}");
 }
 
-/// A field that clears every guard still carries the hook, written after the attributes the
-/// declaration itself had.
+/// A struct field that clears every guard keeps the attributes the declaration itself had and is
+/// hung with nothing else.
+///
+/// The constraint is still read and its validator still written — what moved is where the check
+/// runs. Hanging a `deserialize_with` here would put it back on the read, where a value out of
+/// range becomes a payload that would not deserialize and the caller is told its serialization is
+/// broken. The one position that still earns the hook is an untagged member, and
+/// `untagged_member_constraint_generates_the_validator_and_hangs_it_on_the_member` is the other
+/// half of this pair.
 #[cfg(feature = "serde")]
 #[test]
-fn a_field_that_clears_the_guards_carries_the_hook_it_earned() {
+fn a_struct_field_that_clears_the_guards_is_hung_with_no_hook() {
     let mut item: syn::ItemStruct = syn::parse_quote! {
         struct Report {
             #[serde(rename = "label")]
@@ -2497,25 +2504,102 @@ fn a_field_that_clears_the_guards_carries_the_hook_it_earned() {
             name: String,
         }
     };
-    let errors = super::collect_struct_fields(
+    let collected = super::collect_struct_fields(
         &mut item.fields,
         None,
         Some("report_schema"),
         "Report",
         &syn::Generics::default(),
         false,
-    )
-    .4;
-    assert!(errors.is_empty(), "got: {errors:?}");
+    );
+    assert!(collected.4.is_empty(), "got: {:?}", collected.4);
+
+    let generated = collected
+        .2
+        .iter()
+        .map(ToString::to_string)
+        .collect::<String>();
+    assert!(
+        generated.contains("fn validate_name_value"),
+        "the constraint is still read and its validator still written: {generated}"
+    );
+
     let rendered = walked_field_attrs(item.fields.iter());
     assert_eq!(
         rendered,
         quote::quote! {
             #[serde(rename = "label")]
-            #[serde(deserialize_with = "report_schema::deserialize_name")]
         }
         .to_string(),
         "got: {rendered}"
+    );
+}
+
+/// An optional constrained field is hung with neither the hook nor the `#[serde(default)]` that
+/// only exists to answer for it.
+///
+/// The `default` is not decoration: a `deserialize_with` turns off serde's own reading of an
+/// `Option`, under which a missing key is `None` without anything being written for it, and the
+/// `default` puts that reading back. Off the hook there is nothing to put back — and writing one
+/// anyway would let a key that really is required go missing and be defaulted, which is a payload
+/// that is not a message being read as though it were.
+#[cfg(feature = "serde")]
+#[test]
+fn an_optional_struct_field_is_hung_with_neither_the_hook_nor_the_default_it_answers_for() {
+    let mut item: syn::ItemStruct = syn::parse_quote! {
+        struct Report {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            #[model_schema_prop(minLength = 2)]
+            name: Option<String>,
+        }
+    };
+    let collected = super::collect_struct_fields(
+        &mut item.fields,
+        None,
+        Some("report_schema"),
+        "Report",
+        &syn::Generics::default(),
+        false,
+    );
+    assert!(collected.4.is_empty(), "got: {:?}", collected.4);
+    let rendered = walked_field_attrs(item.fields.iter());
+    assert_eq!(
+        rendered,
+        quote::quote! {
+            #[serde(skip_serializing_if = "Option::is_none")]
+        }
+        .to_string(),
+        "the declaration's own attribute and nothing beside it. Got: {rendered}"
+    );
+}
+
+/// The untagged member is the other half: it earns the hook, and therefore earns the `default` too.
+#[cfg(feature = "serde")]
+#[test]
+fn an_optional_untagged_member_is_hung_with_the_hook_and_the_default_it_answers_for() {
+    let mut item: syn::ItemEnum = syn::parse_quote! {
+        enum Choice {
+            Named {
+                #[serde(skip_serializing_if = "Option::is_none")]
+                #[model_schema_prop(minLength = 2)]
+                name: Option<String>,
+            },
+        }
+    };
+    let (_, _, _, _, _, errors, _, _) = collect_untagged_members(&mut item, UNTAGGED_MODULE);
+    assert!(errors.is_empty(), "got: {errors:?}");
+    let attrs = &item.variants[0].fields.iter().next().unwrap().attrs;
+    let rendered = quote::quote!(#(#attrs)*).to_string();
+    assert_eq!(
+        rendered,
+        quote::quote! {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            #[serde(deserialize_with = "choice_schema::deserialize_named_name")]
+            #[serde(default)]
+        }
+        .to_string(),
+        "the declaration's own attribute, then the hook, then the `default` the hook needs. Got: \
+         {rendered}"
     );
 }
 
@@ -8944,12 +9028,13 @@ fn a_variant_field_names_its_helpers_for_its_variant() {
 }
 
 /// The sole field of `item`, run through the constraint generator under `constraint` as the field
-/// of variant `One`, returning (`module_items`, `validate_body`, `guard_error`, injected attribute
-/// count).
+/// of variant `One`, gated as `gate` says, returning (`module_items`, `validate_body`,
+/// `guard_error`, injected attribute count).
 #[cfg(feature = "serde")]
 fn generated_field_validation(
     item: &syn::ItemStruct,
     constraint: &ModelSchemaPropMeta,
+    gate: ConstraintGate,
 ) -> (bool, bool, Option<String>, usize) {
     let field = item.fields.iter().next().unwrap();
     let raw_field_ident = field
@@ -8964,6 +9049,7 @@ fn generated_field_validation(
         &raw_field_ident,
         Some("One"),
         constraint,
+        gate,
         &mut new_attrs,
     );
     (
@@ -8995,7 +9081,7 @@ fn a_constraint_on_a_positional_field_is_refused_before_a_name_is_spelled() {
         },
     ] {
         let (module_items, validate_body, guard_error, injected_attrs) =
-            generated_field_validation(&positional, &constraint);
+            generated_field_validation(&positional, &constraint, ConstraintGate::Deserializer);
         let error = guard_error.unwrap();
         assert!(error.contains("compile_error"), "got: {error}");
         assert!(error.contains("tuple field"), "got: {error}");
@@ -9010,10 +9096,15 @@ fn a_constraint_on_a_positional_field_is_refused_before_a_name_is_spelled() {
             min_length: Some(3),
             ..ModelSchemaPropMeta::default()
         },
+        ConstraintGate::Deserializer,
     );
     assert_eq!(named_string, (true, true, None, 1));
 
-    let unconstrained = generated_field_validation(&positional, &ModelSchemaPropMeta::default());
+    let unconstrained = generated_field_validation(
+        &positional,
+        &ModelSchemaPropMeta::default(),
+        ConstraintGate::Deserializer,
+    );
     assert_eq!(unconstrained, (false, false, None, 0));
 }
 
@@ -9040,6 +9131,7 @@ fn a_constraint_under_an_interior_mutability_wrapper_names_the_wrapper() {
                 min_length: Some(3),
                 ..ModelSchemaPropMeta::default()
             },
+            ConstraintGate::Deserializer,
         );
         let error = guard_error.unwrap();
         assert!(error.contains("compile_error"), "for {spelling}: {error}");
@@ -9052,7 +9144,11 @@ fn a_constraint_under_an_interior_mutability_wrapper_names_the_wrapper() {
         );
         assert_eq!(injected_attrs, 0, "a refused field was given a serde hook");
 
-        let unconstrained = generated_field_validation(&item, &ModelSchemaPropMeta::default());
+        let unconstrained = generated_field_validation(
+            &item,
+            &ModelSchemaPropMeta::default(),
+            ConstraintGate::Deserializer,
+        );
         assert_eq!(unconstrained, (false, false, None, 0), "for {spelling}");
     }
 }
