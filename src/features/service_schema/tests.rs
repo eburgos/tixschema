@@ -3,13 +3,13 @@
 //! The rendered TypeScript is asserted as text rather than as tokens, because text is what a bundle
 //! writes to a `.ts` file and what a TypeScript compiler then reads.
 //!
-//! **What text assertions do and do not prove.** No TypeScript toolchain is reachable from this
-//! repository — no `tsc`, no `package.json`, no `node_modules` — so nothing here type-checks the
-//! bundle. These tests read structure: that a member is required rather than optional, that a name
-//! carries the service, that the transport is named only on the far side of the validation check.
-//! They cannot prove the emitted file compiles, and they cannot prove that an implementation
-//! missing a method is rejected where it reaches the factory — only a compiler can, and the gap
-//! itself is tracked separately.
+//! **What text assertions do and do not prove.** Nothing here type-checks the bundle. These tests
+//! read structure: that a member is required rather than optional, that a name carries the
+//! service, that the transport is named only on the far side of the validation check. They cannot
+//! prove the emitted file compiles, and they cannot prove that an implementation missing a method
+//! is rejected where it reaches the factory — only a compiler can, and one does: the type-check
+//! group in `tests/service_schema_typescript_tests/type_check.rs` hands the bundle and two
+//! implementations to a real `tsc` wherever one is reachable.
 
 #[cfg(feature = "zod")]
 mod client_tests;
