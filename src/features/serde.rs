@@ -147,6 +147,64 @@ pub fn has_serde_default(attrs: &[Attribute]) -> bool {
     parse_serde_key_omission(attrs).defaulted
 }
 
+/// Whether the item is written to be read back at all — whether `Deserialize` is among what it
+/// derives, in any spelling of the path.
+///
+/// A generated reader for one of the item's fields names that field's own type, so it compiles only
+/// where that type is read back too. A `cfg_attr`-wrapped derive is not reached: a predicate a proc
+/// macro cannot evaluate is not one this answer may guess at, and guessing wrong here is a
+/// generated function referring to an impl that does not exist.
+#[cfg(feature = "serde")]
+pub fn derives_deserialize(attrs: &[Attribute]) -> bool {
+    attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("derive"))
+        .any(|attr| {
+            let mut found = false;
+            attr.parse_nested_meta(|nested| {
+                if nested
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == "Deserialize")
+                {
+                    found = true;
+                }
+                Ok(())
+            })
+            .unwrap_or_else(|e| {
+                log::trace!("Failed to parse derive list: {e}");
+            });
+            found
+        })
+}
+
+/// Whether the field already reads itself through a function of the author's own (`with = "…"` or
+/// `deserialize_with = "…"`).
+///
+/// A field that does is left alone: serde admits one reader per field, so hanging a generated one
+/// beside it would replace the author's rather than wrap it.
+#[cfg(feature = "serde")]
+pub fn has_serde_read_hook(attrs: &[Attribute]) -> bool {
+    let mut found = false;
+    for attr in attrs {
+        if !attr.path().is_ident("serde") {
+            continue;
+        }
+        attr.parse_nested_meta(|nested| {
+            if nested.path.is_ident("with") || nested.path.is_ident("deserialize_with") {
+                found = true;
+            }
+            consume_unread_value(&nested)?;
+            Ok(())
+        })
+        .unwrap_or_else(|e| {
+            log::trace!("Failed to parse serde read-hook attribute: {e}");
+        });
+    }
+    found
+}
+
 /// Reads the `serialize` and `deserialize` sub-keys out of a list-form renaming, stepping past any
 /// other sub-key the same way the outer walk does.
 #[cfg(feature = "serde")]

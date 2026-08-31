@@ -32,6 +32,8 @@ use crate::field_type::is_undescribable_primitive;
 #[cfg(any(feature = "serde", feature = "zod"))]
 use crate::bound_message::Bound;
 #[cfg(feature = "serde")]
+use crate::bound_message::VIOLATION_STEMS;
+#[cfg(feature = "serde")]
 use crate::bound_message::rust_violation;
 #[cfg(feature = "zod")]
 use crate::bound_message::zod_error_arg;
@@ -74,7 +76,9 @@ use crate::utils::{TrivialPattern, trivial_pattern};
 use crate::features::serde::rename_direction_rejection;
 #[cfg(feature = "serde")]
 use crate::features::serde::{SerdeFieldMeta, SerdeTypeMeta};
-use crate::features::serde::{has_serde_default, parse_serde_key_omission};
+use crate::features::serde::{
+    derives_deserialize, has_serde_default, has_serde_read_hook, parse_serde_key_omission,
+};
 // The type is named where a positional slot's own omission is read: the tuple-struct walk, which
 // only a describing build performs, and the variant walk, which every build performs.
 use crate::features::serde::SerdeKeyOmission;
@@ -648,6 +652,10 @@ struct FieldContext<'ctx> {
     /// Whether the container carries `#[serde(default)]`, which supplies a value for every field
     /// under it whose key the payload leaves out.
     container_defaulted: bool,
+    /// Whether the container is read back at all — whether `Deserialize` is among what it derives.
+    /// A reader generated for one of its fields names that field's own type, so it compiles only
+    /// where the container it sits in is read back too.
+    container_read_back: bool,
     rename_all: Option<&'ctx str>,
     schema_module_name: Option<&'ctx str>,
     type_name: &'ctx str,
@@ -3647,6 +3655,7 @@ fn collect_struct_fields(
     type_name: &str,
     generics: &syn::Generics,
     container_defaulted: bool,
+    container_read_back: bool,
 ) -> StructFieldData {
     let type_parameters = type_parameters_in_scope(generics);
     let mut field_defs = Vec::new();
@@ -3676,6 +3685,7 @@ fn collect_struct_fields(
         let (f_def, validation_fn, validate_body, field_guard_errors) = process_field(
             &FieldContext {
                 container_defaulted,
+                container_read_back,
                 rename_all,
                 schema_module_name: module_name_opt,
                 type_name,
@@ -3883,6 +3893,7 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
         &rust_ident,
         &item_struct.generics,
         container_defaulted,
+        derives_deserialize(&item_struct.attrs),
     );
     #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
     let _: &_ = &&collected;
@@ -4012,6 +4023,7 @@ fn collect_tuple_slots(
     type_name: &str,
     generics: &syn::Generics,
     container_defaulted: bool,
+    container_read_back: bool,
 ) -> (TupleStructShape, Vec<proc_macro2::TokenStream>) {
     let declared_slots = fields.len();
     let type_parameters = type_parameters_in_scope(generics);
@@ -4028,6 +4040,7 @@ fn collect_tuple_slots(
         let (slot, _, _, slot_guard_errors) = process_field(
             &FieldContext {
                 container_defaulted,
+                container_read_back,
                 rename_all,
                 schema_module_name: Some(module_name),
                 type_name,
@@ -4194,6 +4207,7 @@ fn process_tuple_struct(
         &name.to_string(),
         &item_struct.generics,
         has_serde_default(&item_struct.attrs),
+        derives_deserialize(&item_struct.attrs),
     );
 
     // A violated slot guard makes the whole contract unsound, so the schema surface is dropped and
@@ -5984,6 +5998,7 @@ fn collect_discriminated_variants(
         Vec::new();
     let mut deferred_attrs: Vec<Vec<syn::Attribute>> = Vec::new();
     let enum_type_name = item_enum.ident.to_string();
+    let enum_read_back = derives_deserialize(&item_enum.attrs);
 
     for item in &mut item_enum.variants {
         let (field_rename, variant_rename_all) =
@@ -6027,6 +6042,7 @@ fn collect_discriminated_variants(
             let (f_def, validation_fn, validate_body, field_guard_errors) = process_field(
                 &FieldContext {
                     container_defaulted: variant_defaulted,
+                    container_read_back: enum_read_back,
                     rename_all: variant_rename_all.as_deref(),
                     schema_module_name: enum_module_name_opt,
                     type_name: &enum_type_name,
@@ -7688,6 +7704,9 @@ const fn untagged_variant_context<'ctx>(
 ) -> FieldContext<'ctx> {
     FieldContext {
         container_defaulted: variant_defaulted,
+        // An untagged member's own reader is hung by the walk that collects it, where a member's
+        // bound decides which variant the payload is; nothing this context reaches hangs one.
+        container_read_back: false,
         rename_all,
         schema_module_name,
         type_name: enum_type_name,
@@ -10234,22 +10253,63 @@ fn nested_leaf(value: &proc_macro2::Ident, under: Option<&str>) -> proc_macro2::
             }
         };
     };
+    let naming = nested_under_fn();
     quote! {
         if let Err(reported) = #value.validate() {
-            fn nested_under(field: &str, violation: &str) -> String {
-                match violation
-                    .strip_prefix('\'')
-                    .and_then(|rest| rest.split_once('\''))
-                {
-                    Some((named, tail)) => format!("'{field}.{named}'{tail}"),
-                    None => format!("'{field}': {violation}"),
-                }
-            }
+            #naming
             errors.extend(
                 reported
                     .iter()
                     .map(|violation| nested_under(#field_name_lit, violation)),
             );
+        }
+    }
+}
+
+/// The one spelling rule for writing a holding field's name into a report the value's own type
+/// wrote, emitted wherever a name has to be written: the validator's nested walk, and the
+/// read-time hook that answers for a bound checked before `validate()` ever runs.
+///
+/// A report that already names a field of its own has the holder spliced into that name —
+/// `'jti': …` under `account` reads `'account.jti': …` — so the whole path stays one quoted run,
+/// which is what a reader takes a name out of. A report naming none, as a brand's does, has
+/// nothing to write into and takes the name in front.
+#[cfg(feature = "serde")]
+fn nested_under_fn() -> proc_macro2::TokenStream {
+    quote! {
+        fn nested_under(field: &str, violation: &str) -> String {
+            match violation
+                .strip_prefix('\'')
+                .and_then(|rest| rest.split_once('\''))
+            {
+                Some((named, tail)) => format!("'{field}.{named}'{tail}"),
+                None => format!("'{field}': {violation}"),
+            }
+        }
+    }
+}
+
+/// Whether a refusal is one of this crate's own bound sentences, under whatever field name it
+/// already carries.
+///
+/// It is the whole test a read-time hook applies before writing a name into a refusal, and it reads
+/// the vocabulary [`crate::bound_message::VIOLATION_STEMS`] spells rather than anything about the
+/// deserializer that raised it. serde saying a value was of the wrong type or that a key was
+/// missing opens with none of those stems and is handed back untouched — it is a refusal about the
+/// shape of the payload, and the key it went wrong at is not one the holding field can name.
+#[cfg(feature = "serde")]
+fn reports_a_bound_fn() -> proc_macro2::TokenStream {
+    let stems: Vec<&str> = VIOLATION_STEMS.to_vec();
+    quote! {
+        fn reports_a_bound(reported: &str) -> bool {
+            let said = match reported
+                .strip_prefix('\'')
+                .and_then(|rest| rest.split_once('\''))
+            {
+                Some((_, tail)) => tail.strip_prefix(": ").unwrap_or(tail),
+                None => reported,
+            };
+            [#(#stems),*].iter().any(|stem| said.starts_with(stem))
         }
     }
 }
@@ -11380,18 +11440,19 @@ fn process_field(
 
     // Generate validation code and hold back the serde attribute it hangs on the field
     #[cfg(feature = "serde")]
-    let (validation_fn, validate_body, field_validation_guard_error) = generate_field_validation(
-        field,
-        ctx.schema_module_name,
-        &raw_field_ident,
-        ctx.variant_ident,
-        &model_schema_prop_meta,
-        // A struct's field, or a tagged variant's: the shape of the payload says which type it is,
-        // so a constraint here decides only whether the value is admissible. That is the
-        // validator's answer to give, and only the validator can give it naming the field.
-        ConstraintGate::Validator,
-        &mut injected_attrs,
-    );
+    let (mut validation_fn, validate_body, field_validation_guard_error) =
+        generate_field_validation(
+            field,
+            ctx.schema_module_name,
+            &raw_field_ident,
+            ctx.variant_ident,
+            &model_schema_prop_meta,
+            // A struct's field, or a tagged variant's: the shape of the payload says which type it is,
+            // so a constraint here decides only whether the value is admissible. That is the
+            // validator's answer to give, and only the validator can give it naming the field.
+            ConstraintGate::Validator,
+            &mut injected_attrs,
+        );
 
     #[cfg(not(feature = "serde"))]
     let (validation_fn, validate_body): (
@@ -11402,7 +11463,6 @@ fn process_field(
     let _: &_ = &(ctx.schema_module_name, ctx.variant_ident);
 
     field.attrs = new_attrs;
-    deferred_attrs.push(injected_attrs);
 
     let field_type: &syn::Type = &field.ty;
 
@@ -11465,6 +11525,22 @@ fn process_field(
     #[cfg(not(feature = "serde"))]
     let body = validate_body;
 
+    // The read-time half of the same reach: what the field's own type turns away before
+    // `validate()` is ever asked. Held back until here because the reach is read off the field's
+    // *def*, which is not built until the guards above have had it.
+    #[cfg(feature = "serde")]
+    if let Some((hook, attrs)) =
+        named_read_hook(field, &field_def, ctx, &raw_field_ident, &final_name)
+    {
+        validation_fn = Some(match validation_fn {
+            Some(already) => quote! { #already #hook },
+            None => hook,
+        });
+        injected_attrs.extend(attrs);
+    }
+
+    deferred_attrs.push(injected_attrs);
+
     (field_def, validation_fn, body, guard_errors)
 }
 
@@ -11503,6 +11579,172 @@ fn nested_validate_body(
     let named = field_ident_tok.to_string();
     let under = (!flattened).then_some(named.as_str());
     Some(build_nested_validation(&wraps, &checked, under))
+}
+
+/// The read-time hook for a named field whose *own type* carries the bound — a constrained brand,
+/// or a nested `#[model_schema()]` type holding one — together with the serde attributes that hang
+/// it on the field. `None` for every field no hook may be hung on.
+///
+/// A bound declared on a field is the validator's to answer, which is where it names the field. A
+/// bound declared on the field's *type* is not: a brand gates its own read, so a payload breaking
+/// it is turned away before `validate()` runs and the refusal reaches a caller in the brand's own
+/// words, which name no field — the brand being the value rather than a member of anything. This
+/// writes the holding field's name into that refusal, in the same spelling
+/// [`nested_under_fn`] gives the validator's walk, so one payload reads the same whichever of the
+/// two turned it away.
+///
+/// The name written is the key as the wire spells it. That is the name serde was reading for, the
+/// name the schema published from the same declaration reports, and the name a caller can find in
+/// the bytes it sent.
+///
+/// Held back from a field the hook would displace something on: one the author already reads
+/// through a function of their own, one serde is told to skip, one written `#[serde(flatten)]`
+/// (whose reader serde does not let a `deserialize_with` stand beside), one with no ident to name
+/// the helper from, and one borrowing for a lifetime the generated signature would have to declare.
+#[cfg(feature = "serde")]
+fn named_read_hook(
+    field: &Field,
+    field_def: &FieldDef,
+    ctx: &FieldContext<'_>,
+    raw_field_ident: &str,
+    wire_name: &str,
+) -> Option<(proc_macro2::TokenStream, Vec<syn::Attribute>)> {
+    let module_name = ctx.schema_module_name?;
+    field.ident.as_ref()?;
+    if !ctx.container_read_back
+        || is_flattened_field(field)
+        || names_what_the_module_cannot_repeat(&field.ty, ctx.type_parameters)
+    {
+        return None;
+    }
+    let serde_meta = parse_serde_field_attributes(&field.attrs);
+    if serde_meta.skip || has_serde_read_hook(&field.attrs) {
+        return None;
+    }
+    let wraps = reachable_nested_shape(field, field_def)?;
+
+    let stem = helper_name_stem(raw_field_ident, ctx.variant_ident);
+    let hook_ident = proc_macro2::Ident::new(
+        &format!("deserialize_named_{stem}"),
+        proc_macro2::Span::call_site(),
+    );
+    let path_lit = syn::LitStr::new(
+        &format!("{module_name}::{hook_ident}"),
+        proc_macro2::Span::call_site(),
+    );
+    let mut attrs: Vec<syn::Attribute> = vec![syn::parse_quote! {
+        #[serde(deserialize_with = #path_lit)]
+    }];
+    // The same reading a constrained field's own hook takes: a `deserialize_with` turns off serde's
+    // reading of an `Option`, under which a missing key is `None` without anything being written
+    // for it, and the `default` puts that back. Only alongside the hook, and only where the wrap
+    // that would have supplied it is the one serde stopped answering for.
+    if needs_injected_default(&wraps, has_serde_default(&field.attrs)) {
+        attrs.push(syn::parse_quote! { #[serde(default)] });
+    }
+    Some((
+        build_named_read_hook(&hook_ident, &field.ty, wire_name),
+        attrs,
+    ))
+}
+
+/// The hook itself: read the field's declared type, and where the refusal is one of this crate's
+/// own bound sentences, answer it again with the holding field's name written into every violation
+/// it carries.
+///
+/// A refusal reaches a hook as one sentence and not a list — that is all serde has to hand — so the
+/// violations a value broke at once arrive joined, and each is named in turn. That is what the
+/// enclosing validator does with the same list, and what the schema published from the same
+/// declaration reports for the same payload: a name per violation, not one in front of the run.
+///
+/// Anything else goes back exactly as it arrived, the original refusal and not a rebuilt one, so a
+/// payload that is not a document at all keeps the class serde gave it — the dispatcher reads that
+/// class to tell the two kinds of fault apart, and a refusal rebuilt through `custom` would be
+/// `Data` whatever it started as.
+#[cfg(feature = "serde")]
+fn build_named_read_hook(
+    hook_ident: &proc_macro2::Ident,
+    field_ty: &syn::Type,
+    wire_name: &str,
+) -> proc_macro2::TokenStream {
+    let naming = nested_under_fn();
+    let recogniser = reports_a_bound_fn();
+    let splitter = joined_violations_fn();
+    quote! {
+        pub fn #hook_ident<'de, D>(deserializer: D) -> Result<#field_ty, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            use serde::Deserialize;
+            <#field_ty>::deserialize(deserializer).map_err(|refused| {
+                #naming
+                #recogniser
+                #splitter
+                let reported = refused.to_string();
+                let violations = joined_violations(&reported);
+                if !violations.iter().all(|violation| reports_a_bound(violation)) {
+                    return refused;
+                }
+                let named: Vec<String> = violations
+                    .iter()
+                    .map(|violation| nested_under(#wire_name, violation))
+                    .collect();
+                serde::de::Error::custom(named.join("; "))
+            })
+        }
+    }
+}
+
+/// Reads a joined report back into the violations it was built from.
+///
+/// A validator hands its list to serde joined with `"; "`, which is the one separator this crate
+/// writes, and a value breaking two bounds at once arrives as two sentences under it. Splitting on
+/// every occurrence would cut a `pattern` that spells one inside itself, so a separator is a
+/// separator only where what follows it opens a sentence of this crate's own — the same question
+/// `reports_a_bound` answers, asked of the tail.
+#[cfg(feature = "serde")]
+fn joined_violations_fn() -> proc_macro2::TokenStream {
+    quote! {
+        fn joined_violations(reported: &str) -> Vec<&str> {
+            let mut found: Vec<&str> = Vec::new();
+            let mut rest = reported;
+            loop {
+                let cut = rest.match_indices("; ").find_map(|(at, _)| {
+                    let (head, tail) = rest.split_at(at);
+                    let tail = tail.strip_prefix("; ")?;
+                    reports_a_bound(tail).then_some((head, tail))
+                });
+                match cut {
+                    Some((head, tail)) => {
+                        found.push(head);
+                        rest = tail;
+                    }
+                    None => {
+                        found.push(rest);
+                        return found;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Whether a written type says anything a free function in the schema module cannot repeat: a
+/// lifetime it borrows for, `Self`, or one of the item's own type parameters.
+///
+/// The hook is such a function — it names the field's declared type in its own signature — and the
+/// module it lands in is beside the item rather than inside it, so none of the three resolves
+/// there. A field written any of them is left unhooked; what it holds is still reached by the
+/// validator, which is written as a method and has all three in scope.
+#[cfg(feature = "serde")]
+fn names_what_the_module_cannot_repeat(ty: &syn::Type, type_parameters: &[String]) -> bool {
+    let written = quote! { #ty }.to_string();
+    if written.contains('\'') {
+        return true;
+    }
+    written
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+        .any(|word| word == "Self" || type_parameters.iter().any(|named| named == word))
 }
 
 /// The `validate()` contribution for an untagged newtype variant's lone slot, read off the binding

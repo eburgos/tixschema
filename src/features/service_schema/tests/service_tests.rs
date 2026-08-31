@@ -149,14 +149,29 @@ fn the_payload_is_parsed_before_the_implementation_is_called() {
     );
 }
 
+/// The dispatcher is handed a payload somebody already read out of the bytes, so every failure it
+/// can see is a failure of what the document *said* — which is the one kind it raises, and the kind
+/// the Rust dispatcher answers the same payload under.
+///
+/// `undeserializable-payload` is the answer to bytes that are no document at all. Nothing here
+/// sees those, so nothing here writes that kind: reporting it for a value that parsed would send a
+/// caller looking at its serialization when what was wrong was what it sent.
 #[test]
-fn a_payload_that_was_never_the_message_is_told_apart_from_one_that_failed_a_key() {
+fn a_payload_that_parsed_and_then_failed_is_answered_under_one_kind() {
     let written = service_of(MIXED_SERVICE);
     assert!(
-        written.contains(
-            "kind: failedAt === \"\" ? \"undeserializable-payload\" : \"failed-validation\","
-        ),
+        written.contains("kind: \"failed-validation\","),
         "got: {written}"
+    );
+    assert!(
+        !written.contains("? \"undeserializable-payload\""),
+        "a payload the dispatcher was handed had already parsed, so this kind is not one of its \
+         answers. Got: {written}"
+    );
+    assert!(
+        written.contains("field: failedAt === \"\" ? undefined : failedAt,"),
+        "a failure at no key names none: a value that is not an object is not this message, and \
+         there is no key to send a caller to. Got: {written}"
     );
 }
 
