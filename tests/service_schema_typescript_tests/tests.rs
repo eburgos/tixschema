@@ -174,6 +174,17 @@ mod the_bundle_one_registration_line_produces {
                 && declared.contains(&"AuditServiceGetBalanceResult"),
             "two services declaring one operation name publish two result types. Got: {declared:?}"
         );
+        // A generated message publishes under the operation's own name, with no service prefix to
+        // separate it, so two services' generated messages sharing one flat file is the case that
+        // has to be seen rather than assumed. Both are here, and the dedup above covers them.
+        for message in ["SweepRequest", "ApplyBundleRequest", "ReconcileRequest"] {
+            assert_eq!(
+                two.matches(&format!("export type {message} =")).count(),
+                1,
+                "a generated message is declared once in a bundle carrying two services. \
+                 Got: {declared:?}"
+            );
+        }
     }
 
     #[test]
@@ -275,7 +286,7 @@ mod the_schema_that_rides_with_the_type {
 mod the_envelope_typescript_declares_is_the_one_rust_writes {
     use super::{
         BalanceRequest, PreparedAnswer, ProbeServiceSchema, dispatched, poll_once,
-        probe_service_schema,
+        probe_service_schema, settlements,
     };
     use core::mem::take;
 
@@ -456,6 +467,170 @@ mod the_envelope_typescript_declares_is_the_one_rust_writes {
         assert_eq!(carried, "unknown-operation");
     }
 
+    /// Every kind the Rust enum can be, as serde writes it. Read off the values rather than from
+    /// spellings written here, so a variant renamed on either side lands in the comparison below.
+    fn serialized_kinds() -> Vec<String> {
+        let mut written: Vec<String> = [
+            probe_service_schema::ProbeServiceFaultKind::FailedValidation,
+            probe_service_schema::ProbeServiceFaultKind::HandlerPanic,
+            probe_service_schema::ProbeServiceFaultKind::UndeserializablePayload,
+            probe_service_schema::ProbeServiceFaultKind::UnknownOperation,
+        ]
+        .iter()
+        .map(|kind| {
+            serde_json::to_value(kind)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+        written.sort_unstable();
+        written
+    }
+
+    /// The published union and the wire, compared as sets rather than one sampled value.
+    ///
+    /// The kind a dispatch happens to produce is one of four, and a test that reads only that one
+    /// would pass while the other three drifted. Both sides here are derived: the literals come off
+    /// the emitted text, the values off serde.
+    #[test]
+    fn the_kinds_the_published_union_declares_are_exactly_the_ones_serde_writes() {
+        let mut admitted = literals("ProbeServiceFaultKind");
+        admitted.sort_unstable();
+        assert_eq!(
+            admitted,
+            serialized_kinds(),
+            "the fault's TypeScript comes from the Rust declaration, so a kind on one side and \
+             not the other means the two stopped being one type"
+        );
+    }
+
+    /// The kinds a dispatcher can actually reach, read off bytes it wrote rather than off the enum.
+    ///
+    /// `handler-panic` is not among them: nothing builds one today, which is tracked separately.
+    #[test]
+    fn each_kind_a_dispatch_can_produce_is_one_the_published_union_admits() {
+        let admitted = literals("ProbeServiceFaultKind");
+        for (operation, payload, expected) in [
+            (
+                "nothing-answers-to-this",
+                b"{}".as_slice(),
+                "unknown-operation",
+            ),
+            (
+                "get-balance",
+                br#"{"organization_id":42}"#.as_slice(),
+                "undeserializable-payload",
+            ),
+        ] {
+            let encoded = dispatched(operation, payload, "probe");
+            let read: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+            let carried = read["kind"].as_str().unwrap().to_owned();
+            assert_eq!(
+                carried,
+                expected,
+                "got: {}",
+                String::from_utf8_lossy(&encoded)
+            );
+            assert!(
+                admitted.contains(&carried),
+                "the wire carries `{carried}` and the published union admits {admitted:?}"
+            );
+        }
+    }
+
+    /// The one operation shape with no envelope at all, read on both sides.
+    ///
+    /// A one-way arm answers nothing on the Rust side, and the TypeScript for the same operation
+    /// says so twice — the method answers `Promise<void>` and the dispatcher arm returns
+    /// `undefined`. If either side started carrying a value the other would be wrong about the
+    /// wire, and no envelope comparison would catch it, there being no envelope.
+    #[test]
+    fn a_one_way_operation_puts_nothing_on_the_wire_and_says_so_in_both_languages() {
+        let settled = settlements(
+            "apply-bundle",
+            br#"{"organizationId":"acme","bundleId":"b-1"}"#,
+        );
+        assert!(
+            settled.is_empty(),
+            "a one-way arm publishes nothing, so there is no envelope for a caller to read. \
+             Got: {settled:?}"
+        );
+        let client = ProbeServiceSchema::ts_client();
+        assert!(
+            client.contains("applyBundle(req: ApplyBundleRequest): Promise<void>;"),
+            "got: {client}"
+        );
+        let service = ProbeServiceSchema::ts_service();
+        assert!(
+            service.contains("applyBundle(ctx: Ctx, req: ApplyBundleRequest): Promise<void>;"),
+            "got: {service}"
+        );
+        let arm = service
+            .split("      case \"apply-bundle\": {")
+            .nth(1)
+            .and_then(|rest| rest.split_once("\n      }"))
+            .map(|(body, _)| body.to_owned());
+        assert!(arm.is_some(), "got: {service}");
+        let body = arm.unwrap();
+        assert!(
+            body.contains("return undefined;") && !body.contains("return { ok:"),
+            "the arm answers with nothing, which is what `Promise<void>` promises. Got: {body}"
+        );
+    }
+
+    /// Every operation name the emitted TypeScript dispatcher switches on, read off its own text.
+    fn typescript_operation_names() -> Vec<String> {
+        let written = ProbeServiceSchema::ts_service();
+        let mut named: Vec<String> = written
+            .lines()
+            .map(str::trim)
+            .filter_map(|line| line.strip_prefix("case \""))
+            .filter_map(|rest| rest.split_once('"').map(|(name, _)| name.to_owned()))
+            .collect();
+        named.sort_unstable();
+        named
+    }
+
+    /// A name only one of the two dispatchers answers to is a call that cannot cross.
+    ///
+    /// The names come off the emitted TypeScript; the verdict comes off the Rust dispatcher driven
+    /// over each one. Neither side is a list written here, so an operation renamed on one side and
+    /// not the other lands as a fault this reads.
+    #[test]
+    fn every_operation_the_typescript_dispatcher_answers_to_is_one_the_rust_one_answers_to() {
+        let named = typescript_operation_names();
+        assert_eq!(named.len(), 5, "got: {named:?}");
+        for operation in &named {
+            let settled = settlements(operation, b"{}");
+            let unknown = settled.iter().any(|encoded| {
+                serde_json::from_slice::<serde_json::Value>(encoded)
+                    .ok()
+                    .and_then(|read| read["kind"].as_str().map(ToOwned::to_owned))
+                    .is_some_and(|kind| kind == "unknown-operation")
+            });
+            assert!(
+                !unknown,
+                "the TypeScript dispatcher routes `{operation}` and the Rust one answers to no \
+                 such operation"
+            );
+        }
+        // And the reverse: a name neither side declares is refused, so the check above is reading
+        // a real verdict rather than one the dispatcher gives everything.
+        let strange = settlements("reconcile", b"{}");
+        let refused = strange.iter().any(|encoded| {
+            serde_json::from_slice::<serde_json::Value>(encoded)
+                .ok()
+                .and_then(|read| read["kind"].as_str().map(ToOwned::to_owned))
+                .is_some_and(|kind| kind == "unknown-operation")
+        });
+        assert!(
+            refused && !named.iter().any(|operation| operation == "reconcile"),
+            "got: {strange:?}"
+        );
+    }
+
     /// The other half of the framing: a fault written the way the emitted TypeScript dispatcher
     /// writes one, read back by the generated Rust client. If the tag key or the member the fault
     /// rides in disagreed, this would not narrow.
@@ -520,6 +695,10 @@ pub struct Capture {
 // group is asked of a build that writes TypeScript at all.
 #[cfg(feature = "typescript")]
 impl Capture {
+    fn answered(&self) -> Vec<Vec<u8>> {
+        self.answered.lock().unwrap().clone()
+    }
+
     fn new() -> Self {
         Self {
             answered: Mutex::new(Vec::new()),
@@ -669,8 +848,12 @@ pub trait ProbeService<Ctx> {
 /// exists to be read, not to be driven: what it proves is that two services publishing a
 /// `get_balance` each land two distinct result types and two distinct faults in one flat file.
 ///
-/// Its operations name their messages, rather than leaving the macro to declare one, so nothing
-/// here turns on a message name the other service also declares.
+/// It also leaves one operation's message to the macro. A generated message carries no service
+/// prefix — it publishes under the operation's own name — so this is what puts two services'
+/// generated messages into one flat file at once. `reconcile` is not an operation the other
+/// service declares, and two services that *did* declare one name cannot be written at all: the
+/// second declaration of the message is a duplicate definition in Rust long before a bundle exists
+/// to collide in, which the compile-fail run on `messages::emit` pins.
 #[service_schema()]
 pub trait AuditService<Ctx> {
     async fn get_balance(
@@ -678,6 +861,8 @@ pub trait AuditService<Ctx> {
         ctx: &Ctx,
         req: BalanceRequest,
     ) -> Result<BalanceResponse, CreditWriteError>;
+
+    async fn reconcile(&self, ctx: &Ctx) -> Result<BalanceResponse, CreditWriteError>;
 }
 
 pub struct AuditBackEnd;
@@ -689,6 +874,13 @@ impl AuditService<ProbeContext> for AuditBackEnd {
         req: BalanceRequest,
     ) -> Result<BalanceResponse, CreditWriteError> {
         let seen = ready(req.organization_id.len() + ctx.logger_name.len()).await;
+        Ok(BalanceResponse {
+            credits: u32::try_from(seen).unwrap_or(0),
+        })
+    }
+
+    async fn reconcile(&self, ctx: &ProbeContext) -> Result<BalanceResponse, CreditWriteError> {
+        let seen = ready(ctx.logger_name.len()).await;
         Ok(BalanceResponse {
             credits: u32::try_from(seen).unwrap_or(0),
         })
@@ -769,6 +961,20 @@ where
 /// Read in every feature combination: the TypeScript emission is additive, so the trait the macro
 /// emits is still the trait an implementation satisfies and a caller calls.
 #[test]
+fn the_second_service_answers_the_operation_its_generated_message_was_declared_for() {
+    let answered = poll_once(AuditBackEnd.reconcile(&ProbeContext {
+        logger_name: "audit".to_owned(),
+    }))
+    .unwrap();
+    assert_eq!(
+        answered.map_or(u32::MAX, |balance| balance.credits),
+        5,
+        "the operation whose message the macro declared for the *second* service is one the \
+         second service answers"
+    );
+}
+
+#[test]
 fn the_service_is_still_implementable_and_callable_alongside_its_published_typescript() {
     let service = ProbeBackEnd { granted_credits: 5 };
     let ctx = ProbeContext {
@@ -822,6 +1028,25 @@ fn the_service_is_still_implementable_and_callable_alongside_its_published_types
 
 // Only the group that reads the wire against the published TypeScript drives these, and that
 // group is asked of a build that writes TypeScript at all.
+#[cfg(feature = "typescript")]
+/// Everything one dispatch put on the reply handle, which for a one-way arm that ran is nothing.
+fn settlements(operation: &str, payload: &[u8]) -> Vec<Vec<u8>> {
+    let capture = Capture::new();
+    let settled = poll_once(probe_service_schema::dispatch(
+        &ProbeBackEnd { granted_credits: 5 },
+        &ProbeContext {
+            logger_name: "probe".to_owned(),
+        },
+        &probe_service_schema::IncomingMessage {
+            operation: operation.to_owned(),
+            payload: payload.to_vec(),
+        },
+        &capture,
+    ));
+    assert!(settled.is_some(), "the probe never suspends");
+    capture.answered()
+}
+
 #[cfg(feature = "typescript")]
 /// Drives the generated dispatcher over one message and answers with what the reply handle was
 /// handed.

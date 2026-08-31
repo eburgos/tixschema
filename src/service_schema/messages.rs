@@ -17,6 +17,87 @@ use super::parse::{GeneratedMessage, ServiceDef};
 use proc_macro2::TokenStream;
 use quote::quote;
 
+/// A generated message publishes under the operation's own name, with no service prefix.
+///
+/// That is deliberate — it is the name a caller in either language types — and it means two
+/// services in one module cannot both leave the same operation name's message to the macro. The
+/// second declaration is a duplicate definition in Rust, so a bundle carrying two same-named
+/// generated messages cannot be built at all. The result types either service publishes *are*
+/// prefixed, because those the macro names itself and TypeScript has no per-service scope.
+///
+/// Two services whose generated messages differ compile:
+///
+/// ```rust
+/// use tixschema::service_schema;
+///
+/// #[derive(serde::Deserialize, serde::Serialize)]
+/// pub struct Report;
+///
+/// #[derive(serde::Deserialize, serde::Serialize)]
+/// pub enum Failed {
+///     DbError,
+/// }
+///
+/// #[service_schema()]
+/// pub trait AlphaService<Ctx> {
+///     async fn sweep(&self, ctx: &Ctx) -> Result<Report, Failed>;
+/// }
+///
+/// #[service_schema()]
+/// pub trait BetaService<Ctx> {
+///     async fn reconcile(&self, ctx: &Ctx) -> Result<Report, Failed>;
+/// }
+///
+/// fn main() {}
+/// ```
+///
+/// The run below is that one with `reconcile` spelled `sweep`, and nothing else changed, so the
+/// refusal can only be the message name the two now share:
+///
+/// ```rust,compile_fail
+/// use tixschema::service_schema;
+///
+/// #[derive(serde::Deserialize, serde::Serialize)]
+/// pub struct Report;
+///
+/// #[derive(serde::Deserialize, serde::Serialize)]
+/// pub enum Failed {
+///     DbError,
+/// }
+///
+/// #[service_schema()]
+/// pub trait AlphaService<Ctx> {
+///     async fn sweep(&self, ctx: &Ctx) -> Result<Report, Failed>;
+/// }
+///
+/// #[service_schema()]
+/// pub trait BetaService<Ctx> {
+///     async fn sweep(&self, ctx: &Ctx) -> Result<Report, Failed>;
+/// }
+///
+/// fn main() {}
+/// ```
+///
+/// `compile_fail` says only that *something* was refused and this toolchain checks no error code a
+/// doctest names, so the pair above was compiled standalone and read. The refusal is a pile rather
+/// than one sentence — eleven errors, the first two naming the message and the module beside it,
+/// the rest following from them — and none of them names the operation or the two services:
+///
+/// ```text
+/// error[E0428]: the name `sweep_request_schema` is defined multiple times
+/// error[E0428]: the name `SweepRequest` is defined multiple times
+/// error[E0119]: conflicting implementations of trait `Deserialize<'_>` for type `SweepRequest`
+/// error[E0119]: conflicting implementations of trait `Serialize` for type `SweepRequest`
+/// error[E0592]: duplicate definitions with name `json_schema`
+/// error[E0592]: duplicate definitions with name `ts_definition`
+/// error[E0592]: duplicate definitions with name `zod_schema`
+/// error[E0034]: multiple applicable items in scope        (×4)
+/// error: could not compile `tixschema` (test "zz_probe") due to 11 previous errors
+/// ```
+///
+/// It is a build failure either way, which is what a bundle needs: nothing that reaches TypeScript
+/// can carry the same generated message twice. Whether the macro should say so in one sentence
+/// instead is a separate question and not one this emitter answers today.
 pub fn emit(service: &ServiceDef) -> TokenStream {
     let declared = service.generated_messages.iter().map(message);
     quote! {
