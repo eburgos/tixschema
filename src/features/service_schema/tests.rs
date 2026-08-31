@@ -11,8 +11,8 @@
 //! missing a method is rejected where it reaches the factory — only a compiler can, and the gap
 //! itself is tracked separately.
 
-mod the_client;
-mod the_implementable_service;
+mod client_tests;
+mod service_tests;
 
 use super::{client, emit, result, service};
 use crate::service_schema::parse::{ServiceDef, parse_service};
