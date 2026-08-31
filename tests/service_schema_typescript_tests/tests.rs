@@ -3,6 +3,11 @@
 
 #![cfg(feature = "serde")]
 
+/// The same bundle, put through a real TypeScript compiler where one is reachable.
+#[cfg(feature = "typescript")]
+#[path = "type_check.rs"]
+mod type_check;
+
 #[cfg(feature = "typescript")]
 mod the_bundle_one_registration_line_produces {
     use super::{
@@ -25,7 +30,7 @@ mod the_bundle_one_registration_line_produces {
 
     /// The bundle a consuming codebase writes: its own types named by hand, one line each, and the
     /// service named once. Nothing here names a message the macro declared — that is the point.
-    fn bundle() -> String {
+    pub(super) fn bundle() -> String {
         let mut written = vec![
             BalanceRequest::ts_definition(),
             BalanceResponse::ts_definition(),
@@ -43,7 +48,7 @@ mod the_bundle_one_registration_line_produces {
     /// publishes: both parse a message against the schema `#[model_schema()]` writes for it, and a
     /// build that writes none publishes neither rather than a pair that checks nothing.
     #[cfg(feature = "zod")]
-    fn probe_seam() -> Vec<String> {
+    pub(super) fn probe_seam() -> Vec<String> {
         vec![
             ProbeServiceSchema::ts_client(),
             ProbeServiceSchema::ts_service(),
@@ -51,14 +56,14 @@ mod the_bundle_one_registration_line_produces {
     }
 
     #[cfg(not(feature = "zod"))]
-    const fn probe_seam() -> Vec<String> {
+    pub(super) const fn probe_seam() -> Vec<String> {
         Vec::new()
     }
 
     /// The second service's half of the same pair, so the collision test below reads two full
     /// services in whichever build it runs in.
     #[cfg(feature = "zod")]
-    fn audit_seam() -> Vec<String> {
+    pub(super) fn audit_seam() -> Vec<String> {
         vec![
             AuditServiceSchema::ts_client(),
             AuditServiceSchema::ts_service(),
@@ -66,7 +71,7 @@ mod the_bundle_one_registration_line_produces {
     }
 
     #[cfg(not(feature = "zod"))]
-    const fn audit_seam() -> Vec<String> {
+    pub(super) const fn audit_seam() -> Vec<String> {
         Vec::new()
     }
 
@@ -76,7 +81,7 @@ mod the_bundle_one_registration_line_produces {
     /// bundle that names only its types leaves the client and the dispatcher parsing with a value
     /// nothing declares.
     #[cfg(feature = "zod")]
-    fn author_schemas() -> Vec<String> {
+    pub(super) fn author_schemas() -> Vec<String> {
         vec![
             BalanceRequest::zod_schema(),
             BalanceResponse::zod_schema(),
@@ -87,7 +92,7 @@ mod the_bundle_one_registration_line_produces {
     }
 
     #[cfg(not(feature = "zod"))]
-    const fn author_schemas() -> Vec<String> {
+    pub(super) const fn author_schemas() -> Vec<String> {
         Vec::new()
     }
 
@@ -267,10 +272,10 @@ mod the_bundle_one_registration_line_produces {
 
     /// The seal on the published fault, read off the bundle a consuming codebase writes.
     ///
-    /// **What this proves and what it cannot.** No TypeScript toolchain is reachable from this
-    /// repository, so nothing here compiles the bundle. What it reads is the structure the refusal
-    /// rests on: `ProbeServiceFault` is not an object type but an intersection, one half of which is
-    /// a required property keyed on a symbol the bundle declares and exports nowhere. An object
+    /// **What this proves and what it cannot.** Nothing here compiles the bundle; the group in
+    /// `type_check.rs` does that. What this reads is the structure the refusal rests on:
+    /// `ProbeServiceFault` is not an object type but an intersection, one half of which is a
+    /// required property keyed on a symbol the bundle declares and exports nowhere. An object
     /// literal cannot carry that property, because a module outside the bundle cannot name the
     /// symbol to write it and a module inside has no value to write. Whether `tsc` then rejects a
     /// given fabrication is a claim only `tsc` can settle.

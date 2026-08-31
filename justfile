@@ -78,6 +78,21 @@ lint-all:
     cargo hack clippy --feature-powerset --all-targets -- -D warnings
     @echo "✅ All feature combinations lint passed!"
 
+# Type-check the emitted TypeScript bundle with a real compiler, in the build that publishes the
+# client and the dispatcher and in the one that publishes neither.
+#
+# Deliberately outside `all` and `ci`: a fresh clone has no TypeScript compiler, and the type-check
+# tests inside `cargo test` stand down when they find none, saying so on stderr. This recipe is the
+# one that refuses to stand down — it resolves the compiler up front and names it for the tests,
+# where a named compiler that cannot be started is a failure rather than a stand-down. Set
+# TIXSCHEMA_TSC to use a compiler that is not on PATH.
+typecheck-ts:
+    @command -v "${TIXSCHEMA_TSC:-tsc}" >/dev/null 2>&1 || { echo "No TypeScript compiler: put \`tsc\` on PATH, or set TIXSCHEMA_TSC to one." >&2; exit 1; }
+    @echo "Type-checking the emitted bundle with $(command -v "${TIXSCHEMA_TSC:-tsc}")..."
+    TIXSCHEMA_TSC="$(command -v "${TIXSCHEMA_TSC:-tsc}")" cargo test --test service_schema_typescript_tests type_check
+    TIXSCHEMA_TSC="$(command -v "${TIXSCHEMA_TSC:-tsc}")" cargo test --no-default-features --features "serde,typescript" --test service_schema_typescript_tests type_check
+    @echo "✅ The emitted bundle type-checks!"
+
 # Check code without running tests
 check:
     @echo "Checking code..."

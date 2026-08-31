@@ -43,6 +43,18 @@ just fmt
 just check-all
 ```
 
+### Type-Checking the Emitted TypeScript
+
+The `service_schema` tests that compile an emitted bundle need a TypeScript compiler, which a
+fresh clone does not have. They look for `tsc` on `PATH` (or wherever `TIXSCHEMA_TSC` names) and
+stand down when they find none, saying so on stderr — so `just quick`, `just test` and `just all`
+never require one, and a run that did not type-check anything says so rather than passing quietly.
+
+```bash
+# Refuses to stand down: fails if no compiler is reachable.
+just typecheck-ts
+```
+
 ### Full CI Pipeline
 
 ```bash
