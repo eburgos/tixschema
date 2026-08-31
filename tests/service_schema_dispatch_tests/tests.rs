@@ -204,12 +204,31 @@ mod a_message_annotated_with_a_constraint {
     }
 }
 
+use core::cell::RefCell;
+use core::fmt::{self, Debug, Display, Write as _};
 use core::future::{Future, ready};
 use core::pin::pin;
 use core::task::{Context as PollContext, Poll, Waker};
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+use std::sync::{Mutex, Once};
 use tixschema::{model_schema, service_schema};
+use tracing::field::{Field, Visit};
+use tracing::span::{Attributes, Id, Record};
+use tracing::subscriber::set_global_default;
+use tracing::{Event, Metadata, Subscriber};
+
+thread_local! {
+    /// What the dispatcher wrote down on *this* thread.
+    ///
+    /// A subscriber installed per test would not do. `tracing` caches each callsite's interest
+    /// globally and recomputes it against the set of dispatchers currently registered, so a
+    /// callsite first reached while no subscriber existed caches as never-interested, and a
+    /// dispatcher registered and dropped by a neighbouring test moves the answer under a test
+    /// that is mid-dispatch. One subscriber for the whole binary is registered once and never
+    /// dropped, which leaves the interest settled; libtest gives each test its own thread, and
+    /// that is what keeps one test's records out of another's.
+    static WRITTEN: RefCell<Vec<Recorded>> = const { RefCell::new(Vec::new()) };
+}
 
 /// A message that publishes a validator of its own, written by hand rather than annotated, so
 /// that what the arm does with a violation is read off the arm rather than off the serde hook
@@ -417,6 +436,103 @@ impl ProbeReply {
     }
 }
 
+/// One event as it reached the subscriber, so a test says what was written down rather than that
+/// something was written somewhere.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Recorded {
+    detail: String,
+    level: String,
+    message: String,
+    operation: String,
+}
+
+/// The fields off one event, read by name. A field the event did not carry stays empty, which is
+/// itself something a test can assert.
+struct ReadFields {
+    detail: String,
+    message: String,
+    operation: String,
+}
+
+/// Stands in for the subscriber a service would really install, and files every event it is
+/// handed under the thread that produced it.
+struct Recorder;
+
+/// A field's value under the one rendering `Visit` offers for it.
+///
+/// `Visit::record_debug` hands over a `&dyn Debug` and nothing else — the event's message arrives
+/// that way, as the `format_args!` the macro built — so the `Debug` rendering *is* the value here
+/// rather than a stand-in for a `Display` that exists. This says so in the type instead of writing
+/// `{:?}` at a call site that reads like a slip.
+struct Shown<'reading>(&'reading dyn Debug);
+
+impl Display for Shown<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Debug::fmt(self.0, f)
+    }
+}
+
+impl Subscriber for Recorder {
+    fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+        true
+    }
+
+    fn enter(&self, _span: &Id) {}
+
+    fn event(&self, event: &Event<'_>) {
+        let mut read = ReadFields::new();
+        event.record(&mut read);
+        let written = Recorded {
+            detail: read.detail,
+            level: event.metadata().level().to_string(),
+            message: read.message,
+            operation: read.operation,
+        };
+        WRITTEN.with_borrow_mut(|events| events.push(written));
+    }
+
+    fn exit(&self, _span: &Id) {}
+
+    fn new_span(&self, _span: &Attributes<'_>) -> Id {
+        Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+}
+
+impl Visit for ReadFields {
+    fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
+        let mut rendered = String::new();
+        write!(rendered, "{}", Shown(value)).unwrap();
+        self.put(field.name(), rendered);
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.put(field.name(), value.to_owned());
+    }
+}
+
+impl ReadFields {
+    fn new() -> Self {
+        Self {
+            detail: String::new(),
+            message: String::new(),
+            operation: String::new(),
+        }
+    }
+
+    fn put(&mut self, named: &str, value: String) {
+        match named {
+            "detail" => self.detail = value,
+            "message" => self.message = value,
+            "operation" => self.operation = value,
+            _ => {}
+        }
+    }
+}
+
 /// Comes apart the way a handler does when something the compiler was expected to prevent gets
 /// through.
 ///
@@ -457,6 +573,16 @@ fn only_fault(settled: &[Settled]) -> Option<&probe_service_schema::ServiceFault
         [Settled::Fault(reported)] => Some(reported),
         _ => None,
     }
+}
+
+/// Dispatches one message with a subscriber of our own in place, and answers with both accounts of
+/// it: what the caller was told, and what the operator's records hold.
+fn recorded(operation: &str, payload: &str) -> (Vec<Settled>, Vec<Recorded>) {
+    static INSTALLED: Once = Once::new();
+    INSTALLED.call_once(|| set_global_default(Recorder).unwrap());
+    WRITTEN.with_borrow_mut(Vec::clear);
+    let (_reached, settled) = dispatched(operation, payload);
+    (settled, WRITTEN.with_borrow(Clone::clone))
 }
 
 /// The probe never suspends, so one poll answers it; `None` says an assumption about the bodies
@@ -703,6 +829,76 @@ fn a_one_way_handler_that_panics_still_answers_nothing_and_still_lets_dispatch_r
          guard buys here is the return itself, which is what the transport settles on. Got: \
          {settled:?}"
     );
+}
+
+#[test]
+fn a_one_way_handler_that_panics_is_written_down_even_though_nobody_is_answered() {
+    let (settled, written) = recorded("discard", r#"{"organization_id":"acme"}"#);
+    assert!(
+        settled.is_empty(),
+        "the operation declared no reply, which is exactly why the record is the only account \
+         there is. Got: {settled:?}"
+    );
+    assert_eq!(
+        written,
+        vec![Recorded {
+            detail: "the ledger is not a ledger".to_owned(),
+            level: "ERROR".to_owned(),
+            message: "the handler for this operation panicked".to_owned(),
+            operation: "discard".to_owned(),
+        }],
+        "catching a panic so the transport can settle the delivery must not be the same as losing \
+         it. The record names the operation, because the panic hook's own line does not."
+    );
+}
+
+#[test]
+fn a_request_and_reply_panic_is_written_down_as_well_as_answered() {
+    let (settled, written) = recorded("collapse", r#"{"organization_id":"acme"}"#);
+    let reported = only_fault(&settled).unwrap();
+    assert_eq!(
+        reported.kind(),
+        probe_service_schema::ServiceFaultKind::HandlerPanic
+    );
+    assert_eq!(
+        written,
+        vec![Recorded {
+            detail: "the ledger is not a ledger".to_owned(),
+            level: "ERROR".to_owned(),
+            message: "the handler for this operation panicked".to_owned(),
+            operation: "collapse".to_owned(),
+        }],
+        "the fault answers the caller and the record answers the operator, and the two are \
+         frequently not the same party. A panic is a defect in this service whichever way its \
+         operation was declared, so both outcomes write the same event."
+    );
+    assert_eq!(
+        written[0].detail,
+        reported.detail(),
+        "one panic, one account of what it said, so a record and a fault cannot disagree about it"
+    );
+}
+
+#[test]
+fn nothing_but_a_panic_is_written_down() {
+    // Every other path through an arm, including the two that fault: a fault is a defect the
+    // caller is told about, and only a panic is one the caller may never hear of at all.
+    for (operation, payload) in [
+        ("get-balance", r#"{"organization_id":"acme"}"#),
+        ("get-balance", r#"{"organization_id":"unlucky"}"#),
+        ("get-balance", r#"{"organization_id":42}"#),
+        ("get-the-balance", "{}"),
+        ("admit", r#"{"organization_id":"ab"}"#),
+        ("apply-bundle", r#"{"organization_id":"acme"}"#),
+        ("sweep", "{}"),
+    ] {
+        let (_settled, written) = recorded(operation, payload);
+        assert!(
+            written.is_empty(),
+            "`{operation}` on `{payload}` wrote a record. An arm that logged every message it \
+             settled would bury the one event that means a handler died. Got: {written:?}"
+        );
+    }
 }
 
 #[test]

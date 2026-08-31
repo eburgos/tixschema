@@ -23,6 +23,31 @@
 //! *written* only matters where one can exist, and nothing in that reading is feature-dependent
 //! anyway — the refusals it produces are read by its own unit tests, in every build that has the
 //! feature.
+//!
+//! # What a crate declaring a service names in its own manifest
+//!
+//! Three runtime crates, because the generated code calls them: `serde`, `serde_json` and
+//! `tracing`. tixschema itself is build-time only and none of the three is reached through it —
+//! a service names them the way it names any dependency of code it compiles.
+//!
+//! `tracing` is the newest of the three and is there so that a caught panic is written down. A
+//! dispatcher catches a panicking handler in order to return, so the transport can settle the
+//! delivery; catching without recording would trade a stalled consumer for a silent one, so the
+//! arm emits `tracing::error!` naming the operation and what the panic said.
+//!
+//! It costs a consumer that wants no logging very little. With no subscriber installed the
+//! callsite registers against `NoSubscriber`, whose `register_callsite` answers `Interest::never()`
+//! and whose `enabled` answers `false`, so the event is never built. The crate itself pulls in
+//! `tracing-core` (and its `once_cell`), `pin-project-lite`, and the `tracing-attributes` proc
+//! macro, which brings the same `proc-macro2`/`quote`/`syn` tixschema already builds against —
+//! nothing more. The machinery that formats and writes records lives in `tracing-subscriber`,
+//! which is not named here and which only a service that wants output adds.
+//!
+//! A crate that forgets it earns one error, spanned on the declaration, naming the crate:
+//! `error[E0433]: cannot find `tracing` in the crate root`. Forgetting `serde_json` earns seven.
+//!
+//! **`#[model_schema]` requires none of this.** Only a declared service emits a dispatcher, so a
+//! crate that describes types and declares no service names no `tracing` and reaches no logger.
 
 #[cfg(feature = "serde")]
 mod client;

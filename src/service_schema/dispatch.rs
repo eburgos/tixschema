@@ -131,13 +131,14 @@ fn answered_envelope() -> TokenStream {
     }
 }
 
-/// One arm: deserialize, validate, call behind the panic guard, answer. Every fault path names the
-/// wire name rather than what arrived, this arm being the one that answered to it.
+/// One arm: deserialize, validate, call behind the panic guard, record and answer. Every fault path
+/// names the wire name rather than what arrived, this arm being the one that answered to it.
 ///
 /// A one-way arm answers nothing once the implementation has been entered, a panic included: the
 /// operation declared no reply and the delivery carries no queue for one to go to. What the guard
 /// buys there is the return itself — the transport acknowledges after `dispatch` returns, and a
-/// panic that unwound past it would leave the delivery outstanding.
+/// panic that unwound past it would leave the delivery outstanding. The record is what keeps that
+/// return from being silent, so a panic is written down on both outcomes.
 fn arm(operation: &OperationDef) -> TokenStream {
     let wire = &operation.wire_name;
     let message = message_type(operation);
@@ -146,12 +147,15 @@ fn arm(operation: &OperationDef) -> TokenStream {
     let called = quote! { caught(move || svc.#method(ctx #(, #call)*)).await };
     let settled = match operation.outcome {
         OperationOutcome::OneWay => quote! {
-            let _unreported = #called;
+            if let Err(panicked) = #called {
+                record_panic(#wire, &panicked);
+            }
         },
         OperationOutcome::Reply { .. } => quote! {
             match #called {
                 Ok(answered) => reply.send(Answered::answering(answered)).await,
                 Err(panicked) => {
+                    record_panic(#wire, &panicked);
                     reply.fault(ServiceFault::handler_panic(#wire, &panicked)).await
                 }
             }
@@ -281,7 +285,8 @@ fn violation_readers() -> TokenStream {
     }
 }
 
-/// The guard a handler is called behind, and the reader that turns a caught panic into a detail.
+/// The guard a handler is called behind, the record a caught panic leaves, and the reader that
+/// turns one into a detail.
 ///
 /// Two things make this the arm's business rather than the transport's. The delivery is
 /// acknowledged after `dispatch` returns, so a panic that unwound past it is never acknowledged at
@@ -289,6 +294,12 @@ fn violation_readers() -> TokenStream {
 /// `nack`, no dead-letter exchange, no message TTL and no timeout, so that delivery stays
 /// outstanding against the prefetch until the channel closes. And a handler that panicked failed at
 /// something its operation never declared, which is exactly what a fault reports.
+///
+/// Catching a panic without writing it down would trade a stalled consumer for a silent one, so
+/// every caught panic is recorded through `tracing::error!`. That is the third runtime crate a
+/// crate declaring a service names in its own manifest, beside `serde` and `serde_json`, and it is
+/// named for the same reason they are: the generated code calls it. See the
+/// [module documentation](super) for what that costs.
 fn panic_guard() -> TokenStream {
     quote! {
         /// Runs a handler, answering `Err` with what it said where it panicked rather than letting
@@ -327,6 +338,29 @@ fn panic_guard() -> TokenStream {
                 }
             })
             .await
+        }
+
+        /// Writes down that a handler came apart, so that catching a panic is not the same as
+        /// losing it.
+        ///
+        /// It runs on both outcomes. A one-way operation declared no reply and its delivery
+        /// carries no queue for one to go to, so without this the panic is visible to nobody at
+        /// all. A request-and-reply operation answers its caller a fault, and that is the
+        /// *caller's* record rather than the operator's — the two are frequently not the same
+        /// party, and a panic is a defect in this service whichever way its operation was
+        /// declared. So both write the same event, and a service reads its handlers' failures off
+        /// one place.
+        ///
+        /// `tracing` is named because the operator's subscriber is where a service's records
+        /// already go. The default panic hook has printed the panic to stderr by the time this
+        /// runs, but that line carries no operation name, is not structured, and is gone entirely
+        /// under a hook the service replaced.
+        fn record_panic(operation: &str, detail: &str) {
+            ::tracing::error!(
+                operation = operation,
+                detail = detail,
+                "the handler for this operation panicked"
+            );
         }
 
         /// What a caught panic said, for the fault's detail. A panic payload is whatever reached

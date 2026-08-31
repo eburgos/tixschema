@@ -8,6 +8,7 @@
 
 use super::parse::{OperationDef, OperationInputs, OperationOutcome, ServiceDef, parse_service};
 use super::{emitted_trait, exec_service_schema};
+use crate::model_schema::exec_model_schema;
 use proc_macro2::TokenStream;
 use quote::{ToTokens as _, quote};
 use syn::{Ident, ItemTrait, Type};
@@ -757,11 +758,60 @@ fn a_request_and_reply_arm_answers_a_caught_panic_with_a_fault_naming_its_own_wi
     let emitted = expanded(MIXED_SERVICE);
     assert!(
         emitted.contains(
-            "Err (panicked) => { reply . fault (ServiceFault :: handler_panic \
+            "Err (panicked) => { record_panic (\"usage-generation-request\" , & panicked) ; \
+             reply . fault (ServiceFault :: handler_panic \
              (\"usage-generation-request\" , & panicked)) . await }"
         ),
         "the arm that answered to the name is the one that reports the defect, and it reports it \
          under the wire name rather than under the Rust ident. Got: {emitted}"
+    );
+}
+
+#[test]
+fn every_arm_writes_a_caught_panic_down_before_it_answers() {
+    let emitted = expanded(MIXED_SERVICE);
+    assert!(
+        emitted.contains(
+            "if let Err (panicked) = caught (move || svc . apply_bundle (ctx , received)) . await \
+             { record_panic (\"apply-bundle\" , & panicked) ; }"
+        ),
+        "a one-way arm answers nobody, so the record is the whole account of the panic there is. \
+         Got: {emitted}"
+    );
+    let recorded = emitted
+        .find("record_panic (\"usage-generation-request\" , & panicked)")
+        .unwrap();
+    let answered = emitted
+        .find("ServiceFault :: handler_panic (\"usage-generation-request\" , & panicked)")
+        .unwrap();
+    assert!(
+        recorded < answered,
+        "the operator's record is written before the caller is answered, so a `Reply` that comes \
+         apart in turn cannot take the account of the first panic with it. Got: {emitted}"
+    );
+}
+
+#[test]
+fn a_declared_service_names_tracing_and_a_declared_type_does_not() {
+    let emitted = expanded(MIXED_SERVICE);
+    assert!(
+        emitted.contains(":: tracing :: error !"),
+        "a crate declaring a service names `tracing` in its own manifest, beside `serde` and \
+         `serde_json`, because the generated dispatcher calls it. Got: {emitted}"
+    );
+    let described = exec_model_schema(
+        TokenStream::new(),
+        quote! {
+            pub struct AvailableBalanceRequest {
+                pub organization_id: String,
+            }
+        },
+    )
+    .to_string();
+    assert!(
+        !described.contains("tracing"),
+        "only a declared service emits a dispatcher, so describing a type reaches no logger and \
+         adds nothing to a crate's manifest. Got: {described}"
     );
 }
 
