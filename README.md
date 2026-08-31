@@ -1657,6 +1657,14 @@ service_schema: operation `apply_bundle` is marked `one_way` but returns a value
 
 There is no error arm on a one-way operation, because there is no reply to carry one. An operation that needs to report failure is a request-and-reply operation declared wrong. In TypeScript a one-way method answers `Promise<void>`; in Rust it answers nothing beyond the send.
 
+The one failure it can still report is its own. A message that fails its own validation never reaches the transport, and the fault naming the key has nowhere to go but out of band: in Rust it is `Err(ServiceFault)`, the failure arm the method already has, and in TypeScript `Promise<void>` has no failure arm at all, so it is **thrown**. What is thrown is published rather than left to be discovered from the body -- `<Service>Refusal`, an `Error` carrying the fault -- and the method's own `JSDoc` names it:
+
+```typescript
+export type UsageServiceRefusal = Error & { fault: UsageServiceFault };
+```
+
+Silently dropping a refused message was the alternative and is worse: a fault is a defect meant to page a human, and a dropped one pages nobody.
+
 #### Service Validation
 
 A message is validated when it is constructed, in both directions, by the validator `#[model_schema()]` already generates for it -- `validate()` on the Rust side, the Zod schema on the TypeScript side. Nothing new is written for a service.
@@ -1678,6 +1686,18 @@ Outbound, the generated client validates the message it is about to send, so a m
         };
       }
       return transport.request<UsageServiceExpireCreditResult>("expire-credit", validated.data);
+    },
+```
+
+A one-way method runs the same check and has nowhere to put the result of it, so it throws the refusal the section above names -- still before the transport is reached:
+
+```typescript
+    async applyBundle(req) {
+      const validated = AvailableBalanceRequest$Schema.safeParse(req);
+      if (!validated.success) {
+        throw usageServiceRefused(usageServiceOutboundFault("apply-bundle", validated.error.issues));
+      }
+      await transport.notify("apply-bundle", validated.data);
     },
 ```
 
@@ -1729,7 +1749,7 @@ On the Rust side, beside the trait, in a module named for the service (`usage_se
 - `Transport` -- the seam a client is bound to, with `notify` and `request`.
 - `CallError<E>` -- `Operation(E)` or `Fault(ServiceFault)`.
 - `IncomingMessage` and `dispatch(svc, ctx, message, reply)` -- the dispatcher, generic over the implementing type.
-- `UsageServiceClient` -- one method per operation, over any `Transport`.
+- `UsageServiceClient` -- one method per operation, over any `Transport`. Each takes that operation's arguments and no context: a context is what an implementation needs, and a caller has nothing to hand one to.
 - `ExpireCreditRequest` and `SweepRequest` -- the messages declared for the operations that named none, each an ordinary `#[model_schema()]` type.
 
 On the TypeScript side, three artifacts, reached through a unit struct named `<Service>Schema`:
@@ -1753,7 +1773,13 @@ pub fn get_entities() -> (String, Vec<String>) {
 
 ```typescript
 export type UsageServiceClient = {
-  /** Sends `apply-bundle` on `UsageService`, which expects no reply. */
+  /**
+   * Sends `apply-bundle` on `UsageService`, which expects no reply.
+   *
+   * @throws {UsageServiceRefusal} when the message fails its own schema. The operation
+   * answers `Promise<void>`, so there is no failure arm to put the fault in; the transport
+   * is still never reached.
+   */
   applyBundle(req: AvailableBalanceRequest): Promise<void>;
   /** Calls `usage-generation-request` on `UsageService` and waits for the answer. */
   canGenerate(req: AvailableBalanceRequest): Promise<UsageServiceCanGenerateResult>;

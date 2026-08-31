@@ -345,13 +345,9 @@ fn reported_fault(
 fn an_answer_becomes_the_success_type_the_operation_declared() {
     let transport = ProbeTransport::new(&[r#"{"ok":true,"value":{"credits":7}}"#]);
     let client = probe_service_schema::ProbeServiceClient::new(transport);
-    let ctx = "probe".to_owned();
-    let answered = poll_once(client.get_balance(
-        &ctx,
-        BalanceRequest {
-            organization_id: "acme".to_owned(),
-        },
-    ))
+    let answered = poll_once(client.get_balance(BalanceRequest {
+        organization_id: "acme".to_owned(),
+    }))
     .unwrap();
     assert_eq!(answered, Ok(BalanceResponse { credits: 7 }));
 }
@@ -360,13 +356,9 @@ fn an_answer_becomes_the_success_type_the_operation_declared() {
 fn the_error_the_operation_declared_comes_back_in_the_operation_arm() {
     let transport = ProbeTransport::new(&[r#"{"ok":false,"error":{"errorCode":"db-error"}}"#]);
     let client = probe_service_schema::ProbeServiceClient::new(transport);
-    let ctx = "probe".to_owned();
-    let answered = poll_once(client.get_balance(
-        &ctx,
-        BalanceRequest {
-            organization_id: "unlucky".to_owned(),
-        },
-    ))
+    let answered = poll_once(client.get_balance(BalanceRequest {
+        organization_id: "unlucky".to_owned(),
+    }))
     .unwrap();
     assert_eq!(
         answered,
@@ -385,13 +377,9 @@ fn a_fault_the_remote_produced_comes_back_in_the_fault_arm() {
         r#""kind":"unknown-operation","operation":"get-balance"}}}"#
     )]);
     let client = probe_service_schema::ProbeServiceClient::new(transport);
-    let ctx = "probe".to_owned();
-    let answered = poll_once(client.get_balance(
-        &ctx,
-        BalanceRequest {
-            organization_id: "acme".to_owned(),
-        },
-    ))
+    let answered = poll_once(client.get_balance(BalanceRequest {
+        organization_id: "acme".to_owned(),
+    }))
     .unwrap();
     let reported = reported_fault(&answered).unwrap();
     assert_eq!(
@@ -408,13 +396,9 @@ fn a_fault_the_remote_produced_comes_back_in_the_fault_arm() {
 fn an_envelope_that_contradicts_itself_is_a_defect_rather_than_an_answer() {
     let transport = ProbeTransport::new(&[r#"{"ok":true}"#]);
     let client = probe_service_schema::ProbeServiceClient::new(transport);
-    let ctx = "probe".to_owned();
-    let answered = poll_once(client.get_balance(
-        &ctx,
-        BalanceRequest {
-            organization_id: "acme".to_owned(),
-        },
-    ))
+    let answered = poll_once(client.get_balance(BalanceRequest {
+        organization_id: "acme".to_owned(),
+    }))
     .unwrap();
     let reported = reported_fault(&answered).unwrap();
     assert_eq!(
@@ -432,13 +416,9 @@ fn an_envelope_that_contradicts_itself_is_a_defect_rather_than_an_answer() {
 fn the_operation_name_travels_beside_the_payload_and_never_inside_it() {
     let transport = ProbeTransport::new(&[r#"{"ok":true,"value":{"credits":7}}"#]);
     let client = probe_service_schema::ProbeServiceClient::new(transport);
-    let ctx = "probe".to_owned();
-    poll_once(client.get_balance(
-        &ctx,
-        BalanceRequest {
-            organization_id: "acme".to_owned(),
-        },
-    ))
+    poll_once(client.get_balance(BalanceRequest {
+        organization_id: "acme".to_owned(),
+    }))
     .unwrap()
     .unwrap();
     let calls = client.transport().calls();
@@ -456,8 +436,7 @@ fn the_operation_name_travels_beside_the_payload_and_never_inside_it() {
 fn a_method_declared_from_several_arguments_still_takes_them_separately() {
     let transport = ProbeTransport::new(&[r#"{"ok":true,"value":{"credits":1}}"#]);
     let client = probe_service_schema::ProbeServiceClient::new(transport);
-    let ctx = "probe".to_owned();
-    poll_once(client.expire_credit(&ctx, "acme".to_owned(), "cr-1".to_owned()))
+    poll_once(client.expire_credit("acme".to_owned(), "cr-1".to_owned()))
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -474,8 +453,7 @@ fn a_method_declared_from_several_arguments_still_takes_them_separately() {
 fn a_method_for_an_operation_that_takes_nothing_still_sends_a_payload() {
     let transport = ProbeTransport::new(&[r#"{"ok":true,"value":{"credits":0}}"#]);
     let client = probe_service_schema::ProbeServiceClient::new(transport);
-    let ctx = "probe".to_owned();
-    poll_once(client.sweep(&ctx)).unwrap().unwrap();
+    poll_once(client.sweep()).unwrap().unwrap();
     assert_eq!(
         client.transport().calls(),
         vec![("sweep".to_owned(), "{}".to_owned())],
@@ -487,13 +465,9 @@ fn a_method_for_an_operation_that_takes_nothing_still_sends_a_payload() {
 fn a_one_way_method_sends_and_answers_with_nothing_beyond_that() {
     let transport = ProbeTransport::new(&[""]);
     let client = probe_service_schema::ProbeServiceClient::new(transport);
-    let ctx = "probe".to_owned();
-    let answered = poll_once(client.apply_bundle(
-        &ctx,
-        AdmitRequest {
-            organization_id: "acme".to_owned(),
-        },
-    ))
+    let answered = poll_once(client.apply_bundle(AdmitRequest {
+        organization_id: "acme".to_owned(),
+    }))
     .unwrap();
     assert!(answered.is_ok(), "got: {answered:?}");
     assert_eq!(
@@ -512,13 +486,9 @@ fn a_message_failing_its_own_validation_is_a_fault_and_the_transport_is_never_re
     // is the proof that the transport was not touched.
     let transport = ProbeTransport::new(&[]);
     let client = probe_service_schema::ProbeServiceClient::new(transport);
-    let ctx = "probe".to_owned();
-    let answered = poll_once(client.admit(
-        &ctx,
-        AdmitRequest {
-            organization_id: "ab".to_owned(),
-        },
-    ))
+    let answered = poll_once(client.admit(AdmitRequest {
+        organization_id: "ab".to_owned(),
+    }))
     .unwrap();
     let reported = reported_fault(&answered).unwrap();
     assert_eq!(
@@ -544,13 +514,9 @@ fn a_message_failing_its_own_validation_is_a_fault_and_the_transport_is_never_re
 fn a_one_way_message_failing_its_own_validation_is_a_fault_and_sends_nothing() {
     let transport = ProbeTransport::new(&[]);
     let client = probe_service_schema::ProbeServiceClient::new(transport);
-    let ctx = "probe".to_owned();
-    let answered = poll_once(client.apply_bundle(
-        &ctx,
-        AdmitRequest {
-            organization_id: "ab".to_owned(),
-        },
-    ))
+    let answered = poll_once(client.apply_bundle(AdmitRequest {
+        organization_id: "ab".to_owned(),
+    }))
     .unwrap();
     let reported = answered.unwrap_err();
     assert_eq!(
@@ -567,13 +533,9 @@ fn a_one_way_message_failing_its_own_validation_is_a_fault_and_sends_nothing() {
 #[test]
 fn what_the_dispatcher_writes_is_what_the_client_reads() {
     let client = probe_service_schema::ProbeServiceClient::new(Loopback::new());
-    let ctx = "probe".to_owned();
-    let answered = poll_once(client.get_balance(
-        &ctx,
-        BalanceRequest {
-            organization_id: "acme".to_owned(),
-        },
-    ))
+    let answered = poll_once(client.get_balance(BalanceRequest {
+        organization_id: "acme".to_owned(),
+    }))
     .unwrap();
     assert_eq!(
         answered,
@@ -581,12 +543,9 @@ fn what_the_dispatcher_writes_is_what_the_client_reads() {
         "one envelope, written by the dispatcher and read by the client"
     );
 
-    let failed = poll_once(client.get_balance(
-        &ctx,
-        BalanceRequest {
-            organization_id: "unlucky".to_owned(),
-        },
-    ))
+    let failed = poll_once(client.get_balance(BalanceRequest {
+        organization_id: "unlucky".to_owned(),
+    }))
     .unwrap();
     assert_eq!(
         failed,
@@ -596,12 +555,9 @@ fn what_the_dispatcher_writes_is_what_the_client_reads() {
         "and the failure arm survives the round trip as the error the operation declared"
     );
 
-    poll_once(client.apply_bundle(
-        &ctx,
-        AdmitRequest {
-            organization_id: "acme".to_owned(),
-        },
-    ))
+    poll_once(client.apply_bundle(AdmitRequest {
+        organization_id: "acme".to_owned(),
+    }))
     .unwrap()
     .unwrap();
     assert_eq!(

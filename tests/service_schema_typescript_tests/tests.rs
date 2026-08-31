@@ -16,17 +16,41 @@ mod the_bundle_one_registration_line_produces {
     /// The bundle a consuming codebase writes: its own types named by hand, one line each, and the
     /// service named once. Nothing here names a message the macro declared — that is the point.
     fn bundle() -> String {
-        [
+        let mut written = vec![
             BalanceRequest::ts_definition(),
             BalanceResponse::ts_definition(),
             ApplyBundleReceipt::ts_definition(),
             ProbeError::ts_definition(),
             CreditWriteError::ts_definition(),
+        ];
+        written.extend(author_schemas());
+        written.extend([
             ProbeServiceSchema::ts_definition(),
             ProbeServiceSchema::ts_client(),
             ProbeServiceSchema::ts_service(),
+        ]);
+        written.join("\n\n")
+    }
+
+    /// The schema line a hand-written type publishes beside its type. The service's own line
+    /// carries the schemas of the messages the macro declared and nobody else's, so a type the
+    /// author named is the author's to publish twice — once as a type, once as a schema — and a
+    /// bundle that names only its types leaves the client and the dispatcher parsing with a value
+    /// nothing declares.
+    #[cfg(feature = "zod")]
+    fn author_schemas() -> Vec<String> {
+        vec![
+            BalanceRequest::zod_schema(),
+            BalanceResponse::zod_schema(),
+            ApplyBundleReceipt::zod_schema(),
+            ProbeError::zod_schema(),
+            CreditWriteError::zod_schema(),
         ]
-        .join("\n\n")
+    }
+
+    #[cfg(not(feature = "zod"))]
+    const fn author_schemas() -> Vec<String> {
+        Vec::new()
     }
 
     /// Every name the published result envelopes refer to, read off the two arms themselves rather
@@ -67,6 +91,34 @@ mod the_bundle_one_registration_line_produces {
                 written.contains(&format!("export type {named} =")),
                 "a bundle carrying one line per author type and one line for the service leaves \
                  `{named}` undeclared. Got: {written}"
+            );
+        }
+    }
+
+    /// Every schema the bundle's client and dispatcher parse with is declared by the same bundle.
+    /// A schema is a value rather than a type, so none of the checks that read declared type names
+    /// reach it: a bundle naming a `$Schema` nothing declares reads exactly like one that does,
+    /// and is a file that will not compile.
+    #[cfg(feature = "zod")]
+    #[test]
+    fn every_schema_the_bundle_parses_with_is_declared_by_the_bundle() {
+        let (_, written) = written_bundle("tixschema_service_bundle_schemas.ts");
+        let mut parsed: Vec<&str> = written
+            .match_indices("$Schema.safeParse(")
+            .filter_map(|(at, _)| {
+                written[..at]
+                    .rsplit(|character: char| !character.is_alphanumeric())
+                    .next()
+            })
+            .collect();
+        parsed.sort_unstable();
+        parsed.dedup();
+        assert!(parsed.len() >= 4, "got: {parsed:?}");
+        for named in parsed {
+            assert!(
+                written.contains(&format!("export const {named}$Schema")),
+                "the bundle parses with `{named}$Schema` and declares no such value. \
+                 Got: {written}"
             );
         }
     }
@@ -223,9 +275,9 @@ mod the_bundle_one_registration_line_produces {
     }
 
     /// Every name the client and the implementable service refer to is declared by the same
-    /// bundle: the messages, the result types, the outcome types and the fault. Read off the text
-    /// rather than from a list written here, so a name they start referring to is checked without
-    /// this test being edited.
+    /// bundle: the message each member takes, the result types, the outcome types and the fault.
+    /// Read off the text rather than from a list written here, so a name they start referring to
+    /// is checked without this test being edited.
     #[test]
     fn the_client_and_the_service_name_only_types_the_bundle_declares() {
         let (_, written) = written_bundle("tixschema_service_bundle_reachable.ts");
@@ -236,20 +288,22 @@ mod the_bundle_one_registration_line_produces {
             if let Some(rest) = line.strip_prefix("return transport.request<") {
                 reached.push(rest.split_once('>').unwrap_or((rest, "")).0.to_owned());
             }
-            // A member of the client type or of the interface, which is where a method names the
-            // type it answers with. The transport's own `request<Answered>` is a type parameter
-            // rather than a reference and is passed over.
-            if let Some((_, answered)) = line
-                .split_once("): Promise<")
-                .filter(|_| line.contains("(req: ") || line.contains("(ctx: Ctx, req: "))
-            {
-                let named = answered.trim_end_matches(';').trim_end_matches('>');
-                if named != "void" {
-                    reached.push(named.to_owned());
-                }
+            // A member of the client type or of the interface, which is where a method names both
+            // the message it takes and the type it answers with. The transport's own members take
+            // an `unknown` payload and answer a type parameter, so neither reaches this.
+            let Some((taken, answered)) = line.split_once("): Promise<") else {
+                continue;
+            };
+            let Some((_, message)) = taken.split_once("req: ") else {
+                continue;
+            };
+            reached.push(message.to_owned());
+            let named = answered.trim_end_matches(';').trim_end_matches('>');
+            if named != "void" {
+                reached.push(named.to_owned());
             }
         }
-        assert!(reached.len() >= 8, "got: {reached:?}");
+        assert!(reached.len() >= 18, "got: {reached:?}");
         for named in reached {
             assert!(
                 written.contains(&format!("export type {named} =")),
@@ -652,12 +706,9 @@ mod the_envelope_typescript_declares_is_the_one_rust_writes {
         .unwrap();
         let client =
             probe_service_schema::ProbeServiceClient::new(PreparedAnswer { encoded: framed });
-        let answered = poll_once(client.get_balance(
-            &(),
-            BalanceRequest {
-                organization_id: "acme".to_owned(),
-            },
-        ))
+        let answered = poll_once(client.get_balance(BalanceRequest {
+            organization_id: "acme".to_owned(),
+        }))
         .unwrap();
         let reported = match answered {
             Err(probe_service_schema::CallError::Fault(carried)) => Some(carried),

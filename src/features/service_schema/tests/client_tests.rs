@@ -2,8 +2,8 @@
 //!
 //! What these prove and what they cannot: the structure of the emitted TypeScript — the spelling of
 //! a method, that the transport is named only on the far side of the validation check, that a
-//! one-way method answers nothing. No TypeScript toolchain is reachable here, so none of them type-
-//! checks the bundle.
+//! one-way method answers nothing and publishes the shape it throws instead. No TypeScript
+//! toolchain is reachable here, so none of them type-checks the bundle.
 
 use super::{MIXED_SERVICE, client_of};
 
@@ -132,6 +132,74 @@ fn a_refused_one_way_message_is_thrown_because_there_is_no_arm_to_return_it_in()
 
 #[cfg(feature = "zod")]
 #[test]
+fn the_shape_a_refused_one_way_message_is_thrown_as_is_published() {
+    let written = client_of(MIXED_SERVICE);
+    assert!(
+        written.contains("export type UsageServiceRefusal = Error & { fault: UsageServiceFault };"),
+        "what a method throws is part of its surface, not something to read out of its body. \
+         Got: {written}"
+    );
+    assert!(
+        written.contains(
+            "function usageServiceRefused(fault: UsageServiceFault): UsageServiceRefusal {"
+        ),
+        "got: {written}"
+    );
+    assert!(
+        !written.contains("): Error {"),
+        "annotating the thrower `Error` widens the fault property away again, and a caller that \
+         caught one would have nothing to read. Got: {written}"
+    );
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn a_one_way_method_says_in_its_own_documentation_what_it_throws() {
+    let written = client_of(MIXED_SERVICE);
+    let declared = members_of(&written);
+    let documented = declared
+        .rsplit_once("  applyBundle(req: ApplyBundleRequest): Promise<void>;")
+        .and_then(|(before, _)| before.rsplit_once("  /**"))
+        .map(|(_, doc)| doc.to_owned());
+    assert!(documented.is_some(), "got: {declared}");
+    let block = documented.unwrap();
+    assert!(
+        block.contains("@throws {UsageServiceRefusal} when the message fails its own schema."),
+        "`Promise<void>` has nowhere to say it, so the documentation is the only place left. \
+         Got: {block}"
+    );
+    assert!(
+        declared.contains(
+            "  /** Calls `get-available-balance` on `UsageService` and waits for the answer. */\n  \
+             getAvailableBalance(req:"
+        ),
+        "an operation with a failure arm answers its refusal into that arm and throws nothing, \
+         so it says nothing about throwing. Got: {declared}"
+    );
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn a_service_with_no_one_way_operation_publishes_no_refusal() {
+    const REPLYING_ONLY: &str = "
+        pub trait UsageService<Ctx> {
+            async fn sweep(&self, ctx: &Ctx) -> Result<SweepReport, BalanceError>;
+        }
+    ";
+    let written = client_of(REPLYING_ONLY);
+    assert!(
+        !written.contains("UsageServiceRefusal"),
+        "nothing here can throw, so a type naming what would be thrown is a type nothing \
+         produces. Got: {written}"
+    );
+    assert!(
+        written.contains("function usageServiceOutboundFault("),
+        "the fault a replying operation answers with is still built the same way. Got: {written}"
+    );
+}
+
+#[cfg(feature = "zod")]
+#[test]
 fn the_fault_a_client_builds_names_the_key_that_failed() {
     let written = client_of(MIXED_SERVICE);
     assert!(
@@ -150,6 +218,28 @@ fn the_fault_a_client_builds_names_the_key_that_failed() {
 
 #[cfg(not(feature = "zod"))]
 #[test]
+fn a_build_that_refuses_nothing_promises_no_throw_and_publishes_no_refusal() {
+    let written = client_of(MIXED_SERVICE);
+    assert!(
+        !written.contains("UsageServiceRefusal"),
+        "with no schema there is nothing to refuse and nothing to throw. Got: {written}"
+    );
+    assert!(
+        !written.contains("@throws"),
+        "documenting a throw a build cannot produce is worse than documenting nothing. \
+         Got: {written}"
+    );
+    assert!(
+        written.contains(
+            "  /** Sends `apply-bundle` on `UsageService`, which expects no reply. */\n  \
+             applyBundle(req: ApplyBundleRequest): Promise<void>;"
+        ),
+        "the method and what it answers are the same in either build. Got: {written}"
+    );
+}
+
+#[cfg(not(feature = "zod"))]
+#[test]
 fn a_build_that_publishes_no_schema_names_none() {
     let written = client_of(MIXED_SERVICE);
     assert!(
@@ -161,4 +251,13 @@ fn a_build_that_publishes_no_schema_names_none() {
         written.contains("return transport.request<UsageServiceGetAvailableBalanceResult>"),
         "got: {written}"
     );
+}
+
+/// The members of the client type, which is where a method's own documentation is written.
+#[cfg(feature = "zod")]
+fn members_of(written: &str) -> String {
+    written
+        .split_once("export type UsageServiceClient = {")
+        .and_then(|(_, rest)| rest.split_once("\n};"))
+        .map_or_else(String::new, |(declared, _)| declared.to_owned())
 }
