@@ -324,7 +324,7 @@ pub struct TreeNode {
 
 #### Plain Enums
 
-Plain enums (all unit variants) generate a TypeScript string union and `z.enum()` in Zod.
+An enum whose variants are all unit variants and which names no `tag` generates a TypeScript string union and `z.enum()` in Zod, matching the bare variant name Serde writes for it. Naming a `tag` changes what Serde writes -- the variant name moves under the tag key, into an object -- and the same all-unit variants are then described as the tagged objects below rather than as a string union.
 
 ```rust
 #[model_schema()]
@@ -498,6 +498,8 @@ Add `#[serde(tag = "...", content = "...")]` to get the adjacently tagged `{ typ
 #### Internally Tagged Enums (`tag` With No `content`)
 
 An enum that names `tag` but no `content` is internally tagged: there is no key for a variant's data, so Serde writes it as members of the object the tag is written in. A struct variant's fields sit beside the tag, and so do the members of a newtype variant's inner type -- which the surfaces describe as an intersection, the same composition `#[serde(flatten)]` uses.
+
+A variant carrying nothing is the tag alone, `{"type":"Bare"}`, and an enum whose variants are *all* unit variants is written that way throughout -- one object per variant, each holding only the tag. That is the shape of a service's error code, and it is described as the tagged object union it is written as, never as the bare string union the same variants would publish with no `tag` named.
 
 ```rust
 #[model_schema()]
