@@ -159,3 +159,67 @@ fn a_payload_that_was_never_the_message_is_told_apart_from_one_that_failed_a_key
         "got: {written}"
     );
 }
+
+/// Every function in the dispatcher that answers a fault mints one the same way: build the fields
+/// the Rust declaration published, then assert them into the sealed type.
+///
+/// Read off the emitted text rather than from a list written here, so a constructor added later
+/// lands in the comparison without this test being edited. The assertion is the price of the seal
+/// — TypeScript has no way to write a branded property whose symbol has no runtime value — and
+/// keeping it to this one form is what makes minting a fault greppable.
+#[test]
+fn every_fault_the_dispatcher_builds_is_minted_from_the_fields_and_sealed() {
+    let written = service_of(MIXED_SERVICE);
+    let answering: Vec<&str> = written
+        .match_indices("): UsageServiceFault {")
+        .map(|(at, _)| &written[at..])
+        .collect();
+    assert_eq!(
+        answering.len(),
+        2,
+        "the dispatcher builds a fault for an unrecognised operation and for a payload that \
+         failed. Got: {written}"
+    );
+    for body in answering {
+        assert!(
+            body.contains("const built: UsageServiceFaultFields = {"),
+            "a fault is built as the fields the Rust declaration published. Got: {body}"
+        );
+        assert!(
+            body.find("const built: UsageServiceFaultFields = {")
+                < body.find("return built as UsageServiceFault;"),
+            "the fields are built, then sealed. Got: {body}"
+        );
+    }
+    assert_eq!(
+        written
+            .matches("return built as UsageServiceFault;")
+            .count(),
+        2,
+        "one assertion per constructor and nowhere else. Got: {written}"
+    );
+}
+
+/// The seal costs an implementation the fault and costs a caller nothing, so the two shapes a
+/// caller reads through are unchanged: the framing it narrows on, and the members it then reads.
+#[test]
+fn the_seal_leaves_the_framing_a_caller_narrows_on_untouched() {
+    let written = service_of(MIXED_SERVICE);
+    assert!(
+        written.contains(
+            "): { ok: false; error: { isServiceFault: true; fault: UsageServiceFault } } {"
+        ),
+        "a fault still crosses behind the literal a caller narrows on. Got: {written}"
+    );
+    for read in ["detail:", "field:", "kind:", "operation:"] {
+        assert!(
+            written.contains(read),
+            "the members a caller reads are the same members. Got: {written}"
+        );
+    }
+    assert!(
+        !written.contains("usageServiceFaultSeal"),
+        "the seal is declared beside the fault, not written into the dispatcher: a bundle \
+         declaring it twice does not compile. Got: {written}"
+    );
+}
