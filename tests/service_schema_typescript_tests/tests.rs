@@ -1,6 +1,8 @@
 //! A service whose operations cover every input shape and every outcome, read off the TypeScript
 //! it publishes and off a bundle written to a file the way a consuming codebase writes one.
 
+#![cfg(feature = "serde")]
+
 #[cfg(feature = "typescript")]
 mod the_bundle_one_registration_line_produces {
     use super::{
@@ -529,7 +531,7 @@ impl Capture {
         assert_eq!(
             held.len(),
             1,
-            "exactly one of the three is called per message"
+            "a request-and-reply arm answers exactly once, through one of the two"
         );
         held[0].clone()
     }
@@ -539,11 +541,6 @@ impl Capture {
 // group is asked of a build that writes TypeScript at all.
 #[cfg(feature = "typescript")]
 impl probe_service_schema::Reply for Capture {
-    async fn done(&self) {
-        ready(()).await;
-        self.answered.lock().unwrap().push(Vec::new());
-    }
-
     async fn fault(&self, fault: probe_service_schema::ServiceFault) {
         ready(()).await;
         // The fault alone, unframed. What frames it is the transport, and what that framing has to

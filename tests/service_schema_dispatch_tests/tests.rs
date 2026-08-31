@@ -2,9 +2,11 @@
 //! every path through an arm: the answer, the operation's own error, an undeserializable payload,
 //! a name nothing answers to, and a one-way operation that settles without publishing.
 //!
-//! The probe reply handle records which of `send`, `fault` and `done` was called, so a test can
-//! assert not only what was answered but that the message was settled exactly once — the property
-//! that keeps a delivery from sitting unacknowledged against the consumer's prefetch.
+//! The probe reply handle records which of `send` and `fault` was called, so a test can assert not
+//! only what was answered but that a request-and-reply arm answered exactly once and that a
+//! one-way arm that reached its implementation answered nothing at all.
+
+#![cfg(feature = "serde")]
 
 /// A message annotated with `#[model_schema_prop]`, and where a violation of it is actually
 /// caught.
@@ -72,14 +74,6 @@ mod a_message_annotated_with_a_constraint {
     }
 
     impl gate_service_schema::Reply for GateReply {
-        async fn done(&self) {
-            ready(()).await;
-            self.settled
-                .lock()
-                .unwrap()
-                .push("settled, nothing published".to_owned());
-        }
-
         async fn fault(&self, fault: gate_service_schema::ServiceFault) {
             ready(()).await;
             self.settled.lock().unwrap().push(fault.to_string());
@@ -224,10 +218,10 @@ pub struct ProbeReply {
     settled: Mutex<Vec<Settled>>,
 }
 
-/// One of the three ways a message is settled. Exactly one lands per dispatch.
+/// One of the two ways an arm answers. Exactly one lands per request-and-reply dispatch, and none
+/// at all where a one-way operation reached its implementation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Settled {
-    Done,
     Fault(probe_service_schema::ServiceFault),
     Sent(String),
 }
@@ -305,11 +299,6 @@ impl ProbeService<String> for ProbeBackEnd {
 }
 
 impl probe_service_schema::Reply for ProbeReply {
-    async fn done(&self) {
-        ready(()).await;
-        self.record(Settled::Done);
-    }
-
     async fn fault(&self, fault: probe_service_schema::ServiceFault) {
         ready(()).await;
         self.record(Settled::Fault(fault));
@@ -444,14 +433,13 @@ fn an_operation_that_takes_nothing_is_still_dispatched_from_a_payload() {
 }
 
 #[test]
-fn a_one_way_operation_runs_and_then_settles_through_done() {
+fn a_one_way_operation_runs_and_answers_nothing_on_the_handle() {
     let (reached, settled) = dispatched("apply-bundle", r#"{"organization_id":"acme"}"#);
     assert_eq!(reached, vec!["apply_bundle acme".to_owned()]);
-    assert_eq!(
-        settled,
-        vec![Settled::Done],
-        "a one-way arm publishes nothing and still settles the delivery, or ten of them stall the \
-         consumer against its prefetch"
+    assert!(
+        settled.is_empty(),
+        "nothing about replying belongs on a path that never replies; the transport adapter \
+         acknowledges the delivery after `dispatch` returns. Got: {settled:?}"
     );
 }
 
@@ -543,4 +531,61 @@ fn a_message_that_fails_its_own_validator_never_reaches_it_and_the_fault_names_t
         "got: {}",
         reported.detail()
     );
+}
+
+#[test]
+fn every_arm_answers_exactly_the_number_of_times_its_outcome_allows() {
+    // Every arm the service has, on every path through it: the answer, the operation's own error,
+    // a message its validator refuses, bytes that were never the message at all, and a name
+    // nothing answers to. The last field is how many times the handle may be reached — once for a
+    // request-and-reply arm however it goes, and for a one-way arm only where the message was
+    // refused before the implementation ever ran.
+    for (operation, payload, answers) in [
+        ("admit", r#"{"organization_id":"acme"}"#, 1),
+        ("admit", r#"{"organization_id":"ab"}"#, 1),
+        ("apply-bundle", r#"{"organization_id":"acme"}"#, 0),
+        ("apply-bundle", r#"{"organization_id":42}"#, 1),
+        (
+            "expire-credit",
+            r#"{"organizationId":"acme","creditId":"cr-1"}"#,
+            1,
+        ),
+        ("get-balance", r#"{"organization_id":"acme"}"#, 1),
+        ("get-balance", r#"{"organization_id":"unlucky"}"#, 1),
+        ("get-balance", r#"{"organization_id":42}"#, 1),
+        ("get-the-balance", "{}", 1),
+        ("sweep", "{}", 1),
+        ("sweep", "not a document at all", 1),
+    ] {
+        let (_reached, settled) = dispatched(operation, payload);
+        assert_eq!(
+            settled.len(),
+            answers,
+            "`{operation}` on `{payload}` reached the handle {} times. Answering twice answers a \
+             message that was already answered, and answering a message the operation declared no \
+             reply for puts a reply on a queue nothing is reading. Got: {settled:?}",
+            settled.len()
+        );
+        if operation == "apply-bundle" {
+            assert!(
+                !settled.iter().any(|what| matches!(*what, Settled::Sent(_))),
+                "a one-way arm publishes nothing on any path, whether the message reached the \
+                 implementation or was refused before it. Got: {settled:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_one_way_message_refused_before_it_ran_is_the_one_thing_that_arm_answers() {
+    let (never_reached, refused) = dispatched("apply-bundle", r#"{"organization_id":42}"#);
+    assert!(never_reached.is_empty(), "got: {never_reached:?}");
+    let reported = only_fault(&refused).unwrap();
+    assert_eq!(
+        reported.kind(),
+        probe_service_schema::ServiceFaultKind::UndeserializablePayload,
+        "the operation never ran, so the defect is the arm's to report even though the operation \
+         itself declares no reply"
+    );
+    assert_eq!(reported.operation(), "apply-bundle");
 }

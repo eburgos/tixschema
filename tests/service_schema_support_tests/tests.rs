@@ -1,11 +1,13 @@
 //! Two services declared through the macro, one transport serving both, and the call error a
 //! client hands back.
 //!
-//! The reply handle is exercised rather than merely implemented: `done` settles a one-way message
-//! without publishing, and `send` is handed a value the transport serializes itself, which is what
-//! keeps the wire format out of the generator. `fault` has no runtime arm here on purpose — a
-//! fault is constructible only inside the generated module, which is the property the compile-fail
-//! run beside the constructors pins.
+//! The reply handle is exercised rather than merely implemented: `send` is handed a value the
+//! transport serializes itself, which is what keeps the wire format out of the generator, and a
+//! one-way operation reaches it with nothing at all. `fault` has no runtime arm here on purpose —
+//! a fault is constructible only inside the generated module, which is the property the
+//! compile-fail run beside the constructors pins.
+
+#![cfg(feature = "serde")]
 
 use core::future::{Future, ready};
 use core::pin::pin;
@@ -31,7 +33,8 @@ pub struct SweepReport {
 }
 
 pub struct ProbeBackEnd {
-    pub swept: u32,
+    purged: Mutex<Vec<String>>,
+    swept: u32,
 }
 
 /// A transport that writes down what it was asked to do instead of publishing it.
@@ -54,7 +57,8 @@ pub trait UsageService<Ctx> {
 
 impl SweepService<String> for ProbeBackEnd {
     async fn purge(&self, ctx: &String, req: PurgeRequest) {
-        let _read = ready(ctx.len() + req.organization_id.len()).await;
+        let _read = ready(ctx.len()).await;
+        self.purged.lock().unwrap().push(req.organization_id);
     }
 
     async fn sweep(&self, ctx: &String) -> Result<SweepReport, SweepError> {
@@ -76,10 +80,6 @@ impl UsageService<String> for ProbeBackEnd {
 // One transport, two services, two unrelated reply handles: the types are generated per service,
 // so serving both means implementing both.
 impl sweep_service_schema::Reply for ProbeTransport {
-    async fn done(&self) {
-        self.record("settled, nothing published".to_owned());
-    }
-
     async fn fault(&self, fault: sweep_service_schema::ServiceFault) {
         self.record(fault.to_string());
     }
@@ -93,10 +93,6 @@ impl sweep_service_schema::Reply for ProbeTransport {
 }
 
 impl usage_service_schema::Reply for ProbeTransport {
-    async fn done(&self) {
-        self.record("usage settled, nothing published".to_owned());
-    }
-
     async fn fault(&self, fault: usage_service_schema::ServiceFault) {
         self.record(fault.to_string());
     }
@@ -106,6 +102,19 @@ impl usage_service_schema::Reply for ProbeTransport {
         T: Serialize + Send,
     {
         self.record(serde_json::to_string(&value).unwrap());
+    }
+}
+
+impl ProbeBackEnd {
+    fn new(swept: u32) -> Self {
+        Self {
+            purged: Mutex::new(Vec::new()),
+            swept,
+        }
+    }
+
+    fn purged(&self) -> Vec<String> {
+        self.purged.lock().unwrap().clone()
     }
 }
 
@@ -140,24 +149,30 @@ where
 }
 
 #[test]
-fn a_one_way_operation_runs_and_then_settles_through_done() {
-    use sweep_service_schema::Reply as _;
-
-    let service = ProbeBackEnd { swept: 12 };
+fn a_one_way_operation_runs_and_leaves_the_handle_it_was_given_untouched() {
+    let service = ProbeBackEnd::new(12);
     let transport = ProbeTransport::new();
     let ctx = "probe".to_owned();
-    poll_once(service.purge(
+    poll_once(sweep_service_schema::dispatch(
+        &service,
         &ctx,
-        PurgeRequest {
-            organization_id: "acme".to_owned(),
+        &sweep_service_schema::IncomingMessage {
+            operation: "purge".to_owned(),
+            payload: br#"{"organization_id":"acme"}"#.to_vec(),
         },
+        &transport,
     ))
     .unwrap();
-    poll_once(transport.done()).unwrap();
     assert_eq!(
-        transport.settled(),
-        vec!["settled, nothing published".to_owned()],
-        "a one-way operation still has to touch the handle, or its delivery is never acknowledged"
+        service.purged(),
+        vec!["acme".to_owned()],
+        "the implementation is the whole of what a one-way arm reaches"
+    );
+    assert!(
+        transport.settled().is_empty(),
+        "a one-way operation answers nothing, so the handle it was given is never touched at \
+         all; acknowledgement is the transport adapter's, after `dispatch` returns. Got: {:?}",
+        transport.settled()
     );
 }
 
@@ -165,7 +180,7 @@ fn a_one_way_operation_runs_and_then_settles_through_done() {
 fn a_reply_is_handed_the_value_and_the_transport_serializes_it() {
     use sweep_service_schema::Reply as _;
 
-    let service = ProbeBackEnd { swept: 12 };
+    let service = ProbeBackEnd::new(12);
     let transport = ProbeTransport::new();
     let ctx = "probe".to_owned();
     let answered = poll_once(service.sweep(&ctx)).unwrap().unwrap();
@@ -179,18 +194,19 @@ fn a_reply_is_handed_the_value_and_the_transport_serializes_it() {
 
 #[test]
 fn one_transport_serves_two_services_through_two_reply_handles() {
-    let service = ProbeBackEnd { swept: 12 };
+    let service = ProbeBackEnd::new(12);
     let transport = ProbeTransport::new();
     let ctx = "probe".to_owned();
     let counted = poll_once(service.count(&ctx)).unwrap().unwrap();
     poll_once(usage_service_schema::Reply::send(&transport, counted)).unwrap();
-    poll_once(sweep_service_schema::Reply::done(&transport)).unwrap();
+    poll_once(sweep_service_schema::Reply::send(
+        &transport,
+        SweepReport { swept: 7 },
+    ))
+    .unwrap();
     assert_eq!(
         transport.settled(),
-        vec![
-            r#"{"swept":12}"#.to_owned(),
-            "settled, nothing published".to_owned(),
-        ],
+        vec![r#"{"swept":12}"#.to_owned(), r#"{"swept":7}"#.to_owned()],
         "each service generates its own `Reply`, so nothing is shared between the two"
     );
 }

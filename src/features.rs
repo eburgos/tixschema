@@ -23,7 +23,9 @@ pub mod chrono;
 /// Module for parsing model_schema_prop attributes
 pub mod model_schema_prop;
 
-#[cfg(feature = "typescript")]
+// Also gated on `serde`, because `#[service_schema]` is: the emitters this module names live in
+// `crate::service_schema`, which a build without that feature does not have.
+#[cfg(all(feature = "serde", feature = "typescript"))]
 pub mod service_schema;
 
 /// Feature detection utilities.

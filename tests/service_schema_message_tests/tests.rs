@@ -6,6 +6,8 @@
 //! an implementation receives the context in every operation and none of the three surfaces
 //! mentions any of it.
 
+#![cfg(feature = "serde")]
+
 #[cfg(feature = "jsonschema")]
 mod the_generated_message_on_json_schema {
     use super::{CREDIT_ID_KEY, ORGANIZATION_ID_KEY};

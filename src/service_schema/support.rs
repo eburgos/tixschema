@@ -31,17 +31,18 @@
 //! also opens with `use super::*;`, since both of them name the trait's own message types, which
 //! the author declared beside the trait.
 //!
-//! # Why `Reply` has three methods
+//! # Why `Reply` has exactly two methods
 //!
-//! Acknowledging and replying are one act on the transport this has to live on. Every
-//! acknowledgement in the message bus this was measured against sits inside a send, there is no
-//! `nack`, and the consumer that one-way traffic reaches asks for manual acknowledgement with no
-//! dead-letter exchange, no message TTL and no timeout behind it. A one-way operation that
-//! returned without touching the handle would leave its delivery unacknowledged forever and stall
-//! the consumer against its prefetch, so `done` settles the message and publishes nothing. `send`
-//! takes a serializable value rather than bytes because the transport mutates what it is handed
-//! before serializing — an error flag and the correlation id go in — and neither is reachable
-//! behind an encoded buffer.
+//! Replying is all the handle does. A request-and-reply operation answers with `send` or `fault`;
+//! a one-way operation never touches it at all, so nothing about replying appears on a path
+//! that never replies. Acknowledgement is the transport's: `dispatch` returns nothing, so the
+//! adapter that called it still holds the delivery when the arm finishes and acknowledges there,
+//! for every message including a one-way one. That placement matters on the bus this was measured
+//! against, where every acknowledgement sits inside a send, there is no `nack`, and the consumer
+//! one-way traffic reaches asks for manual acknowledgement with no dead-letter exchange, no
+//! message TTL and no timeout behind it. `send` takes a serializable value rather than bytes
+//! because the transport mutates what it is handed before serializing — an error flag and the
+//! correlation id go in — and neither is reachable behind an encoded buffer.
 
 use super::parse::ServiceDef;
 use crate::rename_rule::RenameRule;
@@ -408,10 +409,6 @@ fn fault_declaration(declared: &Ident) -> TokenStream {
 /// }
 ///
 /// impl sweep_service_schema::Reply for ProbeTransport {
-///     async fn done(&self) {
-///         self.settled.lock().unwrap().push("settled, nothing published".to_owned());
-///     }
-///
 ///     async fn fault(&self, fault: sweep_service_schema::ServiceFault) {
 ///         self.settled.lock().unwrap().push(fault.to_string());
 ///     }
@@ -430,18 +427,14 @@ fn reply_declaration(declared: &Ident) -> TokenStream {
     let reply_doc = format!(
         "The handle a transport gives the `{declared}` dispatcher so it can settle *this* \
          message.\n\n\
-         Exactly one of the three is called for every message: a request-and-reply operation \
-         answers with [`send`](Reply::send) or [`fault`](Reply::fault), a one-way operation \
-         settles with [`done`](Reply::done). Encoding sits behind the trait, which is what keeps \
-         the generator out of the wire format."
+         A request-and-reply operation answers with [`send`](Reply::send) or \
+         [`fault`](Reply::fault). A one-way operation calls neither, and the transport \
+         acknowledges the delivery after dispatch returns. Encoding sits behind the trait, which \
+         is what keeps the generator out of the wire format."
     );
     quote! {
         #[doc = #reply_doc]
         pub trait Reply {
-            /// Settle this message and publish nothing. What a one-way operation calls, and the
-            /// only way a delivery carrying no reply destination gets acknowledged.
-            fn done(&self) -> impl ::core::future::Future<Output = ()> + Send;
-
             /// Answer with a defect the operation never declared.
             fn fault(
                 &self,

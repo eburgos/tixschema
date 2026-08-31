@@ -4,6 +4,8 @@
 //! an assertion compares the text the compiler shows against the text the design specifies,
 //! character for character, with no token-rendering escapes in between.
 
+#![cfg(feature = "serde")]
+
 use super::parse::{OperationDef, OperationInputs, OperationOutcome, ServiceDef, parse_service};
 use super::{emitted_trait, exec_service_schema};
 use proc_macro2::TokenStream;
@@ -700,17 +702,22 @@ fn an_arm_validates_before_it_calls_and_faults_on_both_ways_the_message_can_be_w
 }
 
 #[test]
-fn a_one_way_arm_settles_the_delivery_rather_than_skipping_the_handle() {
+fn a_one_way_arm_calls_the_implementation_and_then_touches_the_handle_with_nothing() {
     let emitted = expanded(MIXED_SERVICE);
+    // From the call to the end of the arm: the two fault guards sit above the call, so anything
+    // naming the handle below it would be an answer on a path the operation declared no reply for.
     let called = emitted.find("svc . apply_bundle").unwrap();
-    let settled = emitted[called..].find("reply . done ()").unwrap();
-    let next_arm = emitted[called..]
-        .find("=>")
-        .unwrap_or(emitted.len() - called);
+    let rest = &emitted[called..];
+    let next_arm = rest.find("=>").unwrap_or(rest.len());
+    let tail = &rest[..next_arm];
     assert!(
-        settled < next_arm,
-        "a one-way arm that touched nothing would leave its delivery unacknowledged forever. \
-         Got: {emitted}"
+        tail.contains('}'),
+        "the slice has to reach the end of the arm or it proves nothing. Got: {tail}"
+    );
+    assert!(
+        !tail.contains("reply ."),
+        "nothing about replying belongs on a path that never replies; acknowledgement is the \
+         transport adapter's, after `dispatch` returns. Got: {emitted}"
     );
 }
 
@@ -782,4 +789,54 @@ fn a_fault_is_read_back_through_a_private_mirror_rather_than_by_widening_the_fau
         "the module keeps the unstuttering spelling; only TypeScript needs the prefix. Got: \
          {emitted}"
     );
+}
+
+#[test]
+fn the_emitted_trait_names_the_operation_a_missing_implementation_is_refused_for() {
+    let emitted = rendered(MIXED_SERVICE);
+    // rustc's `E0046` names the trait item an implementation left out, so the name a reader is
+    // sent to look for is whatever ident the emitted trait declares the operation under. The
+    // desugaring rewrites the return type and nothing about the name.
+    for declared in [
+        "fn apply_bundle",
+        "fn can_generate",
+        "fn expire_credit",
+        "fn get_available_balance",
+        "fn sweep",
+    ] {
+        assert!(
+            emitted.contains(declared),
+            "an operation rustc cannot name is one a missing implementation is refused for \
+             silently. Got: {emitted}"
+        );
+    }
+}
+
+#[test]
+fn the_readme_shows_both_one_way_refusals_the_way_the_macro_writes_them() {
+    let readme = include_str!("../../README.md");
+    for (source, shown) in [
+        (
+            "pub trait OrganizationService<Ctx> {
+                async fn apply_bundle(&self, ctx: &Ctx, req: ApplyBundleRequest);
+            }",
+            "service_schema: operation `apply_bundle` has no return type\n       \
+             add `#[service_schema_op(one_way)]` if it expects no reply,\n       \
+             or give it a `Result<Success, Error>` return",
+        ),
+        (
+            "pub trait OrganizationService<Ctx> {
+                #[service_schema_op(one_way)]
+                async fn apply_bundle(&self, ctx: &Ctx, req: ApplyBundleRequest) -> Result<Ack, E>;
+            }",
+            "service_schema: operation `apply_bundle` is marked `one_way` but returns a value\n       \
+             a one-way operation produces no reply",
+        ),
+    ] {
+        assert_eq!(refusals(source), vec![shown.to_owned()]);
+        assert!(
+            readme.contains(shown),
+            "the README no longer shows this refusal verbatim:\n{shown}"
+        );
+    }
 }

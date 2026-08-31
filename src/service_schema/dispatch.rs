@@ -11,10 +11,10 @@
 //! faults, and a fault goes through the reply handle like any other answer rather than becoming a
 //! return value the transport has to interpret.
 //!
-//! Every arm calls exactly one of `send`, `fault` and `done`, and a one-way arm calls `done`. On
-//! the bus this was measured against, acknowledging and replying are one act: an arm that returned
-//! without touching the handle would leave its delivery unacknowledged forever and stall the
-//! consumer against its prefetch.
+//! A request-and-reply arm calls exactly one of `send` and `fault`. A one-way arm calls neither:
+//! it runs the implementation and returns, so nothing about replying appears on a path that never
+//! replies. Acknowledgement is the transport's, not the handle's — `dispatch` returns nothing, so
+//! the adapter that called it still holds the delivery and acknowledges once dispatch is done.
 //!
 //! # What this file emits beside `dispatch`, and who else reads it
 //!
@@ -133,8 +133,7 @@ fn arm(operation: &OperationDef) -> TokenStream {
     let method = &operation.ident;
     let settled = match operation.outcome {
         OperationOutcome::OneWay => quote! {
-            svc.#method(ctx #(, #call)*).await;
-            reply.done().await
+            svc.#method(ctx #(, #call)*).await
         },
         OperationOutcome::Reply { .. } => quote! {
             reply

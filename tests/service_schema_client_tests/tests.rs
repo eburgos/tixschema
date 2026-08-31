@@ -9,6 +9,8 @@
 //! reply handle captured. It is the only place both halves of the seam meet, and it is where the
 //! envelope one writes and the other reads is proven to be one envelope.
 
+#![cfg(feature = "serde")]
+
 use core::future::{Future, ready};
 use core::pin::pin;
 use core::task::{Context as PollContext, Poll, Waker};
@@ -151,11 +153,6 @@ impl ProbeService<String> for ProbeBackEnd {
 }
 
 impl probe_service_schema::Reply for Capture {
-    async fn done(&self) {
-        ready(()).await;
-        self.answered.lock().unwrap().push(Vec::new());
-    }
-
     async fn fault(&self, fault: probe_service_schema::ServiceFault) {
         ready(()).await;
         // The framing is the transport's business: a fault rides tagged inside the failure arm,
