@@ -24,6 +24,13 @@
 //! that does derive it and converts, inside the module, where the fields are reachable. The mirror
 //! is the seam; the seal on the fault survives it.
 //!
+//! # A client takes no context
+//!
+//! The trait's context exists for the thing that answers: a logger, and later whatever else an
+//! implementation reaches for that has no business being in a message. A caller has no
+//! implementation to hand one to, so a client method takes the operation's arguments and nothing
+//! else — which is what the generated TypeScript client has always taken.
+//!
 //! # What this file reads from [`dispatch`](super::dispatch)
 //!
 //! `Answered`, `MessageValidation`, `violated_field` and `violation_detail`, all of which land in
@@ -42,8 +49,9 @@ pub fn emit(service: &ServiceDef) -> TokenStream {
     let client_doc = format!(
         "A `{contract}` caller, over any transport that can send an operation name beside a \
          payload.\n\n\
-         Every operation on the trait has a method here taking the same arguments after the \
-         context. A request-and-reply operation answers `Result<Success, CallError<Error>>`; a \
+         Every operation on the trait has a method here, taking that operation's arguments and \
+         nothing else: the context is the implementation's and never reaches a caller. A \
+         request-and-reply operation answers `Result<Success, CallError<Error>>`; a \
          one-way operation answers nothing beyond the send, save for the fault it owes when the \
          message it was handed fails its own validation."
     );
@@ -122,8 +130,8 @@ fn answer_reader() -> TokenStream {
     }
 }
 
-/// The arguments an operation's client method takes after the context, and the message they are
-/// packed into before it is sent.
+/// The arguments an operation's client method takes, and the message they are packed into before
+/// it is sent.
 fn call_message(operation: &OperationDef) -> (Vec<TokenStream>, TokenStream) {
     match &operation.inputs {
         OperationInputs::Empty => {
@@ -246,9 +254,8 @@ fn method(operation: &OperationDef) -> TokenStream {
     let doc = method_doc(operation);
     quote! {
         #[doc = #doc]
-        pub fn #named<Ctx>(
-            &self,
-            _ctx: &Ctx #(, #taken)*
+        pub fn #named(
+            &self #(, #taken)*
         ) -> impl ::core::future::Future<Output = #answers> + Send {
             async move {
                 #packed
@@ -274,8 +281,8 @@ fn answers(operation: &OperationDef) -> TokenStream {
 fn method_doc(operation: &OperationDef) -> String {
     let named = &operation.ident;
     let carried = &operation.wire_name;
-    let context = " The context is taken so a call reads the same on both sides of the seam; a \
-                    client has no implementation to hand it to and reads nothing out of it.";
+    let context = " No context is taken. A context is what an implementation needs and a caller \
+                    has nothing to hand one to, so a call carries the message and nothing else.";
     match operation.outcome {
         OperationOutcome::OneWay => format!(
             " Sends `{carried}`, which expects no reply.\n\n\

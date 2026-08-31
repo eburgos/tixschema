@@ -298,20 +298,18 @@ fn the_outcome_an_implementation_answers_is_shown_with_no_fault_in_it() {
 
 #[test]
 fn the_client_type_is_shown_with_every_method_the_service_declares() {
-    assert_shown(
+    assert_shown_members(
         &UsageServiceSchema::ts_client(),
-        "export type UsageServiceClient = {\n  \
-         /** Sends `apply-bundle` on `UsageService`, which expects no reply. */\n  \
-         applyBundle(req: AvailableBalanceRequest): Promise<void>;\n  \
-         /** Calls `usage-generation-request` on `UsageService` and waits for the answer. */\n  \
-         canGenerate(req: AvailableBalanceRequest): Promise<UsageServiceCanGenerateResult>;\n  \
-         /** Calls `expire-credit` on `UsageService` and waits for the answer. */\n  \
-         expireCredit(req: ExpireCreditRequest): Promise<UsageServiceExpireCreditResult>;\n  \
-         /** Calls `get-available-balance` on `UsageService` and waits for the answer. */\n  \
-         getAvailableBalance(req: AvailableBalanceRequest): \
-         Promise<UsageServiceGetAvailableBalanceResult>;\n  \
-         /** Calls `sweep` on `UsageService` and waits for the answer. */\n  \
-         sweep(req: SweepRequest): Promise<UsageServiceSweepResult>;\n};",
+        &[
+            "export type UsageServiceClient = {",
+            "  applyBundle(req: AvailableBalanceRequest): Promise<void>;",
+            "  canGenerate(req: AvailableBalanceRequest): Promise<UsageServiceCanGenerateResult>;",
+            "  expireCredit(req: ExpireCreditRequest): Promise<UsageServiceExpireCreditResult>;",
+            "  getAvailableBalance(req: AvailableBalanceRequest): \
+             Promise<UsageServiceGetAvailableBalanceResult>;",
+            "  sweep(req: SweepRequest): Promise<UsageServiceSweepResult>;",
+            "};",
+        ],
     );
 }
 
@@ -374,6 +372,43 @@ fn the_schema_an_empty_message_publishes_is_shown_too() {
     assert_shown(
         &published,
         "export const SweepRequest$Schema: ZodType<SweepRequest> = SweepRequest$RawSchema;",
+    );
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn the_shape_a_refused_one_way_message_is_thrown_as_is_shown() {
+    assert_shown(
+        &UsageServiceSchema::ts_client(),
+        "export type UsageServiceRefusal = Error & { fault: UsageServiceFault };",
+    );
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn the_throw_a_one_way_method_documents_is_shown_as_emitted() {
+    assert_shown(
+        &UsageServiceSchema::ts_client(),
+        "   * @throws {UsageServiceRefusal} when the message fails its own schema. The \
+         operation\n   \
+         * answers `Promise<void>`, so there is no failure arm to put the fault in; the \
+         transport\n   \
+         * is still never reached.",
+    );
+}
+
+#[cfg(feature = "zod")]
+#[test]
+fn the_one_way_refusal_the_client_throws_is_shown_as_emitted() {
+    assert_shown(
+        &UsageServiceSchema::ts_client(),
+        "    async applyBundle(req) {\n      \
+         const validated = AvailableBalanceRequest$Schema.safeParse(req);\n      \
+         if (!validated.success) {\n        \
+         throw usageServiceRefused(usageServiceOutboundFault(\"apply-bundle\", \
+         validated.error.issues));\n      \
+         }\n      \
+         await transport.notify(\"apply-bundle\", validated.data);\n    },",
     );
 }
 
