@@ -11210,6 +11210,113 @@ fn the_shapes_the_macro_expands_are_not_refused() {
     }
 }
 
+/// How many `compile_error!` invocations `tokens` writes, counted off the token trees so a name a
+/// message quotes in its own text is not mistaken for a second diagnostic.
+#[cfg(feature = "serde")]
+fn compile_error_count(tokens: &proc_macro2::TokenStream) -> usize {
+    let mut count = 0;
+    for tree in tokens.clone() {
+        match &tree {
+            proc_macro2::TokenTree::Group(group) => count += compile_error_count(&group.stream()),
+            proc_macro2::TokenTree::Ident(ident) => {
+                if ident == "compile_error" {
+                    count += 1;
+                }
+            }
+            proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => {}
+        }
+    }
+    count
+}
+
+/// The diagnostics `tokens` carries, told from the attribute values and refusal stubs that are
+/// string literals too by the prefix every diagnostic this crate writes opens with.
+#[cfg(feature = "serde")]
+fn refusal_texts(tokens: &proc_macro2::TokenStream) -> Vec<String> {
+    literal_texts(tokens)
+        .into_iter()
+        .filter(|text| text.starts_with("model_schema: "))
+        .collect()
+}
+
+/// The all-unit enum of the untagged case, written under `attributes`.
+#[cfg(feature = "serde")]
+fn all_unit_source(attributes: &str) -> String {
+    format!("{attributes} pub enum BalanceError {{ DbError, InsufficientBalance }}")
+}
+
+/// `#[serde(untagged)]` writes every unit variant as a bare `null`, which the untagged rendering
+/// has no member spelling for and already refuses per variant. An all-unit enum has to reach that
+/// refusal like any other: read as a plain enum instead, it publishes a string union of names
+/// serde never writes. The refusal it earns is that same one, once per offending variant, and it
+/// is the only diagnostic the expansion carries.
+#[cfg(feature = "serde")]
+#[test]
+fn an_all_unit_untagged_enum_earns_the_unit_variant_refusal_on_every_variant() {
+    let tokens = expansion_over(&all_unit_source(
+        "#[serde(rename_all = \"kebab-case\", untagged)]",
+    ));
+    assert_eq!(compile_error_count(&tokens), 2, "got: {tokens}");
+    let refusals = refusal_texts(&tokens);
+    assert_eq!(refusals.len(), 2, "got: {refusals:?}");
+    for (text, variant) in refusals.iter().zip(["DbError", "InsufficientBalance"]) {
+        assert!(
+            text.contains(&format!("variant `{variant}`")),
+            "got: {text}"
+        );
+        assert!(text.contains("is a unit variant"), "got: {text}");
+        assert!(
+            text.contains("supports newtype (`V(T)`) and struct"),
+            "got: {text}"
+        );
+    }
+}
+
+/// The refusal is the whole answer: the surfaces stand down to the stub every refused declaration
+/// publishes, so no variant name reaches a described type as the string union serde is not
+/// writing.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[test]
+fn a_refused_all_unit_untagged_enum_publishes_no_string_union() {
+    let tokens = expansion_over(&all_unit_source(
+        "#[serde(rename_all = \"kebab-case\", untagged)]",
+    ))
+    .to_string();
+    assert!(
+        tokens.contains("refused by `#[model_schema()]`"),
+        "got: {tokens}"
+    );
+    for absent in ["db-error", "insufficient-balance", "z.enum"] {
+        assert!(!tokens.contains(absent), "{absent} present: {tokens}");
+    }
+}
+
+/// The same variants with nothing but the `untagged` attribute taken off them: serde writes the
+/// bare variant name for those, which is the string union the plain-enum path publishes, and no
+/// word of the refusal is earned.
+#[cfg(feature = "serde")]
+#[test]
+fn the_same_all_unit_enum_without_untagged_is_not_refused() {
+    let tokens = expansion_over(&all_unit_source("#[serde(rename_all = \"kebab-case\")]"));
+    assert_eq!(compile_error_count(&tokens), 0, "got: {tokens}");
+    assert!(refusal_texts(&tokens).is_empty(), "got: {tokens}");
+}
+
+/// The same `untagged` attribute over the variant shapes the union does have a member spelling
+/// for: the attribute is not what is refused, the unit variants written under it are.
+#[cfg(feature = "serde")]
+#[test]
+fn the_same_untagged_attribute_over_carrying_variants_is_not_refused() {
+    let tokens = expansion_over(
+        "#[serde(rename_all = \"kebab-case\", untagged)] pub enum BalanceError { DbError(String), \
+         InsufficientBalance { shortfall: u32 } }",
+    );
+    assert_eq!(compile_error_count(&tokens), 0, "got: {tokens}");
+}
+
 /// The text of every string literal in `tokens`, which is where a `compile_error!` carries its
 /// message — read back unescaped, as against the escaped literal `to_string` renders.
 fn literal_texts(tokens: &proc_macro2::TokenStream) -> Vec<String> {
