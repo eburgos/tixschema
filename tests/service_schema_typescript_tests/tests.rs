@@ -133,14 +133,11 @@ mod the_bundle_one_registration_line_produces {
         }
     }
 
-    /// Every schema the bundle's client and dispatcher parse with is declared by the same bundle.
-    /// A schema is a value rather than a type, so none of the checks that read declared type names
-    /// reach it: a bundle naming a `$Schema` nothing declares reads exactly like one that does,
-    /// and is a file that will not compile.
+    /// Every name a bundle's client and dispatcher parse a payload through, read off the parse
+    /// sites themselves. A schema is a value rather than a type, so none of the checks that read
+    /// declared type names reach it.
     #[cfg(feature = "zod")]
-    #[test]
-    fn every_schema_the_bundle_parses_with_is_declared_by_the_bundle() {
-        let (_, written) = written_bundle("tixschema_service_bundle_schemas.ts");
+    fn parsed_through(written: &str) -> Vec<&str> {
         let mut parsed: Vec<&str> = written
             .match_indices("$Schema.safeParse(")
             .filter_map(|(at, _)| {
@@ -151,6 +148,18 @@ mod the_bundle_one_registration_line_produces {
             .collect();
         parsed.sort_unstable();
         parsed.dedup();
+        parsed
+    }
+
+    /// Every schema the bundle's client and dispatcher parse with is declared by the same bundle.
+    /// A schema is a value rather than a type, so none of the checks that read declared type names
+    /// reach it: a bundle naming a `$Schema` nothing declares reads exactly like one that does,
+    /// and is a file that will not compile.
+    #[cfg(feature = "zod")]
+    #[test]
+    fn every_schema_the_bundle_parses_with_is_declared_by_the_bundle() {
+        let (_, written) = written_bundle("tixschema_service_bundle_schemas.ts");
+        let parsed = parsed_through(&written);
         assert!(parsed.len() >= 4, "got: {parsed:?}");
         for named in parsed {
             assert!(
@@ -159,6 +168,49 @@ mod the_bundle_one_registration_line_produces {
                  Got: {written}"
             );
         }
+    }
+
+    /// What a bundle writer gets for leaving an author type's `zod_schema()` line out: the bundle
+    /// above with `author_schemas()` dropped and nothing else changed.
+    ///
+    /// The service's own line carries the schemas of the messages the macro declared and nobody
+    /// else's — it does not own a type the author named and cannot publish its schema line — so a
+    /// bundle naming only its types parses through a value it never declares. Nothing on the Rust
+    /// side refuses that bundle; it is a file the consuming codebase fails to compile.
+    #[cfg(feature = "zod")]
+    #[test]
+    fn a_bundle_missing_an_author_type_s_schema_line_parses_through_a_value_it_never_declares() {
+        let types_only = [
+            BalanceRequest::ts_definition(),
+            BalanceResponse::ts_definition(),
+            ApplyBundleReceipt::ts_definition(),
+            ProbeError::ts_definition(),
+            CreditWriteError::ts_definition(),
+            ProbeServiceSchema::ts_definition(),
+            ProbeServiceSchema::ts_client(),
+            ProbeServiceSchema::ts_service(),
+        ]
+        .join("\n\n");
+        let undeclared: Vec<&str> = parsed_through(&types_only)
+            .into_iter()
+            .filter(|named| !types_only.contains(&format!("export const {named}$Schema")))
+            .collect();
+        assert!(
+            undeclared.contains(&"BalanceRequest"),
+            "the author named `BalanceRequest` on an operation, so the client and the dispatcher \
+             parse through `BalanceRequest$Schema`, and the only line that could declare it is one \
+             the bundle writer omitted. Got: {undeclared:?}"
+        );
+        assert!(
+            types_only.contains("export type BalanceRequest ="),
+            "the type is declared and the schema is not, which is exactly why nothing that reads \
+             declared type names catches this. Got: {types_only}"
+        );
+        assert!(
+            types_only.contains("export const ApplyBundleRequest$Schema"),
+            "a message the macro declared is unaffected: the service's own line carries its \
+             schema, because the service owns the type. Got: {types_only}"
+        );
     }
 
     #[test]
@@ -583,6 +635,7 @@ mod the_envelope_typescript_declares_is_the_one_rust_writes {
         let mut written: Vec<String> = [
             probe_service_schema::ProbeServiceFaultKind::FailedValidation,
             probe_service_schema::ProbeServiceFaultKind::HandlerPanic,
+            probe_service_schema::ProbeServiceFaultKind::TransportFailure,
             probe_service_schema::ProbeServiceFaultKind::UndeserializablePayload,
             probe_service_schema::ProbeServiceFaultKind::UnknownOperation,
         ]
@@ -870,19 +923,20 @@ pub struct PreparedAnswer {
 // those are published only where the Zod surface they parse against is.
 #[cfg(all(feature = "typescript", feature = "zod"))]
 impl probe_service_schema::Transport for PreparedAnswer {
-    async fn notify<T>(&self, _operation: &str, _payload: T)
+    async fn notify<T>(&self, _operation: &str, _payload: T) -> Result<(), String>
     where
         T: serde::Serialize + Send,
     {
         ready(()).await;
+        Ok(())
     }
 
-    async fn request<T>(&self, _operation: &str, _payload: T) -> Vec<u8>
+    async fn request<T>(&self, _operation: &str, _payload: T) -> Result<Vec<u8>, String>
     where
         T: serde::Serialize + Send,
     {
         ready(()).await;
-        self.encoded.clone()
+        Ok(self.encoded.clone())
     }
 }
 

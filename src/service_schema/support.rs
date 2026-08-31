@@ -344,7 +344,7 @@ fn fault_accessors() -> TokenStream {
     }
 }
 
-/// The four ways a fault comes into being, one per kind, private to the generated module so that
+/// The five ways a fault comes into being, one per kind, private to the generated module so that
 /// only the dispatcher and the client — the two emitters written inside it — can reach them.
 ///
 /// A service implementation cannot construct one. This is the run above with a single line added,
@@ -392,6 +392,17 @@ fn fault_constructors() -> TokenStream {
                     detail: detail.to_owned(),
                     field: None,
                     kind: ServiceFaultKind::HandlerPanic,
+                    operation: operation.to_owned(),
+                }
+            }
+
+            fn transport_failure(operation: &str, detail: &str) -> Self {
+                Self {
+                    detail: detail.to_owned(),
+                    // The transport reports that the call did not travel, not that a value inside
+                    // it was wrong, so there is no field to name.
+                    field: None,
+                    kind: ServiceFaultKind::TransportFailure,
                     operation: operation.to_owned(),
                 }
             }
@@ -452,8 +463,8 @@ fn fault_declaration(declared: &Ident) -> TokenStream {
     let kind = format_ident!("{declared}FaultKind", span = declared.span());
     let fault_doc = format!(
         "A failure `{declared}` never declared: a payload that would not deserialize, a message \
-         that failed validation, an operation name nothing recognises, a handler that \
-         panicked.\n\n\
+         that failed validation, an operation name nothing recognises, a handler that panicked, a \
+         call the transport could not carry.\n\n\
          It is a defect rather than a condition, so it is logged at error level and meant to page \
          a human. No implementation of [`{declared}`] can produce one — an operation's signature \
          admits only its own error type, and the constructors are private to this module, which \
@@ -478,6 +489,10 @@ fn fault_declaration(declared: &Ident) -> TokenStream {
             FailedValidation,
             /// The operation's handler panicked.
             HandlerPanic,
+            /// The transport could not carry the call: the message did not go out, or the reply
+            /// never came back. Only a client reports one — the far side, by definition, was
+            /// never reached.
+            TransportFailure,
             /// The payload would not deserialize into the operation's message at all.
             UndeserializablePayload,
             /// Nothing on this service answers to the operation name that arrived.
@@ -605,6 +620,7 @@ fn renderings() -> TokenStream {
                 formatter.write_str(match *self {
                     Self::FailedValidation => "failed validation",
                     Self::HandlerPanic => "handler panic",
+                    Self::TransportFailure => "transport failure",
                     Self::UndeserializablePayload => "undeserializable payload",
                     Self::UnknownOperation => "unknown operation",
                 })
