@@ -387,8 +387,8 @@ fn test_string_literal_zod() {
 
     assert!(zod_schema.contains("aud: z.string()"));
 
-    assert!(zod_schema.contains("sub: z.string().min(1)"));
-    assert!(zod_schema.contains("jti: z.string().min(1)"));
+    assert!(zod_schema.contains("sub: z.string().min(1, { error: (issue) => `too short: minimum length is 1, got ${String(issue.input).length}` })"));
+    assert!(zod_schema.contains("jti: z.string().min(1, { error: (issue) => `too short: minimum length is 1, got ${String(issue.input).length}` })"));
 
     assert!(zod_schema.contains("exp: z.number().int()"));
     assert!(zod_schema.contains("iat: z.number().int()"));
@@ -563,15 +563,15 @@ fn test_min_length_typescript() {
 fn test_min_length_zod() {
     let zod_schema = MinLengthTest::zod_schema();
 
-    assert!(zod_schema.contains("name: z.string().min(1)"));
-    assert!(zod_schema.contains("username: z.string().min(5)"));
-    assert!(zod_schema.contains("password: z.string().min(10)"));
-    assert!(zod_schema.contains("tags: z.array(z.string().min(2))"));
+    assert!(zod_schema.contains("name: z.string().min(1, { error: (issue) => `too short: minimum length is 1, got ${String(issue.input).length}` })"));
+    assert!(zod_schema.contains("username: z.string().min(5, { error: (issue) => `too short: minimum length is 5, got ${String(issue.input).length}` })"));
+    assert!(zod_schema.contains("password: z.string().min(10, { error: (issue) => `too short: minimum length is 10, got ${String(issue.input).length}` })"));
+    assert!(zod_schema.contains("tags: z.array(z.string().min(2, { error: (issue) => `too short: minimum length is 2, got ${String(issue.input).length}` }))"));
 
     assert!(zod_schema.contains("description: z.string(),"));
 
     assert!(zod_schema.contains(
-        "nickname: z.union([z.null().transform(() => undefined), z.string().min(3), z.undefined()])"
+        "nickname: z.union([z.null().transform(() => undefined), z.string().min(3, { error: (issue) => `too short: minimum length is 3, got ${String(issue.input).length}` }), z.undefined()])"
     ));
 }
 
@@ -625,7 +625,7 @@ fn test_combined_literal_minlength_zod() {
     let zod_schema = CombinedTest::zod_schema();
 
     assert!(zod_schema.contains("fixed_field: z.literal(\"fixed\")"));
-    assert!(zod_schema.contains("normal_field: z.string().min(1)"));
+    assert!(zod_schema.contains("normal_field: z.string().min(1, { error: (issue) => `too short: minimum length is 1, got ${String(issue.input).length}` })"));
 }
 
 #[test]

@@ -155,7 +155,7 @@ fn test_a_constrained_path_is_read_and_then_refused_by_validate() {
             .unwrap()
             .validate()
             .unwrap_err(),
-        vec!["'owned' is too short: minimum length is 3, got 2"]
+        vec!["'owned': too short: minimum length is 3, got 2"]
     );
 
     assert_eq!(
@@ -163,7 +163,7 @@ fn test_a_constrained_path_is_read_and_then_refused_by_validate() {
             .unwrap()
             .validate()
             .unwrap_err(),
-        vec!["'owned' does not match pattern '^/[a-z]+$'"]
+        vec!["'owned': does not match pattern '^/[a-z]+$'"]
     );
 
     let accepted = serde_json::from_str::<ConstrainedPath>(r#"{"owned":"/etc"}"#).unwrap();
@@ -179,7 +179,7 @@ fn test_a_constrained_path_is_read_and_then_refused_by_validate() {
     };
     assert_eq!(
         short.validate().unwrap_err(),
-        vec!["'owned' is too short: minimum length is 3, got 2"]
+        vec!["'owned': too short: minimum length is 3, got 2"]
     );
 }
 
@@ -239,9 +239,7 @@ fn test_every_constrained_path_spelling_is_held_to_its_bound() {
         assert_eq!(admitted.as_ref().err(), None);
         assert_eq!(
             admitted.unwrap().validate().unwrap_err(),
-            vec![format!(
-                "'{field}' is too short: minimum length is 3, got 1"
-            )],
+            vec![format!("'{field}': too short: minimum length is 3, got 1")],
             "spelling {field} broke its bound and validate() did not say so"
         );
     }
@@ -259,7 +257,7 @@ fn test_every_constrained_path_spelling_is_held_to_its_bound() {
         short.validate().unwrap_err(),
         SPELLINGS
             .iter()
-            .map(|(field, _)| format!("'{field}' is too short: minimum length is 3, got 1"))
+            .map(|(field, _)| format!("'{field}': too short: minimum length is 3, got 1"))
             .collect::<Vec<_>>(),
         "every spelling must report for itself"
     );
@@ -279,13 +277,13 @@ fn test_the_zod_bound_on_a_path_is_the_bound_validate_enforces() {
     }
 
     let schema = RenderedBound::zod_schema();
-    assert!(schema.contains("owned: z.string().min(3)"), "got: {schema}");
+    assert!(schema.contains("owned: z.string().min(3, { error: (issue) => `too short: minimum length is 3, got ${String(issue.input).length}` })"), "got: {schema}");
     assert_eq!(
         serde_json::from_str::<RenderedBound>(r#"{"owned":"/a"}"#)
             .unwrap()
             .validate()
             .unwrap_err(),
-        vec!["'owned' is too short: minimum length is 3, got 2"],
+        vec!["'owned': too short: minimum length is 3, got 2"],
         "the rendered minimum is one the validator holds the value to"
     );
 }

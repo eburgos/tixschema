@@ -17,7 +17,7 @@ fn test_pattern_zod_output() {
 
     let schema = PatternTest::zod_schema();
     assert!(
-        schema.contains(".check(z.regex(/^[0-9a-fA-F]{24}$/))"),
+        schema.contains(".check(z.regex(/^[0-9a-fA-F]{24}$/, { error: \"does not match pattern '^[0-9a-fA-F]{24}$'\" }))"),
         "Schema: {schema}"
     );
 }
@@ -79,7 +79,7 @@ fn test_pattern_enum_variant_field() {
 
     let schema = PatternEnum::zod_schema();
     assert!(
-        schema.contains(".check(z.regex(/^[0-9a-fA-F]{24}$/))"),
+        schema.contains(".check(z.regex(/^[0-9a-fA-F]{24}$/, { error: \"does not match pattern '^[0-9a-fA-F]{24}$'\" }))"),
         "Schema: {schema}"
     );
 }
@@ -216,7 +216,7 @@ fn test_pattern_and_preprocess_same_field() {
     let schema = PatternAndPreprocess::zod_schema();
     assert!(schema.contains("z.preprocess(trim,"), "Schema: {schema}");
     assert!(
-        schema.contains(".check(z.regex(/^[0-9a-fA-F]{24}$/))"),
+        schema.contains(".check(z.regex(/^[0-9a-fA-F]{24}$/, { error: \"does not match pattern '^[0-9a-fA-F]{24}$'\" }))"),
         "Schema: {schema}"
     );
 }
@@ -235,7 +235,7 @@ fn test_pattern_optional_field_zod() {
     let schema = PatternOptional::zod_schema();
     assert!(
         schema.contains(
-            "z.union([z.null().transform(() => undefined), z.string().check(z.regex(/^[0-9]+$/)), z.undefined()])"
+            "z.union([z.null().transform(() => undefined), z.string().check(z.regex(/^[0-9]+$/, { error: \"does not match pattern '^[0-9]+$'\" })), z.undefined()])"
         ),
         "Expected optional pattern union in Zod schema: {schema}"
     );
@@ -253,15 +253,17 @@ fn test_pattern_with_min_max_length_zod() {
 
     let schema = PatternMinMaxLen::zod_schema();
     assert!(
-        schema.contains(".min(3)"),
-        "Expected .min(3) in Zod schema: {schema}"
+        schema.contains(".min(3, { error: (issue) => `too short: minimum length is 3, got ${String(issue.input).length}` })"),
+        "Expected the minLength check in Zod schema: {schema}"
     );
     assert!(
-        schema.contains(".max(20)"),
-        "Expected .max(20) in Zod schema: {schema}"
+        schema.contains(".max(20, { error: (issue) => `too long: maximum length is 20, got ${String(issue.input).length}` })"),
+        "Expected the maxLength check in Zod schema: {schema}"
     );
     assert!(
-        schema.contains(".check(z.regex(/^[a-z]+$/))"),
+        schema.contains(
+            ".check(z.regex(/^[a-z]+$/, { error: \"does not match pattern '^[a-z]+$'\" }))"
+        ),
         "Expected .check(z.regex(...)) in Zod schema: {schema}"
     );
 }
@@ -347,7 +349,7 @@ fn test_pattern_special_regex_chars() {
     // are not: a flagless Zod literal reads that as ASCII where the Rust validator reads the
     // Unicode class, so the members it stands for are written out and both read the one set.
     assert!(
-        schema.contains(r".check(z.regex(/^[0-9]{3}\.[0-9]{3}\.[0-9]{3}-[0-9]{2}$/))"),
+        schema.contains(r#".check(z.regex(/^[0-9]{3}\.[0-9]{3}\.[0-9]{3}-[0-9]{2}$/, { error: "does not match pattern '^[0-9]{3}\\.[0-9]{3}\\.[0-9]{3}-[0-9]{2}$'" }))"#),
         "Expected special regex chars passed through in Zod schema: {schema}"
     );
 }
@@ -385,11 +387,13 @@ fn test_pattern_enum_variant_with_min_length() {
 
     let schema = PatternEnumMinLen::zod_schema();
     assert!(
-        schema.contains(".min(2)"),
-        "Expected .min(2) in Zod enum schema: {schema}"
+        schema.contains(".min(2, { error: (issue) => `too short: minimum length is 2, got ${String(issue.input).length}` })"),
+        "Expected the minLength check in Zod enum schema: {schema}"
     );
     assert!(
-        schema.contains(".check(z.regex(/^[a-z]+$/))"),
+        schema.contains(
+            ".check(z.regex(/^[a-z]+$/, { error: \"does not match pattern '^[a-z]+$'\" }))"
+        ),
         "Expected .check(z.regex(...)) in Zod enum schema: {schema}"
     );
 }
@@ -449,7 +453,9 @@ fn test_a_slash_in_a_field_pattern_escapes_the_zod_regex_delimiter() {
 
     let schema = SlashField::zod_schema();
     assert!(
-        schema.contains(r".check(z.regex(/^\/[a-z]+$/))"),
+        schema.contains(
+            r#".check(z.regex(/^\/[a-z]+$/, { error: "does not match pattern '^/[a-z]+$'" }))"#
+        ),
         "Expected the slash escaped inside the regex literal: {schema}"
     );
 }
@@ -464,7 +470,9 @@ fn test_a_slash_in_a_brand_pattern_escapes_the_zod_regex_delimiter() {
 
     let schema = SlashBrand::zod_schema();
     assert!(
-        schema.contains(r".check(z.regex(/^\/[a-z]+$/))"),
+        schema.contains(
+            r#".check(z.regex(/^\/[a-z]+$/, { error: "does not match pattern '^/[a-z]+$'" }))"#
+        ),
         "Expected the slash escaped inside the regex literal: {schema}"
     );
 }
@@ -481,11 +489,13 @@ fn test_an_already_escaped_slash_is_not_escaped_twice() {
 
     let schema = EscapedSlashField::zod_schema();
     assert!(
-        schema.contains(r".check(z.regex(/^\/[a-z]+$/))"),
+        schema.contains(
+            r#".check(z.regex(/^\/[a-z]+$/, { error: "does not match pattern '^\\/[a-z]+$'" }))"#
+        ),
         "Expected the existing escape carried through untouched: {schema}"
     );
     assert!(
-        !schema.contains(r"\\/"),
+        !schema.contains(r"z.regex(/^\\/"),
         "An escaped slash must not gain a second backslash: {schema}"
     );
 }
@@ -503,7 +513,7 @@ fn test_a_backslash_escape_before_a_slash_is_read_as_one_unit() {
 
     let schema = LiteralBackslashField::zod_schema();
     assert!(
-        schema.contains(r".check(z.regex(/^\\\/[a-z]+$/))"),
+        schema.contains(r#".check(z.regex(/^\\\/[a-z]+$/, { error: "does not match pattern '^\\\\/[a-z]+$'" }))"#),
         "Expected the slash after a literal backslash escaped: {schema}"
     );
 }
@@ -572,7 +582,9 @@ fn test_a_raw_newline_in_a_field_pattern_escapes_for_the_zod_regex_literal() {
 
     let schema = NewlineField::zod_schema();
     assert!(
-        schema.contains(r".check(z.regex(/^a\n[a-z]+$/))"),
+        schema.contains(
+            r#".check(z.regex(/^a\n[a-z]+$/, { error: "does not match pattern '^a\n[a-z]+$'" }))"#
+        ),
         "Expected the newline escaped inside the regex literal: {schema}"
     );
     assert!(
@@ -591,7 +603,9 @@ fn test_a_raw_newline_in_a_brand_pattern_escapes_for_the_zod_regex_literal() {
 
     let schema = NewlineBrand::zod_schema();
     assert!(
-        schema.contains(r".check(z.regex(/^a\n[a-z]+$/))"),
+        schema.contains(
+            r#".check(z.regex(/^a\n[a-z]+$/, { error: "does not match pattern '^a\n[a-z]+$'" }))"#
+        ),
         "Expected the newline escaped inside the regex literal: {schema}"
     );
 }
@@ -622,17 +636,19 @@ fn test_every_other_raw_line_terminator_escapes_for_the_zod_regex_literal() {
 
     let cr = CarriageReturnField::zod_schema();
     assert!(
-        cr.contains(r".check(z.regex(/^a\r[a-z]+$/))"),
+        cr.contains(
+            r#".check(z.regex(/^a\r[a-z]+$/, { error: "does not match pattern '^a\r[a-z]+$'" }))"#
+        ),
         "Expected the carriage return escaped: {cr}"
     );
     let ls = LineSeparatorField::zod_schema();
     assert!(
-        ls.contains(r".check(z.regex(/^a\u2028[a-z]+$/))"),
+        ls.contains(r#".check(z.regex(/^a\u2028[a-z]+$/, { error: "does not match pattern '^a\u2028[a-z]+$'" }))"#),
         "Expected the line separator escaped: {ls}"
     );
     let ps = ParagraphSeparatorField::zod_schema();
     assert!(
-        ps.contains(r".check(z.regex(/^a\u2029[a-z]+$/))"),
+        ps.contains(r#".check(z.regex(/^a\u2029[a-z]+$/, { error: "does not match pattern '^a\u2029[a-z]+$'" }))"#),
         "Expected the paragraph separator escaped: {ps}"
     );
     for schema in [&cr, &ls, &ps] {
@@ -655,11 +671,13 @@ fn test_an_authored_newline_escape_is_not_escaped_twice() {
 
     let schema = EscapedNewlineField::zod_schema();
     assert!(
-        schema.contains(r".check(z.regex(/^a\n[a-z]+$/))"),
+        schema.contains(
+            r#".check(z.regex(/^a\n[a-z]+$/, { error: "does not match pattern '^a\\n[a-z]+$'" }))"#
+        ),
         "Expected the existing escape carried through untouched: {schema}"
     );
     assert!(
-        !schema.contains(r"\\n"),
+        !schema.contains(r"z.regex(/^a\\n"),
         "An escaped newline must not gain a second backslash: {schema}"
     );
 }
@@ -721,7 +739,7 @@ fn test_a_rust_named_group_reaches_the_zod_literal_as_javascript_spells_it() {
 
     let schema = RustNamedGroup::zod_schema();
     assert!(
-        schema.contains("z.regex(/^(?<word>[a-z]+)-(?<number>[0-9]+)$/)"),
+        schema.contains("z.regex(/^(?<word>[a-z]+)-(?<number>[0-9]+)$/, { error: \"does not match pattern '^(?<word>[a-z]+)-(?<number>[0-9]+)$'\" })"),
         "Schema: {schema}"
     );
     assert!(

@@ -279,7 +279,7 @@ fn violation_readers() -> TokenStream {
     quote! {
         /// The field one line names, where it is written in the shape every validator
         /// `#[model_schema()]` generates: the field first and in single quotes —
-        /// `'organization_id' is too short: …`. A line written any other way names none.
+        /// `'organization_id': too short: …`. A line written any other way names none.
         ///
         /// It is read off a deserializer's refusal as well as off a validator's report, because
         /// those are the same message. A field carrying a constraint gets a serde

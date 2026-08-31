@@ -2216,7 +2216,7 @@ fn a_lifetime_struct_still_holds_its_field_to_its_bound() {
             .unwrap()
             .validate()
             .unwrap_err(),
-        vec!["'label' is too short: minimum length is 1, got 0"],
+        vec!["'label': too short: minimum length is 1, got 0"],
         "the borrowed field was read and then held to its bound"
     );
 
@@ -2232,7 +2232,7 @@ fn a_lifetime_struct_still_holds_its_field_to_its_bound() {
     };
     assert_eq!(
         empty.validate().unwrap_err(),
-        vec!["'label' is too short: minimum length is 1, got 0"]
+        vec!["'label': too short: minimum length is 1, got 0"]
     );
 }
 
@@ -2259,7 +2259,7 @@ fn a_lifetime_beside_a_type_parameter_still_pins_validate_to_the_declared_defaul
     };
     assert_eq!(
         untagged.validate().unwrap_err(),
-        vec!["'tag' is too short: minimum length is 1, got 0"]
+        vec!["'tag': too short: minimum length is 1, got 0"]
     );
 
     let other_instantiation = AnnotatedConstrained {

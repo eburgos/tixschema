@@ -3646,7 +3646,7 @@ fn test_set_element_zod_generation() {
     for spelling in [
         "aliased_tags: z.array(MetricTagRefType$Schema),",
         "big_ids: z.array(z.number().int()),",
-        "constrained_labels: z.array(z.string().min(3)),",
+        "constrained_labels: z.array(z.string().min(3, { error: (issue) => `too short: minimum length is 3, got ${String(issue.input).length}` })),",
         "labels: z.array(z.string()),",
         // The preprocess wrap belongs once, outside the array — where the `Vec` spelling puts it.
         "preprocessed_labels: z.preprocess(trim, z.array(z.string())),",
@@ -4156,7 +4156,7 @@ fn test_nested_sequences_validate_at_the_depth_they_are_written() {
     let zod_schema = NestedSequenceFields::zod_schema();
     for spelling in [
         "aliased_rows: z.array(z.array(MetricTagRefType$Schema)),",
-        "constrained_rows: z.array(z.array(z.string().min(3))),",
+        "constrained_rows: z.array(z.array(z.string().min(3, { error: (issue) => `too short: minimum length is 3, got ${String(issue.input).length}` }))),",
         "deep_ids: z.array(z.array(z.array(z.number().int()))),",
         "fixed_grid: z.array(z.array(z.number().int()).length(2)).length(2),",
         "labels: z.array(z.array(z.string())),",

@@ -751,7 +751,7 @@ fn test_serde_round_trip_nested_recursive_union() {
 fn test_date_string_branded_pattern_zod() {
     let zod = DateString::zod_schema();
     assert!(
-        zod.contains(".check(z.regex(/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/))"),
+        zod.contains(".check(z.regex(/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/, { error: \"does not match pattern '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'\" }))"),
         "Got:\n{zod}"
     );
 }
@@ -1470,7 +1470,7 @@ fn test_untagged_string_array_member_zod() {
     for member in [
         "z.strictObject({ tags: z.array(z.string()), })",
         "z.strictObject({ rows: z.array(z.array(z.string())), })",
-        "z.strictObject({ slugs: z.array(z.string().min(2).check(z.regex(/^[a-z]+$/))), })",
+        "z.strictObject({ slugs: z.array(z.string().min(2, { error: (issue) => `too short: minimum length is 2, got ${String(issue.input).length}` }).check(z.regex(/^[a-z]+$/, { error: \"does not match pattern '^[a-z]+$'\" }))), })",
     ] {
         assert!(zod.contains(member), "Got:\n{zod}");
     }
@@ -1482,7 +1482,7 @@ fn test_untagged_string_array_member_zod() {
 #[test]
 #[cfg(feature = "zod")]
 fn test_untagged_member_constraint_zod() {
-    let expected = "slug: z.string().min(2).check(z.regex(/^[a-z]+$/)),";
+    let expected = "slug: z.string().min(2, { error: (issue) => `too short: minimum length is 2, got ${String(issue.input).length}` }).check(z.regex(/^[a-z]+$/, { error: \"does not match pattern '^[a-z]+$'\" })),";
     let untagged = ConstrainedUnion::zod_schema();
     assert!(untagged.contains(expected), "Got:\n{untagged}");
     assert!(
@@ -1598,8 +1598,11 @@ fn test_the_bound_runs_on_an_untagged_read_and_in_a_tagged_twins_validator() {
             .unwrap()
             .validate()
             .unwrap_err(),
-        vec!["'slug' is too short: minimum length is 2, got 1"],
-        "the tag settled which variant this is, so the payload is a message and the bound is \
+        vec![
+            "'slug': too short: minimum length is 2, got 1",
+            "'slug': does not match pattern '^[a-z]+$'",
+        ],
+        "the tag settled which variant this is, so the payload is a message and the bounds are \
          what it failed"
     );
 }
@@ -1609,7 +1612,10 @@ fn test_the_bound_runs_on_an_untagged_read_and_in_a_tagged_twins_validator() {
 /// value built or read back in Rust has nothing else to ask. It answers in the tagged twin's words.
 #[test]
 fn test_untagged_union_publishes_validate_for_its_constrained_members() {
-    let expected = vec!["'slug' is too short: minimum length is 2, got 1".to_owned()];
+    let expected = vec![
+        "'slug': too short: minimum length is 2, got 1".to_owned(),
+        "'slug': does not match pattern '^[a-z]+$'".to_owned(),
+    ];
     assert_eq!(
         SoleConstrainedUnion::Slug {
             slug: "A".to_owned()
@@ -1643,7 +1649,7 @@ fn test_untagged_validate_runs_only_the_held_variants_checks() {
         }
         .validate()
         .unwrap_err(),
-        vec!["'name' is too short: minimum length is 2, got 1".to_owned()]
+        vec!["'name': too short: minimum length is 2, got 1".to_owned()]
     );
     assert!(
         CheckedThenLooseUnion::Loose {

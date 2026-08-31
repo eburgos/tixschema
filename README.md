@@ -702,7 +702,7 @@ let refused = serde_json::from_str::<SoleConstrained>(r#"{"slug":"A"}"#).unwrap_
 assert_eq!(refused.to_string(), "data did not match any variant of untagged enum SoleConstrained");
 ```
 
-The tagged twin of that declaration reads back `'slug' is too short: minimum length is 2, got 1`, because its tag names the variant before its members are read. To learn which bound refused an untagged value, ask a surface that answers per member rather than per variant: validate the payload against the generated Zod schema or JSON Schema for a diagnosable verdict, or -- once the value is in hand -- call the enum's `validate()`, or the schema module's `validate_{variant}_{member}_value` directly.
+The tagged twin of that declaration reads back `'slug': too short: minimum length is 2, got 1`, because its tag names the variant before its members are read. To learn which bound refused an untagged value, ask a surface that answers per member rather than per variant: validate the payload against the generated Zod schema or JSON Schema for a diagnosable verdict, or -- once the value is in hand -- call the enum's `validate()`, or the schema module's `validate_{variant}_{member}_value` directly.
 
 A member holding a map or a tuple describes as the struct field written from the same type does, on every surface. A map is dispatched on the classification its key earns -- enumerated properties for a key whose members the expansion knows, `additionalProperties` for an open one -- and a key no surface can write is refused at the member, at whatever depth the map sits at. A tuple is the fixed-arity array Serde writes, `prefixItems` and the arity bounds included. A member the parser could not classify at all is the one shape that stays permissive: it carries no type name to narrow with, so it admits any value, exactly as the same field does.
 
@@ -1219,7 +1219,7 @@ You can add `pattern`, `minLength`, and `maxLength` constraints directly on the 
 
 **The inner type has to be one whose schema is a string** — `String`, `PathBuf`, `ObjectId`, a chrono date/time type, or a named type whose own schema is one of those. A numeric, boolean, container (`Vec`, array, `HashMap`, tuple), or opaque inner is rejected at expansion time, because the three constraints are string checks and each surface would read them differently: Zod's `.min`/`.max` become bounds on the value itself, JSON Schema ignores `minLength`/`maxLength`/`pattern` outside `"type": "string"`, and `validate()` measures the inner's `Display` rendering.
 
-**A named inner is judged by what the named type publishes**, not by the fact that it is a name. The brand appends its checks to that type's own schema binding — `Inner$Schema.min(3)` — so a name whose schema is an object, a union, a `z.enum`, a number, an array or `z.unknown()` is rejected exactly as the same shape spelled directly is, and the refusal names both the brand and the inner. A brand over `serde_json::Value` is opaque, and so is a brand over that brand.
+**A named inner is judged by what the named type publishes**, not by the fact that it is a name. The brand appends its checks to that type's own schema binding — `Inner$Schema.min(3, ...)` — so a name whose schema is an object, a union, a `z.enum`, a number, an array or `z.unknown()` is rejected exactly as the same shape spelled directly is, and the refusal names both the brand and the inner. A brand over `serde_json::Value` is opaque, and so is a brand over that brand.
 
 That answer comes from the type's own expansion, so it is only available once that expansion has run: a brand written **above** the type it names, or over a type this crate never expands at all, is admitted with the emission it has always had. Declaration order is not a diagnostic — moving a declaration must not turn a compiling program into a rejected one — so keep a constrained brand below the type it constrains if you want the check.
 
@@ -1250,7 +1250,7 @@ export const DocumentId$SchemaFactory = <IdType extends ZodType>(idType: IdType)
 
 // $SchemaDefault composes the factory with the constrained default argument.
 export const DocumentId$SchemaDefault = DocumentId$SchemaFactory(
-  z.string().min(24).max(24).check(z.regex(/^[a-f0-9]{24}$/)),
+  z.string().min(24, { error: (issue) => `too short: minimum length is 24, got ${String(issue.input).length}` }).max(24, { error: (issue) => `too long: maximum length is 24, got ${String(issue.input).length}` }).check(z.regex(/^[a-f0-9]{24}$/, { error: "does not match pattern '^[a-f0-9]{24}$'" })),
 );
 ```
 
@@ -1298,7 +1298,7 @@ pub struct SlugId(pub String);
 Generated Zod:
 
 ```typescript
-const SlugId$RawSchema = z.string().min(3).max(50).check(z.regex(/^[a-z0-9_]+$/)).brand<"SlugId">().meta({
+const SlugId$RawSchema = z.string().min(3, { error: (issue) => `too short: minimum length is 3, got ${String(issue.input).length}` }).max(50, { error: (issue) => `too long: maximum length is 50, got ${String(issue.input).length}` }).check(z.regex(/^[a-z0-9_]+$/, { error: "does not match pattern '^[a-z0-9_]+$'" })).brand<"SlugId">().meta({
   description: "SlugId",
 });
 
@@ -1329,11 +1329,11 @@ assert!(slug.validate().is_ok());
 let bad = SlugId("ab".to_string());
 match bad.validate() {
     Ok(()) => unreachable!(),
-    Err(errors) => println!("{:?}", errors), // ["value is too short: minimum length is 3, got 2"]
+    Err(errors) => println!("{:?}", errors), // ["too short: minimum length is 3, got 2"]
 }
 ```
 
-A brand names the rejected value `value`, bare, where a struct field is named and quoted (`'username'`): a newtype has one value and no field name to quote.
+A brand's report names no field where a struct field's is named and quoted (`'username': ...`): a newtype has one value and no field name to quote, so whatever holds it supplies the name.
 
 You can use any combination of the three constraints:
 
@@ -1925,11 +1925,20 @@ pub struct UserProfile {
 }
 ```
 
-Generated Zod for `username`: `z.string().min(3).max(30).check(z.regex(/^[a-z0-9_]+$/))`
+Generated Zod for `username` -- each check carrying the sentence the Rust validator reports for the same bound, so the two languages answer a bad value with the same words:
+
+```text
+z.string()
+  .min(3, { error: (issue) => `too short: minimum length is 3, got ${String(issue.input).length}` })
+  .max(30, { error: (issue) => `too long: maximum length is 30, got ${String(issue.input).length}` })
+  .check(z.regex(/^[a-z0-9_]+$/, { error: "does not match pattern '^[a-z0-9_]+$'" }))
+```
 
 Generated JSON Schema for `username`: `{ "type": "string", "minLength": 3, "maxLength": 30, "pattern": "^[a-z0-9_]+$" }`
 
 The TypeScript type is unchanged -- still just `string`.
+
+A value breaking more than one of a field's bounds is reported once per bound on both sides, in the order the bounds were declared: `validate()` collects every violation rather than stopping at the first, and every check on the Zod schema runs. So `"A!"` in the field above reads `'username': too short: minimum length is 3, got 2; 'username': does not match pattern '^[a-z0-9_]+$'` from a Rust service and from a TypeScript one alike.
 
 A type whose schema this crate writes whole carries none of the five constraints, and writing one on
 such a field is a compile error naming the keys and the type: `ObjectId` writes a `{"$oid": "..."}`
@@ -2028,14 +2037,14 @@ match reg.validate() {
         for e in &errors {
             println!("Error: {e}");
         }
-        // "'username' is too short: minimum length is 3, got 2"
-        // "'age' is too large: maximum is 120, got 150"
+        // "'username': too short: minimum length is 3, got 2"
+        // "'age': too large: maximum is 120, got 150"
     }
 }
 ```
 
 The macro also generates into the type's schema module:
-- `validate_{field}_value(&FieldType) -> Result<(), String>` -- pure static validator per field
+- `validate_{field}_value(&FieldType) -> Result<(), Vec<String>>` -- pure static validator per field, answering every bound the value broke in the order they were declared
 - `deserialize_{field}(D) -> Result<FieldType, E>` -- serde hook that calls the static validator
 
 A constrained field of an enum variant is named for its variant too -- `validate_{variant}_{field}_value` and `deserialize_{variant}_{field}`, with `{variant}` in `snake_case`. One schema module holds every variant's helpers, and a field name is unique only within the variant that declares it, so two variants naming one field carry their own constraints.
@@ -2060,7 +2069,7 @@ pub enum Action {
 let deleting = Action::Delete { note: "abc".to_string() };
 assert_eq!(
     deleting.validate().unwrap_err(),
-    vec!["'note' is too short: minimum length is 5, got 3".to_string()],
+    vec!["'note': too short: minimum length is 5, got 3".to_string()],
 );
 // The same value read as an `Upload` is held to that variant's own minimum, and passes.
 assert!(Action::Upload { note: "abc".to_string() }.validate().is_ok());
@@ -2093,7 +2102,7 @@ A constraint describes the value, not the shape. A payload carrying a value it r
 
 A field still generates both helpers into its schema module: `validate_{field}_value()`, which `validate()` calls, and `deserialize_{field}`, a serde hook an author may hang on a field of their own accord. Two positions carry a check on the read without being asked to, and both have to:
 
-- **A member of an `#[serde(untagged)]` enum**, where whether the member is admissible is what chooses which variant the payload is. The check is part of reading the value rather than part of judging it -- exactly as it is under `anyOf` and `z.union` on the two schema surfaces the same type publishes -- and `validate()` cannot stand in for it, since by the time it runs the variant has already been chosen. A wrapped member's hook deserializes the member's own declared type and then runs the same walk `validate()` runs over it; the two differ in that `validate()` answers with every violation in the instance while a `Deserializer` answers with one error, so the read stops at the first.
+- **A member of an `#[serde(untagged)]` enum**, where whether the member is admissible is what chooses which variant the payload is. The check is part of reading the value rather than part of judging it -- exactly as it is under `anyOf` and `z.union` on the two schema surfaces the same type publishes -- and `validate()` cannot stand in for it, since by the time it runs the variant has already been chosen. A wrapped member's hook deserializes the member's own declared type and then runs the same walk `validate()` runs over it; the two differ in that `validate()` answers with every violation in the instance while a `Deserializer` answers with one line, so the read stops at the first value that broke a bound and hands serde that value's violations joined by `; `.
 - **A constrained brand**, where the same reasoning applies wherever the brand is used as an untagged member. The hook is on the brand's type rather than on the field, so it is one hook covering every position the brand appears in.
 
 A field whose key may be left out keeps that reading. Where a member is hung with the hook -- an untagged variant's, which is the one position that is -- an `Option` written outermost (under any number of transparent wrappers) is given `#[serde(default)]` alongside it, since a `deserialize_with` otherwise turns a missing key into an error; a field that writes its own `default` keeps the one it wrote. Off the hook there is nothing to put back and no `default` is written, so a required key that goes missing is still the error it always was.
@@ -2117,14 +2126,14 @@ pub struct Enrolment {
 
 ```rust
 Enrolment { slug: Slug("a".to_string()) }.validate();
-// Err(["'slug': value is too short: minimum length is 3, got 1"])
+// Err(["'slug': too short: minimum length is 3, got 1"])
 ```
 
-The brand's own report says `value is too short: ...` and names nothing, the brand being the value rather than a field of anything -- so the field name is the message's to supply, written first and in single quotes, which is where a reader of these reports already looks for one: `'slug': value is too short: ...`. A nested type's report already names its own member, and the field name is written *into* that name rather than in front of it: `'holds.name' is too short: ...`. One quoted run carries the whole path, so a reader taking the first one gets the member that was actually wrong rather than the hop above it -- and it is the string the TypeScript schema published from the same declaration reports for the same payload.
+The brand's own report says `too short: ...` and names nothing, the brand being the value rather than a field of anything -- so the field name is the message's to supply, written first and in single quotes, which is where a reader of these reports already looks for one: `'slug': too short: ...`. A nested type's report already names its own member, and the field name is written *into* that name rather than in front of it: `'holds.name': too short: ...`. One quoted run carries the whole path, so a reader taking the first one gets the member that was actually wrong rather than the hop above it -- and it is the string the TypeScript schema published from the same declaration reports for the same payload.
 
-A `#[serde(flatten)]` hop writes no key, so it contributes no segment: a bound under a flattened `claims` inside `account` reads `'account.jti' is too short: ...`, which is what the wire carries and what TypeScript names.
+A `#[serde(flatten)]` hop writes no key, so it contributes no segment: a bound under a flattened `claims` inside `account` reads `'account.jti': too short: ...`, which is what the wire carries and what TypeScript names.
 
-This reaches through the same wrappers a constraint is reached through -- `Option`, sequences, `Box`/`Cow`/`Rc`/`Arc`, fixed arrays -- and applies to a struct's field, to a named member of an enum variant under any tagging, and to the lone slot of an `#[serde(untagged)]` newtype variant. That last one contributes no segment either, for the same reason a flattened hop contributes none: what an untagged newtype member writes on the wire *is* the inner value, so a violation beneath it is already one of the enclosing object's own keys. So a union of newtype members publishes a `validate()` that dispatches to whichever variant the value holds, and a field holding such a union reports the path the payload spells -- `'account.jti' is too short: ...` whether the account is a union or a plain struct.
+This reaches through the same wrappers a constraint is reached through -- `Option`, sequences, `Box`/`Cow`/`Rc`/`Arc`, fixed arrays -- and applies to a struct's field, to a named member of an enum variant under any tagging, and to the lone slot of an `#[serde(untagged)]` newtype variant. That last one contributes no segment either, for the same reason a flattened hop contributes none: what an untagged newtype member writes on the wire *is* the inner value, so a violation beneath it is already one of the enclosing object's own keys. So a union of newtype members publishes a `validate()` that dispatches to whichever variant the value holds, and a field holding such a union reports the path the payload spells -- `'account.jti': too short: ...` whether the account is a union or a plain struct.
 
 It reaches nothing through a map or a tuple. It also reaches nothing through a *tagged* variant's positional slot or a tuple struct's slots, which have no name to report under and no arm named for them; those are the same limits a constraint's own walk has.
 

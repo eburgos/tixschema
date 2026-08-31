@@ -1,3 +1,4 @@
+mod bound_message;
 mod features;
 mod field_type;
 mod model_schema;
@@ -706,7 +707,15 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 /// }
 /// ```
 ///
-/// Generated Zod: `z.string().min(3).max(50).check(z.regex(/^[a-z0-9_]+$/))`.
+/// Generated Zod, with each check carrying the sentence the Rust validator reports for the same
+/// bound, so a caller reaching either implementation of a service is told the same thing:
+///
+/// ```text
+/// z.string()
+///   .min(3, { error: (issue) => `too short: minimum length is 3, got ${String(issue.input).length}` })
+///   .max(50, { error: (issue) => `too long: maximum length is 50, got ${String(issue.input).length}` })
+///   .check(z.regex(/^[a-z0-9_]+$/, { error: "does not match pattern '^[a-z0-9_]+$'" }))
+/// ```
 ///
 /// Generated JSON Schema: `{ "type": "string", "minLength": 3, "maxLength": 50, "pattern": "^[a-z0-9_]+$" }`.
 ///
@@ -781,8 +790,8 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 ///         for e in &errors {
 ///             println!("Error: {e}");
 ///         }
-///         // "'username' is too short: minimum length is 3, got 2"
-///         // "'age' is too large: maximum is 120, got 150"
+///         // "'username': too short: minimum length is 3, got 2"
+///         // "'age': too large: maximum is 120, got 150"
 ///     }
 /// }
 /// ```
