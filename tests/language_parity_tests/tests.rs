@@ -90,11 +90,20 @@ mod declarations {
 /// those: the fault the generated Rust dispatcher answers a payload with, against what the
 /// generated TypeScript dispatcher would answer the same payload, read off the TypeScript that
 /// dispatcher published rather than written down here.
-#[cfg(all(feature = "serde", feature = "zod"))]
+///
+/// The `typescript` feature is part of the gate, unlike everything above it. What the comparison
+/// reads the TypeScript half from is `GateServiceSchema`, and only a build emitting TypeScript
+/// declares that type at all — a build without it has the Rust dispatcher and nothing to hold it
+/// against, which is a comparison that cannot be written rather than one that passes trivially.
+#[cfg(all(feature = "serde", feature = "typescript", feature = "zod"))]
 mod refusals {
+    use super::declarations::{Account, OrganizationId};
     // The schema module each held type publishes is named beside the type, and the emitted code
     // reaches it unqualified — so a type declared elsewhere is held by bringing its module along.
-    use super::declarations::{Account, OrganizationId, account_schema, organization_id_schema};
+    // Only the JSON-schema emission reaches for a sibling module that way; the Zod and TypeScript
+    // surfaces name the published type itself and need nothing brought along for it.
+    #[cfg(feature = "jsonschema")]
+    use super::declarations::{account_schema, organization_id_schema};
     use core::future::{Future, ready};
     use core::pin::pin;
     use core::task::{Context as PollContext, Poll, Waker};
@@ -559,7 +568,7 @@ fn no_emitted_check_is_left_to_report_in_zods_own_words() {
 /// brand's report names no field, the brand being the value rather than a member of anything. What
 /// a caller is owed is still the key it got wrong, and it is owed the same one from either
 /// language: the field the value was held in, spelled the way the wire spells it.
-#[cfg(all(feature = "serde", feature = "zod"))]
+#[cfg(all(feature = "serde", feature = "typescript", feature = "zod"))]
 #[test]
 fn a_brand_refused_on_the_read_answers_the_same_fault_in_both_languages() {
     let answered = refusals::refused(r#"{"account":{"jti":"a"},"organizationId":"A!"}"#);
@@ -602,7 +611,7 @@ fn a_brand_refused_on_the_read_answers_the_same_fault_in_both_languages() {
 /// A bound two hops down, one of them flattened, reached by the message's own validator rather than
 /// on the read — the other half of the same comparison, so the two paths cannot be shown to agree
 /// with TypeScript one at a time while disagreeing with each other.
-#[cfg(all(feature = "serde", feature = "zod"))]
+#[cfg(all(feature = "serde", feature = "typescript", feature = "zod"))]
 #[test]
 fn a_bound_below_a_flattened_hop_answers_the_same_fault_in_both_languages() {
     let answered = refusals::refused(r#"{"account":{"jti":""},"organizationId":"acme"}"#);
@@ -621,7 +630,7 @@ fn a_bound_below_a_flattened_hop_answers_the_same_fault_in_both_languages() {
 /// *were* a document and answered for what the document said. Only one of those can be true of a
 /// value that parsed, so both answer the one kind now — and neither names a field, there being no
 /// key to send a caller to.
-#[cfg(all(feature = "serde", feature = "zod"))]
+#[cfg(all(feature = "serde", feature = "typescript", feature = "zod"))]
 #[test]
 fn a_payload_that_parsed_and_is_not_the_message_answers_the_same_kind_in_both_languages() {
     let constructor = refusals::inbound_fault();

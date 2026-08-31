@@ -113,7 +113,10 @@ fn a_pattern_reaches_the_quoted_string_escaped() {
 /// The list a reader tells this crate's sentences by, held against the sentences themselves. A
 /// bound whose stem is missing from the list would report words no reader recognises, and a stem
 /// nothing writes would let a reader claim a sentence that is not one of ours.
-#[cfg(any(feature = "serde", feature = "zod"))]
+///
+/// Gated with the list itself: a build with no serde feature has no reader and so no list to hold
+/// the sentences against. The Zod spelling of the same sentences is checked above.
+#[cfg(feature = "serde")]
 #[test]
 fn every_sentence_opens_with_a_stem_the_list_spells_and_no_stem_is_unwritten() {
     let written = [
