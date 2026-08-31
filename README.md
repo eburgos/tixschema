@@ -1846,6 +1846,19 @@ pub fn get_entities() -> (String, Vec<String>) {
 
 `ts_definition()` answers with every message the macro declared for the service, the fault type and the kind it reports, and one result type per operation that answers -- **so a generated message needs no registration line of its own.** The author never wrote those types and has no reason to know their names; a forgotten line would leave a Rust-only message and a client unable to call the operation.
 
+**A type *you* named on an operation still takes two lines, not one.** The service's line carries the schemas of the messages the macro declared and nobody else's -- it does not own `AvailableBalanceRequest` and has no schema of its own to publish for it. The client and the dispatcher parse every message through `<Type>$Schema`, so a bundle naming only the type parses through a value it never declares:
+
+```rust
+AvailableBalanceRequest::ts_definition(),   // the type
+AvailableBalanceRequest::zod_schema(),      // the schema the seam parses through
+```
+
+Nothing on the Rust side refuses a bundle missing the second line -- the bundle is assembled at run time out of strings, and expansion sees a type path on a trait and no bundle at all. What refuses it is your own compiler, at each parse site:
+
+```text
+bundle.ts(555,25): error TS2304: Cannot find name 'AvailableBalanceRequest$Schema'.
+```
+
 `ts_client()` answers with the transport seam, the client type and the factory that binds one:
 
 ```typescript

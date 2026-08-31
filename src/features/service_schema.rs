@@ -14,6 +14,15 @@
 //! than re-derived, so what is written and what is registered cannot disagree. A service is added
 //! to a bundle once and nothing it declared can be left behind.
 //!
+//! The other half of that boundary is the bundle writer's. A type the *author* named is not the
+//! service's to publish — the service does not own it and has no schema of its own to write for
+//! it — so it takes two lines in the bundle rather than one: its type and its schema. A bundle
+//! naming only the type still parses through `<Type>$Schema` in the client and the dispatcher, and
+//! nothing here can refuse that: the bundle is assembled at run time by the consuming codebase out
+//! of strings, and expansion sees a type path on a trait and no bundle at all. The consuming
+//! codebase's own compiler refuses it, naming the value at every parse site, which is why the
+//! requirement is written into the registry's rustdoc rather than checked for.
+//!
 //! # Why the registration hangs off `<Service>Schema`
 //!
 //! The design spells the bundle line `UsageService::ts_definition()`, and Rust does not allow it:
@@ -196,11 +205,23 @@ fn registry_rustdoc(service: &str) -> Vec<String> {
 }
 
 /// What the registry's own rustdoc says about the client and the dispatcher. In a build that
-/// publishes them, nothing — the two methods carry their own. In a build that does not, the reason
-/// they are missing, written where a reader looking for them arrives.
+/// publishes them, what a bundle carrying them has to declare beside them — the two methods carry
+/// the rest themselves. In a build that does not, the reason they are missing, written where a
+/// reader looking for them arrives.
 #[cfg(feature = "zod")]
-const fn seam_rustdoc(_service: &str) -> Vec<String> {
-    Vec::new()
+fn seam_rustdoc(service: &str) -> Vec<String> {
+    vec![
+        String::new(),
+        format!(
+            " The line above carries a schema for every message the macro declared and for no type \
+             the author named: `{service}` does not own those and cannot publish their schemas. So \
+             a type named on an operation takes two lines in a bundle, `ts_definition()` and \
+             `zod_schema()` — the client and the dispatcher parse a message through \
+             `<Type>$Schema`, and a bundle carrying only the type declares no such value. Nothing \
+             here refuses that bundle. The consuming codebase's compiler does, with `error TS2304: \
+             Cannot find name '<Type>$Schema'` at every site the message is parsed."
+        ),
+    ]
 }
 
 #[cfg(not(feature = "zod"))]

@@ -31,17 +31,34 @@ mod the_bundle_one_registration_line_produces {
     /// The bundle a consuming codebase writes: its own types named by hand, one line each, and the
     /// service named once. Nothing here names a message the macro declared — that is the point.
     pub(super) fn bundle() -> String {
-        let mut written = vec![
+        let mut written = author_types();
+        written.extend(author_schemas());
+        written.push(ProbeServiceSchema::ts_definition());
+        written.extend(probe_seam());
+        written.join("\n\n")
+    }
+
+    /// The bundle above with the author types' schema lines dropped and nothing else changed: what
+    /// a bundle writer gets for leaving `zod_schema()` out. The string check below and the compile
+    /// check beside it read this one fixture, so neither is about a file the other never saw.
+    #[cfg(feature = "zod")]
+    pub(super) fn bundle_without_author_schemas() -> String {
+        let mut written = author_types();
+        written.push(ProbeServiceSchema::ts_definition());
+        written.extend(probe_seam());
+        written.join("\n\n")
+    }
+
+    /// The types the author wrote, one line each — the half of a bundle nobody but the bundle
+    /// writer can put there.
+    pub(super) fn author_types() -> Vec<String> {
+        vec![
             BalanceRequest::ts_definition(),
             BalanceResponse::ts_definition(),
             ApplyBundleReceipt::ts_definition(),
             ProbeError::ts_definition(),
             CreditWriteError::ts_definition(),
-        ];
-        written.extend(author_schemas());
-        written.push(ProbeServiceSchema::ts_definition());
-        written.extend(probe_seam());
-        written.join("\n\n")
+        ]
     }
 
     /// The client and the dispatcher a bundle carries, which only a build with the Zod surface
@@ -185,17 +202,7 @@ mod the_bundle_one_registration_line_produces {
     #[cfg(feature = "zod")]
     #[test]
     fn a_bundle_missing_an_author_type_s_schema_line_parses_through_a_value_it_never_declares() {
-        let types_only = [
-            BalanceRequest::ts_definition(),
-            BalanceResponse::ts_definition(),
-            ApplyBundleReceipt::ts_definition(),
-            ProbeError::ts_definition(),
-            CreditWriteError::ts_definition(),
-            ProbeServiceSchema::ts_definition(),
-            ProbeServiceSchema::ts_client(),
-            ProbeServiceSchema::ts_service(),
-        ]
-        .join("\n\n");
+        let types_only = bundle_without_author_schemas();
         let undeclared: Vec<&str> = parsed_through(&types_only)
             .into_iter()
             .filter(|named| !types_only.contains(&format!("export const {named}$Schema")))

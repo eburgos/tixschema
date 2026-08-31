@@ -291,6 +291,38 @@ fn a_build_that_publishes_no_schema_publishes_no_client_and_no_dispatcher() {
     );
 }
 
+/// The line a bundle writer has to write themselves, said on the registry they are already
+/// reading. The construct cannot refuse a bundle that leaves it out — the bundle is assembled at
+/// run time out of strings and expansion sees none of it — so the requirement is published where
+/// the mistake is made, and the consuming codebase's compiler is what catches it. That refusal is
+/// pinned by `a_bundle_missing_an_author_type_s_schema_line_is_refused_by_the_compiler` in the
+/// type-check group; this is what keeps the sentence that prevents it from going missing.
+#[cfg(feature = "zod")]
+#[test]
+fn the_registry_says_an_author_named_type_takes_a_schema_line_of_its_own() {
+    let rendered = registration(MIXED_SERVICE);
+    for said in [
+        "a type named on an operation takes two lines in a bundle, `ts_definition()` and \
+         `zod_schema()`",
+        "the client and the dispatcher parse a message through `<Type>$Schema`",
+        "The consuming codebase's compiler does",
+    ] {
+        assert!(
+            rendered.contains(said),
+            "the registry's own rustdoc says what a bundle writer still has to write. \
+             Got: {rendered}"
+        );
+    }
+    // The README states the same requirement where it documents the bundle, so the two cannot
+    // drift.
+    let readme = include_str!("../../../README.md");
+    assert!(
+        readme.contains("**A type *you* named on an operation still takes two lines, not one.**")
+            && readme.contains("AvailableBalanceRequest::zod_schema()"),
+        "the README no longer says that an author-named type takes a schema line of its own"
+    );
+}
+
 /// The missing methods are the one thing a reader of this build's registry goes looking for, so
 /// the reason they are missing is written on the registry itself rather than left to an
 /// `E0599` naming the method and nothing else.

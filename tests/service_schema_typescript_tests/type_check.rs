@@ -2,10 +2,18 @@
 //!
 //! Every other assertion about the published TypeScript in this repository reads strings. This
 //! group does not: it writes the bundle a consuming codebase would write, hands it to `tsc
-//! --strict`, and reads the verdict. What that settles is the one claim the construct rests on and
-//! no string test can reach — an implementation missing a single operation is refused where it
+//! --strict`, and reads the verdict. What that settles is the claim the construct rests on and no
+//! string test can reach — an implementation missing a single operation is refused where it
 //! reaches the dispatcher factory, and the same implementation with the operation present compiles
 //! clean.
+//!
+//! It also settles the one mistake the construct deliberately leaves to this compiler. A bundle
+//! writer who names an author type's `ts_definition()` and forgets its `zod_schema()` publishes a
+//! bundle that parses through a value nothing declares, and nothing on the Rust side can refuse
+//! it: the bundle is assembled by the consuming codebase out of strings, and a service does not
+//! own a type its author named and cannot publish that type's schema line. The check below is
+//! where that omission is caught, so the ruling rests on what a real compiler does rather than on
+//! a claim about one.
 //!
 //! **Where the compiler comes from.** `tsc` is looked up on `PATH`, or at whatever
 //! `TIXSCHEMA_TSC` names. A repository cannot assume one is installed, so a build that finds none
@@ -19,13 +27,12 @@
 //! schema *expressions* well-typed without claiming each one infers its own type. Everything else
 //! is checked for real, the interface and the factory included, and neither mentions `zod`.
 
+#[cfg(feature = "zod")]
+use super::the_bundle_one_registration_line_produces::bundle_without_author_schemas;
 use super::the_bundle_one_registration_line_produces::{
-    audit_seam, author_schemas, bundle, probe_seam,
+    audit_seam, author_schemas, author_types, bundle, probe_seam,
 };
-use super::{
-    ApplyBundleReceipt, AuditServiceSchema, BalanceRequest, BalanceResponse, CreditWriteError,
-    ProbeError, ProbeServiceSchema,
-};
+use super::{AuditServiceSchema, ProbeServiceSchema};
 use std::env;
 use std::env::temp_dir;
 use std::fs;
@@ -298,13 +305,7 @@ fn the_bundle_a_consuming_codebase_writes_compiles_under_strict() {
 /// name one service declares and one the other's generated code refers to.
 #[test]
 fn two_services_in_one_bundle_compile_together() {
-    let mut both = vec![
-        BalanceRequest::ts_definition(),
-        BalanceResponse::ts_definition(),
-        ApplyBundleReceipt::ts_definition(),
-        ProbeError::ts_definition(),
-        CreditWriteError::ts_definition(),
-    ];
+    let mut both = author_types();
     both.extend(author_schemas());
     both.push(ProbeServiceSchema::ts_definition());
     both.extend(probe_seam());
@@ -316,6 +317,47 @@ fn two_services_in_one_bundle_compile_together() {
     assert!(
         accepted,
         "a bundle carrying two services does not compile:\n{said}"
+    );
+}
+
+/// What a bundle writer gets for leaving an author type's `zod_schema()` line out, settled by a
+/// compiler rather than read off a string.
+///
+/// The service's own line carries the schemas of the messages the macro declared and nobody
+/// else's — it does not own a type the author named and cannot publish its schema line — so a
+/// bundle naming only its types parses through a value it never declares. Nothing on the Rust side
+/// refuses that bundle, and this is what does: the file compiled here is the accepted one above
+/// with `author_schemas()` dropped and nothing else changed. Recorded verbatim from tsc 7.0.2
+/// under `--strict`:
+///
+/// ```text
+/// bundle.ts(555,25): error TS2304: Cannot find name 'BalanceRequest$Schema'.
+/// bundle.ts(568,25): error TS2304: Cannot find name 'BalanceRequest$Schema'.
+/// bundle.ts(746,26): error TS2304: Cannot find name 'BalanceRequest$Schema'.
+/// bundle.ts(753,26): error TS2304: Cannot find name 'BalanceRequest$Schema'.
+/// ```
+///
+/// One diagnostic per parse site, each naming the value that is missing — which is why the
+/// construct publishes no check of its own for this. The assertion reads that name rather than the
+/// error code, so a fixture refused for some unrelated reason does not satisfy it.
+#[cfg(feature = "zod")]
+#[test]
+fn a_bundle_missing_an_author_type_s_schema_line_is_refused_by_the_compiler() {
+    let Some((accepted, said)) = compiled(
+        "missing-author-schema",
+        &bundled(bundle_without_author_schemas()),
+    ) else {
+        return;
+    };
+    assert!(
+        !accepted,
+        "a bundle whose client and dispatcher parse through `BalanceRequest$Schema`, and which \
+         declares no such value, compiled:\n{said}"
+    );
+    assert!(
+        said.contains("Cannot find name 'BalanceRequest$Schema'"),
+        "the refusal has to name the value the bundle writer left undeclared; a fixture refused \
+         for some other reason would not. Got:\n{said}"
     );
 }
 
