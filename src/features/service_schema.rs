@@ -28,9 +28,28 @@
 //!
 //! - `ts_definition()`: every generated message's type and schema, the fault type and the kind it
 //!   reports, and one [`result`] type per operation that answers.
-//! - [`ts_client()`](client): the transport seam, the client type and the factory that binds one.
-//! - [`ts_service()`](service): the interface an implementation satisfies in full, the outcome
-//!   types it answers with, and the dispatcher factory.
+//! - `ts_client()`: the transport seam, the client type and the factory that binds one.
+//! - `ts_service()`: the interface an implementation satisfies in full, the outcome types it
+//!   answers with, and the dispatcher factory.
+//!
+//! # The client and the dispatcher exist only where the Zod surface does
+//!
+//! A message validates when it is constructed, in both directions: the client parses what it is
+//! about to send before a transport is reached, and the dispatcher parses what arrived before an
+//! implementation is entered, so an implementation may assume its message is valid. On the
+//! TypeScript side both checks are the same parse, against the `<Message>$Schema` const
+//! `#[model_schema()]` publishes — and only a build with the `zod` feature publishes one.
+//!
+//! So a build with `typescript` on and `zod` off emits neither. The two artifacts it can still
+//! write truthfully — the message types and the result envelopes — are published exactly as they
+//! always are, because they describe what a Rust service puts on the wire and that half validates
+//! either way. The two it cannot are absent rather than emitted without their check: a client that
+//! forwards whatever it is handed and a dispatcher that narrows an unread payload with `as` would
+//! both compile, both look like the checked ones, and neither would hold the guarantee every
+//! caller of them is written against.
+//!
+//! A bundle naming `<Service>Schema::ts_client()` in such a build is refused where it names it,
+//! which is the one place the choice of features can still be acted on.
 //!
 //! # Every emitted name carries the service
 //!
@@ -47,9 +66,12 @@
 //! declaration as the Rust type and the two cannot drift. Nothing here writes a fault type; the
 //! registration below asks the Rust type for its own, exactly as it does for every message.
 
+#[cfg(feature = "zod")]
 mod client;
+#[cfg(feature = "zod")]
 mod message;
 mod result;
+#[cfg(feature = "zod")]
 mod service;
 
 use crate::service_schema::parse::ServiceDef;
@@ -62,19 +84,12 @@ pub fn emit(service: &ServiceDef) -> TokenStream {
     let registry = format_ident!("{named}Schema", span = service.ident.span());
     let rustdoc = registry_rustdoc(&named);
     let published = published(service);
-    let client = client::emit(service).join("\n\n");
-    let service_side = service::emit(service).join("\n\n");
+    let seam = seam(service);
     quote! {
         #(#[doc = #rustdoc])*
         pub struct #registry;
 
         impl #registry {
-            #[doc = " The service's generated TypeScript client: the transport seam it is bound"]
-            #[doc = " to, the type its methods are declared on, and the factory that binds one."]
-            pub fn ts_client() -> String {
-                #client.to_owned()
-            }
-
             #[doc = " Every TypeScript type this service publishes: the messages the macro declared"]
             #[doc = " for it, the fault a caller can receive, and one result type per operation that"]
             #[doc = " answers."]
@@ -82,13 +97,38 @@ pub fn emit(service: &ServiceDef) -> TokenStream {
                 [#(#published),*].join("\n\n")
             }
 
-            #[doc = " The service's implementable TypeScript interface, the outcome types an"]
-            #[doc = " implementation answers with, and the dispatcher factory that drives one."]
-            pub fn ts_service() -> String {
-                #service_side.to_owned()
-            }
+            #seam
         }
     }
+}
+
+/// The two artifacts that carry the validation decision D11 binds: the client that checks a
+/// message before it reaches a transport, and the dispatcher that checks one before it reaches an
+/// implementation. Both parse against the Zod schema `#[model_schema()]` publishes for the message,
+/// so a build without the Zod surface has nothing for either of them to check against and publishes
+/// neither.
+#[cfg(feature = "zod")]
+fn seam(service: &ServiceDef) -> TokenStream {
+    let client = client::emit(service).join("\n\n");
+    let service_side = service::emit(service).join("\n\n");
+    quote! {
+        #[doc = " The service's generated TypeScript client: the transport seam it is bound"]
+        #[doc = " to, the type its methods are declared on, and the factory that binds one."]
+        pub fn ts_client() -> String {
+            #client.to_owned()
+        }
+
+        #[doc = " The service's implementable TypeScript interface, the outcome types an"]
+        #[doc = " implementation answers with, and the dispatcher factory that drives one."]
+        pub fn ts_service() -> String {
+            #service_side.to_owned()
+        }
+    }
+}
+
+#[cfg(not(feature = "zod"))]
+fn seam(_service: &ServiceDef) -> TokenStream {
+    TokenStream::new()
 }
 
 /// One expression per published artifact, each answering with a `String`, in the order they are
@@ -125,13 +165,38 @@ fn published(service: &ServiceDef) -> Vec<TokenStream> {
 }
 
 fn registry_rustdoc(service: &str) -> Vec<String> {
-    vec![
+    let mut written = vec![
         format!(" What `{service}` publishes to TypeScript, in one place per artifact."),
         String::new(),
         format!(
             " A bundle names `{service}Schema::ts_definition()` once and receives the service's own \
              types together with every message the macro declared for it, so no generated message \
              needs a registration line of its own."
+        ),
+    ];
+    written.extend(seam_rustdoc(service));
+    written
+}
+
+/// What the registry's own rustdoc says about the client and the dispatcher. In a build that
+/// publishes them, nothing — the two methods carry their own. In a build that does not, the reason
+/// they are missing, written where a reader looking for them arrives.
+#[cfg(feature = "zod")]
+const fn seam_rustdoc(_service: &str) -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(not(feature = "zod"))]
+fn seam_rustdoc(service: &str) -> Vec<String> {
+    vec![
+        String::new(),
+        format!(
+            " This build publishes no `{service}Schema::ts_client()` and no \
+             `{service}Schema::ts_service()`. Both parse a message against the schema \
+             `#[model_schema()]` writes for it, and only a build with tixschema's `zod` feature \
+             writes one — so rather than a client and a dispatcher that check nothing, this build \
+             publishes the service's types and leaves the two seam artifacts out. Add `features = \
+             [\"zod\"]` to the tixschema dependency to get them."
         ),
     ]
 }

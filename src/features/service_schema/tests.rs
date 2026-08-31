@@ -11,10 +11,16 @@
 //! missing a method is rejected where it reaches the factory — only a compiler can, and the gap
 //! itself is tracked separately.
 
+#[cfg(feature = "zod")]
 mod client_tests;
+#[cfg(feature = "zod")]
 mod service_tests;
 
-use super::{client, emit, result, service};
+#[cfg(feature = "zod")]
+use super::client;
+#[cfg(feature = "zod")]
+use super::service;
+use super::{emit, result};
 use crate::service_schema::parse::{ServiceDef, parse_service};
 use quote::ToTokens as _;
 use syn::ItemTrait;
@@ -43,6 +49,7 @@ const MIXED_SERVICE: &str = "
     }
 ";
 
+#[cfg(feature = "zod")]
 fn client_of(source: &str) -> String {
     client::emit(&parsed(source)).join("\n\n")
 }
@@ -55,6 +62,7 @@ fn registration(source: &str) -> String {
     emit(&parsed(source)).to_token_stream().to_string()
 }
 
+#[cfg(feature = "zod")]
 fn service_of(source: &str) -> String {
     service::emit(&parsed(source)).join("\n\n")
 }
@@ -178,6 +186,103 @@ fn two_operations_naming_unrelated_errors_keep_them_apart() {
         "an operation's failure arm carries the error that operation declared, not the service's. \
          Got: {expire}"
     );
+}
+
+/// The pair that says a client and a dispatcher are published exactly where their check can be.
+/// This is the half that runs in a build with the Zod surface; the one below it is the same
+/// registration read in a build without it, and neither could pass alone.
+#[cfg(feature = "zod")]
+#[test]
+fn a_build_that_publishes_a_schema_publishes_the_client_and_the_dispatcher_that_parse_it() {
+    let rendered = registration(MIXED_SERVICE);
+    for published in [
+        "pub fn ts_client",
+        "pub fn ts_service",
+        "pub fn ts_definition",
+    ] {
+        assert!(
+            rendered.contains(published),
+            "a build with a schema to parse against publishes all three artifacts. \
+             Got: {rendered}"
+        );
+    }
+}
+
+/// A build with `typescript` on and `zod` off publishes the service's types and neither seam
+/// artifact.
+///
+/// Both of them parse a message against the `<Message>$Schema` const `#[model_schema()]` writes,
+/// and this build writes none. Emitting them without the parse is what this replaced: a client that
+/// forwarded whatever it was handed, and a dispatcher that narrowed an unread payload with `as` and
+/// gave it to an implementation entitled to assume it was valid. Both compiled, both read like the
+/// checked ones, and the Rust half of the same service went on validating — so the two halves
+/// disagreed about what they accept and nothing said so.
+#[cfg(not(feature = "zod"))]
+#[test]
+fn a_build_that_publishes_no_schema_publishes_no_client_and_no_dispatcher() {
+    let rendered = registration(MIXED_SERVICE);
+    for withheld in ["pub fn ts_client", "pub fn ts_service"] {
+        assert!(
+            !rendered.contains(withheld),
+            "an artifact that cannot hold the guarantee its callers are written against is not \
+             published at all. Got: {rendered}"
+        );
+    }
+    assert!(
+        rendered.contains("pub fn ts_definition"),
+        "the types describe what the Rust half puts on the wire and are true either way. \
+         Got: {rendered}"
+    );
+    // The README states the consequence where it documents the requirement, so the two cannot
+    // drift.
+    let readme = include_str!("../../../README.md");
+    assert!(
+        readme.contains("**A service that publishes TypeScript needs the `zod` feature too.**")
+            && readme.contains(
+                "no `<Service>Schema::ts_client()` and no `<Service>Schema::ts_service()`"
+            ),
+        "the README no longer says what a build without the Zod surface publishes"
+    );
+}
+
+/// The missing methods are the one thing a reader of this build's registry goes looking for, so
+/// the reason they are missing is written on the registry itself rather than left to an
+/// `E0599` naming the method and nothing else.
+#[cfg(not(feature = "zod"))]
+#[test]
+fn a_build_that_publishes_no_client_says_on_the_registry_why_not() {
+    let rendered = registration(MIXED_SERVICE);
+    for said in [
+        "This build publishes no `UsageServiceSchema::ts_client()` and no \
+         `UsageServiceSchema::ts_service()`.",
+        "only a build with tixschema's `zod` feature writes one",
+        "Add `features = [\\\"zod\\\"]` to the tixschema dependency to get them.",
+    ] {
+        assert!(
+            rendered.contains(said),
+            "the registry's own rustdoc names the feature and what to add. Got: {rendered}"
+        );
+    }
+}
+
+/// What the Zod-less build still publishes, and therefore why it is not refused outright: the
+/// message types and the result envelopes describe what the *Rust* dispatcher and client put on the
+/// wire, and that half validates in this build exactly as it does in any other.
+#[cfg(not(feature = "zod"))]
+#[test]
+fn a_build_that_publishes_no_client_still_publishes_every_type_the_wire_carries() {
+    let rendered = registration(MIXED_SERVICE);
+    for asked in [
+        "ExpireCreditRequest :: ts_definition",
+        "usage_service_schema :: UsageServiceFault :: ts_definition",
+        "export type UsageServiceGetAvailableBalanceResult =",
+    ] {
+        assert!(
+            rendered.contains(asked),
+            "the types are what a hand-written caller of this service reads, and nothing about \
+             them depends on the Zod surface. Got: {rendered}"
+        );
+    }
 }
 
 #[cfg(feature = "zod")]

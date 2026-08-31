@@ -131,7 +131,6 @@ fn an_operation_nothing_answers_to_produces_a_framed_fault() {
     );
 }
 
-#[cfg(feature = "zod")]
 #[test]
 fn the_payload_is_parsed_before_the_implementation_is_called() {
     let written = service_of(MIXED_SERVICE);
@@ -150,7 +149,6 @@ fn the_payload_is_parsed_before_the_implementation_is_called() {
     );
 }
 
-#[cfg(feature = "zod")]
 #[test]
 fn a_payload_that_was_never_the_message_is_told_apart_from_one_that_failed_a_key() {
     let written = service_of(MIXED_SERVICE);
@@ -159,21 +157,5 @@ fn a_payload_that_was_never_the_message_is_told_apart_from_one_that_failed_a_key
             "kind: failedAt === \"\" ? \"undeserializable-payload\" : \"failed-validation\","
         ),
         "got: {written}"
-    );
-}
-
-#[cfg(not(feature = "zod"))]
-#[test]
-fn a_build_that_publishes_no_schema_says_what_it_could_not_check() {
-    let written = service_of(MIXED_SERVICE);
-    assert!(
-        !written.contains("$Schema"),
-        "naming a const the bundle does not declare is worse than skipping the check. \
-         Got: {written}"
-    );
-    assert!(
-        written.contains("payload as AvailableBalanceRequest"),
-        "an unchecked payload is narrowed by assertion and nothing pretends otherwise. \
-         Got: {written}"
     );
 }

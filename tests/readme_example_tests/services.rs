@@ -286,6 +286,9 @@ fn the_result_a_caller_narrows_on_is_shown_with_the_fault_inside_its_failure_arm
     );
 }
 
+// The README shows the client and the dispatcher, which only a build with the Zod surface
+// publishes: both parse a message against the schema `#[model_schema()]` writes for it.
+#[cfg(feature = "zod")]
 #[test]
 fn the_outcome_an_implementation_answers_is_shown_with_no_fault_in_it() {
     assert_shown(
@@ -296,6 +299,9 @@ fn the_outcome_an_implementation_answers_is_shown_with_no_fault_in_it() {
     );
 }
 
+// The README shows the client and the dispatcher, which only a build with the Zod surface
+// publishes: both parse a message against the schema `#[model_schema()]` writes for it.
+#[cfg(feature = "zod")]
 #[test]
 fn the_client_type_is_shown_with_every_method_the_service_declares() {
     assert_shown_members(
@@ -313,6 +319,9 @@ fn the_client_type_is_shown_with_every_method_the_service_declares() {
     );
 }
 
+// The README shows the client and the dispatcher, which only a build with the Zod surface
+// publishes: both parse a message against the schema `#[model_schema()]` writes for it.
+#[cfg(feature = "zod")]
 #[test]
 fn the_implementable_interface_is_shown_with_every_member_required() {
     assert_shown(
@@ -334,6 +343,9 @@ fn the_implementable_interface_is_shown_with_every_member_required() {
     );
 }
 
+// The README shows the client and the dispatcher, which only a build with the Zod surface
+// publishes: both parse a message against the schema `#[model_schema()]` writes for it.
+#[cfg(feature = "zod")]
 #[test]
 fn the_dispatcher_factory_is_shown_with_the_signature_it_is_emitted_under() {
     assert_shown(

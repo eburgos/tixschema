@@ -1,5 +1,9 @@
 //! How the client and the service name the one message an operation receives.
 //!
+//! Read by the client and the dispatcher and by nothing else, so it is gated with them: only a
+//! build with the Zod surface publishes either, and a name and a schema nobody asks for is dead
+//! code.
+//!
 //! Both sides take the message as a single object — `getBalance(req)` — where Rust unpacks an
 //! argument list, because that is what a TypeScript caller of the hand-written client types today.
 //! Which type that is, and which schema validates it, is read off the parsed operation rather than
@@ -11,7 +15,6 @@ use crate::service_schema::parse::{OperationDef, OperationInputs};
 /// The schema the message validates against: the one `#[model_schema()]` published for it, read
 /// through the same field walk every other reference to the type goes through rather than by
 /// pasting a suffix onto a name.
-#[cfg(feature = "zod")]
 pub fn schema(operation: &OperationDef) -> String {
     match &operation.inputs {
         OperationInputs::Named(declared) => get_field_def("req", declared, "").zod_type(),
