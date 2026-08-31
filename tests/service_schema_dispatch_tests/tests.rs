@@ -92,6 +92,124 @@ mod a_message_annotated_with_a_constraint {
         pub ledger_id: String,
     }
 
+    /// The claims every account context carries. `jti` is the field the port's gate emptied on
+    /// each of the five operations it sent, and the bound it broke.
+    #[model_schema()]
+    #[derive(Deserialize, Serialize)]
+    pub struct WireClaims {
+        #[model_schema_prop(minLength = 1)]
+        pub jti: String,
+    }
+
+    #[model_schema()]
+    #[derive(Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct AppUserAccount {
+        pub aud: String,
+        #[serde(flatten)]
+        pub claims: WireClaims,
+    }
+
+    #[model_schema()]
+    #[derive(Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct AdminAccount {
+        #[serde(flatten)]
+        pub claims: WireClaims,
+        pub sys_admin_username: String,
+    }
+
+    /// The account a request carries: `#[serde(untagged)]`, every variant a newtype. This is the
+    /// shape the member walk used to stop at, and it stopped there for both reasons at once — the
+    /// union published no arm for a slot with no ident, so the union published no `validate()`, so
+    /// the field above it walked into a blanket `Ok(())`.
+    #[model_schema()]
+    #[derive(Deserialize, Serialize)]
+    #[serde(untagged)]
+    pub enum ScopedAccount {
+        Admin(AdminAccount),
+        AppUser(AppUserAccount),
+    }
+
+    #[model_schema()]
+    #[derive(Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct ScopedBalanceRequest {
+        pub account: ScopedAccount,
+        pub organization_id: String,
+    }
+
+    #[model_schema()]
+    #[derive(Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct AdminBalanceRequest {
+        pub account: AdminAccount,
+        pub organization_id: String,
+    }
+
+    /// A request that *is* an untagged enum, which is the second shape and the worse one: nothing
+    /// checked one field of it, not even the fields its own variants declare bounds on.
+    #[model_schema()]
+    #[derive(Deserialize, Serialize)]
+    #[serde(untagged)]
+    pub enum BalanceRequest {
+        Admin(AdminBalanceRequest),
+        Scoped(ScopedBalanceRequest),
+    }
+
+    /// A union whose first member's own bound is what takes it out of the running: the read tries
+    /// `Attributed`, the bound refuses the value, and the payload is `Unattributed` instead. That
+    /// check stays on the read, and moving it would change which variant a payload *is* rather than
+    /// how a violation is worded.
+    #[model_schema()]
+    #[derive(Deserialize, Serialize)]
+    #[serde(untagged)]
+    pub enum Caller {
+        Attributed {
+            #[serde(flatten)]
+            claims: WireClaims,
+            #[model_schema_prop(minLength = 3)]
+            name: String,
+        },
+        Unattributed {
+            #[serde(flatten)]
+            claims: WireClaims,
+        },
+    }
+
+    #[model_schema()]
+    #[derive(Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct CallRequest {
+        pub caller: Caller,
+        pub organization_id: String,
+    }
+
+    /// The same carve-out in the position this change newly walks: a *newtype* member whose bound
+    /// selects it. `Tag`'s own read hook is what takes `Tagged` out of the running, and the arm
+    /// added for the slot runs after that choice is settled.
+    #[model_schema(minLength = 3)]
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(transparent)]
+    pub struct Tag(pub String);
+
+    #[model_schema()]
+    #[derive(Deserialize, Serialize)]
+    #[serde(untagged)]
+    /// `Bounded` is declared first because an untagged read tries its members in order and `Free`
+    /// admits every string: the bound is what takes the first member out of the running.
+    pub enum Label {
+        Bounded(Tag),
+        Free(String),
+    }
+
+    #[model_schema()]
+    #[derive(Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct LabelRequest {
+        pub label: Label,
+    }
+
     /// Records every message that reached it, which is how a test says an invalid one did not.
     pub struct GateBackEnd {
         reached: Mutex<Vec<String>>,
@@ -119,7 +237,26 @@ mod a_message_annotated_with_a_constraint {
 
         async fn hold(&self, ctx: &Ctx, req: HoldRequest) -> Result<Admitted, GateError>;
 
+        async fn label(&self, ctx: &Ctx, req: LabelRequest) -> Result<Admitted, GateError>;
+
         async fn open_ledger(&self, ctx: &Ctx, req: LedgerRequest) -> Result<Admitted, GateError>;
+
+        async fn place_call(&self, ctx: &Ctx, req: CallRequest) -> Result<Admitted, GateError>;
+
+        async fn read_admin_balance(
+            &self,
+            ctx: &Ctx,
+            req: AdminBalanceRequest,
+        ) -> Result<Admitted, GateError>;
+
+        async fn read_balance(&self, ctx: &Ctx, req: BalanceRequest)
+        -> Result<Admitted, GateError>;
+
+        async fn read_scoped_balance(
+            &self,
+            ctx: &Ctx,
+            req: ScopedBalanceRequest,
+        ) -> Result<Admitted, GateError>;
     }
 
     impl GateService<()> for GateBackEnd {
@@ -141,9 +278,62 @@ mod a_message_annotated_with_a_constraint {
             Ok(Admitted { admitted: true })
         }
 
+        async fn label(&self, _ctx: &(), req: LabelRequest) -> Result<Admitted, GateError> {
+            ready(()).await;
+            self.reached.lock().unwrap().push(match req.label {
+                Label::Bounded(tag) => format!("tagged:{}", tag.0),
+                Label::Free(free) => format!("free:{free}"),
+            });
+            Ok(Admitted { admitted: true })
+        }
+
         async fn open_ledger(&self, _ctx: &(), req: LedgerRequest) -> Result<Admitted, GateError> {
             ready(()).await;
             self.reached.lock().unwrap().push(req.ledger_id);
+            Ok(Admitted { admitted: true })
+        }
+
+        async fn place_call(&self, _ctx: &(), req: CallRequest) -> Result<Admitted, GateError> {
+            ready(()).await;
+            // Which variant the read chose, so a test can say the bound still selects rather than
+            // merely that a good payload got through.
+            self.reached.lock().unwrap().push(match req.caller {
+                Caller::Attributed { name, .. } => format!("named:{name}"),
+                Caller::Unattributed { .. } => "anonymous".to_owned(),
+            });
+            Ok(Admitted { admitted: true })
+        }
+
+        async fn read_admin_balance(
+            &self,
+            _ctx: &(),
+            req: AdminBalanceRequest,
+        ) -> Result<Admitted, GateError> {
+            ready(()).await;
+            self.reached.lock().unwrap().push(req.organization_id);
+            Ok(Admitted { admitted: true })
+        }
+
+        async fn read_balance(
+            &self,
+            _ctx: &(),
+            req: BalanceRequest,
+        ) -> Result<Admitted, GateError> {
+            ready(()).await;
+            self.reached.lock().unwrap().push(match req {
+                BalanceRequest::Admin(admin) => admin.organization_id,
+                BalanceRequest::Scoped(scoped) => scoped.organization_id,
+            });
+            Ok(Admitted { admitted: true })
+        }
+
+        async fn read_scoped_balance(
+            &self,
+            _ctx: &(),
+            req: ScopedBalanceRequest,
+        ) -> Result<Admitted, GateError> {
+            ready(()).await;
+            self.reached.lock().unwrap().push(req.organization_id);
             Ok(Admitted { admitted: true })
         }
     }
@@ -439,6 +629,195 @@ mod a_message_annotated_with_a_constraint {
              Got: {}",
             reported[0].detail()
         );
+    }
+
+    /// A helper the four shapes below share: dispatch one payload and answer what the arm did with
+    /// it — which messages reached the implementation, and which faults were raised.
+    fn dispatched(
+        operation: &str,
+        payload: &[u8],
+    ) -> (Vec<String>, Vec<gate_service_schema::ServiceFault>) {
+        let service = GateBackEnd::new();
+        let reply = GateReply::new();
+        poll_once(gate_service_schema::dispatch(
+            &service,
+            &(),
+            &gate_service_schema::IncomingMessage {
+                operation: operation.to_owned(),
+                payload: payload.to_vec(),
+            },
+            &reply,
+        ))
+        .unwrap();
+        (service.reached(), reply.faults())
+    }
+
+    /// The account a request carries is an `#[serde(untagged)]` enum, and the bound broken is one
+    /// its variant's type declares — the first of the two shapes the walk stopped at, and the one
+    /// three of the port's five operations carry.
+    ///
+    /// The payload is a message: every key present, every value of its declared type. What it is
+    /// not is one satisfying the bound `jti` declares, and until the walk reached through the union
+    /// nothing said so — the request executed, and one of the three that executed was a write.
+    #[test]
+    fn a_bound_inside_an_untagged_variant_fails_validation_and_names_the_whole_path() {
+        let (reached, reported) = dispatched(
+            "read-scoped-balance",
+            br#"{"account":{"aud":"app-user","jti":""},"organizationId":"gate-org"}"#,
+        );
+        assert!(
+            reached.is_empty(),
+            "the union answered Ok(()) and the message executed. Got: {reached:?}"
+        );
+        assert_eq!(
+            reported[0].kind(),
+            gate_service_schema::ServiceFaultKind::FailedValidation,
+            "got detail: {}",
+            reported[0].detail()
+        );
+        assert_eq!(
+            reported[0].field(),
+            Some("account.jti"),
+            "an untagged newtype member writes no key of its own — what it puts on the wire is the              inner value — so the union contributes no segment and the path is the one the payload              actually spells. Got: {}",
+            reported[0].detail()
+        );
+        assert_eq!(
+            reported[0].detail(),
+            "'account.jti' is too short: minimum length is 1, got 0"
+        );
+    }
+
+    /// The message itself is an `#[serde(untagged)]` enum — the second shape, where the union
+    /// published no `validate()` at all and the dispatcher's blanket fallback answered for every
+    /// payload, so not one field of the message was checked.
+    ///
+    /// It must now answer exactly what the variant it holds answers on its own, which is the whole
+    /// content of "the walk dispatches to whichever variant deserialized".
+    #[test]
+    fn a_message_that_is_itself_untagged_answers_what_the_variant_it_holds_answers() {
+        let payload = br#"{"account":{"aud":"app-user","jti":""},"organizationId":"gate-org"}"#;
+        let (reached, reported) = dispatched("read-balance", payload);
+        assert!(
+            reached.is_empty(),
+            "nothing checked one field of this message. Got: {reached:?}"
+        );
+        assert_eq!(
+            reported[0].kind(),
+            gate_service_schema::ServiceFaultKind::FailedValidation,
+            "got detail: {}",
+            reported[0].detail()
+        );
+        assert_eq!(reported[0].field(), Some("account.jti"));
+
+        let (_, direct) = dispatched("read-scoped-balance", payload);
+        assert_eq!(
+            reported[0].detail(),
+            direct[0].detail(),
+            "the union has no report of its own to write: what it answers is the variant's,              unchanged"
+        );
+    }
+
+    /// The operations that already refused have to keep refusing, in the same words and naming the
+    /// same field. Their account is a plain struct rather than a union, which is exactly why they
+    /// refused while the other three executed, and nothing here was allowed to disturb them.
+    #[test]
+    fn a_request_whose_account_is_no_union_keeps_refusing_what_it_already_refused() {
+        let (reached, reported) = dispatched(
+            "read-admin-balance",
+            br#"{"account":{"sysAdminUsername":"ops","jti":""},"organizationId":"gate-org"}"#,
+        );
+        assert!(reached.is_empty(), "got: {reached:?}");
+        assert_eq!(reported[0].field(), Some("account.jti"));
+        assert_eq!(
+            reported[0].detail(),
+            "'account.jti' is too short: minimum length is 1, got 0"
+        );
+    }
+
+    /// The carve-out, from both sides. A member's own bound still runs on the read, where it takes
+    /// its variant out of the running — so `name` too short is not a violation to report but a
+    /// payload that is the *other* variant. A bound a member's type declares is the validator's
+    /// either way, and the arm that runs it is the one the read chose.
+    ///
+    /// The two valid payloads are what says the selection is real: the same key, two lengths, two
+    /// different variants reaching the implementation. Were that check moved to the validator,
+    /// both would arrive as `Named` and one of them would then be refused — a value changing, not
+    /// a message.
+    #[test]
+    fn a_bound_that_selects_the_variant_stays_on_the_read() {
+        assert_eq!(
+            dispatched(
+                "place-call",
+                br#"{"caller":{"name":"ab","jti":"a"},"organizationId":"gate-org"}"#
+            )
+            .0,
+            vec!["anonymous".to_owned()],
+            "the bound took the first member out of the running rather than ending the read"
+        );
+        assert_eq!(
+            dispatched(
+                "place-call",
+                br#"{"caller":{"name":"abc","jti":"a"},"organizationId":"gate-org"}"#
+            )
+            .0,
+            vec!["named:abc".to_owned()],
+            "the same key one character longer is the first member, which is what the bound              decides and what only the read can decide"
+        );
+
+        // And the member's *type* is still walked in whichever variant was chosen: the bound below
+        // the hop is reported, under the path the payload spells, in both.
+        for (name, chosen) in [("ab", "the second member"), ("abc", "the first")] {
+            let payload =
+                format!(r#"{{"caller":{{"name":"{name}","jti":""}},"organizationId":"gate-org"}}"#);
+            let (reached, reported) = dispatched("place-call", payload.as_bytes());
+            assert!(reached.is_empty(), "{chosen} executed. Got: {reached:?}");
+            assert_eq!(
+                reported[0].detail(),
+                "'caller.jti' is too short: minimum length is 1, got 0",
+                "{chosen} was chosen and its own members went unwalked"
+            );
+        }
+
+        // And in the position this change newly walks: a newtype member whose brand's own hook is
+        // what selects it. Adding an arm for the slot must not have moved that decision.
+        assert_eq!(
+            dispatched("label", br#"{"label":"ab"}"#).0,
+            vec!["free:ab".to_owned()],
+            "the brand's hook took the newtype member out of the running"
+        );
+        assert_eq!(
+            dispatched("label", br#"{"label":"abc"}"#).0,
+            vec!["tagged:abc".to_owned()],
+            "one character longer and the same key is the newtype member instead"
+        );
+    }
+
+    /// The other direction, so that what the walk refuses is something rather than everything: the
+    /// same three shapes with a value the bound admits reach their implementations.
+    #[test]
+    fn a_message_whose_bound_beneath_a_union_is_satisfied_reaches_the_implementation() {
+        for (operation, payload) in [
+            (
+                "read-scoped-balance",
+                r#"{"account":{"aud":"app-user","jti":"a"},"organizationId":"gate-org"}"#,
+            ),
+            (
+                "read-balance",
+                r#"{"account":{"aud":"app-user","jti":"a"},"organizationId":"gate-org"}"#,
+            ),
+            (
+                "read-admin-balance",
+                r#"{"account":{"sysAdminUsername":"ops","jti":"a"},"organizationId":"gate-org"}"#,
+            ),
+        ] {
+            let (reached, reported) = dispatched(operation, payload.as_bytes());
+            assert!(
+                reported.is_empty(),
+                "`{operation}` refused a payload its bounds admit: {:?}",
+                reported.iter().map(ToString::to_string).collect::<Vec<_>>()
+            );
+            assert_eq!(reached, vec!["gate-org".to_owned()], "`{operation}`");
+        }
     }
 
     #[test]

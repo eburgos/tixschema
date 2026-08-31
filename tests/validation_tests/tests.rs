@@ -529,6 +529,341 @@ mod a_bound_the_fields_own_type_declares {
     }
 }
 
+/// What a message's own validator does about a bound reached through an `#[serde(untagged)]` enum
+/// — one it holds as a field, and one the message itself is.
+///
+/// The union is the position the walk used to stop at, and it stopped for one reason wearing two
+/// faces: a newtype member has no field ident, and both the arm that would run it and the report
+/// that would name it were spelled from one. So a union of newtype members published no arm, and
+/// therefore no `validate()` at all, and therefore a field holding one walked into a blanket
+/// `Ok(())` that answered for every payload beneath it.
+///
+/// Which bound belongs where does not change here, and the line is the same one drawn for a member
+/// with a name. A bound that decides *which variant a payload is* stays on the read: an untagged
+/// union takes a member the constraint rejects out of the running, and `validate()` cannot answer
+/// that question because by the time it runs the variant is already chosen. A bound that decides
+/// only whether a value is *admissible* is the validator's, wherever it sits — the arm runs after
+/// the choice is settled, so nothing it reports can move a payload from one member to another.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+mod a_bound_inside_an_untagged_variant {
+    use super::UnpublishedValidate;
+    use serde::{Deserialize, Serialize};
+    use tixschema::model_schema;
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct WireClaims {
+        #[model_schema_prop(minLength = 1)]
+        pub jti: String,
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct AppUserAccount {
+        pub aud: String,
+        #[serde(flatten)]
+        pub claims: WireClaims,
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct AdminAccount {
+        #[serde(flatten)]
+        pub claims: WireClaims,
+        pub sys_admin_username: String,
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct SharedLinkAccount {
+        #[serde(flatten)]
+        pub claims: WireClaims,
+        pub token_id: String,
+    }
+
+    /// A union of newtype members held by another union's newtype member, which is how a shared-link
+    /// caller is written: the account a message declares is a union, and one of its members is a
+    /// union in its own right.
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    #[serde(untagged)]
+    pub enum SharedAccount {
+        Link(SharedLinkAccount),
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    #[serde(untagged)]
+    pub enum ScopedAccount {
+        Admin(AdminAccount),
+        AppUser(AppUserAccount),
+        Shared(SharedAccount),
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct ScopedEnvelope {
+        pub account: ScopedAccount,
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct AdminEnvelope {
+        pub account: AdminAccount,
+    }
+
+    /// The envelope itself as a union, which is the shape a balance request is declared in.
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    #[serde(untagged)]
+    pub enum EitherEnvelope {
+        Admin(AdminEnvelope),
+        Scoped(ScopedEnvelope),
+    }
+
+    #[model_schema(minLength = 3)]
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(transparent)]
+    pub struct Tag(pub String);
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    #[serde(untagged)]
+    /// `Bounded` is declared first because an untagged read tries its members in order and
+    /// `Free` admits every string: the bound is what takes the first member out of the running,
+    /// and a `Free` ahead of it would take that decision away from the bound entirely.
+    pub enum Label {
+        Bounded(Tag),
+        Free(String),
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct LabelHolder {
+        pub label: Label,
+    }
+
+    /// A union whose members hold nothing any bound describes, so there is nothing for a walk to
+    /// run and nothing to publish.
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    #[serde(untagged)]
+    pub enum Unbounded {
+        Count(u32),
+        Name(String),
+    }
+
+    impl UnpublishedValidate for Unbounded {}
+
+    /// A union of newtype members publishes a validator that dispatches to whichever variant it
+    /// holds, and reports what that variant reported.
+    ///
+    /// The member contributes no segment of its own, for the reason a `#[serde(flatten)]` hop
+    /// contributes none: what an untagged newtype member writes on the wire *is* the inner value,
+    /// so a violation beneath it is already one of the payload's own keys and a segment for the hop
+    /// would name a key nothing carries.
+    #[test]
+    fn test_an_untagged_union_dispatches_to_whichever_variant_it_holds() {
+        assert_eq!(
+            serde_json::from_str::<ScopedAccount>(r#"{"aud":"app-user","jti":""}"#)
+                .unwrap()
+                .validate()
+                .unwrap_err(),
+            vec!["'jti' is too short: minimum length is 1, got 0".to_owned()]
+        );
+        assert_eq!(
+            serde_json::from_str::<ScopedAccount>(r#"{"sysAdminUsername":"ops","jti":""}"#)
+                .unwrap()
+                .validate()
+                .unwrap_err(),
+            vec!["'jti' is too short: minimum length is 1, got 0".to_owned()],
+            "the second member has to be walked too, or the arm is one variant's rather than the \
+             union's"
+        );
+        assert_eq!(
+            serde_json::from_str::<ScopedAccount>(r#"{"aud":"app-user","jti":"a"}"#)
+                .unwrap()
+                .validate(),
+            Ok(())
+        );
+    }
+
+    /// Two unions stacked, which is the shape the account a real message declares actually has: a
+    /// union whose member is a union whose member reaches the bound through a flattened hop. Each
+    /// level contributes nothing to the path and the field named is still the one the payload
+    /// spells, because none of the three hops writes a key.
+    #[test]
+    fn test_a_union_inside_a_union_is_walked_to_the_bound_beneath_both() {
+        assert_eq!(
+            serde_json::from_str::<ScopedEnvelope>(r#"{"account":{"tokenId":"t-1","jti":""}}"#)
+                .unwrap()
+                .validate()
+                .unwrap_err(),
+            vec!["'account.jti' is too short: minimum length is 1, got 0".to_owned()]
+        );
+        assert_eq!(
+            serde_json::from_str::<ScopedEnvelope>(r#"{"account":{"tokenId":"t-1","jti":"a"}}"#)
+                .unwrap()
+                .validate(),
+            Ok(())
+        );
+    }
+
+    /// A field holding such a union: the hop the payload spells contributes its name, the union
+    /// contributes none, and the path is the one a caller can look up in what it sent.
+    #[test]
+    fn test_a_field_holding_an_untagged_union_names_the_path_the_payload_spells() {
+        assert_eq!(
+            serde_json::from_str::<ScopedEnvelope>(r#"{"account":{"aud":"app-user","jti":""}}"#)
+                .unwrap()
+                .validate()
+                .unwrap_err(),
+            vec!["'account.jti' is too short: minimum length is 1, got 0".to_owned()]
+        );
+        assert_eq!(
+            serde_json::from_str::<ScopedEnvelope>(r#"{"account":{"aud":"app-user","jti":"a"}}"#)
+                .unwrap()
+                .validate(),
+            Ok(())
+        );
+    }
+
+    /// The message that *is* a union answers exactly what the variant it holds answers — the union
+    /// has no report of its own to write.
+    ///
+    /// And the envelope whose account is a plain struct rather than a union keeps answering what it
+    /// always answered: that pair is the whole of the port's divergence, and it is now one string.
+    #[test]
+    fn test_a_message_that_is_itself_untagged_answers_what_its_variant_answers() {
+        let refused = "'account.jti' is too short: minimum length is 1, got 0".to_owned();
+        assert_eq!(
+            serde_json::from_str::<EitherEnvelope>(r#"{"account":{"aud":"app-user","jti":""}}"#)
+                .unwrap()
+                .validate()
+                .unwrap_err(),
+            vec![refused.clone()]
+        );
+        assert_eq!(
+            serde_json::from_str::<EitherEnvelope>(
+                r#"{"account":{"sysAdminUsername":"ops","jti":""}}"#
+            )
+            .unwrap()
+            .validate()
+            .unwrap_err(),
+            vec![refused.clone()]
+        );
+        assert_eq!(
+            serde_json::from_str::<AdminEnvelope>(
+                r#"{"account":{"sysAdminUsername":"ops","jti":""}}"#
+            )
+            .unwrap()
+            .validate()
+            .unwrap_err(),
+            vec![refused],
+            "the shape that already refused has to keep refusing, in the same words"
+        );
+    }
+
+    /// A brand behind a newtype member. Its own report names nothing — the brand *is* the value —
+    /// so the union has nothing to write a name into and the holder supplies one, which is what a
+    /// brand held directly by a field already does.
+    ///
+    /// The read still chooses the variant: a value the bound refuses is the other member, never a
+    /// violation to report.
+    #[test]
+    fn test_a_brand_behind_a_newtype_member_is_reached_and_named_by_its_holder() {
+        assert_eq!(
+            Label::Bounded(Tag("a".to_owned())).validate().unwrap_err(),
+            vec!["value is too short: minimum length is 3, got 1".to_owned()]
+        );
+        assert_eq!(
+            LabelHolder {
+                label: Label::Bounded(Tag("a".to_owned())),
+            }
+            .validate()
+            .unwrap_err(),
+            vec!["'label': value is too short: minimum length is 3, got 1".to_owned()]
+        );
+
+        let refused: Label = serde_json::from_str(r#""ab""#).unwrap();
+        assert!(
+            matches!(&refused, Label::Free(loose) if loose == "ab"),
+            "the brand's bound took the newtype member out of the running rather than ending the \
+             read. Got: {refused:?}"
+        );
+        assert_eq!(refused.validate(), Ok(()));
+        let admitted: Label = serde_json::from_str(r#""abc""#).unwrap();
+        assert!(
+            matches!(&admitted, Label::Bounded(tag) if tag.0 == "abc"),
+            "got: {admitted:?}"
+        );
+        assert_eq!(admitted.validate(), Ok(()));
+    }
+
+    /// Parity, from the other side: a union whose members hold nothing any bound describes still
+    /// publishes no validator, exactly as a constraint-free struct does. The trait's method is
+    /// reached only because no inherent one shadows it.
+    #[test]
+    fn test_a_union_with_nothing_to_check_publishes_no_validator() {
+        assert_eq!(Unbounded::Count(0).validate(), "no inherent validate()");
+        assert_eq!(
+            Unbounded::Name(String::new()).validate(),
+            "no inherent validate()"
+        );
+    }
+
+    /// The Zod schema published from the same declaration carries the same bound behind the same
+    /// union, which is why the TypeScript service refused these payloads all along. The two
+    /// surfaces disagreeing about a payload is the divergence this closes; agreeing about where the
+    /// bound sits is what makes the reports name the same field.
+    #[cfg(feature = "zod")]
+    #[test]
+    fn test_the_zod_surface_carries_the_same_bound_behind_the_same_union() {
+        // Each hop names the next rather than inlining it, so the chain is read one link at a time
+        // — and it is the same chain of hops the Rust walk takes.
+        for (named, schema, names) in [
+            (
+                "ScopedAccount",
+                ScopedAccount::zod_schema(),
+                "z.union([AdminAccount$Schema, AppUserAccount$Schema, SharedAccount$Schema])",
+            ),
+            (
+                "EitherEnvelope",
+                EitherEnvelope::zod_schema(),
+                "z.union([AdminEnvelope$Schema, ScopedEnvelope$Schema])",
+            ),
+            (
+                "AppUserAccount",
+                AppUserAccount::zod_schema(),
+                "WireClaims$Schema",
+            ),
+            (
+                "AdminAccount",
+                AdminAccount::zod_schema(),
+                "WireClaims$Schema",
+            ),
+        ] {
+            assert!(
+                schema.contains(names),
+                "`{named}` reaches the bound by naming `{names}`: {schema}"
+            );
+        }
+        let claims = WireClaims::zod_schema();
+        assert!(
+            claims.contains(".min(1)"),
+            "the bound the whole chain composes down to: {claims}"
+        );
+    }
+}
+
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
