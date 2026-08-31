@@ -598,12 +598,24 @@ enum TupleStructShape {
     BareValue(Box<FieldDef>),
 }
 
+/// One constrained member of a variant as the arm that matched it binds it: where the pattern finds
+/// it, and the name the check reads it under.
+struct BoundMember {
+    binding: proc_macro2::Ident,
+    /// The member's declaration index, which is what places a positional binding in a tuple
+    /// pattern — a named member is placed by its ident instead and never consults this.
+    index: usize,
+    /// The member's field ident, or `None` for a positional slot, which the pattern matches by
+    /// position because it has no name to match by.
+    named: Option<proc_macro2::Ident>,
+}
+
 /// What one untagged variant's member walk produces: the members its surfaces are rendered from,
 /// the bindings its constrained members are checked under, and the three enum-wide lists the walk
 /// adds to, which the caller joins onto its own in declaration order.
 #[cfg(feature = "serde")]
 struct UntaggedVariantMembers {
-    bound: Vec<(proc_macro2::Ident, proc_macro2::Ident)>,
+    bound: Vec<BoundMember>,
     checks: Vec<proc_macro2::TokenStream>,
     deferred_attrs: Vec<Vec<syn::Attribute>>,
     field_defs: Vec<FieldDef>,
@@ -1584,7 +1596,7 @@ fn variant_check_pattern(
     variant_ident: &proc_macro2::Ident,
     kind: &VariantKind,
     total_fields: usize,
-    bound: &[(proc_macro2::Ident, proc_macro2::Ident)],
+    bound: &[BoundMember],
 ) -> proc_macro2::TokenStream {
     if bound.is_empty() {
         return match *kind {
@@ -1596,12 +1608,33 @@ fn variant_check_pattern(
             VariantKind::Named => quote! { Self::#variant_ident { .. } },
         };
     }
-    let fields = bound.iter().map(|(field, _)| field);
-    let bindings = bound.iter().map(|(_, binding)| binding);
+    if matches!(*kind, VariantKind::TupleSingle | VariantKind::TupleMultiple) {
+        let slots = (0..total_fields).map(|index| {
+            bound
+                .iter()
+                .find(|member| member.index == index)
+                .map_or_else(
+                    || quote! { _ },
+                    |member| {
+                        let binding = &member.binding;
+                        quote! { #binding }
+                    },
+                )
+        });
+        return quote! { Self::#variant_ident(#(#slots),*) };
+    }
+    // One iterator rather than a name list zipped against a binding list, so the two cannot come
+    // out of step: a member with no name is a positional slot, which the tuple arm above already
+    // took.
+    let members = bound.iter().filter_map(|member| {
+        let field = member.named.as_ref()?;
+        let binding = &member.binding;
+        Some(quote! { #field: #binding })
+    });
     if bound.len() == total_fields {
-        quote! { Self::#variant_ident { #(#fields: #bindings),* } }
+        quote! { Self::#variant_ident { #(#members),* } }
     } else {
-        quote! { Self::#variant_ident { #(#fields: #bindings,)* .. } }
+        quote! { Self::#variant_ident { #(#members,)* .. } }
     }
 }
 
@@ -5961,7 +5994,7 @@ fn collect_discriminated_variants(
 
         let mut field_defs: Vec<FieldDef> = Vec::new();
         let mut flattened_fields: Vec<FieldDef> = Vec::new();
-        let mut bound: Vec<(proc_macro2::Ident, proc_macro2::Ident)> = Vec::new();
+        let mut bound: Vec<BoundMember> = Vec::new();
         let mut checks: Vec<proc_macro2::TokenStream> = Vec::new();
         let total_fields = item.fields.len();
         for (index, field) in item.fields.iter_mut().enumerate() {
@@ -6002,7 +6035,7 @@ fn collect_discriminated_variants(
                 let _: (&_, &_) = (&validation_fn, &validate_body);
                 // Rebuilt under no name, as a struct's flattened field is — see there.
                 #[cfg(feature = "serde")]
-                flattened_member_walk(field, &f_def, &mut bound, &mut checks);
+                flattened_member_walk(field, &f_def, index, &mut bound, &mut checks);
                 flattened_fields.push(f_def);
                 continue;
             }
@@ -6013,7 +6046,7 @@ fn collect_discriminated_variants(
             // A constrained positional slot is refused by its own guard, so a member with a body to
             // run is always one the arm can name.
             if let (Some(body), Some(ident)) = (validate_body, field.ident.as_ref()) {
-                bound.push((ident.clone(), member_binding(ident)));
+                bound.push(named_bound_member(ident, index));
                 checks.push(body);
             }
             if positional && omission.absent_from_wire() {
@@ -7797,16 +7830,28 @@ fn collect_untagged_variant_members(
         // carve-out this walk exists for — but a bound its type declares is still the validator's:
         // the arm runs after the variant has been chosen, so nothing it reports can move a payload
         // from one member to another.
-        // A flattened member keeps the walk and loses the name, the hop writing no key of its own.
-        let member_body = if is_flatten {
-            nested_validate_body(field, &member_def, true, true)
-        } else {
-            validate_body.or_else(|| nested_validate_body(field, &member_def, true, false))
+        // A flattened member keeps the walk and loses the name, the hop writing no key of its own,
+        // and a positional slot loses it for the same reason: what the member writes on the wire is
+        // the inner value itself.
+        let bound_member = field.ident.as_ref().map_or_else(
+            || BoundMember {
+                binding: positional_member_binding(index),
+                index,
+                named: None,
+            },
+            |ident| named_bound_member(ident, index),
+        );
+        let member_body = match (is_flatten, field.ident.is_some()) {
+            (true, _) => nested_validate_body(field, &member_def, true, true),
+            (false, true) => {
+                validate_body.or_else(|| nested_validate_body(field, &member_def, true, false))
+            }
+            (false, false) => {
+                positional_member_validate_body(field, &member_def, &bound_member.binding)
+            }
         };
-        if let Some(body) = member_body
-            && let Some(ident) = field.ident.as_ref()
-        {
-            walked.bound.push((ident.clone(), member_binding(ident)));
+        if let Some(body) = member_body {
+            walked.bound.push(bound_member);
             walked.checks.push(body);
         }
         if is_flatten {
@@ -8165,6 +8210,13 @@ fn build_untagged_schema_impl_items(
 /// Processes an untagged enum (`#[serde(untagged)]`), emitting a TypeScript union (`A | B`), a Zod
 /// `z.union([...])`, and a JSON-schema `anyOf`. Mirrors [`process_discriminated_enum`]'s
 /// setup/assembly so all feature combinations compile.
+///
+/// The `validate()` it publishes dispatches to whichever variant the value holds and runs that
+/// variant's members' walks, which is the only reading available to it: the union is a choice
+/// already made by the time a validator runs. It publishes one exactly when some variant has
+/// something to run, the rule every other shape follows — a union whose members hold nothing any
+/// bound describes publishes none, and answers `Ok(())` through the caller's fallback, which is the
+/// true answer rather than a gap.
 #[cfg(feature = "serde")]
 fn process_untagged_enum(
     mut item_enum: syn::ItemEnum,
@@ -9983,6 +10035,16 @@ fn member_binding(field_ident: &proc_macro2::Ident) -> proc_macro2::Ident {
     )
 }
 
+/// The same, for a positional slot, numbered by declaration position — the spelling a tuple slot
+/// has in place of the field ident a named member is bound under.
+#[cfg(feature = "serde")]
+fn positional_member_binding(index: usize) -> proc_macro2::Ident {
+    proc_macro2::Ident::new(
+        &format!("member_slot_{index}"),
+        proc_macro2::Span::call_site(),
+    )
+}
+
 /// The expression a check reads its value from, in whichever position the member was written.
 #[cfg(feature = "serde")]
 fn member_access_expr(
@@ -10098,11 +10160,9 @@ fn walk_wraps(
 #[cfg(feature = "serde")]
 fn build_nested_validation(
     wraps: &[ConstraintWrap],
-    access: MemberAccess,
-    field_ident_tok: &proc_macro2::Ident,
+    checked: &proc_macro2::TokenStream,
     under: Option<&str>,
 ) -> proc_macro2::TokenStream {
-    let checked = member_access_expr(access, field_ident_tok);
     let head = wrap_binding(0);
     let leaf = nested_leaf(&walked_value(wraps), under);
     let walk = walk_wraps(wraps, &head, 1, &leaf);
@@ -11399,15 +11459,23 @@ fn process_field(
     (field_def, validation_fn, body, guard_errors)
 }
 
-/// The `validate()` contribution for a field whose *own type* carries the bound — a constrained
-/// brand, or a nested `#[model_schema()]` type — or `None` where nothing below the field could
-/// publish a validator to run.
+/// The wrapper chain a field's own type is reached through, and `None` where nothing below the
+/// field could publish a validator to run at all.
 ///
-/// Which types those are is the crate's own answer rather than a second list: every leaf a surface
+/// Which types could is the crate's own answer rather than a second list: every leaf a surface
 /// renders itself — a primitive, a date, an `ObjectId`, a map, a tuple, one of the item's own
-/// parameters — is not a reference to a declared type and publishes nothing. A positional slot is
-/// left alone for the reason a constrained one is refused: the report and the arm that would run it
-/// are both named from a field ident it has none of.
+/// parameters — is not a reference to a declared type and publishes nothing.
+#[cfg(feature = "serde")]
+fn reachable_nested_shape(field: &Field, field_def: &FieldDef) -> Option<Vec<ConstraintWrap>> {
+    matches!(field_def.field_type, FieldDefType::SiblingType(_, _))
+        .then(|| nested_shape(&field.ty))
+        .flatten()
+}
+
+/// The `validate()` contribution for a named field whose *own type* carries the bound — a
+/// constrained brand, or a nested `#[model_schema()]` type — or `None` where there is nothing below
+/// it to run. A positional slot has no ident to name its report or its access from, and is answered
+/// by [`positional_member_validate_body`] instead.
 #[cfg(feature = "serde")]
 fn nested_validate_body(
     field: &Field,
@@ -11416,23 +11484,34 @@ fn nested_validate_body(
     flattened: bool,
 ) -> Option<proc_macro2::TokenStream> {
     let field_ident_tok = field.ident.as_ref()?;
-    if !matches!(field_def.field_type, FieldDefType::SiblingType(_, _)) {
-        return None;
-    }
-    let wraps = nested_shape(&field.ty)?;
+    let wraps = reachable_nested_shape(field, field_def)?;
     let access = if in_variant {
         MemberAccess::VariantBinding
     } else {
         MemberAccess::SelfField
     };
+    let checked = member_access_expr(access, field_ident_tok);
     let named = field_ident_tok.to_string();
     let under = (!flattened).then_some(named.as_str());
-    Some(build_nested_validation(
-        &wraps,
-        access,
-        field_ident_tok,
-        under,
-    ))
+    Some(build_nested_validation(&wraps, &checked, under))
+}
+
+/// The `validate()` contribution for an untagged newtype variant's lone slot, read off the binding
+/// the arm that matched it introduced.
+///
+/// The slot contributes no path segment, for the reason a `#[serde(flatten)]` hop contributes none:
+/// what an untagged newtype member puts on the wire *is* the inner value, so a violation beneath it
+/// is already one of the enclosing object's own keys and a segment for the hop would name a key no
+/// payload carries. A member's own bound is not this — that one still runs on the read, where it
+/// decides which variant the payload is.
+#[cfg(feature = "serde")]
+fn positional_member_validate_body(
+    field: &Field,
+    field_def: &FieldDef,
+    binding: &proc_macro2::Ident,
+) -> Option<proc_macro2::TokenStream> {
+    let wraps = reachable_nested_shape(field, field_def)?;
+    Some(build_nested_validation(&wraps, &quote! { #binding }, None))
 }
 
 /// The walk a flattened variant member keeps, bound under the name the arm will match it by.
@@ -11444,15 +11523,25 @@ fn nested_validate_body(
 fn flattened_member_walk(
     field: &Field,
     field_def: &FieldDef,
-    bound: &mut Vec<(proc_macro2::Ident, proc_macro2::Ident)>,
+    index: usize,
+    bound: &mut Vec<BoundMember>,
     checks: &mut Vec<proc_macro2::TokenStream>,
 ) {
     if let (Some(body), Some(ident)) = (
         nested_validate_body(field, field_def, true, true),
         field.ident.as_ref(),
     ) {
-        bound.push((ident.clone(), member_binding(ident)));
+        bound.push(named_bound_member(ident, index));
         checks.push(body);
+    }
+}
+
+/// One named member's entry in the arm's bindings, bound under the name its check already reads.
+fn named_bound_member(field_ident: &proc_macro2::Ident, index: usize) -> BoundMember {
+    BoundMember {
+        binding: member_binding(field_ident),
+        index,
+        named: Some(field_ident.clone()),
     }
 }
 
