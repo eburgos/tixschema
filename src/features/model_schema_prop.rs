@@ -57,29 +57,52 @@ pub enum LiteralValue {
 ///   [`crate::utils::constraining_pattern`].
 ///   - Zod: `.check(z.regex(/regex/))`
 ///   - JSON Schema: `"pattern"`
-///   - Rust: auto-generates a `deserialize_{field}` serde hook and a `validate_{field}_value()` static function
+///   - Rust: `validate()` — see "Where a constraint is checked" below
 ///
 /// - `minLength = N` — minimum string length (inclusive).
 ///   - Zod: `.min(N)`
 ///   - JSON Schema: `"minLength"`
-///   - Rust: serde validator
+///   - Rust: `validate()`
 ///
 /// - `maxLength = N` — maximum string length (inclusive).
 ///   - Zod: `.max(N)`
 ///   - JSON Schema: `"maxLength"`
-///   - Rust: serde validator
+///   - Rust: `validate()`
 ///
 /// ## Numeric constraints
 ///
 /// - `minimum = N` — minimum value for numeric fields (integer or float).
 ///   - Zod: `.min(N)`
 ///   - JSON Schema: `"minimum"`
-///   - Rust: serde validator
+///   - Rust: `validate()`
 ///
 /// - `maximum = N` — maximum value for numeric fields (integer or float).
 ///   - Zod: `.max(N)`
 ///   - JSON Schema: `"maximum"`
-///   - Rust: serde validator
+///   - Rust: `validate()`
+///
+/// ## Where a constraint is checked
+///
+/// By the `validate()` the type publishes, and not as the payload is read.
+///
+/// A constraint describes the value, not the shape, so a payload carrying a value it rejects is
+/// still structurally the message it claims to be — every key present, every value of its field's
+/// declared type. Checking it on the read makes the two indistinguishable to whoever receives the
+/// failure: "I could not parse this at all" and "I parsed it and the value broke a rule" are
+/// different sentences that send a caller looking in different places. So the read admits the
+/// value and `validate()` refuses it, naming the field.
+///
+/// A field still generates both helpers into the schema module — `validate_{field}_value()`, which
+/// `validate()` calls, and `deserialize_{field}`, a serde hook an author may hang on a field of
+/// their own accord. Only one position is hung with that hook automatically: a member of an
+/// `#[serde(untagged)]` enum, where whether the member is admissible is what chooses which variant
+/// the payload is. There the check is part of reading the value rather than part of judging it,
+/// exactly as it is under `anyOf` and `z.union` on the two schema surfaces the same type
+/// publishes, and `validate()` cannot stand in for it — by the time it runs the variant has
+/// already been chosen.
+///
+/// A constrained *brand* is the remaining exception and is enforced on the read: a message holding
+/// one publishes no `validate()` that reaches into it, so the read is the only thing there is.
 ///
 /// ## Type overrides
 ///

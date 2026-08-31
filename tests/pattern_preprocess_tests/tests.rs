@@ -110,7 +110,7 @@ fn test_pattern_rust_validation_valid() {
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
 ))]
 #[test]
-fn test_pattern_rust_validation_invalid() {
+fn test_pattern_rust_validation_invalid_reaches_validate() {
     #[model_schema()]
     #[derive(Serialize, Deserialize, Debug)]
     pub struct ValidationInvalid {
@@ -118,13 +118,16 @@ fn test_pattern_rust_validation_invalid() {
         pub id: String,
     }
 
+    // A string that matches no pattern is still a string, so the read admits it and the
+    // validator is what holds it to the pattern.
     let invalid = r#"{"id": "not-a-hex-id"}"#;
-    let result: Result<ValidationInvalid, _> = serde_json::from_str(invalid);
-    assert!(result.is_err(), "Invalid hex ID should fail to deserialize");
-    let err_str = result.unwrap_err().to_string();
+    let errors = serde_json::from_str::<ValidationInvalid>(invalid)
+        .unwrap()
+        .validate()
+        .unwrap_err();
     assert!(
-        err_str.contains("does not match pattern"),
-        "Error: {err_str}"
+        errors[0].contains("does not match pattern"),
+        "Error: {errors:?}"
     );
 }
 
@@ -416,17 +419,16 @@ fn test_pattern_enum_variant_serde_validation() {
         result.err()
     );
 
-    // Invalid: contains uppercase and digits
+    // Invalid: contains uppercase and digits. The tag named the variant before its members were
+    // read, so the value is never in doubt and the pattern is the validator's to apply.
     let invalid = r#"{"type": "Item", "key": "Hello123"}"#;
-    let invalid_result: Result<PatternEnumSerde, _> = serde_json::from_str(invalid);
+    let errors = serde_json::from_str::<PatternEnumSerde>(invalid)
+        .unwrap()
+        .validate()
+        .unwrap_err();
     assert!(
-        invalid_result.is_err(),
-        "Invalid key should fail to deserialize"
-    );
-    let err_str = invalid_result.unwrap_err().to_string();
-    assert!(
-        err_str.contains("does not match pattern"),
-        "Error should mention pattern mismatch: {err_str}"
+        errors[0].contains("does not match pattern"),
+        "Error should mention pattern mismatch: {errors:?}"
     );
 }
 
@@ -542,10 +544,13 @@ fn test_the_escaped_zod_pattern_matches_the_value_set_the_validator_enforces() {
         r#"{"name": "/ETC"}"#,
         r#"{"name": "//etc"}"#,
     ] {
-        let err = serde_json::from_str::<SlashValidated>(rejected).unwrap_err();
+        let errors = serde_json::from_str::<SlashValidated>(rejected)
+            .unwrap()
+            .validate()
+            .unwrap_err();
         assert!(
-            err.to_string().contains("does not match pattern"),
-            "Expected a pattern rejection for {rejected}: {err}"
+            errors[0].contains("does not match pattern"),
+            "Expected a pattern rejection for {rejected}: {errors:?}"
         );
     }
 }
@@ -691,10 +696,13 @@ fn test_the_escaped_newline_literal_matches_the_value_set_the_validator_enforces
 
     serde_json::from_str::<NewlineValidated>(r#"{"name": "a\nbc"}"#).unwrap();
     for rejected in [r#"{"name": "abc"}"#, r#"{"name": "a\n\nbc"}"#] {
-        let err = serde_json::from_str::<NewlineValidated>(rejected).unwrap_err();
+        let errors = serde_json::from_str::<NewlineValidated>(rejected)
+            .unwrap()
+            .validate()
+            .unwrap_err();
         assert!(
-            err.to_string().contains("does not match pattern"),
-            "Expected a pattern rejection for {rejected}: {err}"
+            errors[0].contains("does not match pattern"),
+            "Expected a pattern rejection for {rejected}: {errors:?}"
         );
     }
 }
@@ -758,10 +766,13 @@ fn test_the_rewritten_named_group_matches_the_value_set_the_validator_enforces()
         r#"{"tag": "ABC-42"}"#,
         r#"{"tag": "-42"}"#,
     ] {
-        let err = serde_json::from_str::<RustNamedGroupValidated>(rejected).unwrap_err();
+        let errors = serde_json::from_str::<RustNamedGroupValidated>(rejected)
+            .unwrap()
+            .validate()
+            .unwrap_err();
         assert!(
-            err.to_string().contains("does not match pattern"),
-            "Expected a pattern rejection for {rejected}: {err}"
+            errors[0].contains("does not match pattern"),
+            "Expected a pattern rejection for {rejected}: {errors:?}"
         );
     }
 }

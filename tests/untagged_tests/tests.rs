@@ -1574,23 +1574,33 @@ fn test_untagged_objectid_member_spells_the_one_oid_object() {
     );
 }
 
-/// What the read costs the author: serde's derived `Deserialize` for an untagged enum drops each
-/// candidate's own error as it moves to the next, so when no variant accepts, the bound's own
-/// error is gone and one generic sentence stands in its place. The tagged twin, whose tag names
-/// the variant before its members are read, keeps the bound's own words.
+/// The two readings of one bound, side by side.
+///
+/// Untagged, the bound is part of choosing the variant, so it runs on the read — and serde's
+/// derived `Deserialize` drops each candidate's own error as it moves to the next, so when no
+/// variant accepts, the bound's words are gone and one generic sentence stands in their place.
+///
+/// The tagged twin's tag names the variant before its members are read, so nothing about the value
+/// is in doubt and the bound has no variant to choose. It is therefore not on the read at all: the
+/// payload is admitted and the bound is the validator's, answered in its own words and naming the
+/// field. That difference is the whole of why the two are not the same reading.
 #[test]
-fn test_untagged_member_bound_failure_reports_serdes_generic_sentence() {
+fn test_the_bound_runs_on_an_untagged_read_and_in_a_tagged_twins_validator() {
     assert_eq!(
         serde_json::from_str::<SoleConstrainedUnion>(r#"{"slug":"A"}"#)
             .unwrap_err()
             .to_string(),
-        "data did not match any variant of untagged enum SoleConstrainedUnion"
+        "data did not match any variant of untagged enum SoleConstrainedUnion",
+        "no variant accepted the value, so the payload is not a message of this type at all"
     );
     assert_eq!(
         serde_json::from_str::<SoleConstrainedTagged>(r#"{"kind":"Slug","slug":"A"}"#)
-            .unwrap_err()
-            .to_string(),
-        "'slug' is too short: minimum length is 2, got 1"
+            .unwrap()
+            .validate()
+            .unwrap_err(),
+        vec!["'slug' is too short: minimum length is 2, got 1"],
+        "the tag settled which variant this is, so the payload is a message and the bound is \
+         what it failed"
     );
 }
 

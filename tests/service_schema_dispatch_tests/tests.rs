@@ -9,22 +9,21 @@
 
 #![cfg(feature = "serde")]
 
-/// A message annotated with `#[model_schema_prop]`, and where a violation of it is actually
-/// caught.
+/// A message annotated with `#[model_schema_prop]`, and where a violation of it is caught.
 ///
-/// Gated because the annotation is: the constraint is read, and the deserializer that enforces it
-/// written, only when `serde` is on beside a surface that reads the constraint. What this module
-/// records is that serde's own hook rejects the payload *before* it becomes a message at all, so
-/// the arm never reaches its `validate()` and the fault reports an undeserializable payload. The
-/// implementation is not reached either way, which is the guarantee that matters; the arm's own
-/// validator is read outside this module, over a message that validates itself.
+/// Gated because the annotation is: the constraint is read, and the validator that enforces it
+/// written, only when `serde` is on beside a surface that reads the constraint.
 ///
-/// The kind differs between the two paths and the field does not. A constrained field's serde hook
-/// runs the very check `validate()` runs and hands serde that check's message verbatim, so the
-/// refusal names the field in the same words a violation report does and the fault reads the name
-/// back off either. That is what makes "a payload failing validation produces a fault naming the
-/// field" true on the path a service written with annotations actually takes — which is every
-/// service, the annotation being how a constraint is declared.
+/// **The two answers a payload can earn here are different answers, and the arm gives whichever
+/// one is true.** A payload that is not a message at all — a field carrying the wrong type of
+/// value, a key that is missing — never deserializes, and the fault says so. A payload that *is* a
+/// message, carrying a value the constraint refuses, deserializes and then fails the arm's own
+/// `validate()`, and the fault says that instead and names the field.
+///
+/// A receiver acts differently on each. Unparseable means the sender's serialization is broken.
+/// Failed validation means a person supplied something out of range. Constraints are therefore
+/// enforced by the validator alone and never as the payload is read, so the two never arrive under
+/// one name.
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
@@ -32,6 +31,7 @@
 mod a_message_annotated_with_a_constraint {
     use super::poll_once;
     use core::future::ready;
+    use serde::de::Error as DeError;
     use serde::{Deserialize, Serialize};
     use std::sync::Mutex;
     use tixschema::{model_schema, service_schema};
@@ -47,6 +47,19 @@ mod a_message_annotated_with_a_constraint {
     #[derive(Deserialize, Serialize)]
     pub struct Admitted {
         pub admitted: bool,
+    }
+
+    /// A message whose author wrote the serde hook by hand rather than annotating the field.
+    ///
+    /// Annotating a field no longer puts a check on the read, so this is what is left that can
+    /// refuse a payload in a validator's words: an author who wants the wire itself gated, and who
+    /// reports it in the shape a generated validator reports in — the field first and in single
+    /// quotes. A fault built from such a refusal reads the name back off it.
+    #[model_schema()]
+    #[derive(Deserialize, Serialize)]
+    pub struct LedgerRequest {
+        #[serde(deserialize_with = "refuse_a_short_ledger")]
+        pub ledger_id: String,
     }
 
     /// Records every message that reached it, which is how a test says an invalid one did not.
@@ -71,12 +84,20 @@ mod a_message_annotated_with_a_constraint {
     #[service_schema()]
     pub trait GateService<Ctx> {
         async fn admit(&self, ctx: &Ctx, req: GateRequest) -> Result<Admitted, GateError>;
+
+        async fn open_ledger(&self, ctx: &Ctx, req: LedgerRequest) -> Result<Admitted, GateError>;
     }
 
     impl GateService<()> for GateBackEnd {
         async fn admit(&self, _ctx: &(), req: GateRequest) -> Result<Admitted, GateError> {
             ready(()).await;
             self.reached.lock().unwrap().push(req.organization_id);
+            Ok(Admitted { admitted: true })
+        }
+
+        async fn open_ledger(&self, _ctx: &(), req: LedgerRequest) -> Result<Admitted, GateError> {
+            ready(()).await;
+            self.reached.lock().unwrap().push(req.ledger_id);
             Ok(Admitted { admitted: true })
         }
     }
@@ -129,8 +150,24 @@ mod a_message_annotated_with_a_constraint {
         }
     }
 
+    /// Refuses a short ledger id as the payload is read, in the words a generated validator would
+    /// have used.
+    fn refuse_a_short_ledger<'de, D>(deserializer: D) -> Result<String, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let read = String::deserialize(deserializer)?;
+        if read.len() < 3 {
+            return Err(DeError::custom(format!(
+                "'ledger_id' is too short: minimum length is 3, got {}",
+                read.len()
+            )));
+        }
+        Ok(read)
+    }
+
     #[test]
-    fn a_payload_violating_it_is_refused_before_it_ever_becomes_a_message() {
+    fn a_payload_carrying_a_value_the_constraint_refuses_fails_validation_and_names_the_field() {
         let service = GateBackEnd::new();
         let reply = GateReply::new();
         poll_once(gate_service_schema::dispatch(
@@ -145,17 +182,20 @@ mod a_message_annotated_with_a_constraint {
         .unwrap();
         assert!(
             service.reached().is_empty(),
-            "an implementation may assume its incoming message is valid, and this one never \
-             deserialized. Got: {:?}",
+            "an implementation may assume its incoming message is valid, and this one is not. \
+             Got: {:?}",
             service.reached()
         );
         assert_eq!(reply.settled().len(), 1, "got: {:?}", reply.settled());
         let reported = reply.faults();
         assert_eq!(
             reported[0].kind(),
-            gate_service_schema::ServiceFaultKind::UndeserializablePayload,
-            "the annotation writes a serde hook, which refuses the bytes before the arm can run \
-             the message's own validator"
+            gate_service_schema::ServiceFaultKind::FailedValidation,
+            "this payload *is* a message — every key is present and every value is of the type \
+             the field declared. What it is not is a message satisfying the constraint, and \
+             telling the sender its serialization was broken would send it looking in the wrong \
+             place entirely. Got detail: {}",
+            reported[0].detail()
         );
         assert_eq!(reported[0].operation(), "admit");
         assert!(
@@ -166,23 +206,68 @@ mod a_message_annotated_with_a_constraint {
         assert_eq!(
             reported[0].field(),
             Some("organization_id"),
-            "the caller has to be told which field it got wrong, and which of the two guards \
-             caught it is not the caller's business. The hook serde ran is the constraint's own \
-             check and its message is that check's, so the name is there to be read. Got: {}",
+            "the caller has to be told which field it got wrong. Got: {}",
             reported[0].detail()
         );
     }
 
     #[test]
-    fn a_payload_wrong_about_the_field_s_type_rather_than_its_value_names_no_field() {
+    fn a_payload_that_is_not_a_message_at_all_is_still_answered_as_one_that_would_not_read() {
+        // Wrong about the type its field declared, missing the key entirely, and not a document
+        // in the first place. None of the three is a message, and moving the constraint checks to
+        // the validator moved none of them with it — a required key in particular must not have
+        // become defaultable on the way.
+        for payload in [
+            br#"{"organization_id":42}"#.to_vec(),
+            b"{}".to_vec(),
+            b"not a document at all".to_vec(),
+        ] {
+            let service = GateBackEnd::new();
+            let reply = GateReply::new();
+            poll_once(gate_service_schema::dispatch(
+                &service,
+                &(),
+                &gate_service_schema::IncomingMessage {
+                    operation: "admit".to_owned(),
+                    payload: payload.clone(),
+                },
+                &reply,
+            ))
+            .unwrap();
+            let sent = String::from_utf8_lossy(&payload).into_owned();
+            assert!(
+                service.reached().is_empty(),
+                "`{sent}` reached the implementation: {:?}",
+                service.reached()
+            );
+            let reported = reply.faults();
+            assert_eq!(
+                reported[0].kind(),
+                gate_service_schema::ServiceFaultKind::UndeserializablePayload,
+                "`{sent}` is not a message, and the sender has to be told that rather than that \
+                 some value of its was out of range. Got detail: {}",
+                reported[0].detail()
+            );
+            assert_eq!(
+                reported[0].field(),
+                None,
+                "no constraint's check ran on `{sent}`, so there is no field name to carry. A \
+                 fault that named one would be naming it out of a message it never read. Got: {}",
+                reported[0].detail()
+            );
+        }
+    }
+
+    #[test]
+    fn a_refusal_written_in_a_validator_s_words_still_names_the_field_it_refused() {
         let service = GateBackEnd::new();
         let reply = GateReply::new();
         poll_once(gate_service_schema::dispatch(
             &service,
             &(),
             &gate_service_schema::IncomingMessage {
-                operation: "admit".to_owned(),
-                payload: br#"{"organization_id":42}"#.to_vec(),
+                operation: "open-ledger".to_owned(),
+                payload: br#"{"ledger_id":"ab"}"#.to_vec(),
             },
             &reply,
         ))
@@ -191,14 +276,15 @@ mod a_message_annotated_with_a_constraint {
         let reported = reply.faults();
         assert_eq!(
             reported[0].kind(),
-            gate_service_schema::ServiceFaultKind::UndeserializablePayload
+            gate_service_schema::ServiceFaultKind::UndeserializablePayload,
+            "the author put this check on the read, so the payload really did not deserialize \
+             and the fault says the thing that happened"
         );
         assert_eq!(
             reported[0].field(),
-            None,
-            "serde refused the shape rather than the value, so no constraint's check ran and \
-             there is no field name to carry. A fault that named one here would be naming it out \
-             of a message it never read. Got: {}",
+            Some("ledger_id"),
+            "a refusal written in the shape a validator reports in names its field, and the \
+             fault reads the name back off it wherever the refusal came from. Got: {}",
             reported[0].detail()
         );
     }

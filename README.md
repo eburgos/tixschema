@@ -683,7 +683,7 @@ z.union([z.strictObject({ x: z.string(), }), z.strictObject({ y: z.number().int(
 
 Untagged enums compose with `#[serde(flatten)]`: a flattened variant carrying `Vec<DateValue>` renders `sampleValues: z.array(DateValue$Schema)` (TypeScript `Array<DateValue>`), and the JSON-schema `items` for that field is the `DateValue` `anyOf`.
 
-A member of an untagged variant carries `#[model_schema_prop(...)]` exactly as the same field written in a tagged variant does: the constraint reaches the Zod schema, the JSON Schema and the Rust side alike -- the same per-member validator, the same `deserialize_with` hook, and the same [`validate()` accessor](#the-validate-method) -- and every guard the attribute earns is reported at the member.
+A member of an untagged variant carries `#[model_schema_prop(...)]` exactly as the same field written in a tagged variant does: the constraint reaches the Zod schema, the JSON Schema and the Rust side alike -- the same per-member validator and the same [`validate()` accessor](#the-validate-method) -- and every guard the attribute earns is reported at the member. One thing is the untagged member's alone: it is also hung with the `deserialize_with` hook, because an untagged read picks the variant by which one accepts the payload, so the constraint decides what the value *is* and not merely whether it is admissible. Everywhere else the read admits the value and `validate()` answers for the bound; see [where a constraint is checked](#where-a-constraint-is-checked).
 
 What differs is the position, and it costs the read its diagnosis. Serde tries an untagged enum's variants in declaration order, and a member whose bound fails takes its variant out of the candidate set rather than ending the read -- which is exactly what the same declaration means under `anyOf` and under `z.union`. So a value the bound rejects lands on the next variant that accepts it, and when none does, serde's derived `Deserialize` has already discarded each candidate's own error and answers with one sentence of its own:
 
@@ -1215,7 +1215,7 @@ A generic brand carries the requirement as a `Display` bound on each type parame
 
 #### Branded Newtype Validation Constraints
 
-You can add `pattern`, `minLength`, and `maxLength` constraints directly on the `#[model_schema()]` attribute for branded newtypes. Constraints are enforced in three places: the generated Zod schema, serde deserialization, and a `validate()` method on the type.
+You can add `pattern`, `minLength`, and `maxLength` constraints directly on the `#[model_schema()]` attribute for branded newtypes. Constraints are enforced in three places: the generated Zod schema, serde deserialization, and a `validate()` method on the type. A brand is the one Rust position where the check still runs on the read, and it has to: a message holding a branded field publishes no `validate()` that reaches into it, so the read is the only thing there is.
 
 **The inner type has to be one whose schema is a string** — `String`, `PathBuf`, `ObjectId`, a chrono date/time type, or a named type whose own schema is one of those. A numeric, boolean, container (`Vec`, array, `HashMap`, tuple), or opaque inner is rejected at expansion time, because the three constraints are string checks and each surface would read them differently: Zod's `.min`/`.max` become bounds on the value itself, JSON Schema ignores `minLength`/`maxLength`/`pattern` outside `"type": "string"`, and `validate()` measures the inner's `Display` rendering.
 
@@ -1907,7 +1907,7 @@ pub struct Product {
 
 ### The `validate()` Method
 
-When any field carries a constraint, the macro generates a `validate(&self) -> Result<(), Vec<String>>` method. Use this to validate instances constructed directly in Rust code (serde deserialization validates automatically on the way in).
+When any field carries a constraint, the macro generates a `validate(&self) -> Result<(), Vec<String>>` method. It is what checks a field's constraints -- on an instance built in Rust and on one just read off the wire alike, the read itself having admitted the value.
 
 ```rust
 #[model_schema()]
@@ -1985,9 +1985,18 @@ pub struct Article {
 }
 ```
 
-Deserialization applies the same reach. A bare field's hook answers for the constrained value itself; a wrapped field's hook deserializes the field's own declared type and then runs that same walk over it, so a payload carrying a value the constraint rejects is rejected as it is read, not only when `validate()` is called. The two differ in one thing: `validate()` answers with every violation in the instance, while a `Deserializer` answers with one error, so the read stops at the first.
+### Where a constraint is checked
 
-A field whose key may be left out keeps that reading: an `Option` written outermost (under any number of transparent wrappers) is given `#[serde(default)]` alongside the hook, since a `deserialize_with` otherwise turns a missing key into an error. A field that writes its own `default` keeps the one it wrote.
+By `validate()`, and not as the payload is read.
+
+A constraint describes the value, not the shape. A payload carrying a value it rejects is still structurally the message it claims to be -- every key present, every value of its field's declared type -- so the read admits it and `validate()` is what refuses it, naming the field. Checking it on the read makes the two indistinguishable to whoever receives the failure, and "I could not parse this at all" and "I parsed it and the value broke a rule" send a caller looking in different places.
+
+A field still generates both helpers into its schema module: `validate_{field}_value()`, which `validate()` calls, and `deserialize_{field}`, a serde hook an author may hang on a field of their own accord. Two positions carry a check on the read without being asked to, and both have to:
+
+- **A member of an `#[serde(untagged)]` enum**, where whether the member is admissible is what chooses which variant the payload is. The check is part of reading the value rather than part of judging it -- exactly as it is under `anyOf` and `z.union` on the two schema surfaces the same type publishes -- and `validate()` cannot stand in for it, since by the time it runs the variant has already been chosen. A wrapped member's hook deserializes the member's own declared type and then runs the same walk `validate()` runs over it; the two differ in that `validate()` answers with every violation in the instance while a `Deserializer` answers with one error, so the read stops at the first.
+- **A constrained brand.** A message holding a branded field publishes no `validate()` that reaches into it, so the read is the only thing enforcing the brand's bound.
+
+A field whose key may be left out keeps that reading. Where a member is hung with the hook -- an untagged variant's, which is the one position that is -- an `Option` written outermost (under any number of transparent wrappers) is given `#[serde(default)]` alongside it, since a `deserialize_with` otherwise turns a missing key into an error; a field that writes its own `default` keeps the one it wrote. Off the hook there is nothing to put back and no `default` is written, so a required key that goes missing is still the error it always was.
 
 ### Literal Values
 

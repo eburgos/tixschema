@@ -2203,26 +2203,27 @@ fn every_instantiation_the_wire_accepts_writes_string_keys() {
 }
 
 /// A lifetime is the half of the `impl` fix no schema surface can show: nothing renders it, and
-/// the only evidence it was carried through is that the constrained field still reaches both gates
-/// its bound is held at.
+/// the only evidence it was carried through is that the constrained field is still read into the
+/// borrowed form and still held to its bound by the validator.
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
 ))]
 #[test]
 fn a_lifetime_struct_still_holds_its_field_to_its_bound() {
-    let rejected = serde_json::from_str::<LifetimeStruct<'_>>(r#"{"label":""}"#).unwrap_err();
-    assert!(
-        rejected
-            .to_string()
-            .contains("'label' is too short: minimum length is 1, got 0"),
-        "Unexpected error: {rejected}"
+    assert_eq!(
+        serde_json::from_str::<LifetimeStruct<'_>>(r#"{"label":""}"#)
+            .unwrap()
+            .validate()
+            .unwrap_err(),
+        vec!["'label' is too short: minimum length is 1, got 0"],
+        "the borrowed field was read and then held to its bound"
     );
 
     let accepted = serde_json::from_str::<LifetimeStruct<'_>>(r#"{"label":"x"}"#).unwrap();
     assert!(
         accepted.validate().is_ok(),
-        "A payload the wire admits must be one validate() admits: {:?}",
+        "the value the bound admits has to pass: {:?}",
         accepted.validate().err()
     );
 
