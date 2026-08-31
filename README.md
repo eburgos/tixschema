@@ -1703,7 +1703,7 @@ A one-way method runs the same check and has nowhere to put the result of it, so
 
 #### Service Faults
 
-A payload that will not deserialize, a message that fails validation, an operation name nothing recognises and a handler that panicked are none of the things an operation declared it could fail at. Folding them into a service's domain errors would put transport concerns in every signature, so they come back as a **fault**: a defect rather than a condition, meant to be logged at error level and to page a human.
+A payload that will not deserialize, a message that fails validation, an operation name nothing recognises, a handler that panicked and a call the transport could not carry are none of the things an operation declared it could fail at. Folding them into a service's domain errors would put transport concerns in every signature, so they come back as a **fault**: a defect rather than a condition, meant to be logged at error level and to page a human.
 
 A result therefore keeps two arms, with the fault riding inside the failure arm behind a literal a caller can narrow on:
 
@@ -1738,7 +1738,7 @@ export type UsageServiceGetAvailableBalanceOutcome =
   | { ok: false; error: BalanceError };
 ```
 
-Exactly two generated places build one: the dispatcher, when an incoming message cannot be turned into a valid request or names an operation nothing recognises, and the client, when the message *it* is about to send fails its own validation. In Rust a client call answers `Result<Success, CallError<Error>>`, `CallError` being `Operation(E)` for the error the operation declared and `Fault(ServiceFault)` for a defect that reached the caller.
+Exactly two generated places build one: the dispatcher, when an incoming message cannot be turned into a valid request or names an operation nothing recognises, and the client, when the message *it* is about to send fails its own validation or the transport reports that the call never landed. In Rust a client call answers `Result<Success, CallError<Error>>`, `CallError` being `Operation(E)` for the error the operation declared and `Fault(ServiceFault)` for a defect that reached the caller.
 
 #### What a Service Generates
 
@@ -1746,7 +1746,7 @@ On the Rust side, beside the trait, in a module named for the service (`usage_se
 
 - `ServiceFault` and `ServiceFaultKind` -- readable by anyone, constructible by nothing outside the module.
 - `Reply` -- the handle a transport implements to answer one message, with `send` and `fault`.
-- `Transport` -- the seam a client is bound to, with `notify` and `request`.
+- `Transport` -- the seam a client is bound to, with `notify` and `request`. Both answer a `Result`, whose failure arm carries in words what stopped a call from travelling; the client turns it into a fault of kind `transport-failure`.
 - `CallError<E>` -- `Operation(E)` or `Fault(ServiceFault)`.
 - `IncomingMessage` and `dispatch(svc, ctx, message, reply)` -- the dispatcher, generic over the implementing type.
 - `UsageServiceClient` -- one method per operation, over any `Transport`. Each takes that operation's arguments and no context: a context is what an implementation needs, and a caller has nothing to hand one to.
@@ -1824,6 +1824,7 @@ tixschema generates no transport. What it emits is the seam either side of one:
 - **The operation name arrives from the transport**, beside the payload and never inside it, so no message type has to reserve a key for routing. `dispatch` is handed the name and matches on it; a gRPC method name or an HTTP path serves the same role on those transports.
 - **The encoding lives behind `Reply`.** `Reply::send` is handed a value rather than bytes, because a transport merges its own fields -- a correlation id, an error flag -- into the object before serializing it, and neither is reachable behind an encoded buffer.
 - **Queues, retries, timeouts, acknowledgement, connection handling and reconnection belong to the caller.** `dispatch` returns nothing, so the adapter that called it still holds the delivery when the arm finishes, and acknowledges there -- for every message, including a one-way one. That placement is what lets the handle carry replying and nothing else: a path that never replies names nothing about replying.
+- **A call that never landed has a place to be reported.** `Transport::notify` and `Transport::request` both answer a `Result`, and `Err` carries whatever the transport wants to say about a message that did not go out or a reply that is not coming. Without it a transport that hit its own deadline could only panic or hang, and a caller would be left holding a call that never completes and no fault to report. Whether there is a deadline, and how long it is, stays the transport's decision -- the arm is where the answer is reported, not where it is decided.
 
 A request-and-reply arm answers exactly once, through `send` or `fault`, whichever way it goes. A one-way arm that reached its implementation calls neither; one whose payload was refused before it got there answers with a fault, that being the only thing it can say about a message it never ran.
 

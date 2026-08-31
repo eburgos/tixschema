@@ -167,7 +167,7 @@ impl probe_service_schema::Reply for Capture {
 }
 
 impl probe_service_schema::Transport for Loopback {
-    async fn notify<T>(&self, operation: &str, payload: T)
+    async fn notify<T>(&self, operation: &str, payload: T) -> Result<(), String>
     where
         T: Serialize + Send,
     {
@@ -181,9 +181,10 @@ impl probe_service_schema::Transport for Loopback {
             &capture,
         )
         .await;
+        Ok(())
     }
 
-    async fn request<T>(&self, operation: &str, payload: T) -> Vec<u8>
+    async fn request<T>(&self, operation: &str, payload: T) -> Result<Vec<u8>, String>
     where
         T: Serialize + Send,
     {
@@ -197,7 +198,7 @@ impl probe_service_schema::Transport for Loopback {
             &capture,
         )
         .await;
-        capture.answered()
+        Ok(capture.answered())
     }
 }
 
