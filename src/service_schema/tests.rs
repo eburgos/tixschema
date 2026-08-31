@@ -114,6 +114,37 @@ fn spelled(declared_type: &Type) -> String {
     declared_type.to_token_stream().to_string()
 }
 
+/// The one import that decides where a service may be declared.
+///
+/// The generated module reaches the trait and every message type the author declared beside it
+/// through `super`, so a declaration written inside a function body resolves none of them: a module
+/// nested in a function body has the enclosing module as its parent, not the function. The macro
+/// cannot refuse that placement — an attribute macro is handed the annotated item's tokens and
+/// nothing about the scope around them — so this reads back the mechanism instead, and the doctest
+/// pair on `support::emit` reads the four errors a function-scoped declaration earns.
+#[test]
+fn the_generated_module_reaches_the_author_s_declarations_through_super() {
+    let emitted = expanded(MIXED_SERVICE);
+    assert!(
+        emitted.contains("pub mod usage_service_schema { use super :: * ;"),
+        "the module opens on `use super::*;`, which is the whole of how it reaches what the author \
+         declared beside the trait. Got: {emitted}"
+    );
+    assert!(
+        !emitted.contains("use self :: * ;") && !emitted.contains("use crate :: * ;"),
+        "no other import reaches the author's scope, so `super` is the only path there. \
+         Got: {emitted}"
+    );
+    // The README states the requirement where it documents the construct, so the two cannot drift.
+    let readme = include_str!("../../README.md");
+    assert!(
+        readme.contains("**A service is declared at module scope, never inside a function body.**")
+            && readme.contains("error[E0405]: cannot find trait `UsageService` in module `super`"),
+        "the README no longer states where a service may be declared, or what a function-scoped \
+         one earns"
+    );
+}
+
 #[test]
 fn a_trait_with_no_type_parameter_names_the_context_requirement() {
     assert_eq!(
@@ -724,6 +755,7 @@ fn every_kind_the_fault_publishes_is_one_the_generated_code_has_a_caller_for() {
     for (variant, built) in [
         ("FailedValidation", "ServiceFault :: failed_validation"),
         ("HandlerPanic", "ServiceFault :: handler_panic"),
+        ("TransportFailure", "ServiceFault :: transport_failure"),
         (
             "UndeserializablePayload",
             "ServiceFault :: undeserializable_payload",
@@ -944,6 +976,55 @@ fn a_client_method_validates_before_it_reaches_the_transport() {
     assert!(
         emitted.contains("return Err (CallError :: Fault (ServiceFault :: failed_validation ("),
         "the operation never ran, so it is not one of its declared errors. Got: {emitted}"
+    );
+}
+
+#[test]
+fn the_transport_seam_gives_a_call_that_never_landed_somewhere_to_be_reported() {
+    let emitted = expanded(MIXED_SERVICE);
+    let client = client_emission(&emitted);
+    for answered in [
+        "Output = Result < () , String >",
+        "Output = Result < Vec < u8 > , String >",
+    ] {
+        assert!(
+            client.contains(answered),
+            "a transport that hit its own deadline can only panic or hang without a failure arm \
+             to answer in, and the caller is left holding a call that never completes. Got: \
+             {client}"
+        );
+    }
+    assert!(
+        !client.contains("Output = Vec < u8 > "),
+        "the reply position is the failure arm's `Ok`, not the whole answer. Got: {client}"
+    );
+    // Both directions, so a seam that grew the arm and a client that ignored it fails here.
+    assert_eq!(
+        client.matches("ServiceFault :: transport_failure").count(),
+        5,
+        "every method turns what the transport reported into a fault, one-way operations \
+         included: a send that did not go out is still something the caller is owed. Got: {client}"
+    );
+    assert!(
+        client.contains("CallError :: Fault (ServiceFault :: transport_failure"),
+        "a replying operation carries it in the arm a caller already matches defects on, rather \
+         than in a third one. Got: {client}"
+    );
+}
+
+#[test]
+fn a_transport_failure_is_a_kind_the_fault_publishes_and_the_mirror_reads_back() {
+    let emitted = expanded(MIXED_SERVICE);
+    assert!(
+        emitted.contains(
+            "FaultKindOnTheWire :: TransportFailure => ServiceFaultKind :: TransportFailure"
+        ),
+        "the mirror is what reads a fault back off the wire, so a kind it does not spell is a \
+         fault that arrives and will not deserialize. Got: {emitted}"
+    );
+    assert!(
+        emitted.contains("Self :: TransportFailure => \"transport failure\""),
+        "a fault is meant to page a human, so every kind renders to a line. Got: {emitted}"
     );
 }
 

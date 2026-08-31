@@ -1463,6 +1463,56 @@ service_schema: a service needs tixschema's `serde` feature, and this build does
        add `features = ["serde"]` to the tixschema dependency in Cargo.toml
 ```
 
+**A service that publishes TypeScript needs the `zod` feature too.** A message validates when it is
+constructed, in both directions: the generated client parses what it is about to send before it
+reaches a transport, and the generated dispatcher parses what arrived before it enters an
+implementation, so an implementation may assume its message is valid. On the TypeScript side both
+checks are the same parse, against the `<Message>$Schema` const `#[model_schema()]` publishes — and
+only a build with the `zod` feature publishes one.
+
+So a build with `typescript` on and `zod` off publishes the service's **types** and neither seam
+artifact: no `<Service>Schema::ts_client()` and no `<Service>Schema::ts_service()`. The types are
+published as they always are, because they describe what the Rust dispatcher and the Rust client put
+on the wire, and that half validates in either build. The two that are withheld are withheld rather
+than emitted without their check: a client that forwards whatever it is handed and a dispatcher that
+narrows an unread payload with `as` both compile and both read exactly like the checked ones, while
+the Rust half of the same service goes on validating — two halves of one service disagreeing about
+what they accept, with nothing to say so.
+
+A bundle that names either one in such a build is refused where it names it, which is the one place
+the choice of features can still be acted on:
+
+```text
+error[E0599]: no associated function or constant named `ts_client` found for struct `UsageServiceSchema` in the current scope
+   |
+23 | #[service_schema()]
+   | ------------------- associated function or constant `ts_client` not found for this struct
+...
+34 |     let _ = UsageServiceSchema::ts_client();
+   |                                 ^^^^^^^^^ associated function or constant not found in `UsageServiceSchema`
+```
+
+**A service is declared at module scope, never inside a function body.** The module the macro
+generates opens with `use super::*;`, which is how the dispatcher and the client reach the trait and
+the message types declared beside it. A module written inside a function body has the enclosing
+*module* as its parent rather than the function, so `super` from there reaches past every name that
+function declared. `#[model_schema()]` carries the same requirement, for the same reason.
+
+The macro cannot refuse the placement: an attribute macro is handed the annotated item's own tokens
+and nothing about the scope it was written in, and a trait written inside a function is the same
+tokens as one written beside it. A function-scoped declaration earns the compiler's own resolution
+errors instead — one for the trait, and one for each type an operation named:
+
+```text
+error[E0405]: cannot find trait `UsageService` in module `super`
+error[E0425]: cannot find type `BalanceRequest` in this scope
+error[E0425]: cannot find type `BalanceResponse` in this scope
+error[E0425]: cannot find type `BalanceError` in this scope
+```
+
+One consequence is worth knowing before it costs anyone an afternoon: rustdoc wraps a doctest with
+no explicit `fn main` in one, so a doctest that declares a service writes `fn main() {}` of its own.
+
 #### The Shape of a Service
 
 A service names a **context** type parameter, and every operation takes it as its first argument after `&self`. An operation receives one message and answers `Result<Success, Error>`.
@@ -1703,7 +1753,7 @@ A one-way method runs the same check and has nowhere to put the result of it, so
 
 #### Service Faults
 
-A payload that will not deserialize, a message that fails validation, an operation name nothing recognises and a handler that panicked are none of the things an operation declared it could fail at. Folding them into a service's domain errors would put transport concerns in every signature, so they come back as a **fault**: a defect rather than a condition, meant to be logged at error level and to page a human.
+A payload that will not deserialize, a message that fails validation, an operation name nothing recognises, a handler that panicked and a call the transport could not carry are none of the things an operation declared it could fail at. Folding them into a service's domain errors would put transport concerns in every signature, so they come back as a **fault**: a defect rather than a condition, meant to be logged at error level and to page a human.
 
 A result therefore keeps two arms, with the fault riding inside the failure arm behind a literal a caller can narrow on:
 
@@ -1738,7 +1788,7 @@ export type UsageServiceGetAvailableBalanceOutcome =
   | { ok: false; error: BalanceError };
 ```
 
-Exactly two generated places build one: the dispatcher, when an incoming message cannot be turned into a valid request or names an operation nothing recognises, and the client, when the message *it* is about to send fails its own validation. In Rust a client call answers `Result<Success, CallError<Error>>`, `CallError` being `Operation(E)` for the error the operation declared and `Fault(ServiceFault)` for a defect that reached the caller.
+Exactly two generated places build one: the dispatcher, when an incoming message cannot be turned into a valid request or names an operation nothing recognises, and the client, when the message *it* is about to send fails its own validation or the transport reports that the call never landed. In Rust a client call answers `Result<Success, CallError<Error>>`, `CallError` being `Operation(E)` for the error the operation declared and `Fault(ServiceFault)` for a defect that reached the caller.
 
 #### What a Service Generates
 
@@ -1746,7 +1796,7 @@ On the Rust side, beside the trait, in a module named for the service (`usage_se
 
 - `ServiceFault` and `ServiceFaultKind` -- readable by anyone, constructible by nothing outside the module.
 - `Reply` -- the handle a transport implements to answer one message, with `send` and `fault`.
-- `Transport` -- the seam a client is bound to, with `notify` and `request`.
+- `Transport` -- the seam a client is bound to, with `notify` and `request`. Both answer a `Result`, whose failure arm carries in words what stopped a call from travelling; the client turns it into a fault of kind `transport-failure`.
 - `CallError<E>` -- `Operation(E)` or `Fault(ServiceFault)`.
 - `IncomingMessage` and `dispatch(svc, ctx, message, reply)` -- the dispatcher, generic over the implementing type.
 - `UsageServiceClient` -- one method per operation, over any `Transport`. Each takes that operation's arguments and no context: a context is what an implementation needs, and a caller has nothing to hand one to.
@@ -1824,6 +1874,7 @@ tixschema generates no transport. What it emits is the seam either side of one:
 - **The operation name arrives from the transport**, beside the payload and never inside it, so no message type has to reserve a key for routing. `dispatch` is handed the name and matches on it; a gRPC method name or an HTTP path serves the same role on those transports.
 - **The encoding lives behind `Reply`.** `Reply::send` is handed a value rather than bytes, because a transport merges its own fields -- a correlation id, an error flag -- into the object before serializing it, and neither is reachable behind an encoded buffer.
 - **Queues, retries, timeouts, acknowledgement, connection handling and reconnection belong to the caller.** `dispatch` returns nothing, so the adapter that called it still holds the delivery when the arm finishes, and acknowledges there -- for every message, including a one-way one. That placement is what lets the handle carry replying and nothing else: a path that never replies names nothing about replying.
+- **A call that never landed has a place to be reported.** `Transport::notify` and `Transport::request` both answer a `Result`, and `Err` carries whatever the transport wants to say about a message that did not go out or a reply that is not coming. Without it a transport that hit its own deadline could only panic or hang, and a caller would be left holding a call that never completes and no fault to report. Whether there is a deadline, and how long it is, stays the transport's decision -- the arm is where the answer is reported, not where it is decided.
 
 A request-and-reply arm answers exactly once, through `send` or `fault`, whichever way it goes. A one-way arm that reached its implementation calls neither; one whose payload was refused before it got there answers with a fault, that being the only thing it can say about a message it never ran.
 

@@ -53,6 +53,116 @@ use syn::Ident;
 /// `generated` is what [`dispatch`](super::dispatch) and [`client`](super::client) wrote: it
 /// lands inside the module rather than beside it, because both reach constructors that are private
 /// to it.
+///
+/// # A service is declared at module scope, never inside a function body
+///
+/// The module opens with `use super::*;`, which is how the dispatcher and the client reach the
+/// trait and the message types the author declared beside it. A module written inside a function
+/// body has the enclosing *module* as its parent rather than the function, so `super` from there
+/// reaches past every name that function declared and finds none of them. `#[model_schema]` carries
+/// the same requirement, for the same reason and through the same import.
+///
+/// The macro cannot refuse the placement. An attribute macro is handed the annotated item's own
+/// tokens and nothing about the scope it was written in, and a trait written inside a function is
+/// the same tokens as one written beside it — so there is no signal to read and nothing to refuse
+/// on. What a function-scoped declaration earns instead is the compiler's own resolution errors:
+/// one for the trait, and one for each type an operation named.
+///
+/// The consequence worth knowing is that rustdoc wraps a doctest with no explicit `fn main` in one,
+/// so a doctest declaring a service writes `fn main() {}` of its own. The pair below is exactly
+/// that difference and nothing else. At module scope it compiles:
+///
+/// ```rust
+/// use tixschema::service_schema;
+///
+/// #[derive(serde::Deserialize, serde::Serialize)]
+/// pub struct BalanceRequest;
+///
+/// #[derive(serde::Deserialize, serde::Serialize)]
+/// pub struct BalanceResponse;
+///
+/// #[derive(serde::Deserialize, serde::Serialize)]
+/// pub enum BalanceError {
+///     DbError,
+/// }
+///
+/// #[service_schema()]
+/// pub trait UsageService<Ctx> {
+///     async fn get_balance(
+///         &self,
+///         ctx: &Ctx,
+///         req: BalanceRequest,
+///     ) -> Result<BalanceResponse, BalanceError>;
+/// }
+///
+/// fn main() {}
+/// ```
+///
+/// The run below is that one with `fn main() {}` taken off the end, which puts the whole
+/// declaration inside the `fn main` rustdoc writes around it. Nothing else differs:
+///
+/// ```rust,compile_fail
+/// use tixschema::service_schema;
+///
+/// #[derive(serde::Deserialize, serde::Serialize)]
+/// pub struct BalanceRequest;
+///
+/// #[derive(serde::Deserialize, serde::Serialize)]
+/// pub struct BalanceResponse;
+///
+/// #[derive(serde::Deserialize, serde::Serialize)]
+/// pub enum BalanceError {
+///     DbError,
+/// }
+///
+/// #[service_schema()]
+/// pub trait UsageService<Ctx> {
+///     async fn get_balance(
+///         &self,
+///         ctx: &Ctx,
+///         req: BalanceRequest,
+///     ) -> Result<BalanceResponse, BalanceError>;
+/// }
+/// ```
+///
+/// A `compile_fail` doctest asserts only that *some* error was raised, and an error code named in
+/// the annotation is not checked on this toolchain — a deliberately wrong one still passes. So the
+/// snippet above was compiled standalone as an ordinary test file, wrapped in the `fn main` rustdoc
+/// would have written, and the diagnostics read off that run, verbatim. These four were all of
+/// them:
+///
+/// ```text
+/// error[E0405]: cannot find trait `UsageService` in module `super`
+///   --> tests/zz_probe.rs:16:15
+///    |
+/// 16 |     pub trait UsageService<Ctx> {
+///    |               ^^^^^^^^^^^^ not found in `super`
+///
+/// error[E0425]: cannot find type `BalanceRequest` in this scope
+///   --> tests/zz_probe.rs:20:18
+///    |
+/// 20 |             req: BalanceRequest,
+///    |                  ^^^^^^^^^^^^^^ not found in this scope
+///
+/// error[E0425]: cannot find type `BalanceResponse` in this scope
+///   --> tests/zz_probe.rs:21:21
+///    |
+/// 21 |         ) -> Result<BalanceResponse, BalanceError>;
+///    |                     ^^^^^^^^^^^^^^^ not found in this scope
+///
+/// error[E0425]: cannot find type `BalanceError` in this scope
+///   --> tests/zz_probe.rs:21:38
+///    |
+/// 21 |         ) -> Result<BalanceResponse, BalanceError>;
+///    |                                      ^^^^^^^^^^^^ not found in this scope
+///
+/// error: could not compile `tixschema` (test "zz_probe") due to 4 previous errors
+/// ```
+///
+/// The same file with `fn main() {}` added and nothing else changed compiles, so the refusal is the
+/// placement and nothing else about the program. The import those four errors resolve against is
+/// what the unit test `the_generated_module_reaches_the_author_s_declarations_through_super` reads
+/// back off the expansion.
 pub fn emit(service: &ServiceDef, generated: &TokenStream) -> TokenStream {
     let declared = &service.ident;
     let module = module_ident(service);
@@ -234,7 +344,7 @@ fn fault_accessors() -> TokenStream {
     }
 }
 
-/// The four ways a fault comes into being, one per kind, private to the generated module so that
+/// The five ways a fault comes into being, one per kind, private to the generated module so that
 /// only the dispatcher and the client — the two emitters written inside it — can reach them.
 ///
 /// A service implementation cannot construct one. This is the run above with a single line added,
@@ -282,6 +392,17 @@ fn fault_constructors() -> TokenStream {
                     detail: detail.to_owned(),
                     field: None,
                     kind: ServiceFaultKind::HandlerPanic,
+                    operation: operation.to_owned(),
+                }
+            }
+
+            fn transport_failure(operation: &str, detail: &str) -> Self {
+                Self {
+                    detail: detail.to_owned(),
+                    // The transport reports that the call did not travel, not that a value inside
+                    // it was wrong, so there is no field to name.
+                    field: None,
+                    kind: ServiceFaultKind::TransportFailure,
                     operation: operation.to_owned(),
                 }
             }
@@ -342,8 +463,8 @@ fn fault_declaration(declared: &Ident) -> TokenStream {
     let kind = format_ident!("{declared}FaultKind", span = declared.span());
     let fault_doc = format!(
         "A failure `{declared}` never declared: a payload that would not deserialize, a message \
-         that failed validation, an operation name nothing recognises, a handler that \
-         panicked.\n\n\
+         that failed validation, an operation name nothing recognises, a handler that panicked, a \
+         call the transport could not carry.\n\n\
          It is a defect rather than a condition, so it is logged at error level and meant to page \
          a human. No implementation of [`{declared}`] can produce one — an operation's signature \
          admits only its own error type, and the constructors are private to this module, which \
@@ -368,6 +489,10 @@ fn fault_declaration(declared: &Ident) -> TokenStream {
             FailedValidation,
             /// The operation's handler panicked.
             HandlerPanic,
+            /// The transport could not carry the call: the message did not go out, or the reply
+            /// never came back. Only a client reports one — the far side, by definition, was
+            /// never reached.
+            TransportFailure,
             /// The payload would not deserialize into the operation's message at all.
             UndeserializablePayload,
             /// Nothing on this service answers to the operation name that arrived.
@@ -495,6 +620,7 @@ fn renderings() -> TokenStream {
                 formatter.write_str(match *self {
                     Self::FailedValidation => "failed validation",
                     Self::HandlerPanic => "handler panic",
+                    Self::TransportFailure => "transport failure",
                     Self::UndeserializablePayload => "undeserializable payload",
                     Self::UnknownOperation => "unknown operation",
                 })
