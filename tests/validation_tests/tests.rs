@@ -1,3 +1,281 @@
+/// What a bound declared *beneath* a message is worth: the walk that reaches it, the path it is
+/// reported under, and the two edges — a type that publishes no validator, and a violation that
+/// names no field of its own.
+///
+/// The types are declared at module scope rather than inside each test, because one of them
+/// references another and a reference resolves the referenced type's schema module by name.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+mod a_bound_declared_beneath_a_message {
+    use super::UnpublishedValidate;
+    use alloc::borrow::Cow;
+    use alloc::sync::Arc;
+    use serde::{Deserialize, Serialize};
+    use tixschema::model_schema;
+
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub struct Tag {
+        #[model_schema_prop(minLength = 3)]
+        pub label: String,
+    }
+
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct WrappedHolder {
+        pub boxed: Box<Tag>,
+        pub cow: Cow<'static, Tag>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub nested: Option<Vec<Tag>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub opt: Option<Tag>,
+        pub plain: Tag,
+        pub shared: Arc<Tag>,
+        pub tags: Vec<Tag>,
+    }
+
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct Claims {
+        #[model_schema_prop(minLength = 1)]
+        pub jti: String,
+    }
+
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct DeepAccount {
+        pub claims: Claims,
+    }
+
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct DeepEnvelope {
+        pub account: DeepAccount,
+    }
+
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct FlatAccount {
+        pub aud: String,
+        #[serde(flatten)]
+        pub claims: Claims,
+    }
+
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct FlatEnvelope {
+        pub account: FlatAccount,
+    }
+
+    #[model_schema(minLength = 3)]
+    #[derive(Serialize, Deserialize, Debug)]
+    #[serde(transparent)]
+    pub struct Slug(pub String);
+
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct SlugHolder {
+        pub slug: Slug,
+    }
+
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct Unbounded {
+        pub name: String,
+    }
+
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct MixedHolder {
+        pub bounded: Tag,
+        pub free: Unbounded,
+    }
+
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct HoldsPrimitives {
+        pub count: u32,
+        pub name: String,
+    }
+
+    #[model_schema()]
+    #[derive(Serialize, Deserialize, Debug)]
+    #[serde(tag = "kind")]
+    pub enum Action {
+        Delete { marker: Tag },
+        Upload { tags: Vec<Tag> },
+    }
+
+    impl UnpublishedValidate for HoldsPrimitives {}
+
+    /// A bound beneath a field is reached through the same wrappers a bound *on* a field is.
+    ///
+    /// The wrappers are the load-bearing half. A `Vec<Tag>` whose second element breaks a bound is
+    /// a message the composed Zod schema refuses, and a walk that only looked at a bare field
+    /// would hand the implementation that element anyway.
+    #[test]
+    fn a_nested_bound_is_reached_through_every_wrapped_shape() {
+        const GOOD: &str = r#"{"plain":{"label":"aaa"},"opt":{"label":"bbb"},
+            "tags":[{"label":"ccc"}],"boxed":{"label":"ddd"},"cow":{"label":"eee"},
+            "nested":[{"label":"fff"}],"shared":{"label":"ggg"}}"#;
+
+        let accepted = serde_json::from_str::<WrappedHolder>(GOOD).unwrap();
+        assert!(
+            accepted.validate().is_ok(),
+            "the payload every nested bound admits has to pass: {:?}",
+            accepted.validate().err()
+        );
+
+        for (field, broken) in [
+            ("boxed", r#"{"label":"a"}"#),
+            ("cow", r#"{"label":"a"}"#),
+            ("nested", r#"[{"label":"a"}]"#),
+            ("opt", r#"{"label":"a"}"#),
+            ("plain", r#"{"label":"a"}"#),
+            ("shared", r#"{"label":"a"}"#),
+            // Only the second element breaks its bound, so an element past the first
+            // has to be walked for this to be reported at all.
+            ("tags", r#"[{"label":"abc"},{"label":"a"}]"#),
+        ] {
+            let mut payload: serde_json::Value = serde_json::from_str(GOOD).unwrap();
+            payload[field] = serde_json::from_str(broken).unwrap();
+            let admitted = serde_json::from_str::<WrappedHolder>(&payload.to_string())
+                .map_err(|refused| format!("`{field}` should still read: {refused}"));
+            assert_eq!(admitted.as_ref().err(), None);
+            let read = admitted.unwrap();
+            assert_eq!(
+                read.validate().unwrap_err(),
+                vec![format!(
+                    "'{field}.label' is too short: minimum length is 3, got 1"
+                )],
+                "`{field}` holds a message whose own bound was broken and validate() said nothing"
+            );
+        }
+    }
+
+    /// One level working is what made the gap look closed, so the walk is pinned three levels down.
+    #[test]
+    fn a_bound_three_levels_down_is_reached_and_names_the_whole_path() {
+        assert_eq!(
+            serde_json::from_str::<DeepEnvelope>(r#"{"account":{"claims":{"jti":""}}}"#)
+                .unwrap()
+                .validate()
+                .unwrap_err(),
+            vec!["'account.claims.jti' is too short: minimum length is 1, got 0"]
+        );
+        assert_eq!(
+            serde_json::from_str::<DeepEnvelope>(r#"{"account":{"claims":{"jti":"a"}}}"#)
+                .unwrap()
+                .validate(),
+            Ok(())
+        );
+    }
+
+    /// A `#[serde(flatten)]` hop writes no key, so it contributes no segment to the path either.
+    ///
+    /// The path a fault carries is what a caller looks for in the payload it sent, and a segment
+    /// for a hop the wire does not have would name a key no payload ever writes.
+    #[test]
+    fn a_flattened_hop_contributes_no_segment_to_a_nested_path() {
+        assert_eq!(
+            serde_json::from_str::<FlatEnvelope>(r#"{"account":{"aud":"a","jti":""}}"#)
+                .unwrap()
+                .validate()
+                .unwrap_err(),
+            vec!["'account.jti' is too short: minimum length is 1, got 0"]
+        );
+    }
+
+    /// A violation naming no field of its own is named by the walk that reached it.
+    ///
+    /// A constrained brand's report says `value is too short` and holds no field name, having no
+    /// field. The walk that reached it does, so the fault has a name to carry after all.
+    #[test]
+    fn a_nested_violation_naming_no_field_is_named_by_the_walk_that_reached_it() {
+        assert_eq!(
+            SlugHolder {
+                slug: Slug("ab".to_owned())
+            }
+            .validate()
+            .unwrap_err(),
+            vec!["'slug': value is too short: minimum length is 3, got 2"]
+        );
+    }
+
+    /// A field whose type publishes no `validate()` is walked and passes.
+    ///
+    /// The walk cannot know what a name resolves to, so it asks every field bottoming out in a
+    /// declared type. A type that declares no constraint anywhere beneath it publishes no
+    /// validator at all, and the fallback is what that field's question is answered by.
+    #[test]
+    fn a_nested_type_publishing_no_validator_is_walked_and_passes() {
+        let held = MixedHolder {
+            bounded: Tag {
+                label: "a".to_owned(),
+            },
+            free: Unbounded {
+                name: String::new(),
+            },
+        };
+        assert_eq!(
+            held.validate().unwrap_err(),
+            vec!["'bounded.label' is too short: minimum length is 3, got 1"],
+            "only the field whose type published a validator has anything to report"
+        );
+    }
+
+    /// A variant's member is walked by the arm that matched it, under the member's own name.
+    #[test]
+    fn a_variant_members_nested_bound_is_reached_by_the_arm_that_matched_it() {
+        assert_eq!(
+            serde_json::from_str::<Action>(r#"{"kind":"Delete","marker":{"label":"a"}}"#)
+                .unwrap()
+                .validate()
+                .unwrap_err(),
+            vec!["'marker.label' is too short: minimum length is 3, got 1"]
+        );
+        assert_eq!(
+            serde_json::from_str::<Action>(
+                r#"{"kind":"Upload","tags":[{"label":"abc"},{"label":"b"}]}"#
+            )
+            .unwrap()
+            .validate()
+            .unwrap_err(),
+            vec!["'tags.label' is too short: minimum length is 3, got 1"]
+        );
+    }
+
+    /// A type declaring no constraint of its own publishes a `validate()` when something beneath it
+    /// does, and still publishes none when nothing does.
+    ///
+    /// The second half is what keeps the first from being a blanket change: a message of primitives
+    /// is exactly as it was, and the dispatcher's fallback is still what answers for it.
+    #[test]
+    fn a_validator_is_published_for_a_bound_beneath_the_type_and_for_nothing_less() {
+        assert_eq!(
+            HoldsPrimitives {
+                count: 0,
+                name: String::new(),
+            }
+            .validate(),
+            "no inherent validate()"
+        );
+        // Answers with the accessor's own type rather than the trait's `&'static str`, which is
+        // what makes the assertion above a statement about publication: a published `validate()`
+        // shadows the trait's, and a type publishing one could not compile against it at all.
+        assert_eq!(
+            SlugHolder {
+                slug: Slug("ab".to_owned())
+            }
+            .validate()
+            .unwrap_err(),
+            vec!["'slug': value is too short: minimum length is 3, got 2"]
+        );
+    }
+}
+
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")

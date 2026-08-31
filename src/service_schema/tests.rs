@@ -843,10 +843,16 @@ fn a_refusal_and_a_violation_are_read_for_a_field_name_by_the_same_reader() {
         "a violation report's field is the first line's, read by the one reader. Got: {emitted}"
     );
     assert!(
-        emitted.contains("field : named_field (detail) . map (str :: to_owned)"),
-        "a field carrying a constraint is refused by a serde hook running the very check \
-         `validate()` runs, and the hook hands serde that check's message verbatim — so the \
-         refusal names the field and a fault built from it has the name to carry. Got: {emitted}"
+        emitted.contains("let named = named_field (said) . or_else (|| serde_named_field (said))"),
+        "a serde refusal is read for a field by the reader a violation is read by — a hook hands \
+         serde a validator's message verbatim — and, failing that, by serde's own naming. \
+         Got: {emitted}"
+    );
+    assert!(
+        emitted
+            .contains("if matches ! (refusal . classify () , :: serde_json :: error :: Category"),
+        "which fault a refusal is comes off serde_json's own classification of it rather than off \
+         the shape of the sentence it wrote. Got: {emitted}"
     );
 }
 

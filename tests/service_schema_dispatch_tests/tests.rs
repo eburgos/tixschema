@@ -15,15 +15,18 @@
 /// written, only when `serde` is on beside a surface that reads the constraint.
 ///
 /// **The two answers a payload can earn here are different answers, and the arm gives whichever
-/// one is true.** A payload that is not a message at all — a field carrying the wrong type of
-/// value, a key that is missing — never deserializes, and the fault says so. A payload that *is* a
-/// message, carrying a value the constraint refuses, deserializes and then fails the arm's own
-/// `validate()`, and the fault says that instead and names the field.
+/// one is true.** Bytes that are not a document at all never become anything, and the fault says
+/// the sender's serialization is broken. Everything that *does* read as a document and is then
+/// turned away — a field carrying the wrong type of value, a key that is missing, a value a
+/// constraint refuses — is a value someone supplied that the message does not admit, and the fault
+/// says that instead and names the field wherever the refusal named one.
 ///
-/// A receiver acts differently on each. Unparseable means the sender's serialization is broken.
-/// Failed validation means a person supplied something out of range. Constraints are therefore
-/// enforced by the validator alone and never as the payload is read, so the two never arrive under
-/// one name.
+/// A receiver acts differently on each, and the line between them is `serde_json`'s own
+/// classification of its refusal rather than the shape of the sentence it wrote. It is also where
+/// the TypeScript service serving the same operation draws it: its reader parses the payload and
+/// its schema then judges what was read, so a type mismatch and a broken bound are one kind there
+/// and are one kind here. Constraints stay enforced by the validator alone and never as the
+/// payload is read, which is what lets a broken bound name its field at all.
 #[cfg(all(
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
@@ -62,6 +65,37 @@ mod a_message_annotated_with_a_constraint {
         pub ledger_id: String,
     }
 
+    /// The claims an account context carries, and the only bound anywhere on the message below.
+    ///
+    /// This is the shape a live bus was replayed against: a message declaring no constraint of its
+    /// own, an account context beneath it, and the constrained field one level below *that*. The
+    /// composed Zod schema the same declaration publishes checks it, so a Rust service that did
+    /// not would accept a message the TypeScript one refuses.
+    #[model_schema()]
+    #[derive(Deserialize, Serialize)]
+    pub struct GateClaims {
+        #[model_schema_prop(minLength = 1)]
+        pub jti: String,
+    }
+
+    /// The claims are `#[serde(flatten)]`, so `jti` is a key of the account object itself and the
+    /// path a violation is reported under has to skip the hop, exactly as the wire does.
+    #[model_schema()]
+    #[derive(Deserialize, Serialize)]
+    pub struct GateAccount {
+        pub aud: String,
+        #[serde(flatten)]
+        pub claims: GateClaims,
+    }
+
+    #[model_schema()]
+    #[derive(Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct MintRequest {
+        pub account: GateAccount,
+        pub credit_count: u32,
+    }
+
     /// Records every message that reached it, which is how a test says an invalid one did not.
     pub struct GateBackEnd {
         reached: Mutex<Vec<String>>,
@@ -85,6 +119,8 @@ mod a_message_annotated_with_a_constraint {
     pub trait GateService<Ctx> {
         async fn admit(&self, ctx: &Ctx, req: GateRequest) -> Result<Admitted, GateError>;
 
+        async fn mint(&self, ctx: &Ctx, req: MintRequest) -> Result<Admitted, GateError>;
+
         async fn open_ledger(&self, ctx: &Ctx, req: LedgerRequest) -> Result<Admitted, GateError>;
     }
 
@@ -92,6 +128,15 @@ mod a_message_annotated_with_a_constraint {
         async fn admit(&self, _ctx: &(), req: GateRequest) -> Result<Admitted, GateError> {
             ready(()).await;
             self.reached.lock().unwrap().push(req.organization_id);
+            Ok(Admitted { admitted: true })
+        }
+
+        async fn mint(&self, _ctx: &(), req: MintRequest) -> Result<Admitted, GateError> {
+            ready(()).await;
+            self.reached.lock().unwrap().push(format!(
+                "minted {} for {}",
+                req.credit_count, req.account.aud
+            ));
             Ok(Admitted { admitted: true })
         }
 
@@ -212,15 +257,29 @@ mod a_message_annotated_with_a_constraint {
     }
 
     #[test]
-    fn a_payload_that_is_not_a_message_at_all_is_still_answered_as_one_that_would_not_read() {
-        // Wrong about the type its field declared, missing the key entirely, and not a document
-        // in the first place. None of the three is a message, and moving the constraint checks to
-        // the validator moved none of them with it — a required key in particular must not have
-        // become defaultable on the way.
-        for payload in [
-            br#"{"organization_id":42}"#.to_vec(),
-            b"{}".to_vec(),
-            b"not a document at all".to_vec(),
+    fn a_payload_that_is_not_a_message_is_refused_under_the_class_of_failure_it_is() {
+        // Wrong about the type its field declared, missing the key entirely, and not a document in
+        // the first place. None of the three is a message, and none reaches the implementation —
+        // a required key in particular must not have become defaultable when the constraint checks
+        // moved to the validator. What differs is the class each one is: the first two read as a
+        // document and did not match, which is what a caller supplying a bad value produces, while
+        // the third never read at all.
+        for (payload, kind, field) in [
+            (
+                br#"{"organization_id":42}"#.to_vec(),
+                gate_service_schema::ServiceFaultKind::FailedValidation,
+                None,
+            ),
+            (
+                b"{}".to_vec(),
+                gate_service_schema::ServiceFaultKind::FailedValidation,
+                Some("organization_id"),
+            ),
+            (
+                b"not a document at all".to_vec(),
+                gate_service_schema::ServiceFaultKind::UndeserializablePayload,
+                None,
+            ),
         ] {
             let service = GateBackEnd::new();
             let reply = GateReply::new();
@@ -243,19 +302,90 @@ mod a_message_annotated_with_a_constraint {
             let reported = reply.faults();
             assert_eq!(
                 reported[0].kind(),
-                gate_service_schema::ServiceFaultKind::UndeserializablePayload,
-                "`{sent}` is not a message, and the sender has to be told that rather than that \
-                 some value of its was out of range. Got detail: {}",
+                kind,
+                "`{sent}` was answered under the wrong class of failure, and the class is what a \
+                 caller branches on. Got detail: {}",
                 reported[0].detail()
             );
             assert_eq!(
                 reported[0].field(),
-                None,
-                "no constraint's check ran on `{sent}`, so there is no field name to carry. A \
-                 fault that named one would be naming it out of a message it never read. Got: {}",
+                field,
+                "`{sent}` must name the field its refusal named and no other: a name invented for \
+                 a refusal that carried none would be read out of a message nobody read. Got: {}",
+                reported[0].detail()
+            );
+            assert!(
+                !reported[0].detail().contains("at line"),
+                "the byte offset serde appends locates the failure inside an encoding the caller \
+                 never saw. Got: {}",
                 reported[0].detail()
             );
         }
+    }
+
+    /// The defect a live bus found: the message's own fields declare nothing, the bound is two
+    /// hops down, and the operation ran anyway.
+    ///
+    /// A message reports what a walk of its whole tree reports, not what its top level reports, so
+    /// the path a violation carries is the path it was reached through — and the flattened hop
+    /// writes no key, so it contributes no segment either. `account.jti` is what the composed Zod
+    /// schema names for the same payload, which is the point: one declaration, one answer.
+    #[test]
+    fn a_bound_two_levels_down_refuses_the_message_before_the_implementation_runs() {
+        let service = GateBackEnd::new();
+        let reply = GateReply::new();
+        poll_once(gate_service_schema::dispatch(
+            &service,
+            &(),
+            &gate_service_schema::IncomingMessage {
+                operation: "mint".to_owned(),
+                payload: br#"{"account":{"aud":"acme","jti":""},"creditCount":1}"#.to_vec(),
+            },
+            &reply,
+        ))
+        .unwrap();
+        assert!(
+            service.reached().is_empty(),
+            "the operation ran on a message the same declaration's Zod schema refuses, which is \
+             the two ends of one declaration disagreeing about what a message is. Got: {:?}",
+            service.reached()
+        );
+        let reported = reply.faults();
+        assert_eq!(
+            reported[0].kind(),
+            gate_service_schema::ServiceFaultKind::FailedValidation,
+            "got detail: {}",
+            reported[0].detail()
+        );
+        assert_eq!(
+            reported[0].field(),
+            Some("account.jti"),
+            "the caller has to be told which field it got wrong, and where. Got: {}",
+            reported[0].detail()
+        );
+        assert_eq!(
+            reported[0].detail(),
+            "'account.jti' is too short: minimum length is 1, got 0"
+        );
+    }
+
+    /// The other direction, without which the walk above could be refusing everything.
+    #[test]
+    fn a_message_whose_nested_bound_holds_reaches_the_implementation() {
+        let service = GateBackEnd::new();
+        let reply = GateReply::new();
+        poll_once(gate_service_schema::dispatch(
+            &service,
+            &(),
+            &gate_service_schema::IncomingMessage {
+                operation: "mint".to_owned(),
+                payload: br#"{"account":{"aud":"acme","jti":"a"},"creditCount":2}"#.to_vec(),
+            },
+            &reply,
+        ))
+        .unwrap();
+        assert_eq!(service.reached(), vec!["minted 2 for acme".to_owned()]);
+        assert!(reply.faults().is_empty(), "got: {:?}", reply.settled());
     }
 
     #[test]
@@ -276,9 +406,11 @@ mod a_message_annotated_with_a_constraint {
         let reported = reply.faults();
         assert_eq!(
             reported[0].kind(),
-            gate_service_schema::ServiceFaultKind::UndeserializablePayload,
-            "the author put this check on the read, so the payload really did not deserialize \
-             and the fault says the thing that happened"
+            gate_service_schema::ServiceFaultKind::FailedValidation,
+            "the author put this check on the read, but what it refused is a value out of range \
+             inside a document that read perfectly well — the class `serde_json` reports it under, \
+             and the one a caller acts on. Got detail: {}",
+            reported[0].detail()
         );
         assert_eq!(
             reported[0].field(),
@@ -744,17 +876,32 @@ fn a_one_way_operation_runs_and_answers_nothing_on_the_handle() {
 }
 
 #[test]
-fn a_payload_that_will_not_deserialize_becomes_a_fault_and_reaches_no_implementation() {
+fn a_payload_carrying_the_wrong_type_of_value_becomes_a_fault_and_reaches_no_implementation() {
     let (reached, settled) = dispatched("get-balance", r#"{"organization_id":42}"#);
     assert!(reached.is_empty(), "got: {reached:?}");
     assert_eq!(settled.len(), 1, "got: {settled:?}");
     let reported = only_fault(&settled).unwrap();
     assert_eq!(
         reported.kind(),
-        probe_service_schema::ServiceFaultKind::UndeserializablePayload
+        probe_service_schema::ServiceFaultKind::FailedValidation,
+        "the bytes read as a document and did not match the message, which is a value someone \
+         supplied rather than a sender whose serialization is broken — and is the kind the \
+         TypeScript service serving the same operation answers it under. Got detail: {}",
+        reported.detail()
     );
     assert_eq!(reported.operation(), "get-balance");
-    assert_eq!(reported.field(), None);
+    assert_eq!(
+        reported.field(),
+        None,
+        "a type mismatch says what serde expected and not where, so there is no name to carry and \
+         one carried anyway would be invented. Got: {}",
+        reported.detail()
+    );
+    assert!(
+        !reported.detail().contains("at line"),
+        "the byte offset locates the failure inside an encoding the caller never saw. Got: {}",
+        reported.detail()
+    );
 }
 
 #[test]
@@ -1040,7 +1187,7 @@ fn a_one_way_message_refused_before_it_ran_is_the_one_thing_that_arm_answers() {
     let reported = only_fault(&refused).unwrap();
     assert_eq!(
         reported.kind(),
-        probe_service_schema::ServiceFaultKind::UndeserializablePayload,
+        probe_service_schema::ServiceFaultKind::FailedValidation,
         "the operation never ran, so the defect is the arm's to report even though the operation \
          itself declares no reply"
     );

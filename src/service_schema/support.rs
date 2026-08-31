@@ -289,13 +289,11 @@ fn fault_constructors() -> TokenStream {
             fn undeserializable_payload(operation: &str, detail: &str) -> Self {
                 Self {
                     detail: detail.to_owned(),
-                    // A field carrying a constraint is refused by a serde hook running the very
-                    // check `validate()` runs, and the hook hands serde that check's message
-                    // verbatim. So the refusal that stopped the payload from ever becoming a
-                    // message still names the field it got wrong, and reading it back is reading
-                    // the same report a violation is read from. A refusal written any other way —
-                    // a type mismatch, a missing key — names none.
-                    field: named_field(detail).map(str::to_owned),
+                    // `refused_payload` is the only caller, and it sends here only the refusals
+                    // serde_json classified as the bytes not being a document: bytes that are not
+                    // JSON at all, a document that ends early. Nothing was read far enough for a
+                    // key to be what went wrong, so there is no field to name.
+                    field: None,
                     kind: ServiceFaultKind::UndeserializablePayload,
                     operation: operation.to_owned(),
                 }

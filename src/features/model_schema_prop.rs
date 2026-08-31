@@ -101,8 +101,34 @@ pub enum LiteralValue {
 /// publishes, and `validate()` cannot stand in for it — by the time it runs the variant has
 /// already been chosen.
 ///
-/// A constrained *brand* is the remaining exception and is enforced on the read: a message holding
-/// one publishes no `validate()` that reaches into it, so the read is the only thing there is.
+/// A constrained *brand* is the remaining exception and is enforced on the read. A message holding
+/// a branded *named field* reaches it through the walk below as well, so the two overlap there; the
+/// read is what still covers the positions the walk does not reach — a positional slot, which has
+/// no name for a violation to be reported under, and a field written under a wrapper the walk does
+/// not read through.
+///
+/// ## What a validator reaches
+///
+/// Its own constrained fields, and then whatever each of its other fields holds.
+///
+/// A bound declared on a nested message is a bound on the message that carries it. The Zod schema
+/// the same declaration publishes is composed — validating the outer schema validates the inner one
+/// with it — so a `validate()` stopping at the top level would make the two ends of one declaration
+/// disagree about whether a payload is valid.
+///
+/// Every field bottoming out in a declared type is walked, through the same wrappers a constraint
+/// is reached through, and the value's own `validate()` is run; a field bottoming out in a
+/// primitive is not, its bounds being declared on the field and run there. A type publishing no
+/// `validate()` answers `Ok(())` through a fallback written inside the walk.
+///
+/// A violation is reported under the path it was reached through —
+/// `'account.claims.jti' is too short: minimum length is 1, got 0` — so the field a fault names is
+/// the key a caller looks for in the payload it sent. A `#[serde(flatten)]` hop writes no key and
+/// contributes no segment. A violation naming no field of its own, as a constrained brand's does,
+/// is reported under the field the walk reached it through.
+///
+/// A type declaring no bound of its own publishes a `validate()` when something beneath it does; a
+/// type holding nothing but primitives publishes none.
 ///
 /// ## Type overrides
 ///

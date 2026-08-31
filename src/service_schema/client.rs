@@ -35,7 +35,8 @@
 //!
 //! `Answered`, `MessageValidation`, `violated_field` and `violation_detail`, all of which land in
 //! the same module. The dispatcher writes the envelope this reads, which is the point of their
-//! sharing one.
+//! sharing one. `MessageValidation` is the one of the four that is not in scope where it lands —
+//! it is shut in a private module, so each client method opens its body by `use`ing it.
 
 use super::parse::{OperationDef, OperationInputs, OperationOutcome, ServiceDef};
 use proc_macro2::TokenStream;
@@ -252,12 +253,14 @@ fn method(operation: &OperationDef) -> TokenStream {
     };
     let answers = answers(operation);
     let doc = method_doc(operation);
+    let in_scope = super::dispatch::message_validation_in_scope();
     quote! {
         #[doc = #doc]
         pub fn #named(
             &self #(, #taken)*
         ) -> impl ::core::future::Future<Output = #answers> + Send {
             async move {
+                #in_scope
                 #packed
                 if let Err(violations) = sending.validate() {
                     #refusal

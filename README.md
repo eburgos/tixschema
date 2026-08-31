@@ -1740,6 +1740,8 @@ export type UsageServiceGetAvailableBalanceOutcome =
 
 Exactly two generated places build one: the dispatcher, when an incoming message cannot be turned into a valid request or names an operation nothing recognises, and the client, when the message *it* is about to send fails its own validation. In Rust a client call answers `Result<Success, CallError<Error>>`, `CallError` being `Operation(E)` for the error the operation declared and `Fault(ServiceFault)` for a defect that reached the caller.
 
+Which kind a refused payload is reported under is `serde_json`'s own classification of the refusal, not the shape of the sentence it wrote. `undeserializable-payload` means the bytes are not a document at all -- not JSON, or a document that ends early -- which is a sender whose serialization is broken, and such a refusal names no field because nothing was read far enough for a key to be what went wrong. `failed-validation` means the bytes read as a document and did not match the message: a field carrying the wrong type of value, a key that is missing, a value a bound refuses. That is a value someone supplied, and it is where the TypeScript service serving the same operation draws the line too -- its reader parses the payload and its schema then judges what was read -- so one defect reaches a call site under one kind whichever language served it. The field is named wherever the refusal named one: a validator's report names it in single quotes, and serde names it in backticks for a missing or unknown key. A type mismatch says what serde expected and not where, so that fault carries no field. The byte offset serde appends is dropped, it being a position inside an encoding the caller never saw.
+
 #### What a Service Generates
 
 On the Rust side, beside the trait, in a module named for the service (`usage_service_schema`):
@@ -2020,9 +2022,27 @@ A constraint describes the value, not the shape. A payload carrying a value it r
 A field still generates both helpers into its schema module: `validate_{field}_value()`, which `validate()` calls, and `deserialize_{field}`, a serde hook an author may hang on a field of their own accord. Two positions carry a check on the read without being asked to, and both have to:
 
 - **A member of an `#[serde(untagged)]` enum**, where whether the member is admissible is what chooses which variant the payload is. The check is part of reading the value rather than part of judging it -- exactly as it is under `anyOf` and `z.union` on the two schema surfaces the same type publishes -- and `validate()` cannot stand in for it, since by the time it runs the variant has already been chosen. A wrapped member's hook deserializes the member's own declared type and then runs the same walk `validate()` runs over it; the two differ in that `validate()` answers with every violation in the instance while a `Deserializer` answers with one error, so the read stops at the first.
-- **A constrained brand.** A message holding a branded field publishes no `validate()` that reaches into it, so the read is the only thing enforcing the brand's bound.
+- **A constrained brand.** Its bound is enforced on the read, which is the one automatic hook that is not about choosing a variant. A message holding a branded *named field* also reaches it through the walk below, so the two overlap there; the read is what still covers the positions the walk does not reach -- a positional slot, which has no name for a violation to be reported under, and a field written under a wrapper the walk does not read through.
 
 A field whose key may be left out keeps that reading. Where a member is hung with the hook -- an untagged variant's, which is the one position that is -- an `Option` written outermost (under any number of transparent wrappers) is given `#[serde(default)]` alongside it, since a `deserialize_with` otherwise turns a missing key into an error; a field that writes its own `default` keeps the one it wrote. Off the hook there is nothing to put back and no `default` is written, so a required key that goes missing is still the error it always was.
+
+### What a validator reaches
+
+Its own constrained fields, and then whatever each of its other fields holds.
+
+A bound declared on a nested message is a bound on the message that carries it. The Zod schema the same declaration publishes is composed -- validating the outer schema validates the inner one with it -- so a `validate()` that stopped at the top level would make the two ends of one declaration disagree about whether a payload is valid, and a Rust service would run an operation the TypeScript one refuses.
+
+So every field bottoming out in a declared type is walked, through the same wrappers a constraint is reached through (`Option`, a sequence, `Box`/`Rc`/`Arc`/`Cow`), and the value's own `validate()` is run. A field bottoming out in a primitive is not: its bounds are declared on the field and already run there. A type that publishes no `validate()` -- because nothing beneath it declares a bound -- answers `Ok(())` through a fallback written inside the walk.
+
+A violation is reported under the path it was reached through, so the field a fault names is the key a caller looks for in the payload it sent:
+
+```text
+'account.claims.jti' is too short: minimum length is 1, got 0
+```
+
+A `#[serde(flatten)]` hop writes no key, so it contributes no segment: a bound under a flattened `claims` inside `account` is reported as `'account.jti'`. A violation naming no field of its own -- a constrained brand's, which says `value is too short` and has no field to name -- is reported under the field the walk reached it through: `'slug': value is too short: minimum length is 3, got 2`.
+
+A type declaring no bound of its own publishes a `validate()` when something beneath it does. A type holding nothing but primitives publishes none, and the dispatcher's own fallback is what answers for it.
 
 ### Literal Values
 

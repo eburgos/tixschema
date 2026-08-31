@@ -11782,3 +11782,89 @@ fn a_single_combination_binds_no_name_on_either_path() {
         (String::new(), super::zod_merged_object("OWN", &operands))
     );
 }
+
+/// A field is walked for a bound beneath it when its type is one that could declare one, and is
+/// left alone when it is a primitive.
+///
+/// The two halves are one decision. Walking a primitive would put a `validate()` call on every
+/// `String` and `u32` a message declares, and the fallback would answer `Ok(())` for all of them —
+/// so a message of primitives would start publishing a validator that checks nothing, and the
+/// dispatcher's own fallback, which exists for exactly that message, would stop being reached.
+#[cfg(feature = "serde")]
+#[test]
+fn a_field_bottoming_out_in_a_declared_type_is_walked_and_a_primitive_one_is_not() {
+    let mut item: syn::ItemStruct = syn::parse_quote! {
+        struct Envelope {
+            account: Account,
+            count: u32,
+            flagged: bool,
+            name: String,
+            tags: Vec<Tag>,
+        }
+    };
+    let collected = super::collect_struct_fields(
+        &mut item.fields,
+        None,
+        Some("envelope_schema"),
+        "Envelope",
+        &syn::Generics::default(),
+        false,
+    );
+    assert!(collected.4.is_empty(), "got: {:?}", collected.4);
+
+    let bodies = collected
+        .3
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        bodies.len(),
+        2,
+        "a walk for each of the two fields that could hold a bound, and none for the three that \
+         could not. Got: {bodies:?}"
+    );
+    assert!(
+        bodies
+            .iter()
+            .all(|walk| walk.contains("trait NestedValidation")),
+        "each walk carries the fallback it asks its value through. Got: {bodies:?}"
+    );
+    let walks = bodies.join("");
+    assert!(
+        walks.contains("nested_under (\"account\"") && walks.contains("nested_under (\"tags\""),
+        "got: {walks}"
+    );
+    for primitive in ["count", "flagged", "name"] {
+        assert!(
+            !walks.contains(&format!("nested_under (\"{primitive}\"")),
+            "`{primitive}` bottoms out in a primitive, whose bounds are declared on the field and \
+             run there. Got: {walks}"
+        );
+    }
+}
+
+/// A walk reaches its value as a place and not as the reference the walk is holding.
+///
+/// An inherent method beats a trait's only where both are candidates for the same receiver type,
+/// and the fallback is blanket-implemented — so on a receiver of type `&T` the fallback answers
+/// before an inherent `validate()` on `T` is ever looked for, and every nested bound would pass
+/// silently. Dereferencing puts the receiver back at `T`, where the inherent method wins.
+#[cfg(feature = "serde")]
+#[test]
+fn a_nested_walk_reaches_its_value_as_a_place_rather_than_as_a_reference() {
+    let mut item: syn::ItemStruct = syn::parse_quote! {
+        struct Envelope {
+            account: Account,
+        }
+    };
+    let collected = super::collect_struct_fields(
+        &mut item.fields,
+        None,
+        Some("envelope_schema"),
+        "Envelope",
+        &syn::Generics::default(),
+        false,
+    );
+    let walk = collected.3[0].to_string();
+    assert!(walk.contains("(* value_0) . validate ()"), "got: {walk}");
+}
