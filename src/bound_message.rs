@@ -25,7 +25,11 @@ use quote::quote;
 /// not a list — is one of this crate's own only if it opens with one of these. That is what lets a
 /// generated read-time hook write its field's name into a broken bound while handing back
 /// untouched a refusal about the *shape* of the value, which names a field the hook does not hold.
-#[cfg(any(feature = "serde", feature = "zod"))]
+///
+/// Gated on the reading side alone. Both emitters *write* these sentences, through
+/// [`Bound::stem`], but only a reader has to recognise one, and only a build with the serde
+/// feature writes a reader.
+#[cfg(feature = "serde")]
 pub const VIOLATION_STEMS: [&str; 5] = [
     "does not match pattern '",
     "too large: maximum is ",

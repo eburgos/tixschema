@@ -74,11 +74,16 @@ use crate::utils::{TrivialPattern, trivial_pattern};
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
 ))]
 use crate::features::serde::rename_direction_rejection;
+// `has_serde_read_hook` asks whether a field already reads itself through a function of the
+// author's own, which only matters where a generated reader might displace one. The single place
+// that asks is `named_read_hook`, gated the same way: a build without the serde feature hangs no
+// reader on any field, so the question never arises rather than being answered `false`.
+// `derives_deserialize` is reached through `container_is_read_back`, which states its own answer.
 #[cfg(feature = "serde")]
-use crate::features::serde::{SerdeFieldMeta, SerdeTypeMeta};
 use crate::features::serde::{
-    derives_deserialize, has_serde_default, has_serde_read_hook, parse_serde_key_omission,
+    SerdeFieldMeta, SerdeTypeMeta, derives_deserialize, has_serde_read_hook,
 };
+use crate::features::serde::{has_serde_default, parse_serde_key_omission};
 // The type is named where a positional slot's own omission is read: the tuple-struct walk, which
 // only a describing build performs, and the variant walk, which every build performs.
 use crate::features::serde::SerdeKeyOmission;
@@ -3645,6 +3650,25 @@ fn flattened_name_refused_branch(inner: &FieldDef) -> Option<(String, &'static s
     Some((first.branch_path(), first.non_object?))
 }
 
+/// The [`FieldContext::container_read_back`] every walk hands its fields: whether the item they
+/// belong to derives `Deserialize`.
+///
+/// Without the serde feature the answer is `false`, and that is a decision rather than a fallback.
+/// The one place the flag is read is [`named_read_hook`], which such a build does not compile at
+/// all — nothing in it writes a reader for anything, so "no container here is read back" is the
+/// truthful reading, and it is the answer that stays correct if a second reader of the flag ever
+/// appears. Asking `derives_deserialize` instead would mean parsing derive lists to feed a
+/// question no surface in that build asks.
+#[cfg(feature = "serde")]
+fn container_is_read_back(attrs: &[syn::Attribute]) -> bool {
+    derives_deserialize(attrs)
+}
+
+#[cfg(not(feature = "serde"))]
+const fn container_is_read_back(_attrs: &[syn::Attribute]) -> bool {
+    false
+}
+
 /// Processes every field of a struct, returning the regular field defs, the `#[serde(flatten)]`
 /// field defs, the per-field serde validation functions and `validate()` body fragments, and the
 /// `compile_error!` tokens for any field-level guard violations.
@@ -3893,7 +3917,7 @@ fn process_struct(mut item_struct: syn::ItemStruct, args: &ModelSchemaArgs) -> T
         &rust_ident,
         &item_struct.generics,
         container_defaulted,
-        derives_deserialize(&item_struct.attrs),
+        container_is_read_back(&item_struct.attrs),
     );
     #[cfg(not(any(feature = "typescript", feature = "zod", feature = "jsonschema")))]
     let _: &_ = &&collected;
@@ -4207,7 +4231,7 @@ fn process_tuple_struct(
         &name.to_string(),
         &item_struct.generics,
         has_serde_default(&item_struct.attrs),
-        derives_deserialize(&item_struct.attrs),
+        container_is_read_back(&item_struct.attrs),
     );
 
     // A violated slot guard makes the whole contract unsound, so the schema surface is dropped and
@@ -5998,7 +6022,7 @@ fn collect_discriminated_variants(
         Vec::new();
     let mut deferred_attrs: Vec<Vec<syn::Attribute>> = Vec::new();
     let enum_type_name = item_enum.ident.to_string();
-    let enum_read_back = derives_deserialize(&item_enum.attrs);
+    let enum_read_back = container_is_read_back(&item_enum.attrs);
 
     for item in &mut item_enum.variants {
         let (field_rename, variant_rename_all) =
@@ -11502,6 +11526,9 @@ fn process_field(
     #[cfg(not(feature = "serde"))]
     let serde_guard_errors: Vec<proc_macro2::TokenStream> = {
         let _: bool = ctx.container_defaulted;
+        // Held alive the same way, and for the reason `container_is_read_back` states: the only
+        // reader of this flag is the read-hook writer, which this build does not compile.
+        let _: bool = ctx.container_read_back;
         Vec::new()
     };
 
