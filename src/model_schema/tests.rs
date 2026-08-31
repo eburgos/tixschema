@@ -2589,9 +2589,15 @@ fn a_field_whose_type_could_publish_a_validator_contributes_a_body_that_runs_it(
         "the field's own validator is what runs: {body}"
     );
     assert!(
-        body.contains(r#"format ! ("'{}': {}" , "slug" , violation)"#),
-        "the brand names no field, so the message supplies one, written where a reader of these \
-         reports looks for it: {body}"
+        body.contains(r#"nested_under ("slug" , violation)"#),
+        "the field the value was reached through is written into the report the value's own type \
+         made, so one quoted run carries the whole path: {body}"
+    );
+    assert!(
+        body.contains(r#"format ! ("'{field}.{named}'{tail}")"#)
+            && body.contains(r#"format ! ("'{field}': {violation}")"#),
+        "a report naming a member of its own is written into; a brand's, naming none, has the \
+         field put in front of it instead: {body}"
     );
 
     let rendered = walked_field_attrs(item.fields.iter());
@@ -11879,4 +11885,64 @@ fn a_single_combination_binds_no_name_on_either_path() {
         super::zod_merged_statements("Host", "OWN", &operands),
         (String::new(), super::zod_merged_object("OWN", &operands))
     );
+}
+
+/// A field is walked for a bound beneath it when its type is one that could declare one, and is
+/// left alone when it is a primitive.
+///
+/// The two halves are one decision. Walking a primitive would put a `validate()` call on every
+/// `String` and `u32` a message declares, and the fallback would answer `Ok(())` for all of them —
+/// so a message of primitives would start publishing a validator that checks nothing, and the
+/// dispatcher's own fallback, which exists for exactly that message, would stop being reached.
+#[cfg(feature = "serde")]
+#[test]
+fn a_field_bottoming_out_in_a_declared_type_is_walked_and_a_primitive_one_is_not() {
+    let mut item: syn::ItemStruct = syn::parse_quote! {
+        struct Envelope {
+            account: Account,
+            count: u32,
+            flagged: bool,
+            name: String,
+            tags: Vec<Tag>,
+        }
+    };
+    let collected = super::collect_struct_fields(
+        &mut item.fields,
+        None,
+        Some("envelope_schema"),
+        "Envelope",
+        &syn::Generics::default(),
+        false,
+    );
+    assert!(collected.4.is_empty(), "got: {:?}", collected.4);
+
+    let bodies = collected
+        .3
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        bodies.len(),
+        2,
+        "a walk for each of the two fields that could hold a bound, and none for the three that \
+         could not. Got: {bodies:?}"
+    );
+    assert!(
+        bodies
+            .iter()
+            .all(|walk| walk.contains("trait UnpublishedValidate")),
+        "each walk carries the fallback it asks its value through. Got: {bodies:?}"
+    );
+    let walks = bodies.join("");
+    assert!(
+        walks.contains("& self . account") && walks.contains("& self . tags"),
+        "got: {walks}"
+    );
+    for primitive in ["count", "flagged", "name"] {
+        assert!(
+            !walks.contains(&format!("& self . {primitive}")),
+            "`{primitive}` bottoms out in a primitive, whose bounds are declared on the field and \
+             run there. Got: {walks}"
+        );
+    }
 }

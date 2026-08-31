@@ -37,7 +37,11 @@
 //! inherent `validate()` onto a type with constrained fields and none onto a type without one, and
 //! a message the author declared may carry no annotation at all. An inherent method takes
 //! precedence over a trait's, so a message that declared constraints runs them and one that
-//! declared none passes.
+//! declared none passes. It sits in a private module and is `use`d into the two function bodies
+//! that ask a message to validate itself, rather than standing in the module beside them: an
+//! operation's generated message type lands in this module too, and its own `validate()` walks its
+//! nested fields through a fallback of the same shape, which a second blanket `validate()` in
+//! scope would make ambiguous.
 
 use super::parse::{OperationDef, OperationInputs, OperationOutcome, ServiceDef};
 use proc_macro2::TokenStream;
@@ -62,6 +66,7 @@ pub fn emit(service: &ServiceDef) -> TokenStream {
     let incoming = incoming_message();
     let envelope = answered_envelope();
     let validation = message_validation();
+    let in_scope = message_validation_in_scope();
     let readers = violation_readers();
     let guard = panic_guard();
     quote! {
@@ -84,6 +89,7 @@ pub fn emit(service: &ServiceDef) -> TokenStream {
             R: Reply + Sync,
         {
             async move {
+                #in_scope
                 match message.operation.as_str() {
                     #(#arms)*
                     unrecognised => {
@@ -166,12 +172,7 @@ fn arm(operation: &OperationDef) -> TokenStream {
             let received = match ::serde_json::from_slice::<#message>(&message.payload) {
                 Ok(received) => received,
                 Err(rejected) => {
-                    return reply
-                        .fault(ServiceFault::undeserializable_payload(
-                            #wire,
-                            &rejected.to_string(),
-                        ))
-                        .await;
+                    return reply.fault(refused_payload(#wire, &rejected)).await;
                 }
             };
             if let Err(violations) = received.validate() {
@@ -223,22 +224,40 @@ fn incoming_message() -> TokenStream {
 }
 
 /// What a message answers when it publishes no `validate()` of its own.
+///
+/// It is shut inside a private module and brought into scope by [`message_validation_in_scope`]
+/// only in the two function bodies that ask a message to validate itself. A blanket `validate()`
+/// visible across the whole module would be a second candidate for every `validate()` call written
+/// there — the message types `#[service_schema]` generates for an operation's arguments land in
+/// this module, and each walks its own nested fields through a fallback of exactly this shape, so
+/// two in scope at once is `E0034` on a declaration that named neither.
 fn message_validation() -> TokenStream {
     quote! {
-        /// The answer a message with no declared constraints gives when asked to validate itself.
-        ///
-        /// `#[model_schema()]` writes an inherent `validate()` onto a type with constrained fields
-        /// and none onto a type without one, and an inherent method takes precedence over a
-        /// trait's — so a message that declared constraints runs them, and one that declared none
-        /// passes here.
-        pub trait MessageValidation {
-            /// `Ok(())`, there being nothing declared to check.
-            fn validate(&self) -> Result<(), Vec<String>> {
-                Ok(())
+        mod message_validation {
+            /// The answer a message with no declared constraints gives when asked to validate
+            /// itself.
+            ///
+            /// `#[model_schema()]` writes an inherent `validate()` onto a type with constrained
+            /// fields and none onto a type without one, and an inherent method takes precedence
+            /// over a trait's — so a message that declared constraints runs them, and one that
+            /// declared none passes here.
+            pub trait MessageValidation {
+                /// `Ok(())`, there being nothing declared to check.
+                fn validate(&self) -> Result<(), Vec<String>> {
+                    Ok(())
+                }
             }
-        }
 
-        impl<T> MessageValidation for T {}
+            impl<T> MessageValidation for T {}
+        }
+    }
+}
+
+/// Brings the fallback into scope for one function body — see [`message_validation`] for why it is
+/// not in scope for the module that body is written in.
+pub fn message_validation_in_scope() -> TokenStream {
+    quote! {
+        use message_validation::MessageValidation;
     }
 }
 
@@ -255,7 +274,7 @@ fn message_type(operation: &OperationDef) -> TokenStream {
 }
 
 /// The readers that turn a violation report — or a deserializer's own refusal — into what a fault
-/// carries.
+/// carries, and the one that decides which fault a refusal is at all.
 fn violation_readers() -> TokenStream {
     quote! {
         /// The field one line names, where it is written in the shape every validator
@@ -270,6 +289,51 @@ fn violation_readers() -> TokenStream {
         fn named_field(reported: &str) -> Option<&str> {
             let (field, _rest) = reported.strip_prefix('\'')?.split_once('\'')?;
             Some(field)
+        }
+
+        /// The field serde names in its own words. It writes one into exactly two sentences —
+        /// `missing field \u{60}creditCount\u{60}` and
+        /// `unknown field \u{60}extra\u{60}, expected …` — and into both between backticks. A
+        /// refusal that names none, a type mismatch saying what it expected and not where, leaves
+        /// the fault's field empty.
+        ///
+        /// The name it carries is the key as the wire spells it, since that is the name serde was
+        /// reading for; a validator's report names the Rust field, that being what it holds.
+        fn serde_named_field(reported: &str) -> Option<&str> {
+            let named = reported
+                .strip_prefix("missing field ")
+                .or_else(|| reported.strip_prefix("unknown field "))?;
+            let (field, _rest) = named.strip_prefix('`')?.split_once('`')?;
+            Some(field)
+        }
+
+        /// Which fault a serde refusal is, and what it says.
+        ///
+        /// serde_json classifies its own refusals, and that classification is the line between the
+        /// two kinds. `Syntax` and `Eof` say the bytes are not a document at all, which is a
+        /// sender whose serialization is broken. `Data` says the bytes read as a document and did
+        /// not match the message — a value someone supplied that the message does not admit, which
+        /// is the same failure the validator answers for and is answered under the same kind. That
+        /// is where the TypeScript service serving the same operation draws it too: its reader
+        /// parses the payload, and its schema then judges what was read, so a type mismatch and a
+        /// broken bound are one kind there and are one kind here.
+        ///
+        /// The byte offset serde appends is dropped. It locates the failure inside an encoding the
+        /// caller never saw, and it is removed by rebuilding it from the refusal's own line and
+        /// column rather than by matching the sentence for it.
+        fn refused_payload(operation: &str, refusal: &::serde_json::Error) -> ServiceFault {
+            let reported = refusal.to_string();
+            let offset = format!(
+                " at line {} column {}",
+                refusal.line(),
+                refusal.column()
+            );
+            let said = reported.strip_suffix(&offset).unwrap_or(reported.as_str());
+            if matches!(refusal.classify(), ::serde_json::error::Category::Data) {
+                let named = named_field(said).or_else(|| serde_named_field(said));
+                return ServiceFault::failed_validation(operation, named, said);
+            }
+            ServiceFault::undeserializable_payload(operation, said)
         }
 
         /// Everything that failed, in one line, for the fault's detail.

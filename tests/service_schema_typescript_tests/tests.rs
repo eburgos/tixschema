@@ -684,6 +684,11 @@ mod the_envelope_typescript_declares_is_the_one_rust_writes {
             (
                 "get-balance",
                 br#"{"organization_id":42}"#.as_slice(),
+                "failed-validation",
+            ),
+            (
+                "get-balance",
+                b"not a document at all".as_slice(),
                 "undeserializable-payload",
             ),
         ] {
