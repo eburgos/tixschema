@@ -391,19 +391,13 @@ fn a_client_call_answers_the_declared_success_type_or_a_call_error_over_the_decl
     let client = probe_service_schema::ProbeServiceClient::new(Loopback {
         service: ProbeBackEnd { granted_credits: 5 },
     });
-    let ctx = ProbeContext {
-        logger_name: "probe".to_owned(),
-    };
     // Annotated rather than inferred: the failure arm being `CallError<ProbeError>` rather than
     // `ProbeError` is what makes room for a fault the operation never declared, and an inferred
     // binding would not say so.
     let answering: Result<BalanceResponse, probe_service_schema::CallError<ProbeError>> =
-        poll_once(client.get_balance(
-            &ctx,
-            BalanceRequest {
-                organization_id: "acme".to_owned(),
-            },
-        ))
+        poll_once(client.get_balance(BalanceRequest {
+            organization_id: "acme".to_owned(),
+        }))
         .unwrap();
     assert_eq!(answering, Ok(BalanceResponse { credits: 9 }));
 }

@@ -46,6 +46,19 @@ fn declared(source: &str) -> ItemTrait {
     syn::parse_str::<ItemTrait>(source).unwrap()
 }
 
+/// The whole client emission and nothing else: the transport seam, the fault mirror, the answer
+/// reader, the client and its methods, which run from `Transport` up to the trait itself.
+///
+/// The rest of the expansion names a context legitimately — the dispatcher takes one, the trait
+/// declares one, and the TypeScript strings carry the implementation interface's — so a test
+/// reading the client for a context has to stop where the client does.
+fn client_emission(emitted: &str) -> String {
+    let start = emitted.find("pub trait Transport").unwrap();
+    let end = emitted.find("pub trait UsageService").unwrap();
+    assert!(start < end, "got: {emitted}");
+    emitted[start..end].to_owned()
+}
+
 fn expanded(source: &str) -> String {
     exec_service_schema(TokenStream::new(), declared(source).to_token_stream()).to_string()
 }
@@ -729,11 +742,11 @@ fn the_client_carries_one_method_per_operation_under_the_operation_s_own_wire_na
         "got: {emitted}"
     );
     for named in [
-        "pub fn get_available_balance < Ctx >",
-        "pub fn expire_credit < Ctx >",
-        "pub fn sweep < Ctx >",
-        "pub fn can_generate < Ctx >",
-        "pub fn apply_bundle < Ctx >",
+        "pub fn get_available_balance (& self , req : AvailableBalanceRequest)",
+        "pub fn expire_credit (& self , organization_id : OrganizationId , credit_id : CreditId)",
+        "pub fn sweep (& self)",
+        "pub fn can_generate (& self , req : GenerationRequest)",
+        "pub fn apply_bundle (& self , req : ApplyBundleRequest)",
     ] {
         assert!(emitted.contains(named), "got: {emitted}");
     }
@@ -745,6 +758,39 @@ fn the_client_carries_one_method_per_operation_under_the_operation_s_own_wire_na
     assert!(
         emitted.contains("self . transport . notify (\"apply-bundle\" , sending)"),
         "a one-way operation is sent rather than called. Got: {emitted}"
+    );
+}
+
+#[test]
+fn a_client_method_takes_the_message_and_no_context() {
+    let emitted = expanded(MIXED_SERVICE);
+    let client = client_emission(&emitted);
+    assert!(
+        !client.contains("Ctx") && !client.contains("_ctx"),
+        "the context is what an implementation needs and a caller has nothing to hand one to, so \
+         no part of the client names it. Got: {client}"
+    );
+    // Every parameter list in full, so an argument creeping back in on either side of the message
+    // fails here rather than slipping past a `contains` on the message type alone.
+    for taken in [
+        "pub fn get_available_balance (& self , req : AvailableBalanceRequest)",
+        "pub fn expire_credit (& self , organization_id : OrganizationId , credit_id : CreditId)",
+        "pub fn sweep (& self)",
+        "pub fn can_generate (& self , req : GenerationRequest)",
+        "pub fn apply_bundle (& self , req : ApplyBundleRequest)",
+    ] {
+        assert!(
+            client.contains(taken),
+            "a client method takes what the operation takes after its context, and nothing else. \
+             Got: {client}"
+        );
+    }
+    assert!(
+        emitted.contains(
+            "fn get_available_balance (& self , ctx : & Ctx , req : AvailableBalanceRequest ,)"
+        ),
+        "the trait keeps its context: it is the half that has an implementation to hand one to. \
+         Got: {emitted}"
     );
 }
 

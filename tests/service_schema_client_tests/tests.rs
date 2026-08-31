@@ -8,13 +8,9 @@
 //! `Loopback` sends the message straight into the generated dispatcher and hands back what the
 //! reply handle captured. It is the only place both halves of the seam meet, and it is where the
 //! envelope one writes and the other reads is proven to be one envelope.
-//!
-//! `UnreadContext` is neither `Send` nor `Sync` and carries a marker no message declares, which is
-//! how the context tests read that a client takes a context and reaches into none.
 
 #![cfg(feature = "serde")]
 
-use core::cell::Cell;
 use core::future::{Future, ready};
 use core::pin::pin;
 use core::task::{Context as PollContext, Poll, Waker};
@@ -70,14 +66,6 @@ pub enum ProbeError {
 pub struct ProbeTransport {
     answers: Mutex<Vec<Vec<u8>>>,
     calls: Mutex<Vec<(String, String)>>,
-}
-
-/// A context with nothing to offer a client: no `Sync`, no `Send`, no `Serialize`, and a marker
-/// string no message on the service declares. It counts what the *caller* does with it, the client
-/// having no way to reach a method on a bare type parameter.
-pub struct UnreadContext {
-    counted: Cell<u32>,
-    marker: String,
 }
 
 #[service_schema()]
@@ -318,20 +306,6 @@ impl ProbeTransport {
     }
 }
 
-impl UnreadContext {
-    fn counted(&self) -> u32 {
-        self.counted.set(self.counted.get() + 1);
-        self.counted.get()
-    }
-
-    fn new(marker: &str) -> Self {
-        Self {
-            counted: Cell::new(0),
-            marker: marker.to_owned(),
-        }
-    }
-}
-
 /// One message as the dispatcher on the far side reads it.
 fn incoming<T>(operation: &str, payload: &T) -> probe_service_schema::IncomingMessage
 where
@@ -341,18 +315,6 @@ where
         operation: operation.to_owned(),
         payload: serde_json::to_vec(payload).unwrap(),
     }
-}
-
-/// Hands back exactly what it was given, and compiles only for something `Send`.
-///
-/// A client method that held its context across the await would need `Ctx: Sync` for the future it
-/// answers with to stay `Send`, and `UnreadContext` is neither. So a call passing one through here
-/// at all is the compiler agreeing that the context is not held.
-fn only_if_send<Answering>(answering: Answering) -> Answering
-where
-    Answering: Send,
-{
-    answering
 }
 
 /// The probe never suspends, so one poll answers it; `None` says an assumption about the bodies
@@ -383,13 +345,9 @@ fn reported_fault(
 fn an_answer_becomes_the_success_type_the_operation_declared() {
     let transport = ProbeTransport::new(&[r#"{"ok":true,"value":{"credits":7}}"#]);
     let client = probe_service_schema::ProbeServiceClient::new(transport);
-    let ctx = "probe".to_owned();
-    let answered = poll_once(client.get_balance(
-        &ctx,
-        BalanceRequest {
-            organization_id: "acme".to_owned(),
-        },
-    ))
+    let answered = poll_once(client.get_balance(BalanceRequest {
+        organization_id: "acme".to_owned(),
+    }))
     .unwrap();
     assert_eq!(answered, Ok(BalanceResponse { credits: 7 }));
 }
@@ -398,13 +356,9 @@ fn an_answer_becomes_the_success_type_the_operation_declared() {
 fn the_error_the_operation_declared_comes_back_in_the_operation_arm() {
     let transport = ProbeTransport::new(&[r#"{"ok":false,"error":{"errorCode":"db-error"}}"#]);
     let client = probe_service_schema::ProbeServiceClient::new(transport);
-    let ctx = "probe".to_owned();
-    let answered = poll_once(client.get_balance(
-        &ctx,
-        BalanceRequest {
-            organization_id: "unlucky".to_owned(),
-        },
-    ))
+    let answered = poll_once(client.get_balance(BalanceRequest {
+        organization_id: "unlucky".to_owned(),
+    }))
     .unwrap();
     assert_eq!(
         answered,
@@ -423,13 +377,9 @@ fn a_fault_the_remote_produced_comes_back_in_the_fault_arm() {
         r#""kind":"unknown-operation","operation":"get-balance"}}}"#
     )]);
     let client = probe_service_schema::ProbeServiceClient::new(transport);
-    let ctx = "probe".to_owned();
-    let answered = poll_once(client.get_balance(
-        &ctx,
-        BalanceRequest {
-            organization_id: "acme".to_owned(),
-        },
-    ))
+    let answered = poll_once(client.get_balance(BalanceRequest {
+        organization_id: "acme".to_owned(),
+    }))
     .unwrap();
     let reported = reported_fault(&answered).unwrap();
     assert_eq!(
@@ -446,13 +396,9 @@ fn a_fault_the_remote_produced_comes_back_in_the_fault_arm() {
 fn an_envelope_that_contradicts_itself_is_a_defect_rather_than_an_answer() {
     let transport = ProbeTransport::new(&[r#"{"ok":true}"#]);
     let client = probe_service_schema::ProbeServiceClient::new(transport);
-    let ctx = "probe".to_owned();
-    let answered = poll_once(client.get_balance(
-        &ctx,
-        BalanceRequest {
-            organization_id: "acme".to_owned(),
-        },
-    ))
+    let answered = poll_once(client.get_balance(BalanceRequest {
+        organization_id: "acme".to_owned(),
+    }))
     .unwrap();
     let reported = reported_fault(&answered).unwrap();
     assert_eq!(
@@ -470,13 +416,9 @@ fn an_envelope_that_contradicts_itself_is_a_defect_rather_than_an_answer() {
 fn the_operation_name_travels_beside_the_payload_and_never_inside_it() {
     let transport = ProbeTransport::new(&[r#"{"ok":true,"value":{"credits":7}}"#]);
     let client = probe_service_schema::ProbeServiceClient::new(transport);
-    let ctx = "probe".to_owned();
-    poll_once(client.get_balance(
-        &ctx,
-        BalanceRequest {
-            organization_id: "acme".to_owned(),
-        },
-    ))
+    poll_once(client.get_balance(BalanceRequest {
+        organization_id: "acme".to_owned(),
+    }))
     .unwrap()
     .unwrap();
     let calls = client.transport().calls();
@@ -494,8 +436,7 @@ fn the_operation_name_travels_beside_the_payload_and_never_inside_it() {
 fn a_method_declared_from_several_arguments_still_takes_them_separately() {
     let transport = ProbeTransport::new(&[r#"{"ok":true,"value":{"credits":1}}"#]);
     let client = probe_service_schema::ProbeServiceClient::new(transport);
-    let ctx = "probe".to_owned();
-    poll_once(client.expire_credit(&ctx, "acme".to_owned(), "cr-1".to_owned()))
+    poll_once(client.expire_credit("acme".to_owned(), "cr-1".to_owned()))
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -512,8 +453,7 @@ fn a_method_declared_from_several_arguments_still_takes_them_separately() {
 fn a_method_for_an_operation_that_takes_nothing_still_sends_a_payload() {
     let transport = ProbeTransport::new(&[r#"{"ok":true,"value":{"credits":0}}"#]);
     let client = probe_service_schema::ProbeServiceClient::new(transport);
-    let ctx = "probe".to_owned();
-    poll_once(client.sweep(&ctx)).unwrap().unwrap();
+    poll_once(client.sweep()).unwrap().unwrap();
     assert_eq!(
         client.transport().calls(),
         vec![("sweep".to_owned(), "{}".to_owned())],
@@ -525,13 +465,9 @@ fn a_method_for_an_operation_that_takes_nothing_still_sends_a_payload() {
 fn a_one_way_method_sends_and_answers_with_nothing_beyond_that() {
     let transport = ProbeTransport::new(&[""]);
     let client = probe_service_schema::ProbeServiceClient::new(transport);
-    let ctx = "probe".to_owned();
-    let answered = poll_once(client.apply_bundle(
-        &ctx,
-        AdmitRequest {
-            organization_id: "acme".to_owned(),
-        },
-    ))
+    let answered = poll_once(client.apply_bundle(AdmitRequest {
+        organization_id: "acme".to_owned(),
+    }))
     .unwrap();
     assert!(answered.is_ok(), "got: {answered:?}");
     assert_eq!(
@@ -550,13 +486,9 @@ fn a_message_failing_its_own_validation_is_a_fault_and_the_transport_is_never_re
     // is the proof that the transport was not touched.
     let transport = ProbeTransport::new(&[]);
     let client = probe_service_schema::ProbeServiceClient::new(transport);
-    let ctx = "probe".to_owned();
-    let answered = poll_once(client.admit(
-        &ctx,
-        AdmitRequest {
-            organization_id: "ab".to_owned(),
-        },
-    ))
+    let answered = poll_once(client.admit(AdmitRequest {
+        organization_id: "ab".to_owned(),
+    }))
     .unwrap();
     let reported = reported_fault(&answered).unwrap();
     assert_eq!(
@@ -582,13 +514,9 @@ fn a_message_failing_its_own_validation_is_a_fault_and_the_transport_is_never_re
 fn a_one_way_message_failing_its_own_validation_is_a_fault_and_sends_nothing() {
     let transport = ProbeTransport::new(&[]);
     let client = probe_service_schema::ProbeServiceClient::new(transport);
-    let ctx = "probe".to_owned();
-    let answered = poll_once(client.apply_bundle(
-        &ctx,
-        AdmitRequest {
-            organization_id: "ab".to_owned(),
-        },
-    ))
+    let answered = poll_once(client.apply_bundle(AdmitRequest {
+        organization_id: "ab".to_owned(),
+    }))
     .unwrap();
     let reported = answered.unwrap_err();
     assert_eq!(
@@ -605,13 +533,9 @@ fn a_one_way_message_failing_its_own_validation_is_a_fault_and_sends_nothing() {
 #[test]
 fn what_the_dispatcher_writes_is_what_the_client_reads() {
     let client = probe_service_schema::ProbeServiceClient::new(Loopback::new());
-    let ctx = "probe".to_owned();
-    let answered = poll_once(client.get_balance(
-        &ctx,
-        BalanceRequest {
-            organization_id: "acme".to_owned(),
-        },
-    ))
+    let answered = poll_once(client.get_balance(BalanceRequest {
+        organization_id: "acme".to_owned(),
+    }))
     .unwrap();
     assert_eq!(
         answered,
@@ -619,12 +543,9 @@ fn what_the_dispatcher_writes_is_what_the_client_reads() {
         "one envelope, written by the dispatcher and read by the client"
     );
 
-    let failed = poll_once(client.get_balance(
-        &ctx,
-        BalanceRequest {
-            organization_id: "unlucky".to_owned(),
-        },
-    ))
+    let failed = poll_once(client.get_balance(BalanceRequest {
+        organization_id: "unlucky".to_owned(),
+    }))
     .unwrap();
     assert_eq!(
         failed,
@@ -634,12 +555,9 @@ fn what_the_dispatcher_writes_is_what_the_client_reads() {
         "and the failure arm survives the round trip as the error the operation declared"
     );
 
-    poll_once(client.apply_bundle(
-        &ctx,
-        AdmitRequest {
-            organization_id: "acme".to_owned(),
-        },
-    ))
+    poll_once(client.apply_bundle(AdmitRequest {
+        organization_id: "acme".to_owned(),
+    }))
     .unwrap()
     .unwrap();
     assert_eq!(
@@ -650,98 +568,5 @@ fn what_the_dispatcher_writes_is_what_the_client_reads() {
             "apply_bundle acme".to_owned(),
         ],
         "every method reached the operation it names"
-    );
-}
-
-#[test]
-fn the_context_a_method_takes_is_never_read_out_of() {
-    let transport = ProbeTransport::new(&[r#"{"ok":true,"value":{"credits":7}}"#]);
-    let client = probe_service_schema::ProbeServiceClient::new(transport);
-    let ctx = UnreadContext::new("context-marker-no-message-declares");
-    assert_eq!(
-        ctx.counted(),
-        1,
-        "the caller's own bookkeeping, before the call"
-    );
-    let answered = poll_once(only_if_send(client.get_balance(
-        &ctx,
-        BalanceRequest {
-            organization_id: "acme".to_owned(),
-        },
-    )))
-    .unwrap();
-    assert_eq!(answered, Ok(BalanceResponse { credits: 7 }));
-    assert_eq!(
-        ctx.counted(),
-        2,
-        "and after it: the context was borrowed and handed back, never taken"
-    );
-    assert_eq!(
-        client.transport().calls(),
-        vec![(
-            "get-balance".to_owned(),
-            r#"{"organization_id":"acme"}"#.to_owned()
-        )],
-        "the context is in no message and no schema, so nothing of it reaches the wire"
-    );
-    let (_, sent) = client.transport().calls().pop().unwrap();
-    assert!(
-        !sent.contains(&ctx.marker),
-        "a marker no message declares must not appear in what was sent. Got: {sent}"
-    );
-}
-
-#[test]
-fn the_context_type_is_chosen_per_call_rather_than_per_client() {
-    let transport = ProbeTransport::new(&[
-        r#"{"ok":true,"value":{"credits":7}}"#,
-        r#"{"ok":true,"value":{"credits":0}}"#,
-    ]);
-    let client = probe_service_schema::ProbeServiceClient::new(transport);
-    let unreadable = UnreadContext::new("context-marker-no-message-declares");
-    poll_once(client.get_balance(
-        &unreadable,
-        BalanceRequest {
-            organization_id: "acme".to_owned(),
-        },
-    ))
-    .unwrap()
-    .unwrap();
-    let unrelated = 7_u8;
-    poll_once(client.sweep(&unrelated)).unwrap().unwrap();
-    assert_eq!(
-        client.transport().calls(),
-        vec![
-            (
-                "get-balance".to_owned(),
-                r#"{"organization_id":"acme"}"#.to_owned()
-            ),
-            ("sweep".to_owned(), "{}".to_owned()),
-        ],
-        "`Ctx` is the method's own parameter, not the client's: one client took two unrelated \
-         context types and neither reached the wire"
-    );
-}
-
-#[test]
-fn a_one_way_method_takes_the_context_and_reads_nothing_out_of_it_either() {
-    let transport = ProbeTransport::new(&[""]);
-    let client = probe_service_schema::ProbeServiceClient::new(transport);
-    let ctx = UnreadContext::new("context-marker-no-message-declares");
-    let answered = poll_once(only_if_send(client.apply_bundle(
-        &ctx,
-        AdmitRequest {
-            organization_id: "acme".to_owned(),
-        },
-    )))
-    .unwrap();
-    assert!(answered.is_ok(), "got: {answered:?}");
-    assert_eq!(
-        client.transport().calls(),
-        vec![(
-            "apply-bundle".to_owned(),
-            r#"{"organization_id":"acme"}"#.to_owned()
-        )],
-        "an operation with no reply takes the context the same way and reads it the same amount"
     );
 }

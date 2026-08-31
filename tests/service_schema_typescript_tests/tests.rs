@@ -652,12 +652,9 @@ mod the_envelope_typescript_declares_is_the_one_rust_writes {
         .unwrap();
         let client =
             probe_service_schema::ProbeServiceClient::new(PreparedAnswer { encoded: framed });
-        let answered = poll_once(client.get_balance(
-            &(),
-            BalanceRequest {
-                organization_id: "acme".to_owned(),
-            },
-        ))
+        let answered = poll_once(client.get_balance(BalanceRequest {
+            organization_id: "acme".to_owned(),
+        }))
         .unwrap();
         let reported = match answered {
             Err(probe_service_schema::CallError::Fault(carried)) => Some(carried),

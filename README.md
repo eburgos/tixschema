@@ -1749,7 +1749,7 @@ On the Rust side, beside the trait, in a module named for the service (`usage_se
 - `Transport` -- the seam a client is bound to, with `notify` and `request`.
 - `CallError<E>` -- `Operation(E)` or `Fault(ServiceFault)`.
 - `IncomingMessage` and `dispatch(svc, ctx, message, reply)` -- the dispatcher, generic over the implementing type.
-- `UsageServiceClient` -- one method per operation, over any `Transport`.
+- `UsageServiceClient` -- one method per operation, over any `Transport`. Each takes that operation's arguments and no context: a context is what an implementation needs, and a caller has nothing to hand one to.
 - `ExpireCreditRequest` and `SweepRequest` -- the messages declared for the operations that named none, each an ordinary `#[model_schema()]` type.
 
 On the TypeScript side, three artifacts, reached through a unit struct named `<Service>Schema`:
