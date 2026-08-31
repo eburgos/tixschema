@@ -2,10 +2,12 @@ mod features;
 mod field_type;
 mod model_schema;
 mod rename_rule;
+mod service_schema;
 mod utils;
 
 use model_schema::exec_model_schema;
 use proc_macro::TokenStream;
+use service_schema::exec_service_schema;
 
 /// # `model_schema`
 ///
@@ -849,5 +851,74 @@ pub fn model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn model_schema_prop(_args: TokenStream, input: TokenStream) -> TokenStream {
     // For now, simply pass through the input
+    input
+}
+
+/// # `service_schema`
+///
+/// Declares a service as a trait: one trait, one context, and one message in and one message out
+/// per operation. Failing to implement an operation is a compile error, which is the whole reason
+/// the construct is a trait rather than a table of handlers.
+///
+/// The trait carries a type parameter that is the service's **context** — a logger, and whatever
+/// else an implementation needs that has no business being on the wire. Every operation takes it
+/// as its first argument after `&self`. It reaches no message and no schema.
+///
+/// An operation receives exactly one message. Where it takes one argument after the context, that
+/// argument *is* the message — a type the author declared, reusable and versionable from anywhere,
+/// and the form to reach for. Where it takes several, or none, the macro declares
+/// `<Operation>Request` for it: `expire_credit` gets an `ExpireCreditRequest` with one field per
+/// argument in declaration order, and `sweep` gets an empty `SweepRequest` rather than no message,
+/// so an operation that later needs a field gains one instead of changing from carrying no payload
+/// to carrying one and breaking every caller. A declared message carries `#[model_schema()]`, the
+/// serde derives and `#[serde(rename_all = "camelCase")]`, so it publishes the same TypeScript
+/// type, Zod schema and JSON Schema a hand-written message publishes and writes the same camelCase
+/// keys — a client on the far side has to be able to construct one.
+///
+/// The multi-argument form costs something: a field name is a parameter name, so renaming a
+/// parameter moves a key on the wire and no compiler flags it. Every declared message says so in
+/// its own rustdoc.
+///
+/// An operation returns `Result<Success, Error>`, with both arms declared, unless it is marked
+/// `#[service_schema_op(one_way)]`, in which case it returns nothing. The two are checked against
+/// each other in both directions, so a forgotten `Result` is a build failure naming both choices
+/// rather than a silent fire-and-forget.
+///
+/// The trait is emitted as declared, except that `async fn` is desugared to
+/// `-> impl Future<Output = …> + Send` — the desugaring the compiler's own `async_fn_in_trait`
+/// warning recommends. A trait with `async fn` is not dyn compatible, so a dispatcher generated
+/// from it is generic over the implementing type rather than taking `&dyn`.
+///
+#[cfg_attr(
+    feature = "serde",
+    doc = include_str!("service_schema_example.md")
+)]
+#[proc_macro_attribute]
+pub fn service_schema(args: TokenStream, input: TokenStream) -> TokenStream {
+    exec_service_schema(args.into(), input.into()).into()
+}
+
+/// # `service_schema_op`
+///
+/// The per-operation directive inside a `#[service_schema()]` trait. `service_schema` reads it and
+/// strips it before emitting the trait; reached on its own it expands to the operation unchanged.
+///
+/// ## Directives
+///
+/// - `message = "..."` — what this operation is called **on the wire**, replacing the kebab-cased
+///   method name. It moves nothing else: Rust still calls the operation by its method name and
+///   TypeScript by the camelCased one. It exists because services already ship wire names nobody
+///   would derive — `can_generate` dispatches today as `usage-generation-request`, and the two
+///   share no substring. A greenfield operation writes no attribute at all.
+/// - `one_way` — the operation expects no reply, and therefore declares no return type. An
+///   operation without the flag must return `Result<Success, Error>`. There is no error arm on a
+///   one-way operation, because there is no reply to carry one.
+///
+#[cfg_attr(
+    feature = "serde",
+    doc = include_str!("service_schema_op_example.md")
+)]
+#[proc_macro_attribute]
+pub fn service_schema_op(_args: TokenStream, input: TokenStream) -> TokenStream {
     input
 }

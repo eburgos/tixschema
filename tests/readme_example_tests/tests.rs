@@ -12,6 +12,8 @@
 
 #![cfg(all(feature = "serde", feature = "typescript"))]
 
+mod services;
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tixschema::model_schema;

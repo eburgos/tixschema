@@ -5337,7 +5337,23 @@ fn process_enum(item_enum: syn::ItemEnum, args: &ModelSchemaArgs) -> TokenStream
     // so the override reaches the shape's own surfaces and every reference to it alike.
     let item_name = compute_item_export_name(&name.to_string(), args.name_override.as_deref());
 
-    if is_plain_enum(&item_enum) {
+    // A tag names a key serde writes whether or not any variant carries a field: an all-unit enum
+    // under `#[serde(tag = "errorCode")]` goes on the wire as `{"errorCode":"db-error"}`, not as
+    // `"db-error"`. `#[serde(untagged)]` drops the name instead, writing every unit variant as a
+    // bare `null`, which the untagged path already refuses per variant. Only a declaration serde
+    // writes as the bare variant name is the string union the plain-enum path publishes, so each
+    // of the forms below claims an all-unit enum too.
+    #[cfg(feature = "serde")]
+    let writes_bare_variant_names = serde_type_meta.tag.is_none()
+        && serde_type_meta.content.is_none()
+        && !serde_type_meta.untagged;
+
+    // No attribute is read without the `serde` feature, so no declaration can be told from the
+    // untagged default and the bare-name form stands.
+    #[cfg(not(feature = "serde"))]
+    let writes_bare_variant_names = true;
+
+    if is_plain_enum(&item_enum) && writes_bare_variant_names {
         #[cfg(feature = "serde")]
         let rename_all = serde_type_meta.rename_all.as_deref();
 

@@ -1,6 +1,6 @@
 # TixSchema
 
-A Rust procedural macro library that generates TypeScript type definitions and Zod v4 validation schemas from Rust structs and enums, ensuring type safety and consistency between Rust backends and TypeScript frontends.
+A Rust procedural macro library that generates TypeScript type definitions and Zod v4 validation schemas from Rust structs and enums, and whole [service definitions](#services) -- messages, clients and dispatchers, in both languages -- from Rust traits, ensuring type safety and consistency between Rust backends and TypeScript frontends.
 
 ## Installation
 
@@ -324,7 +324,7 @@ pub struct TreeNode {
 
 #### Plain Enums
 
-Plain enums (all unit variants) generate a TypeScript string union and `z.enum()` in Zod.
+An enum whose variants are all unit variants and which names no `tag` and no `untagged` generates a TypeScript string union and `z.enum()` in Zod, matching the bare variant name Serde writes for it. Either attribute changes what Serde writes, and the surfaces follow it rather than the string union. Naming a `tag` moves the variant name under the tag key, into an object, so the same all-unit variants are described as the tagged objects below. Naming `untagged` drops the name altogether -- Serde writes every unit variant as a bare `null` -- and the declaration is refused per variant, the way any unit variant in an untagged enum is refused under "Untagged Enums" below.
 
 ```rust
 #[model_schema()]
@@ -498,6 +498,8 @@ Add `#[serde(tag = "...", content = "...")]` to get the adjacently tagged `{ typ
 #### Internally Tagged Enums (`tag` With No `content`)
 
 An enum that names `tag` but no `content` is internally tagged: there is no key for a variant's data, so Serde writes it as members of the object the tag is written in. A struct variant's fields sit beside the tag, and so do the members of a newtype variant's inner type -- which the surfaces describe as an intersection, the same composition `#[serde(flatten)]` uses.
+
+A variant carrying nothing is the tag alone, `{"type":"Bare"}`, and an enum whose variants are *all* unit variants is written that way throughout -- one object per variant, each holding only the tag. That is the shape of a service's error code, and it is described as the tagged object union it is written as, never as the bare string union the same variants would publish with no `tag` named.
 
 ```rust
 #[model_schema()]
@@ -1447,6 +1449,357 @@ const DocumentId$RawSchemaDefault = DocumentId$SchemaFactory(z.string());
 
 export const DocumentId$SchemaDefault: typeof DocumentId$RawSchemaDefault = DocumentId$RawSchemaDefault;
 ```
+
+### Services
+
+`#[service_schema()]` declares a service as a trait: one trait, one context, and one message in and one message out per operation. Failing to implement an operation is a compile error, which is the whole reason the construct is a trait rather than a table of handlers.
+
+**Services need the `serde` feature.** A service's messages derive `Serialize` and `Deserialize`, its dispatcher reads payloads through `serde_json`, and the camelCase and kebab-case keys it puts on the wire come from serde attributes the macro writes. A build without the feature is refused at the declaration rather than left to publish TypeScript that names Rust fields the wire never carries:
+
+```text
+service_schema: a service needs tixschema's `serde` feature, and this build does not have it
+       without it the TypeScript a service publishes names Rust fields rather than the camelCase
+       and kebab-case keys its own dispatcher writes, so the two halves disagree about the wire
+       add `features = ["serde"]` to the tixschema dependency in Cargo.toml
+```
+
+#### The Shape of a Service
+
+A service names a **context** type parameter, and every operation takes it as its first argument after `&self`. An operation receives one message and answers `Result<Success, Error>`.
+
+```rust
+use serde::{Deserialize, Serialize};
+use tixschema::{model_schema, service_schema};
+
+#[model_schema()]
+#[derive(Deserialize, Serialize)]
+pub struct AvailableBalanceRequest {
+    pub organization_id: String,
+}
+
+#[model_schema()]
+#[derive(Deserialize, Serialize)]
+pub struct AvailableBalanceResponse {
+    pub available_credits: u32,
+    pub is_post_paid: bool,
+}
+
+#[model_schema()]
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case", tag = "errorCode")]
+pub enum BalanceError {
+    DbError,
+    InsufficientBalance { shortfall: u32 },
+}
+
+#[service_schema()]
+pub trait UsageService<Ctx> {
+    /// No reply, so no return type and no error arm.
+    #[service_schema_op(one_way)]
+    async fn apply_bundle(&self, ctx: &Ctx, req: AvailableBalanceRequest);
+
+    /// Carried on the wire as `usage-generation-request` rather than `can-generate`.
+    #[service_schema_op(message = "usage-generation-request")]
+    async fn can_generate(
+        &self,
+        ctx: &Ctx,
+        req: AvailableBalanceRequest,
+    ) -> Result<AvailableBalanceResponse, BalanceError>;
+
+    /// Several arguments after the context: the macro declares the message.
+    async fn expire_credit(
+        &self,
+        ctx: &Ctx,
+        organization_id: String,
+        credit_id: String,
+    ) -> Result<AvailableBalanceResponse, BalanceError>;
+
+    /// One argument after the context: that argument already is the message.
+    async fn get_available_balance(
+        &self,
+        ctx: &Ctx,
+        req: AvailableBalanceRequest,
+    ) -> Result<AvailableBalanceResponse, BalanceError>;
+
+    /// None at all, so the macro declares an empty message.
+    async fn sweep(&self, ctx: &Ctx) -> Result<AvailableBalanceResponse, BalanceError>;
+}
+```
+
+The context is whatever an implementation needs and no caller may see -- a logger, a correlation id. The implementation chooses the type, and it reaches no message, no schema and no wire:
+
+```rust
+pub struct UsageContext {
+    pub logger_name: String,
+}
+
+pub struct UsageBackEnd;
+
+impl UsageService<UsageContext> for UsageBackEnd {
+    async fn apply_bundle(&self, ctx: &UsageContext, req: AvailableBalanceRequest) {
+        // ...
+    }
+
+    // ... and the other four, or this does not compile.
+}
+```
+
+The trait is emitted as declared, except that `async fn` is desugared to `-> impl Future<Output = ...> + Send`, the desugaring the compiler's own `async_fn_in_trait` warning recommends. A trait with `async fn` is not dyn compatible, so the generated dispatcher is generic over the implementing type rather than taking `&dyn UsageService`.
+
+#### Service Messages
+
+Every operation receives exactly one message. How many arguments it takes after the context decides only who declares that message:
+
+| arguments after the context | the incoming message is | who declares it |
+| --- | --- | --- |
+| exactly one | that argument, as-is | you, with `#[model_schema()]`, like any other type |
+| more than one | a message declared from the argument list | the macro, named `<Operation>Request` |
+| none | an empty message | the macro, named `<Operation>Request`, with no fields |
+
+**One argument is the normal case and the one to reach for.** The argument *is* the message: nothing is synthesized, nothing is renamed, and the type is one you wrote and can reuse, version and reference from elsewhere.
+
+**The multi-argument form costs something, and the cost is on the wire.** Each argument's name becomes a field name on the declared message, so renaming a parameter -- an invisible refactor in Rust -- moves a key on the wire, and no compiler will flag it. Reach for it where the input is one identifier and a named type would be ceremony; reach for a declared type everywhere else. Every generated message repeats this in its own rustdoc and in the JSDoc it publishes.
+
+`expire_credit` takes two arguments, so `ExpireCreditRequest` is declared from them, in declaration order and with camelCase keys:
+
+```typescript
+export type ExpireCreditRequest = {
+  organizationId: string;
+  creditId: string;
+};
+```
+
+```typescript
+const ExpireCreditRequest$RawSchema = z.strictObject({
+  organizationId: z.string(),
+  creditId: z.string(),
+});
+
+export const ExpireCreditRequest$Schema: ZodType<ExpireCreditRequest> = ExpireCreditRequest$RawSchema;
+```
+
+`sweep` takes none, so its message is empty rather than absent. An operation that later needs a field gains one here, instead of changing from carrying no payload to carrying one and breaking every caller:
+
+```typescript
+export type SweepRequest = Record<string, never>;
+
+const SweepRequest$RawSchema = z.strictObject({
+});
+
+export const SweepRequest$Schema: ZodType<SweepRequest> = SweepRequest$RawSchema;
+```
+
+`get_available_balance` takes one argument, so nothing is declared for it at all -- `AvailableBalanceRequest` is the message, exactly as you wrote it.
+
+#### Operation Names
+
+An operation's name is written once, in Rust, and spelled per language by convention. Nothing is repeated and no attribute is involved:
+
+| where | spelling | derived as |
+| --- | --- | --- |
+| Rust | `get_available_balance` | the trait method as declared |
+| TypeScript | `getAvailableBalance` | camelCase, what a TypeScript caller expects to type |
+| the wire | `get-available-balance` | kebab-case of the method name |
+
+`#[service_schema_op(message = "...")]` moves the **wire name only**. Rust still calls the operation by its method name and TypeScript by the camelCased one:
+
+```rust
+#[service_schema_op(message = "usage-generation-request")]
+async fn can_generate(
+    &self,
+    ctx: &Ctx,
+    req: AvailableBalanceRequest,
+) -> Result<AvailableBalanceResponse, BalanceError>;
+```
+
+It exists for one reason: services already ship wire names nobody would derive from the method. An operation a caller knows as `canGenerate` may dispatch today as `usage-generation-request`, the two sharing no substring, so without the override no such service could adopt this construct without changing bytes. A greenfield operation writes no attribute at all. The override replaces the derived name rather than adding a second one -- after it, nothing answers to `can-generate`.
+
+#### Service Errors
+
+An operation's `Result` names **one** type in its error position. That type is normally an enum, which is a union, so "an operation's errors" is one `#[model_schema()]` type with several variants rather than several types.
+
+What is per-operation is *which* type is named, and two operations on one service may name entirely unrelated ones. A service that genuinely has one error surface pays nothing for this -- it writes the same type in every signature. What it buys is that a read operation is never handed a write-conflict variant to match on, and a caller's `switch` over an operation's errors is exhaustive over exactly what that operation can return.
+
+A variant may carry data of its own, which the tag sits beside:
+
+```typescript
+export type BalanceError = {
+  errorCode: "db-error";
+} | {
+  errorCode: "insufficient-balance";
+  shortfall: number;
+};
+```
+
+#### One-Way Operations
+
+An operation marked `#[service_schema_op(one_way)]` expects no reply, and therefore declares no return type:
+
+```rust
+#[service_schema_op(one_way)]
+async fn apply_bundle(&self, ctx: &Ctx, req: AvailableBalanceRequest);
+```
+
+The flag and the return type must agree, and the macro checks both directions, so a forgotten `Result` cannot become a silent fire-and-forget. A missing return type with no flag is refused naming both choices:
+
+```text
+service_schema: operation `apply_bundle` has no return type
+       add `#[service_schema_op(one_way)]` if it expects no reply,
+       or give it a `Result<Success, Error>` return
+```
+
+And the flag with a return type is refused too:
+
+```text
+service_schema: operation `apply_bundle` is marked `one_way` but returns a value
+       a one-way operation produces no reply
+```
+
+There is no error arm on a one-way operation, because there is no reply to carry one. An operation that needs to report failure is a request-and-reply operation declared wrong. In TypeScript a one-way method answers `Promise<void>`; in Rust it answers nothing beyond the send.
+
+#### Service Validation
+
+A message is validated when it is constructed, in both directions, by the validator `#[model_schema()]` already generates for it -- `validate()` on the Rust side, the Zod schema on the TypeScript side. Nothing new is written for a service.
+
+Inbound, the dispatcher deserializes the payload into the operation's message and validates it *before* the operation body is entered. **A service implementation may therefore assume its incoming message is valid, because an invalid one never reaches it.**
+
+Outbound, the generated client validates the message it is about to send, so a malformed request fails at the caller with the field named rather than as a remote error a round trip later -- and the transport is never touched:
+
+```typescript
+    async expireCredit(req) {
+      const validated = ExpireCreditRequest$Schema.safeParse(req);
+      if (!validated.success) {
+        return {
+          ok: false,
+          error: {
+            isServiceFault: true,
+            fault: usageServiceOutboundFault("expire-credit", validated.error.issues),
+          },
+        };
+      }
+      return transport.request<UsageServiceExpireCreditResult>("expire-credit", validated.data);
+    },
+```
+
+#### Service Faults
+
+A payload that will not deserialize, a message that fails validation, an operation name nothing recognises and a handler that panicked are none of the things an operation declared it could fail at. Folding them into a service's domain errors would put transport concerns in every signature, so they come back as a **fault**: a defect rather than a condition, meant to be logged at error level and to page a human.
+
+A result therefore keeps two arms, with the fault riding inside the failure arm behind a literal a caller can narrow on:
+
+```typescript
+export type UsageServiceGetAvailableBalanceResult =
+  | { ok: true; value: AvailableBalanceResponse }
+  | { ok: false; error: BalanceError | { isServiceFault: true; fault: UsageServiceFault } };
+```
+
+A caller that only handles the declared errors still compiles; one that wants to distinguish narrows on `isServiceFault` and then on whatever the error type discriminates on, with no `default` arm to write:
+
+```typescript
+if (result.ok) {
+  render(result.value.availableCredits);
+} else if ("isServiceFault" in result.error) {
+  reportUnexpected(result.error.fault);
+} else {
+  switch (result.error.errorCode) {
+    case "db-error":
+      return retryLater();
+    case "insufficient-balance":
+      return showUpgradePrompt();
+  }
+}
+```
+
+**No service implementation can construct a fault.** In Rust an operation's signature admits only its own error type, and the fault's constructors are private to the generated module. In TypeScript the interface an implementation satisfies is typed against an *outcome*, which has no fault member in it:
+
+```typescript
+export type UsageServiceGetAvailableBalanceOutcome =
+  | { ok: true; value: AvailableBalanceResponse }
+  | { ok: false; error: BalanceError };
+```
+
+Exactly two generated places build one: the dispatcher, when an incoming message cannot be turned into a valid request or names an operation nothing recognises, and the client, when the message *it* is about to send fails its own validation. In Rust a client call answers `Result<Success, CallError<Error>>`, `CallError` being `Operation(E)` for the error the operation declared and `Fault(ServiceFault)` for a defect that reached the caller.
+
+#### What a Service Generates
+
+On the Rust side, beside the trait, in a module named for the service (`usage_service_schema`):
+
+- `ServiceFault` and `ServiceFaultKind` -- readable by anyone, constructible by nothing outside the module.
+- `Reply` -- the handle a transport implements to answer one message, with `send` and `fault`.
+- `Transport` -- the seam a client is bound to, with `notify` and `request`.
+- `CallError<E>` -- `Operation(E)` or `Fault(ServiceFault)`.
+- `IncomingMessage` and `dispatch(svc, ctx, message, reply)` -- the dispatcher, generic over the implementing type.
+- `UsageServiceClient` -- one method per operation, over any `Transport`.
+- `ExpireCreditRequest` and `SweepRequest` -- the messages declared for the operations that named none, each an ordinary `#[model_schema()]` type.
+
+On the TypeScript side, three artifacts, reached through a unit struct named `<Service>Schema`:
+
+```rust
+pub fn get_entities() -> (String, Vec<String>) {
+    (
+        "service entities".to_string(),
+        vec![
+            UsageServiceSchema::ts_definition(),
+            UsageServiceSchema::ts_client(),
+            UsageServiceSchema::ts_service(),
+        ],
+    )
+}
+```
+
+`ts_definition()` answers with every message the macro declared for the service, the fault type and the kind it reports, and one result type per operation that answers -- **so a generated message needs no registration line of its own.** The author never wrote those types and has no reason to know their names; a forgotten line would leave a Rust-only message and a client unable to call the operation.
+
+`ts_client()` answers with the transport seam, the client type and the factory that binds one:
+
+```typescript
+export type UsageServiceClient = {
+  /** Sends `apply-bundle` on `UsageService`, which expects no reply. */
+  applyBundle(req: AvailableBalanceRequest): Promise<void>;
+  /** Calls `usage-generation-request` on `UsageService` and waits for the answer. */
+  canGenerate(req: AvailableBalanceRequest): Promise<UsageServiceCanGenerateResult>;
+  /** Calls `expire-credit` on `UsageService` and waits for the answer. */
+  expireCredit(req: ExpireCreditRequest): Promise<UsageServiceExpireCreditResult>;
+  /** Calls `get-available-balance` on `UsageService` and waits for the answer. */
+  getAvailableBalance(req: AvailableBalanceRequest): Promise<UsageServiceGetAvailableBalanceResult>;
+  /** Calls `sweep` on `UsageService` and waits for the answer. */
+  sweep(req: SweepRequest): Promise<UsageServiceSweepResult>;
+};
+```
+
+`ts_service()` answers with the interface an implementation satisfies in full, the outcome types it answers with, and the dispatcher factory:
+
+```typescript
+export interface UsageServiceImpl<Ctx> {
+  /** Handles `apply-bundle` on `UsageService`, which expects no reply. */
+  applyBundle(ctx: Ctx, req: AvailableBalanceRequest): Promise<void>;
+  /** Handles `usage-generation-request` on `UsageService` and answers it. */
+  canGenerate(ctx: Ctx, req: AvailableBalanceRequest): Promise<UsageServiceCanGenerateOutcome>;
+  /** Handles `expire-credit` on `UsageService` and answers it. */
+  expireCredit(ctx: Ctx, req: ExpireCreditRequest): Promise<UsageServiceExpireCreditOutcome>;
+  /** Handles `get-available-balance` on `UsageService` and answers it. */
+  getAvailableBalance(ctx: Ctx, req: AvailableBalanceRequest): Promise<UsageServiceGetAvailableBalanceOutcome>;
+  /** Handles `sweep` on `UsageService` and answers it. */
+  sweep(ctx: Ctx, req: SweepRequest): Promise<UsageServiceSweepOutcome>;
+}
+```
+
+```typescript
+export function createUsageServiceDispatcher<Ctx>(
+  impl: UsageServiceImpl<Ctx>,
+): (ctx: Ctx, operation: string, payload: unknown) => Promise<unknown> {
+```
+
+Every member is required, so an implementation missing one is refused where it reaches `createUsageServiceDispatcher`. Every emitted name carries the service -- `UsageServiceFault`, `UsageServiceGetAvailableBalanceResult`, `UsageServiceClient` -- because TypeScript has no per-service scope and a bundle is one flat file. Rust needs no such prefix, the generated module being the scope TypeScript lacks.
+
+#### Transports
+
+tixschema generates no transport. What it emits is the seam either side of one:
+
+- **The operation name arrives from the transport**, beside the payload and never inside it, so no message type has to reserve a key for routing. `dispatch` is handed the name and matches on it; a gRPC method name or an HTTP path serves the same role on those transports.
+- **The encoding lives behind `Reply`.** `Reply::send` is handed a value rather than bytes, because a transport merges its own fields -- a correlation id, an error flag -- into the object before serializing it, and neither is reachable behind an encoded buffer.
+- **Queues, retries, timeouts, acknowledgement, connection handling and reconnection belong to the caller.** `dispatch` returns nothing, so the adapter that called it still holds the delivery when the arm finishes, and acknowledges there -- for every message, including a one-way one. That placement is what lets the handle carry replying and nothing else: a path that never replies names nothing about replying.
+
+A request-and-reply arm answers exactly once, through `send` or `fault`, whichever way it goes. A one-way arm that reached its implementation calls neither; one whose payload was refused before it got there answers with a fault, that being the only thing it can say about a message it never ran.
 
 ## Field Validation (`model_schema_prop`)
 
