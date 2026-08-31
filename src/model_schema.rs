@@ -29,6 +29,13 @@ use crate::{
 #[cfg(any(feature = "zod", feature = "jsonschema"))]
 use crate::field_type::is_undescribable_primitive;
 
+#[cfg(any(feature = "serde", feature = "zod"))]
+use crate::bound_message::Bound;
+#[cfg(feature = "serde")]
+use crate::bound_message::rust_violation;
+#[cfg(feature = "zod")]
+use crate::bound_message::zod_error_arg;
+
 #[cfg(feature = "typescript")]
 use crate::utils::ts_generic_params;
 use crate::utils::type_parameters_in_scope;
@@ -4279,48 +4286,42 @@ fn build_branded_validation(
         // same trade-off measured against the same clippy suite.
         let to_string_span = inner_ty.span().resolved_at(proc_macro2::Span::call_site());
         let checked_v = branded_checked_value(measures_path, to_string_span, &quote! { v });
+        // A brand is the value rather than a member of anything, so its report names no field:
+        // whatever holds it writes the name, on both languages' side of the wire.
+        let measured = quote! { value.len() };
         let mut checks: Vec<proc_macro2::TokenStream> = Vec::new();
 
         if let Some(min_len) = args.min_length {
+            let reported = rust_violation(Bound::MinLength(min_len), None, &measured);
             checks.push(quote! {
                 if value.len() < #min_len {
-                    return Err(format!(
-                        "value is too short: minimum length is {}, got {}",
-                        #min_len, value.len()
-                    ));
+                    errors.push(#reported);
                 }
             });
         }
         if let Some(max_len) = args.max_length {
+            let reported = rust_violation(Bound::MaxLength(max_len), None, &measured);
             checks.push(quote! {
                 if value.len() > #max_len {
-                    return Err(format!(
-                        "value is too long: maximum length is {}, got {}",
-                        #max_len, value.len()
-                    ));
+                    errors.push(#reported);
                 }
             });
         }
         if let Some(pattern) = &args.pattern {
-            checks.push(pattern_check(
-                pattern,
-                &quote! {
-                    return Err(format!(
-                        "value does not match pattern '{}'",
-                        #pattern
-                    ));
-                },
-            ));
+            let reported = rust_violation(Bound::Pattern(pattern), None, &measured);
+            checks.push(pattern_check(pattern, &quote! { errors.push(#reported); }));
         }
 
         let validate_fn = quote! {
-            pub fn validate_value(#checked_param) -> Result<(), String> {
+            pub fn validate_value(#checked_param) -> Result<(), Vec<String>> {
                 #rendering
+                let mut errors: Vec<String> = Vec::new();
                 #(#checks)*
-                Ok(())
+                if errors.is_empty() { Ok(()) } else { Err(errors) }
             }
         };
 
+        let refusal = refusal_from_violations();
         let deserialize_fn = if is_generic {
             quote! {
                 pub fn deserialize_value<'de, D, T>(deserializer: D) -> Result<T, D::Error>
@@ -4330,7 +4331,7 @@ fn build_branded_validation(
                 {
                     use serde::Deserialize;
                     let v = T::deserialize(deserializer)?;
-                    validate_value(#checked_v).map_err(serde::de::Error::custom)?;
+                    validate_value(#checked_v).map_err(#refusal)?;
                     Ok(v)
                 }
             }
@@ -4342,7 +4343,7 @@ fn build_branded_validation(
                 {
                     use serde::Deserialize;
                     let v = <#inner_ty>::deserialize(deserializer)?;
-                    validate_value(#checked_v).map_err(serde::de::Error::custom)?;
+                    validate_value(#checked_v).map_err(#refusal)?;
                     Ok(v)
                 }
             }
@@ -4616,14 +4617,17 @@ fn branded_json_inner(inner: &FieldDef) -> BrandedJsonInner {
 fn branded_zod_string_checks(args: &ModelSchemaArgs) -> String {
     let mut checks = String::new();
     if let Some(min_len) = args.min_length {
-        checks = format!("{checks}.min({min_len})");
+        let reported = zod_error_arg(Bound::MinLength(min_len));
+        checks = format!("{checks}.min({min_len}, {reported})");
     }
     if let Some(max_len) = args.max_length {
-        checks = format!("{checks}.max({max_len})");
+        let reported = zod_error_arg(Bound::MaxLength(max_len));
+        checks = format!("{checks}.max({max_len}, {reported})");
     }
     if let Some(pattern) = &args.pattern {
         let literal_body = escape_js_regex_literal(pattern);
-        checks = format!("{checks}.check(z.regex(/{literal_body}/))");
+        let reported = zod_error_arg(Bound::Pattern(pattern));
+        checks = format!("{checks}.check(z.regex(/{literal_body}/, {reported}))");
     }
     checks
 }
@@ -4635,14 +4639,17 @@ fn branded_zod_string_checks(args: &ModelSchemaArgs) -> String {
 fn branded_zod_base_checks(args: &ModelSchemaArgs) -> String {
     let mut checks = Vec::new();
     if let Some(min_len) = args.min_length {
-        checks.push(format!("z.minLength({min_len})"));
+        let reported = zod_error_arg(Bound::MinLength(min_len));
+        checks.push(format!("z.minLength({min_len}, {reported})"));
     }
     if let Some(max_len) = args.max_length {
-        checks.push(format!("z.maxLength({max_len})"));
+        let reported = zod_error_arg(Bound::MaxLength(max_len));
+        checks.push(format!("z.maxLength({max_len}, {reported})"));
     }
     if let Some(pattern) = &args.pattern {
         let literal_body = escape_js_regex_literal(pattern);
-        checks.push(format!("z.regex(/{literal_body}/)"));
+        let reported = zod_error_arg(Bound::Pattern(pattern));
+        checks.push(format!("z.regex(/{literal_body}/, {reported})"));
     }
     if checks.is_empty() {
         String::new()
@@ -5104,8 +5111,8 @@ fn inject_branded_serde_attrs(
     let validate_method = quote! {
         pub fn validate(&self) -> Result<(), Vec<String>> {
             let mut errors = Vec::new();
-            if let Err(e) = #module_ident::validate_value(#checked_inner) {
-                errors.push(e);
+            if let Err(reported) = #module_ident::validate_value(#checked_inner) {
+                errors.extend(reported);
             }
             if errors.is_empty() { Ok(()) } else { Err(errors) }
         }
@@ -10072,8 +10079,8 @@ fn build_field_validation(
     let checked = member_access_expr(access, field_ident_tok);
     if wraps.is_empty() {
         return quote! {
-            if let Err(e) = #validate_value_fn_ident(#checked) {
-                errors.push(e);
+            if let Err(reported) = #validate_value_fn_ident(#checked) {
+                errors.extend(reported);
             }
         };
     }
@@ -10108,8 +10115,8 @@ fn constraint_leaf(
 ) -> proc_macro2::TokenStream {
     match sink {
         CheckSink::Collect => quote! {
-            if let Err(e) = #validate_value_fn_ident(#value) {
-                errors.push(e);
+            if let Err(reported) = #validate_value_fn_ident(#value) {
+                errors.extend(reported);
             }
         },
         CheckSink::Fail => quote! {
@@ -10202,10 +10209,10 @@ fn unpublished_validate_fallback() -> proc_macro2::TokenStream {
 /// that holds it.
 ///
 /// A type's own report names its own members and not the field it was reached through — a brand's
-/// names nothing at all, saying only `value is too short: …`. The field name is the enclosing
-/// type's to supply, and it is written into the name the report already carries rather than in
-/// front of it: `'jti' is too short` reached through `account` reads `'account.jti' is too short`,
-/// which is one quoted run holding the whole path.
+/// names nothing at all, saying only `too short: …`. The field name is the enclosing type's to
+/// supply, and it is written into the name the report already carries rather than in front of it:
+/// `'jti': too short: …` reached through `account` reads `'account.jti': too short: …`, which is
+/// one quoted run holding the whole path.
 ///
 /// That spelling is what a reader of these reports takes a name out of — it reads the first quoted
 /// run — and it is the string the TypeScript schema published from the same declaration reports for
@@ -10247,6 +10254,16 @@ fn nested_leaf(value: &proc_macro2::Ident, under: Option<&str>) -> proc_macro2::
     }
 }
 
+/// How a report reaches serde, which carries one sentence and not a list: joined the way the
+/// dispatcher joins a fault's detail, so a payload refused as it was read and one refused after it
+/// was read say the same thing in the same order.
+#[cfg(feature = "serde")]
+fn refusal_from_violations() -> proc_macro2::TokenStream {
+    quote! {
+        |violations: Vec<String>| serde::de::Error::custom(violations.join("; "))
+    }
+}
+
 /// Builds the serde hook for a field written under wrappers: it deserializes the field's own
 /// declared type and then runs the same walk `validate()` runs, so the wire is gated where the
 /// constraint lands rather than where the field happens to be spelled.
@@ -10265,6 +10282,7 @@ fn build_wrapped_deserializer(
         validate_value_fn_ident,
     );
     let walk = walk_wraps(wraps, &head, 1, &leaf);
+    let refusal = refusal_from_violations();
     quote! {
         pub fn #deserialize_fn_ident<'de, #(#lifetimes,)* D>(deserializer: D) -> Result<#field_ty, D::Error>
         where
@@ -10276,11 +10294,11 @@ fn build_wrapped_deserializer(
             where
                 D: serde::Deserializer<'de>,
                 T: serde::Deserialize<'de>,
-                F: FnOnce(&T) -> Result<(), String>,
+                F: FnOnce(&T) -> Result<(), Vec<String>>,
             {
                 use serde::Deserialize;
                 let value = T::deserialize(deserializer)?;
-                check(&value).map_err(serde::de::Error::custom)?;
+                check(&value).map_err(#refusal)?;
                 Ok(value)
             }
 
@@ -10411,40 +10429,30 @@ fn generate_string_validation_code(
 
     let field_name_lit = field_ident.to_owned();
 
+    let measured = quote! { value.len() };
     let mut checks: Vec<proc_macro2::TokenStream> = Vec::new();
 
     if let Some(min_len) = meta.min_length {
+        let reported = rust_violation(Bound::MinLength(min_len), Some(&field_name_lit), &measured);
         checks.push(quote! {
             if value.len() < #min_len {
-                return Err(format!(
-                    "'{}' is too short: minimum length is {}, got {}",
-                    #field_name_lit, #min_len, value.len()
-                ));
+                errors.push(#reported);
             }
         });
     }
 
     if let Some(max_len) = meta.max_length {
+        let reported = rust_violation(Bound::MaxLength(max_len), Some(&field_name_lit), &measured);
         checks.push(quote! {
             if value.len() > #max_len {
-                return Err(format!(
-                    "'{}' is too long: maximum length is {}, got {}",
-                    #field_name_lit, #max_len, value.len()
-                ));
+                errors.push(#reported);
             }
         });
     }
 
     if let Some(pattern) = &meta.pattern {
-        checks.push(pattern_check(
-            pattern,
-            &quote! {
-                return Err(format!(
-                    "'{}' does not match pattern '{}'",
-                    #field_name_lit, #pattern
-                ));
-            },
-        ));
+        let reported = rust_violation(Bound::Pattern(pattern), Some(&field_name_lit), &measured);
+        checks.push(pattern_check(pattern, &quote! { errors.push(#reported); }));
     }
 
     let deserializer = if wraps.is_empty() {
@@ -10455,6 +10463,7 @@ fn generate_string_validation_code(
         } else {
             quote! { String }
         };
+        let refusal = refusal_from_violations();
         quote! {
             pub fn #deserialize_fn_ident<'de, D>(deserializer: D) -> Result<#owned, D::Error>
             where
@@ -10462,7 +10471,7 @@ fn generate_string_validation_code(
             {
                 use serde::Deserialize;
                 let s = #owned::deserialize(deserializer)?;
-                #validate_value_fn_ident(&s).map_err(serde::de::Error::custom)?;
+                #validate_value_fn_ident(&s).map_err(#refusal)?;
                 Ok(s)
             }
         }
@@ -10477,10 +10486,11 @@ fn generate_string_validation_code(
     };
 
     let module_items = quote! {
-        pub fn #validate_value_fn_ident(#checked_param) -> Result<(), String> {
+        pub fn #validate_value_fn_ident(#checked_param) -> Result<(), Vec<String>> {
             #rendering
+            let mut errors: Vec<String> = Vec::new();
             #(#checks)*
-            Ok(())
+            if errors.is_empty() { Ok(()) } else { Err(errors) }
         }
 
         #deserializer
@@ -10520,18 +10530,17 @@ fn generate_numeric_validation_code(
     let rust_type_ident: proc_macro2::TokenStream = rust_type_str.parse().unwrap();
     let field_name_lit = field_ident.to_owned();
 
+    let measured = quote! { value };
     let mut checks: Vec<proc_macro2::TokenStream> = Vec::new();
 
     if let Some(minimum) = meta.minimum {
         // Cast to the correct type for comparison
         let min_cast: proc_macro2::TokenStream =
             format!("{minimum} as {rust_type_str}").parse().unwrap();
+        let reported = rust_violation(Bound::Minimum(minimum), Some(&field_name_lit), &measured);
         checks.push(quote! {
             if *value < #min_cast {
-                return Err(format!(
-                    "'{}' is too small: minimum is {}, got {}",
-                    #field_name_lit, #minimum, value
-                ));
+                errors.push(#reported);
             }
         });
     }
@@ -10539,17 +10548,16 @@ fn generate_numeric_validation_code(
     if let Some(maximum) = meta.maximum {
         let max_cast: proc_macro2::TokenStream =
             format!("{maximum} as {rust_type_str}").parse().unwrap();
+        let reported = rust_violation(Bound::Maximum(maximum), Some(&field_name_lit), &measured);
         checks.push(quote! {
             if *value > #max_cast {
-                return Err(format!(
-                    "'{}' is too large: maximum is {}, got {}",
-                    #field_name_lit, #maximum, value
-                ));
+                errors.push(#reported);
             }
         });
     }
 
     let deserializer = if wraps.is_empty() {
+        let refusal = refusal_from_violations();
         quote! {
             pub fn #deserialize_fn_ident<'de, D>(deserializer: D) -> Result<#rust_type_ident, D::Error>
             where
@@ -10557,7 +10565,7 @@ fn generate_numeric_validation_code(
             {
                 use serde::Deserialize;
                 let v = #rust_type_ident::deserialize(deserializer)?;
-                #validate_value_fn_ident(&v).map_err(serde::de::Error::custom)?;
+                #validate_value_fn_ident(&v).map_err(#refusal)?;
                 Ok(v)
             }
         }
@@ -10572,9 +10580,10 @@ fn generate_numeric_validation_code(
     };
 
     let module_items = quote! {
-        pub fn #validate_value_fn_ident(value: &#rust_type_ident) -> Result<(), String> {
+        pub fn #validate_value_fn_ident(value: &#rust_type_ident) -> Result<(), Vec<String>> {
+            let mut errors: Vec<String> = Vec::new();
             #(#checks)*
-            Ok(())
+            if errors.is_empty() { Ok(()) } else { Err(errors) }
         }
 
         #deserializer

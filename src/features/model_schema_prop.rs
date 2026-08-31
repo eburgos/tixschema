@@ -103,7 +103,7 @@ pub enum LiteralValue {
 ///
 /// A constrained *brand* is checked in both places, and the two answer different questions. A
 /// message holding a branded field publishes a `validate()` that runs the brand's own validator and
-/// reports what it said under the field that held it — `'slug': value is too short: …`, the name
+/// reports what it said under the field that held it — `'slug': too short: …`, the name
 /// being the message's to supply since the brand names none of its own. That is what holds a caller
 /// building a message in Rust, where no read ever ran. The brand's read-time hook stands unchanged
 /// beside it, so a payload arriving over the wire is still refused there.

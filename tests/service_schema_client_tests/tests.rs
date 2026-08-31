@@ -218,7 +218,7 @@ mod a_bound_the_fields_own_type_declares {
         );
         assert_eq!(
             reported.detail(),
-            "'slug': value is too short: minimum length is 3, got 2"
+            "'slug': too short: minimum length is 3, got 2"
         );
         assert_eq!(reported.operation(), "enrol");
         assert!(
@@ -342,7 +342,7 @@ impl AdmitRequest {
     pub fn validate(&self) -> Result<(), Vec<String>> {
         if self.organization_id.len() < 3 {
             return Err(vec![format!(
-                "'organization_id' is too short: minimum length is 3, got {}",
+                "'organization_id': too short: minimum length is 3, got {}",
                 self.organization_id.len()
             )]);
         }

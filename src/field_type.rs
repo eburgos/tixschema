@@ -12,6 +12,8 @@ use crate::features::model_schema_prop::ModelSchemaPropMeta;
 use crate::utils::{MapKeyWire, lookup_alias_info, written_type};
 
 #[cfg(feature = "zod")]
+use crate::bound_message::{Bound, zod_error_arg};
+#[cfg(feature = "zod")]
 use crate::utils::{
     ZodUnionMember, escape_js_regex_literal, publishes_zod_factory, zod_factory_argument,
 };
@@ -1217,10 +1219,12 @@ impl FieldDef {
         let mut result = base.to_owned();
         if let Some(meta) = &self.model_schema_prop_meta {
             if let Some(min) = meta.minimum {
-                result = format!("{result}.min({min})");
+                let reported = zod_error_arg(Bound::Minimum(min));
+                result = format!("{result}.min({min}, {reported})");
             }
             if let Some(max) = meta.maximum {
-                result = format!("{result}.max({max})");
+                let reported = zod_error_arg(Bound::Maximum(max));
+                result = format!("{result}.max({max}, {reported})");
             }
         }
         result
@@ -1265,18 +1269,21 @@ impl FieldDef {
         if let Some(meta) = &self.model_schema_prop_meta
             && let Some(min_len) = meta.min_length
         {
-            result = format!("{result}.min({min_len})");
+            let reported = zod_error_arg(Bound::MinLength(min_len));
+            result = format!("{result}.min({min_len}, {reported})");
         }
         if let Some(meta) = &self.model_schema_prop_meta
             && let Some(max_len) = meta.max_length
         {
-            result = format!("{result}.max({max_len})");
+            let reported = zod_error_arg(Bound::MaxLength(max_len));
+            result = format!("{result}.max({max_len}, {reported})");
         }
         if let Some(meta) = &self.model_schema_prop_meta
             && let Some(pattern) = &meta.pattern
         {
             let literal_body = escape_js_regex_literal(pattern);
-            result = format!("{result}.check(z.regex(/{literal_body}/))");
+            let reported = zod_error_arg(Bound::Pattern(pattern));
+            result = format!("{result}.check(z.regex(/{literal_body}/, {reported}))");
         }
         result
     }

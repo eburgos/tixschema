@@ -395,7 +395,7 @@ mod a_message_annotated_with_a_constraint {
         let read = String::deserialize(deserializer)?;
         if read.len() < 3 {
             return Err(DeError::custom(format!(
-                "'ledger_id' is too short: minimum length is 3, got {}",
+                "'ledger_id': too short: minimum length is 3, got {}",
                 read.len()
             )));
         }
@@ -435,7 +435,7 @@ mod a_message_annotated_with_a_constraint {
         );
         assert_eq!(reported[0].operation(), "admit");
         assert!(
-            reported[0].detail().contains("is too short"),
+            reported[0].detail().contains("too short"),
             "got: {}",
             reported[0].detail()
         );
@@ -555,7 +555,7 @@ mod a_message_annotated_with_a_constraint {
         );
         assert_eq!(
             reported[0].detail(),
-            "'holds.name' is too short: minimum length is 3, got 1"
+            "'holds.name': too short: minimum length is 3, got 1"
         );
     }
 
@@ -613,7 +613,7 @@ mod a_message_annotated_with_a_constraint {
             reported[0].detail()
         );
         assert!(
-            reported[0].detail().contains("is too short"),
+            reported[0].detail().contains("too short"),
             "the hook hands serde the brand's own message verbatim. Got: {}",
             reported[0].detail()
         );
@@ -683,7 +683,7 @@ mod a_message_annotated_with_a_constraint {
         );
         assert_eq!(
             reported[0].detail(),
-            "'account.jti' is too short: minimum length is 1, got 0"
+            "'account.jti': too short: minimum length is 1, got 0"
         );
     }
 
@@ -730,7 +730,7 @@ mod a_message_annotated_with_a_constraint {
         assert_eq!(reported[0].field(), Some("account.jti"));
         assert_eq!(
             reported[0].detail(),
-            "'account.jti' is too short: minimum length is 1, got 0"
+            "'account.jti': too short: minimum length is 1, got 0"
         );
     }
 
@@ -773,7 +773,7 @@ mod a_message_annotated_with_a_constraint {
             assert!(reached.is_empty(), "{chosen} executed. Got: {reached:?}");
             assert_eq!(
                 reported[0].detail(),
-                "'caller.jti' is too short: minimum length is 1, got 0",
+                "'caller.jti': too short: minimum length is 1, got 0",
                 "{chosen} was chosen and its own members went unwalked"
             );
         }
@@ -907,7 +907,7 @@ impl AdmitRequest {
     pub fn validate(&self) -> Result<(), Vec<String>> {
         if self.organization_id.len() < 3 {
             return Err(vec![format!(
-                "'organization_id' is too short: minimum length is 3, got {}",
+                "'organization_id': too short: minimum length is 3, got {}",
                 self.organization_id.len()
             )]);
         }
@@ -1406,7 +1406,7 @@ fn a_message_that_fails_its_own_validator_never_reaches_it_and_the_fault_names_t
     );
     assert_eq!(reported.operation(), "admit");
     assert!(
-        reported.detail().contains("is too short"),
+        reported.detail().contains("too short"),
         "got: {}",
         reported.detail()
     );

@@ -1523,6 +1523,24 @@ pub fn escape_js_regex_literal(pattern: &str) -> String {
     result
 }
 
+/// Escapes text for splicing between the `"` delimiters of a JavaScript string literal.
+#[cfg(feature = "zod")]
+pub fn escape_js_double_quoted(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if let Some(escape) = js_line_terminator_escape(ch) {
+            result.push('\\');
+            result.push_str(escape);
+        } else {
+            if matches!(ch, '\\' | '"') {
+                result.push('\\');
+            }
+            result.push(ch);
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 #[cfg(any(feature = "typescript", feature = "zod"))]
 mod tests;
