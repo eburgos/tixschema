@@ -2589,9 +2589,15 @@ fn a_field_whose_type_could_publish_a_validator_contributes_a_body_that_runs_it(
         "the field's own validator is what runs: {body}"
     );
     assert!(
-        body.contains(r#"format ! ("'{}': {}" , "slug" , violation)"#),
-        "the brand names no field, so the message supplies one, written where a reader of these \
-         reports looks for it: {body}"
+        body.contains(r#"nested_under ("slug" , violation)"#),
+        "the field the value was reached through is written into the report the value's own type \
+         made, so one quoted run carries the whole path: {body}"
+    );
+    assert!(
+        body.contains(r#"format ! ("'{field}.{named}'{tail}")"#)
+            && body.contains(r#"format ! ("'{field}': {violation}")"#),
+        "a report naming a member of its own is written into; a brand's, naming none, has the \
+         field put in front of it instead: {body}"
     );
 
     let rendered = walked_field_attrs(item.fields.iter());
@@ -11924,45 +11930,19 @@ fn a_field_bottoming_out_in_a_declared_type_is_walked_and_a_primitive_one_is_not
     assert!(
         bodies
             .iter()
-            .all(|walk| walk.contains("trait NestedValidation")),
+            .all(|walk| walk.contains("trait UnpublishedValidate")),
         "each walk carries the fallback it asks its value through. Got: {bodies:?}"
     );
     let walks = bodies.join("");
     assert!(
-        walks.contains("nested_under (\"account\"") && walks.contains("nested_under (\"tags\""),
+        walks.contains("& self . account") && walks.contains("& self . tags"),
         "got: {walks}"
     );
     for primitive in ["count", "flagged", "name"] {
         assert!(
-            !walks.contains(&format!("nested_under (\"{primitive}\"")),
+            !walks.contains(&format!("& self . {primitive}")),
             "`{primitive}` bottoms out in a primitive, whose bounds are declared on the field and \
              run there. Got: {walks}"
         );
     }
-}
-
-/// A walk reaches its value as a place and not as the reference the walk is holding.
-///
-/// An inherent method beats a trait's only where both are candidates for the same receiver type,
-/// and the fallback is blanket-implemented — so on a receiver of type `&T` the fallback answers
-/// before an inherent `validate()` on `T` is ever looked for, and every nested bound would pass
-/// silently. Dereferencing puts the receiver back at `T`, where the inherent method wins.
-#[cfg(feature = "serde")]
-#[test]
-fn a_nested_walk_reaches_its_value_as_a_place_rather_than_as_a_reference() {
-    let mut item: syn::ItemStruct = syn::parse_quote! {
-        struct Envelope {
-            account: Account,
-        }
-    };
-    let collected = super::collect_struct_fields(
-        &mut item.fields,
-        None,
-        Some("envelope_schema"),
-        "Envelope",
-        &syn::Generics::default(),
-        false,
-    );
-    let walk = collected.3[0].to_string();
-    assert!(walk.contains("(* value_0) . validate ()"), "got: {walk}");
 }
