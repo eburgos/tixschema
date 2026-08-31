@@ -324,7 +324,7 @@ pub struct TreeNode {
 
 #### Plain Enums
 
-An enum whose variants are all unit variants and which names no `tag` generates a TypeScript string union and `z.enum()` in Zod, matching the bare variant name Serde writes for it. Naming a `tag` changes what Serde writes -- the variant name moves under the tag key, into an object -- and the same all-unit variants are then described as the tagged objects below rather than as a string union.
+An enum whose variants are all unit variants and which names no `tag` and no `untagged` generates a TypeScript string union and `z.enum()` in Zod, matching the bare variant name Serde writes for it. Either attribute changes what Serde writes, and the surfaces follow it rather than the string union. Naming a `tag` moves the variant name under the tag key, into an object, so the same all-unit variants are described as the tagged objects below. Naming `untagged` drops the name altogether -- Serde writes every unit variant as a bare `null` -- and the declaration is refused per variant, the way any unit variant in an untagged enum is refused under "Untagged Enums" below.
 
 ```rust
 #[model_schema()]
