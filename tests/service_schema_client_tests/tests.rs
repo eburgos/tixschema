@@ -8,9 +8,13 @@
 //! `Loopback` sends the message straight into the generated dispatcher and hands back what the
 //! reply handle captured. It is the only place both halves of the seam meet, and it is where the
 //! envelope one writes and the other reads is proven to be one envelope.
+//!
+//! `UnreadContext` is neither `Send` nor `Sync` and carries a marker no message declares, which is
+//! how the context tests read that a client takes a context and reaches into none.
 
 #![cfg(feature = "serde")]
 
+use core::cell::Cell;
 use core::future::{Future, ready};
 use core::pin::pin;
 use core::task::{Context as PollContext, Poll, Waker};
@@ -66,6 +70,14 @@ pub enum ProbeError {
 pub struct ProbeTransport {
     answers: Mutex<Vec<Vec<u8>>>,
     calls: Mutex<Vec<(String, String)>>,
+}
+
+/// A context with nothing to offer a client: no `Sync`, no `Send`, no `Serialize`, and a marker
+/// string no message on the service declares. It counts what the *caller* does with it, the client
+/// having no way to reach a method on a bare type parameter.
+pub struct UnreadContext {
+    counted: Cell<u32>,
+    marker: String,
 }
 
 #[service_schema()]
@@ -306,6 +318,20 @@ impl ProbeTransport {
     }
 }
 
+impl UnreadContext {
+    fn counted(&self) -> u32 {
+        self.counted.set(self.counted.get() + 1);
+        self.counted.get()
+    }
+
+    fn new(marker: &str) -> Self {
+        Self {
+            counted: Cell::new(0),
+            marker: marker.to_owned(),
+        }
+    }
+}
+
 /// One message as the dispatcher on the far side reads it.
 fn incoming<T>(operation: &str, payload: &T) -> probe_service_schema::IncomingMessage
 where
@@ -315,6 +341,18 @@ where
         operation: operation.to_owned(),
         payload: serde_json::to_vec(payload).unwrap(),
     }
+}
+
+/// Hands back exactly what it was given, and compiles only for something `Send`.
+///
+/// A client method that held its context across the await would need `Ctx: Sync` for the future it
+/// answers with to stay `Send`, and `UnreadContext` is neither. So a call passing one through here
+/// at all is the compiler agreeing that the context is not held.
+fn only_if_send<Answering>(answering: Answering) -> Answering
+where
+    Answering: Send,
+{
+    answering
 }
 
 /// The probe never suspends, so one poll answers it; `None` says an assumption about the bodies
@@ -612,5 +650,98 @@ fn what_the_dispatcher_writes_is_what_the_client_reads() {
             "apply_bundle acme".to_owned(),
         ],
         "every method reached the operation it names"
+    );
+}
+
+#[test]
+fn the_context_a_method_takes_is_never_read_out_of() {
+    let transport = ProbeTransport::new(&[r#"{"ok":true,"value":{"credits":7}}"#]);
+    let client = probe_service_schema::ProbeServiceClient::new(transport);
+    let ctx = UnreadContext::new("context-marker-no-message-declares");
+    assert_eq!(
+        ctx.counted(),
+        1,
+        "the caller's own bookkeeping, before the call"
+    );
+    let answered = poll_once(only_if_send(client.get_balance(
+        &ctx,
+        BalanceRequest {
+            organization_id: "acme".to_owned(),
+        },
+    )))
+    .unwrap();
+    assert_eq!(answered, Ok(BalanceResponse { credits: 7 }));
+    assert_eq!(
+        ctx.counted(),
+        2,
+        "and after it: the context was borrowed and handed back, never taken"
+    );
+    assert_eq!(
+        client.transport().calls(),
+        vec![(
+            "get-balance".to_owned(),
+            r#"{"organization_id":"acme"}"#.to_owned()
+        )],
+        "the context is in no message and no schema, so nothing of it reaches the wire"
+    );
+    let (_, sent) = client.transport().calls().pop().unwrap();
+    assert!(
+        !sent.contains(&ctx.marker),
+        "a marker no message declares must not appear in what was sent. Got: {sent}"
+    );
+}
+
+#[test]
+fn the_context_type_is_chosen_per_call_rather_than_per_client() {
+    let transport = ProbeTransport::new(&[
+        r#"{"ok":true,"value":{"credits":7}}"#,
+        r#"{"ok":true,"value":{"credits":0}}"#,
+    ]);
+    let client = probe_service_schema::ProbeServiceClient::new(transport);
+    let unreadable = UnreadContext::new("context-marker-no-message-declares");
+    poll_once(client.get_balance(
+        &unreadable,
+        BalanceRequest {
+            organization_id: "acme".to_owned(),
+        },
+    ))
+    .unwrap()
+    .unwrap();
+    let unrelated = 7_u8;
+    poll_once(client.sweep(&unrelated)).unwrap().unwrap();
+    assert_eq!(
+        client.transport().calls(),
+        vec![
+            (
+                "get-balance".to_owned(),
+                r#"{"organization_id":"acme"}"#.to_owned()
+            ),
+            ("sweep".to_owned(), "{}".to_owned()),
+        ],
+        "`Ctx` is the method's own parameter, not the client's: one client took two unrelated \
+         context types and neither reached the wire"
+    );
+}
+
+#[test]
+fn a_one_way_method_takes_the_context_and_reads_nothing_out_of_it_either() {
+    let transport = ProbeTransport::new(&[""]);
+    let client = probe_service_schema::ProbeServiceClient::new(transport);
+    let ctx = UnreadContext::new("context-marker-no-message-declares");
+    let answered = poll_once(only_if_send(client.apply_bundle(
+        &ctx,
+        AdmitRequest {
+            organization_id: "acme".to_owned(),
+        },
+    )))
+    .unwrap();
+    assert!(answered.is_ok(), "got: {answered:?}");
+    assert_eq!(
+        client.transport().calls(),
+        vec![(
+            "apply-bundle".to_owned(),
+            r#"{"organization_id":"acme"}"#.to_owned()
+        )],
+        "an operation with no reply takes the context the same way and reads it the same amount"
     );
 }
