@@ -2071,9 +2071,37 @@ A constraint describes the value, not the shape. A payload carrying a value it r
 A field still generates both helpers into its schema module: `validate_{field}_value()`, which `validate()` calls, and `deserialize_{field}`, a serde hook an author may hang on a field of their own accord. Two positions carry a check on the read without being asked to, and both have to:
 
 - **A member of an `#[serde(untagged)]` enum**, where whether the member is admissible is what chooses which variant the payload is. The check is part of reading the value rather than part of judging it -- exactly as it is under `anyOf` and `z.union` on the two schema surfaces the same type publishes -- and `validate()` cannot stand in for it, since by the time it runs the variant has already been chosen. A wrapped member's hook deserializes the member's own declared type and then runs the same walk `validate()` runs over it; the two differ in that `validate()` answers with every violation in the instance while a `Deserializer` answers with one error, so the read stops at the first.
-- **A constrained brand.** A message holding a branded field publishes no `validate()` that reaches into it, so the read is the only thing enforcing the brand's bound.
+- **A constrained brand**, where the same reasoning applies wherever the brand is used as an untagged member. The hook is on the brand's type rather than on the field, so it is one hook covering every position the brand appears in.
 
 A field whose key may be left out keeps that reading. Where a member is hung with the hook -- an untagged variant's, which is the one position that is -- an `Option` written outermost (under any number of transparent wrappers) is given `#[serde(default)]` alongside it, since a `deserialize_with` otherwise turns a missing key into an error; a field that writes its own `default` keeps the one it wrote. Off the hook there is nothing to put back and no `default` is written, so a required key that goes missing is still the error it always was.
+
+#### A bound the field's own type declares
+
+A field carrying no `model_schema_prop` of its own may still hold a type that declares one -- a constrained brand, or a nested `#[model_schema()]` type. The enclosing `validate()` runs whatever validator that type published and writes its report under the field that held it:
+
+```rust
+#[model_schema(minLength = 3)]
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Slug(pub String);
+
+#[model_schema()]
+#[derive(Serialize, Deserialize)]
+pub struct Enrolment {
+    pub slug: Slug,
+}
+```
+
+```rust
+Enrolment { slug: Slug("a".to_string()) }.validate();
+// Err(["'slug': value is too short: minimum length is 3, got 1"])
+```
+
+The brand's own report says `value is too short: ...` and names nothing, the brand being the value rather than a field of anything -- so the field name is the message's to supply, written first and in single quotes, which is where a reader of these reports already looks for one. A nested type's report already names its own member, and the field name goes in front of it: `'holds': 'name' is too short: ...`.
+
+This reaches through the same wrappers a constraint is reached through -- `Option`, sequences, `Box`/`Cow`/`Rc`/`Arc`, fixed arrays -- and applies to a struct's field and to a named member of an enum variant, tagged or untagged. It reaches nothing through a map or a tuple, and nothing at all through a positional slot, which has no name to report under; those are the same limits a constraint's own walk has.
+
+The brand's read-time hook stands unchanged beside this, so a brand's bound is now enforced in both places. They answer different questions: a payload arriving over the wire is refused on the read, and a message built in Rust -- where no read ever ran, which is every outbound message a generated client sends -- is refused by `validate()`. A nested type's bound has no hook at all, so its enclosing `validate()` is the only thing that enforces it.
 
 ### Literal Values
 

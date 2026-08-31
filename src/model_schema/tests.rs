@@ -2535,6 +2535,104 @@ fn a_struct_field_that_clears_the_guards_is_hung_with_no_hook() {
     );
 }
 
+/// A field the enclosing type declares no bound on contributes a `validate()` body anyway when its
+/// *type* is one that could publish a validator — which is what makes a message holding a
+/// constrained brand publish a validator at all.
+///
+/// Read off the emission rather than off behaviour because the two halves are separable and both
+/// matter: the field is hung with no attribute of any kind, and the body runs the field's own
+/// `validate()` under a fallback that answers `Ok(())` for a type that published none.
+#[cfg(feature = "serde")]
+#[test]
+fn a_field_whose_type_could_publish_a_validator_contributes_a_body_that_runs_it() {
+    let mut item: syn::ItemStruct = syn::parse_quote! {
+        struct Enrolment {
+            slug: Slug,
+        }
+    };
+    let collected = super::collect_struct_fields(
+        &mut item.fields,
+        None,
+        Some("enrolment_schema"),
+        "Enrolment",
+        &syn::Generics::default(),
+        false,
+    );
+    assert!(collected.4.is_empty(), "got: {:?}", collected.4);
+    assert!(
+        collected.2.is_empty(),
+        "the field declares no constraint of its own, so there is no per-field validator to \
+         publish: {:?}",
+        collected
+            .2
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    );
+
+    let body = collected
+        .3
+        .iter()
+        .map(ToString::to_string)
+        .collect::<String>();
+    assert!(
+        body.contains("trait UnpublishedValidate"),
+        "a type that published no validator has to answer something: {body}"
+    );
+    assert!(
+        body.contains("impl < T : ? Sized > UnpublishedValidate for & T"),
+        "implemented for `&T` so it sits one autoref step below any other blanket `validate()` \
+         the call site can see, rather than tying with it: {body}"
+    );
+    assert!(
+        body.contains("value_0 . validate ()"),
+        "the field's own validator is what runs: {body}"
+    );
+    assert!(
+        body.contains(r#"format ! ("'{}': {}" , "slug" , violation)"#),
+        "the brand names no field, so the message supplies one, written where a reader of these \
+         reports looks for it: {body}"
+    );
+
+    let rendered = walked_field_attrs(item.fields.iter());
+    assert_eq!(
+        rendered, "",
+        "reaching a bound from the validator hangs nothing on the field. Got: {rendered}"
+    );
+}
+
+/// A field whose value the crate renders itself contributes no body, so a message made only of
+/// those still publishes no `validate()` — the parity a constraint-free struct has always had.
+#[cfg(feature = "serde")]
+#[test]
+fn a_field_the_crate_renders_itself_contributes_no_body_to_reach_into() {
+    let mut item: syn::ItemStruct = syn::parse_quote! {
+        struct Plain {
+            count: u32,
+            name: String,
+            tags: Vec<String>,
+        }
+    };
+    let collected = super::collect_struct_fields(
+        &mut item.fields,
+        None,
+        Some("plain_schema"),
+        "Plain",
+        &syn::Generics::default(),
+        false,
+    );
+    assert!(collected.4.is_empty(), "got: {:?}", collected.4);
+    assert!(
+        collected.3.is_empty(),
+        "got: {:?}",
+        collected
+            .3
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    );
+}
+
 /// An optional constrained field is hung with neither the hook nor the `#[serde(default)]` that
 /// only exists to answer for it.
 ///

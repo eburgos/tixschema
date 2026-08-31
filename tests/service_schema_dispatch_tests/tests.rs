@@ -49,6 +49,33 @@ mod a_message_annotated_with_a_constraint {
         pub admitted: bool,
     }
 
+    /// A brand carrying its own bound, and a plain `#[model_schema()]` type carrying one on a field
+    /// of its own. Neither is annotated where it is *held*, which is what used to leave a message
+    /// holding one publishing no validator at all.
+    #[model_schema(minLength = 3)]
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(transparent)]
+    pub struct Slug(pub String);
+
+    #[model_schema()]
+    #[derive(Deserialize, Serialize)]
+    pub struct EnrolRequest {
+        pub slug: Slug,
+    }
+
+    #[model_schema()]
+    #[derive(Deserialize, Serialize)]
+    pub struct Held {
+        #[model_schema_prop(minLength = 3)]
+        pub name: String,
+    }
+
+    #[model_schema()]
+    #[derive(Deserialize, Serialize)]
+    pub struct HoldRequest {
+        pub holds: Held,
+    }
+
     /// A message whose author wrote the serde hook by hand rather than annotating the field.
     ///
     /// Annotating a field no longer puts a check on the read, so this is what is left that can
@@ -85,6 +112,10 @@ mod a_message_annotated_with_a_constraint {
     pub trait GateService<Ctx> {
         async fn admit(&self, ctx: &Ctx, req: GateRequest) -> Result<Admitted, GateError>;
 
+        async fn enrol(&self, ctx: &Ctx, req: EnrolRequest) -> Result<Admitted, GateError>;
+
+        async fn hold(&self, ctx: &Ctx, req: HoldRequest) -> Result<Admitted, GateError>;
+
         async fn open_ledger(&self, ctx: &Ctx, req: LedgerRequest) -> Result<Admitted, GateError>;
     }
 
@@ -92,6 +123,18 @@ mod a_message_annotated_with_a_constraint {
         async fn admit(&self, _ctx: &(), req: GateRequest) -> Result<Admitted, GateError> {
             ready(()).await;
             self.reached.lock().unwrap().push(req.organization_id);
+            Ok(Admitted { admitted: true })
+        }
+
+        async fn enrol(&self, _ctx: &(), req: EnrolRequest) -> Result<Admitted, GateError> {
+            ready(()).await;
+            self.reached.lock().unwrap().push(req.slug.0);
+            Ok(Admitted { admitted: true })
+        }
+
+        async fn hold(&self, _ctx: &(), req: HoldRequest) -> Result<Admitted, GateError> {
+            ready(()).await;
+            self.reached.lock().unwrap().push(req.holds.name);
             Ok(Admitted { admitted: true })
         }
 
@@ -256,6 +299,107 @@ mod a_message_annotated_with_a_constraint {
                 reported[0].detail()
             );
         }
+    }
+
+    /// A message whose bound is declared on a field's *type* rather than on the field. Until the
+    /// message's own validator reached it, nothing did: the nested type's bound is enforced nowhere
+    /// on the read, so this payload reached the implementation carrying a `Held` violating the
+    /// pattern `Held` itself declares.
+    #[test]
+    fn a_bound_a_fields_own_type_declares_fails_validation_and_names_the_field_that_held_it() {
+        let service = GateBackEnd::new();
+        let reply = GateReply::new();
+        poll_once(gate_service_schema::dispatch(
+            &service,
+            &(),
+            &gate_service_schema::IncomingMessage {
+                operation: "hold".to_owned(),
+                payload: br#"{"holds":{"name":"a"}}"#.to_vec(),
+            },
+            &reply,
+        ))
+        .unwrap();
+        assert!(
+            service.reached().is_empty(),
+            "an implementation may assume its incoming message is valid, and this one is not. \
+             Got: {:?}",
+            service.reached()
+        );
+        let reported = reply.faults();
+        assert_eq!(
+            reported[0].kind(),
+            gate_service_schema::ServiceFaultKind::FailedValidation,
+            "every key is present and every value is of the type its field declared, so this is a \
+             message — one whose value broke a rule. Got detail: {}",
+            reported[0].detail()
+        );
+        assert_eq!(
+            reported[0].field(),
+            Some("holds"),
+            "the field of the message the caller sent, with the member inside it that was wrong \
+             still carried in the detail. Got: {}",
+            reported[0].detail()
+        );
+        assert_eq!(
+            reported[0].detail(),
+            "'holds': 'name' is too short: minimum length is 3, got 1"
+        );
+    }
+
+    /// The same payload with a value the bound admits reaches the implementation, which is what
+    /// says the validator refuses something rather than everything.
+    #[test]
+    fn a_message_whose_nested_bound_is_satisfied_reaches_the_implementation() {
+        let service = GateBackEnd::new();
+        let reply = GateReply::new();
+        poll_once(gate_service_schema::dispatch(
+            &service,
+            &(),
+            &gate_service_schema::IncomingMessage {
+                operation: "hold".to_owned(),
+                payload: br#"{"holds":{"name":"abc"}}"#.to_vec(),
+            },
+            &reply,
+        ))
+        .unwrap();
+        assert_eq!(service.reached(), vec!["abc".to_owned()]);
+        assert!(reply.faults().is_empty(), "got: {:?}", reply.settled());
+    }
+
+    /// The brand's hook was not removed, and this is what says so. A brand's bound still refuses
+    /// the payload as it is read, so a value out of range still comes back as one that would not
+    /// deserialize rather than as one that failed validation.
+    ///
+    /// Moving that check is a separate ruling from reaching it, and the order matters: taking the
+    /// hook off before the validator could reach the field would have left the bound enforced by
+    /// nothing at all.
+    #[test]
+    fn a_brands_bound_still_refuses_the_payload_on_the_read() {
+        let service = GateBackEnd::new();
+        let reply = GateReply::new();
+        poll_once(gate_service_schema::dispatch(
+            &service,
+            &(),
+            &gate_service_schema::IncomingMessage {
+                operation: "enrol".to_owned(),
+                payload: br#"{"slug":"ab"}"#.to_vec(),
+            },
+            &reply,
+        ))
+        .unwrap();
+        assert!(service.reached().is_empty(), "got: {:?}", service.reached());
+        let reported = reply.faults();
+        assert_eq!(
+            reported[0].kind(),
+            gate_service_schema::ServiceFaultKind::UndeserializablePayload,
+            "got detail: {}",
+            reported[0].detail()
+        );
+        assert!(
+            reported[0].detail().contains("is too short"),
+            "the hook hands serde the brand's own message verbatim. Got: {}",
+            reported[0].detail()
+        );
     }
 
     #[test]
