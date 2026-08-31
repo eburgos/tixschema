@@ -585,7 +585,12 @@ mod a_message_annotated_with_a_constraint {
     /// Where it is *reported* is a separate question from where it is caught. The bytes read as a
     /// document and the value inside broke a bound, so the fault says the value someone supplied
     /// was not admitted — which is the kind the TypeScript service answers the same payload under.
-    /// A brand's message names no field, having no field, so this fault carries none.
+    ///
+    /// The brand's own message still names no field, the brand being the value rather than a member
+    /// of anything. The name comes from the field holding it, which writes its own wire key into
+    /// the refusal as the payload is read — the same name the enclosing validator would have
+    /// written had the read not caught it first, and the name the schema published from this
+    /// declaration reports for this payload.
     ///
     /// Moving the check itself is a further ruling again, and the order matters: taking the hook
     /// off before the validator could reach the field would have left the bound enforced by
@@ -619,9 +624,14 @@ mod a_message_annotated_with_a_constraint {
         );
         assert_eq!(
             reported[0].field(),
-            None,
-            "a brand's report names no field, having no field of its own to name. Got: {}",
+            Some("slug"),
+            "the caller has to be told which key it got wrong, and a brand names none of its own —              the field holding it supplies the name. Got: {}",
             reported[0].detail()
+        );
+        assert_eq!(
+            reported[0].detail(),
+            "'slug': too short: minimum length is 3, got 2",
+            "one quoted run holding the whole name, which is what a reader takes a name out of"
         );
         assert!(
             !reported[0].detail().contains("at line"),

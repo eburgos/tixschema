@@ -2420,6 +2420,7 @@ fn a_refused_pattern_leaves_no_hook_naming_the_dropped_module() {
         "ProbeCaret",
         &syn::Generics::default(),
         false,
+        false,
     )
     .4;
     assert_eq!(errors.len(), 1, "got: {errors:?}");
@@ -2515,6 +2516,7 @@ fn a_struct_field_that_clears_the_guards_is_hung_with_no_hook() {
         "Report",
         &syn::Generics::default(),
         false,
+        false,
     );
     assert!(collected.4.is_empty(), "got: {:?}", collected.4);
 
@@ -2560,6 +2562,7 @@ fn a_field_whose_type_could_publish_a_validator_contributes_a_body_that_runs_it(
         Some("enrolment_schema"),
         "Enrolment",
         &syn::Generics::default(),
+        false,
         false,
     );
     assert!(collected.4.is_empty(), "got: {:?}", collected.4);
@@ -2611,6 +2614,134 @@ fn a_field_whose_type_could_publish_a_validator_contributes_a_body_that_runs_it(
     );
 }
 
+/// The read-time half of the same reach: a field holding a type that gates its own read is hung
+/// with a reader that writes the field's own wire key into what that gate refused.
+///
+/// A bound checked as the payload is read is answered before `validate()` is ever asked, and what
+/// it refuses is reported in the held type's words — a brand's name nothing at all. Without this
+/// the fault reaches a caller naming no key, where the schema published from the same declaration
+/// names one.
+#[cfg(feature = "serde")]
+#[test]
+fn a_field_holding_a_declared_type_is_read_through_one_that_names_the_field() {
+    let mut item: syn::ItemStruct = syn::parse_quote! {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Enrolment {
+            organization_id: Slug,
+        }
+    };
+    let collected = super::collect_struct_fields(
+        &mut item.fields,
+        Some("camelCase"),
+        Some("enrolment_schema"),
+        "Enrolment",
+        &syn::Generics::default(),
+        false,
+        true,
+    );
+    assert!(collected.4.is_empty(), "got: {:?}", collected.4);
+
+    let rendered = walked_field_attrs(item.fields.iter());
+    assert_eq!(
+        rendered,
+        quote::quote! {
+            #[serde(deserialize_with = "enrolment_schema::deserialize_named_organization_id")]
+        }
+        .to_string(),
+        "got: {rendered}"
+    );
+
+    let published = collected
+        .2
+        .iter()
+        .map(ToString::to_string)
+        .collect::<String>();
+    assert!(
+        published.contains("\"organizationId\""),
+        "the name written is the key as the wire spells it, that being the name serde was reading \
+         for and the one the schema reports. Got: {published}"
+    );
+    assert!(
+        !published.contains("\"organization_id\""),
+        "got: {published}"
+    );
+}
+
+/// The three shapes the reader is held back from, each because hanging one would displace
+/// something the author wrote or name something the schema module cannot reach.
+#[cfg(feature = "serde")]
+#[test]
+fn a_field_the_reader_would_displace_is_left_to_read_itself() {
+    let mut item: syn::ItemStruct = syn::parse_quote! {
+        #[derive(serde::Deserialize)]
+        struct Enrolment {
+            #[serde(flatten)]
+            merged: Merged,
+            #[serde(deserialize_with = "read_it_myself")]
+            mine: Slug,
+            #[serde(skip)]
+            absent: Slug,
+        }
+    };
+    let collected = super::collect_struct_fields(
+        &mut item.fields,
+        None,
+        Some("enrolment_schema"),
+        "Enrolment",
+        &syn::Generics::default(),
+        false,
+        true,
+    );
+    let rendered = walked_field_attrs(item.fields.iter());
+    assert!(
+        !rendered.contains("deserialize_named_"),
+        "serde admits one reader per field, and each of these already has one or has no read at \
+         all. Got: {rendered}"
+    );
+    let published = collected
+        .2
+        .iter()
+        .map(ToString::to_string)
+        .collect::<String>();
+    assert!(
+        !published.contains("deserialize_named_"),
+        "a reader nothing is hung with is a function nothing calls. Got: {published}"
+    );
+}
+
+/// A container that is never read back publishes no reader for its fields: the reader names the
+/// field's own type in its signature, so it compiles only where that type is read back too.
+#[cfg(feature = "serde")]
+#[test]
+fn a_container_that_is_not_read_back_publishes_no_reader() {
+    let mut item: syn::ItemStruct = syn::parse_quote! {
+        #[derive(serde::Serialize)]
+        struct Enrolment {
+            slug: Slug,
+        }
+    };
+    let collected = super::collect_struct_fields(
+        &mut item.fields,
+        None,
+        Some("enrolment_schema"),
+        "Enrolment",
+        &syn::Generics::default(),
+        false,
+        super::derives_deserialize(&item.attrs),
+    );
+    assert!(
+        collected.2.is_empty(),
+        "got: {:?}",
+        collected
+            .2
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(walked_field_attrs(item.fields.iter()), "");
+}
+
 /// A field whose value the crate renders itself contributes no body, so a message made only of
 /// those still publishes no `validate()` — the parity a constraint-free struct has always had.
 #[cfg(feature = "serde")]
@@ -2629,6 +2760,7 @@ fn a_field_the_crate_renders_itself_contributes_no_body_to_reach_into() {
         Some("plain_schema"),
         "Plain",
         &syn::Generics::default(),
+        false,
         false,
     );
     assert!(collected.4.is_empty(), "got: {:?}", collected.4);
@@ -2667,6 +2799,7 @@ fn an_optional_struct_field_is_hung_with_neither_the_hook_nor_the_default_it_ans
         Some("report_schema"),
         "Report",
         &syn::Generics::default(),
+        false,
         false,
     );
     assert!(collected.4.is_empty(), "got: {:?}", collected.4);
@@ -11922,6 +12055,7 @@ fn a_field_bottoming_out_in_a_declared_type_is_walked_and_a_primitive_one_is_not
         Some("envelope_schema"),
         "Envelope",
         &syn::Generics::default(),
+        false,
         false,
     );
     assert!(collected.4.is_empty(), "got: {:?}", collected.4);

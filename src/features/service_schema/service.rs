@@ -144,9 +144,19 @@ fn fault_helpers(service: &ServiceDef) -> Vec<String> {
     helpers
 }
 
-/// The fault a payload that will not become the operation's message produces, split the way the
-/// Rust dispatcher splits it: a payload that failed at no key at all was never the message, and one
-/// that failed at a key failed the message's own validation.
+/// The fault a payload that will not become the operation's message produces, under the one kind
+/// this dispatcher can raise.
+///
+/// It runs on a payload somebody already parsed — the dispatcher takes the decoded value, not the
+/// bytes — so by the time it is reached the bytes *were* a document and the only thing left to be
+/// wrong is what the document said. That is what the Rust dispatcher calls a failed validation, and
+/// it is the same reading: there, `serde_json`'s own classification separates bytes that are not a
+/// document (`Syntax`, `Eof`) from a document that is not this message (`Data`), and only the second
+/// can happen here at all. `undeserializable-payload` is the answer to the first, which belongs to
+/// whatever turns bytes into the value handed in.
+///
+/// A failure at no key still names no field: a value that is not an object at all is not a message,
+/// and there is no key to send a caller to.
 fn inbound_fault(service: &ServiceDef) -> Vec<String> {
     let named = service.ident.to_string();
     let prefix = RenameRule::CamelCase.apply_to_variant(&named);
@@ -154,11 +164,15 @@ fn inbound_fault(service: &ServiceDef) -> Vec<String> {
         "/**\n \
          * The fault a payload produces when it will not become the operation's message.\n \
          *\n \
-         * A failure that names no key at all is a payload that was never this message, which is \
-         what\n \
-         * the Rust side reports when the bytes would not deserialize. A failure at a key is \
-         the\n \
-         * message's own validation, and the fault names the key.\n \
+         * The payload reaching here was already read out of the bytes, so what is wrong with it \
+         is\n \
+         * what it *said* — the same thing the Rust dispatcher answers `failed-validation` for. \
+         Bytes\n \
+         * that are no document at all never reach this, and are the other kind.\n \
+         *\n \
+         * The fault names the key the failure was at. A failure at no key names none: a value \
+         that\n \
+         * is not an object is not this message, and there is no key to send a caller to.\n \
          */\n\
          function {prefix}InboundFault(\n  \
          operation: string,\n  \
@@ -177,7 +191,7 @@ fn inbound_fault(service: &ServiceDef) -> Vec<String> {
              )\n      \
              .join(\"; \"),\n    \
              field: failedAt === \"\" ? undefined : failedAt,\n    \
-             kind: failedAt === \"\" ? \"undeserializable-payload\" : \"failed-validation\",\n    \
+             kind: \"failed-validation\",\n    \
              operation,"
         )
     )]

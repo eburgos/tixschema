@@ -83,6 +83,173 @@ mod declarations {
     }
 }
 
+/// The refusal path: one declaration, two dispatchers, one answer.
+///
+/// Everything above compares the two *validators* a bound publishes. What a caller actually reads
+/// when it sends a bad value is a fault, and a fault is built by the dispatcher — so this compares
+/// those: the fault the generated Rust dispatcher answers a payload with, against what the
+/// generated TypeScript dispatcher would answer the same payload, read off the TypeScript that
+/// dispatcher published rather than written down here.
+#[cfg(all(feature = "serde", feature = "zod"))]
+mod refusals {
+    // The schema module each held type publishes is named beside the type, and the emitted code
+    // reaches it unqualified — so a type declared elsewhere is held by bringing its module along.
+    use super::declarations::{Account, OrganizationId, account_schema, organization_id_schema};
+    use core::future::{Future, ready};
+    use core::pin::pin;
+    use core::task::{Context as PollContext, Poll, Waker};
+    use serde::{Deserialize, Serialize};
+    use std::sync::Mutex;
+    use tixschema::{model_schema, service_schema};
+
+    /// The message the gate sends, spelled on the wire the way the service it was captured from
+    /// spells it: `rename_all` makes every key differ from the Rust field it stands for, which is
+    /// what a fault naming the wrong one of the two is caught by.
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct AdmitRequest {
+        pub account: Account,
+        pub organization_id: OrganizationId,
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct Admitted {
+        pub admitted: bool,
+    }
+
+    #[service_schema]
+    pub trait GateService<Ctx> {
+        async fn admit(&self, ctx: &Ctx, req: AdmitRequest) -> Result<Admitted, String>;
+    }
+
+    /// An implementation that writes down every message it was handed, so a payload that should
+    /// have been refused before it is read as a comparison against the wrong thing.
+    #[derive(Default)]
+    pub struct NeverEntered {
+        reached: Mutex<Vec<String>>,
+    }
+
+    /// The reply handle, keeping what was answered as the bytes a caller reads.
+    #[derive(Default)]
+    pub struct Recorder {
+        settled: Mutex<Vec<serde_json::Value>>,
+    }
+
+    impl<Ctx> GateService<Ctx> for NeverEntered
+    where
+        Ctx: Sync,
+    {
+        async fn admit(&self, _ctx: &Ctx, req: AdmitRequest) -> Result<Admitted, String> {
+            ready(()).await;
+            self.reached.lock().unwrap().push(format!("{req:?}"));
+            Ok(Admitted { admitted: true })
+        }
+    }
+
+    impl gate_service_schema::Reply for Recorder {
+        async fn fault(&self, fault: gate_service_schema::ServiceFault) {
+            ready(()).await;
+            self.settled
+                .lock()
+                .unwrap()
+                .push(serde_json::to_value(&fault).unwrap());
+        }
+
+        async fn send<T>(&self, value: T)
+        where
+            T: Serialize + Send,
+        {
+            ready(()).await;
+            self.settled
+                .lock()
+                .unwrap()
+                .push(serde_json::to_value(&value).unwrap());
+        }
+    }
+
+    /// The body of the fault constructor the emitted TypeScript dispatcher answers a refused
+    /// payload with, cut out of the bundle it published.
+    pub fn inbound_fault() -> String {
+        let written = GateServiceSchema::ts_service();
+        let opened = written
+            .split_once("function gateServiceInboundFault(")
+            .unwrap()
+            .1;
+        opened.split_once("\n}").unwrap().0.to_owned()
+    }
+
+    fn poll_once<Answered>(answering: Answered) -> Option<Answered::Output>
+    where
+        Answered: Future,
+    {
+        let mut pinned = pin!(answering);
+        let mut polling = PollContext::from_waker(Waker::noop());
+        match pinned.as_mut().poll(&mut polling) {
+            Poll::Ready(answer) => Some(answer),
+            Poll::Pending => None,
+        }
+    }
+
+    /// The one thing the Rust dispatcher answered `payload` with, as the bytes a caller reads.
+    pub fn refused(payload: &str) -> serde_json::Value {
+        let service = NeverEntered::default();
+        let reply = Recorder::default();
+        poll_once(gate_service_schema::dispatch(
+            &service,
+            &(),
+            &gate_service_schema::IncomingMessage {
+                operation: "admit".to_owned(),
+                payload: payload.as_bytes().to_vec(),
+            },
+            &reply,
+        ))
+        .unwrap();
+        let reached = service.reached.lock().unwrap().clone();
+        assert!(
+            reached.is_empty(),
+            "`{payload}` reached the implementation: {reached:?}"
+        );
+        let mut settled = reply.settled.lock().unwrap().clone();
+        assert_eq!(
+            settled.len(),
+            1,
+            "the arm answers exactly once: {settled:?}"
+        );
+        settled.pop().unwrap()
+    }
+
+    /// The `kind` that constructor writes. It has to be a constant for it to be the kind of every
+    /// payload the constructor answers — a conditional leaves this reader with nothing to return
+    /// rather than a branch to pick, which is the point.
+    pub fn ts_kind(body: &str) -> String {
+        let written = body
+            .split_once("kind: ")
+            .unwrap()
+            .1
+            .split_once(',')
+            .unwrap()
+            .0
+            .trim();
+        written
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+            .unwrap()
+            .to_owned()
+    }
+
+    /// The key the emitted Zod object writes `member` under, which is the spelling on the wire.
+    pub fn zod_key_holding(schema: &str, member: &str) -> String {
+        let closing = format!(": {member},");
+        schema
+            .lines()
+            .find_map(|line| line.trim().strip_suffix(&closing))
+            .unwrap()
+            .to_owned()
+    }
+}
+
 /// The sentence one emitted Zod check reports for a value, read off the `{ error: … }` argument the
 /// macro wrote for it.
 ///
@@ -382,6 +549,98 @@ fn no_emitted_check_is_left_to_report_in_zods_own_words() {
             checks,
             error_arguments(&schema).len(),
             "a check reports in zod's own words in:\n{schema}"
+        );
+    }
+}
+
+/// A brand's bound, broken twice by one value, refused as the payload is read.
+///
+/// The brand gates its own read, so this payload never reaches the message's validator — and the
+/// brand's report names no field, the brand being the value rather than a member of anything. What
+/// a caller is owed is still the key it got wrong, and it is owed the same one from either
+/// language: the field the value was held in, spelled the way the wire spells it.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_brand_refused_on_the_read_answers_the_same_fault_in_both_languages() {
+    let answered = refusals::refused(r#"{"account":{"jti":"a"},"organizationId":"A!"}"#);
+    let constructor = refusals::inbound_fault();
+    let held_under = refusals::zod_key_holding(
+        &refusals::AdmitRequest::zod_schema(),
+        "OrganizationId$Schema",
+    );
+    assert_eq!(held_under, "organizationId");
+
+    assert!(
+        constructor
+            .contains("const failedAt = first === undefined ? \"\" : first.path.join(\".\");"),
+        "the field is the path of the first issue. Got: {constructor}"
+    );
+    assert!(
+        constructor.contains("field: failedAt === \"\" ? undefined : failedAt,"),
+        "got: {constructor}"
+    );
+    assert!(constructor.contains(".join(\"; \"),"), "got: {constructor}");
+
+    // What TypeScript answers, read off what it published: one line per issue, under the key the
+    // Zod object wrote, joined the way the constructor joins them.
+    let reported = typescript_report(
+        &declarations::OrganizationId::zod_schema(),
+        &held_under,
+        "A!",
+    );
+    assert_eq!(answered["kind"], refusals::ts_kind(&constructor));
+    assert_eq!(answered["field"], held_under);
+    assert_eq!(answered["detail"], reported.join("; "));
+    assert_eq!(answered["operation"], "admit");
+    assert!(
+        !answered["detail"].as_str().unwrap().contains("at line"),
+        "the byte offset serde appends locates the failure inside an encoding the caller never \
+         saw. Got: {answered}"
+    );
+}
+
+/// A bound two hops down, one of them flattened, reached by the message's own validator rather than
+/// on the read — the other half of the same comparison, so the two paths cannot be shown to agree
+/// with TypeScript one at a time while disagreeing with each other.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_bound_below_a_flattened_hop_answers_the_same_fault_in_both_languages() {
+    let answered = refusals::refused(r#"{"account":{"jti":""},"organizationId":"acme"}"#);
+    let constructor = refusals::inbound_fault();
+    let reported = typescript_report(&declarations::Claims::zod_schema(), "account.jti", "");
+
+    assert_eq!(answered["kind"], refusals::ts_kind(&constructor));
+    assert_eq!(answered["field"], "account.jti");
+    assert_eq!(answered["detail"], reported.join("; "));
+}
+
+/// A payload that parsed and is still not the message: not an object at all.
+///
+/// It is the one shape the two languages classified differently. TypeScript read "failed at no key"
+/// as bytes that were never the message, where the Rust side had already established that the bytes
+/// *were* a document and answered for what the document said. Only one of those can be true of a
+/// value that parsed, so both answer the one kind now — and neither names a field, there being no
+/// key to send a caller to.
+#[cfg(all(feature = "serde", feature = "zod"))]
+#[test]
+fn a_payload_that_parsed_and_is_not_the_message_answers_the_same_kind_in_both_languages() {
+    let constructor = refusals::inbound_fault();
+    for payload in [r#""just a string""#, "42", "[1,2,3]"] {
+        let answered = refusals::refused(payload);
+        assert_eq!(
+            answered["kind"],
+            refusals::ts_kind(&constructor),
+            "`{payload}` was answered under a kind the other language does not answer it under, \
+             and the kind is what a caller branches on. Got: {answered}"
+        );
+        assert_eq!(
+            answered["field"],
+            serde_json::Value::Null,
+            "`{payload}` failed at no key, and there is no key to send a caller to. Got: {answered}"
+        );
+        assert!(
+            !answered["detail"].as_str().unwrap().contains("at line"),
+            "got: {answered}"
         );
     }
 }

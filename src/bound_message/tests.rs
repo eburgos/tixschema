@@ -109,3 +109,33 @@ fn a_pattern_reaches_the_quoted_string_escaped() {
         r#"{ error: "does not match pattern '^\\d+\"x\"$'" }"#
     );
 }
+
+/// The list a reader tells this crate's sentences by, held against the sentences themselves. A
+/// bound whose stem is missing from the list would report words no reader recognises, and a stem
+/// nothing writes would let a reader claim a sentence that is not one of ours.
+#[cfg(any(feature = "serde", feature = "zod"))]
+#[test]
+fn every_sentence_opens_with_a_stem_the_list_spells_and_no_stem_is_unwritten() {
+    let written = [
+        Bound::MaxLength(50),
+        Bound::Maximum(120.0),
+        Bound::MinLength(3),
+        Bound::Minimum(0.0),
+        Bound::Pattern("^[a-z]+$"),
+    ];
+    for bound in written {
+        let stated = bound.stated();
+        assert!(
+            super::VIOLATION_STEMS
+                .iter()
+                .any(|stem| stated.starts_with(stem)),
+            "no stem in the list opens: {stated}"
+        );
+    }
+    for stem in super::VIOLATION_STEMS {
+        assert!(
+            written.iter().any(|bound| bound.stated().starts_with(stem)),
+            "no bound writes the stem: {stem}"
+        );
+    }
+}
