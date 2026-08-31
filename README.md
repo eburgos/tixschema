@@ -1463,6 +1463,56 @@ service_schema: a service needs tixschema's `serde` feature, and this build does
        add `features = ["serde"]` to the tixschema dependency in Cargo.toml
 ```
 
+**A service that publishes TypeScript needs the `zod` feature too.** A message validates when it is
+constructed, in both directions: the generated client parses what it is about to send before it
+reaches a transport, and the generated dispatcher parses what arrived before it enters an
+implementation, so an implementation may assume its message is valid. On the TypeScript side both
+checks are the same parse, against the `<Message>$Schema` const `#[model_schema()]` publishes — and
+only a build with the `zod` feature publishes one.
+
+So a build with `typescript` on and `zod` off publishes the service's **types** and neither seam
+artifact: no `<Service>Schema::ts_client()` and no `<Service>Schema::ts_service()`. The types are
+published as they always are, because they describe what the Rust dispatcher and the Rust client put
+on the wire, and that half validates in either build. The two that are withheld are withheld rather
+than emitted without their check: a client that forwards whatever it is handed and a dispatcher that
+narrows an unread payload with `as` both compile and both read exactly like the checked ones, while
+the Rust half of the same service goes on validating — two halves of one service disagreeing about
+what they accept, with nothing to say so.
+
+A bundle that names either one in such a build is refused where it names it, which is the one place
+the choice of features can still be acted on:
+
+```text
+error[E0599]: no associated function or constant named `ts_client` found for struct `UsageServiceSchema` in the current scope
+   |
+23 | #[service_schema()]
+   | ------------------- associated function or constant `ts_client` not found for this struct
+...
+34 |     let _ = UsageServiceSchema::ts_client();
+   |                                 ^^^^^^^^^ associated function or constant not found in `UsageServiceSchema`
+```
+
+**A service is declared at module scope, never inside a function body.** The module the macro
+generates opens with `use super::*;`, which is how the dispatcher and the client reach the trait and
+the message types declared beside it. A module written inside a function body has the enclosing
+*module* as its parent rather than the function, so `super` from there reaches past every name that
+function declared. `#[model_schema()]` carries the same requirement, for the same reason.
+
+The macro cannot refuse the placement: an attribute macro is handed the annotated item's own tokens
+and nothing about the scope it was written in, and a trait written inside a function is the same
+tokens as one written beside it. A function-scoped declaration earns the compiler's own resolution
+errors instead — one for the trait, and one for each type an operation named:
+
+```text
+error[E0405]: cannot find trait `UsageService` in module `super`
+error[E0425]: cannot find type `BalanceRequest` in this scope
+error[E0425]: cannot find type `BalanceResponse` in this scope
+error[E0425]: cannot find type `BalanceError` in this scope
+```
+
+One consequence is worth knowing before it costs anyone an afternoon: rustdoc wraps a doctest with
+no explicit `fn main` in one, so a doctest that declares a service writes `fn main() {}` of its own.
+
 #### The Shape of a Service
 
 A service names a **context** type parameter, and every operation takes it as its first argument after `&self`. An operation receives one message and answers `Result<Success, Error>`.

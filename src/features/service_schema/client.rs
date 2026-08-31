@@ -22,12 +22,12 @@
 //! operation never ran, so what came back is not one of the errors it declared, and a caller's
 //! code is identical whether the fault came from here or from the far end.
 //!
-//! # Where the schemas come from, and what happens without them
+//! # Where the schemas come from, and why this module exists only beside them
 //!
 //! The schema a message validates against is the one `#[model_schema()]` publishes for it, which
-//! only a build with the Zod surface on writes at all. A TypeScript-without-Zod build therefore
-//! emits the same client without the validation step rather than emitting one that names a
-//! `$Schema` const the bundle does not declare.
+//! only a build with the Zod surface on writes at all. This module is gated with it: a client whose
+//! check was dropped would forward whatever it was handed while reading exactly like the checked
+//! one, so a build that publishes no schema publishes no client either.
 //!
 //! # A one-way method has nowhere to return a fault
 //!
@@ -41,7 +41,6 @@
 
 use super::message;
 use super::result::result_name;
-#[cfg(feature = "zod")]
 use crate::rename_rule::RenameRule;
 use crate::service_schema::parse::{OperationDef, OperationOutcome, ServiceDef};
 
@@ -120,7 +119,6 @@ fn factory(service: &ServiceDef) -> String {
 ///
 /// Their names carry the service for the same reason every published type's does: a bundle is one
 /// flat file, and ten services would otherwise declare one of each ten times over.
-#[cfg(feature = "zod")]
 fn fault_helpers(service: &ServiceDef) -> Vec<String> {
     let named = service.ident.to_string();
     let prefix = RenameRule::CamelCase.apply_to_variant(&named);
@@ -189,11 +187,6 @@ fn fault_helpers(service: &ServiceDef) -> Vec<String> {
     helpers
 }
 
-#[cfg(not(feature = "zod"))]
-const fn fault_helpers(_service: &ServiceDef) -> Vec<String> {
-    Vec::new()
-}
-
 /// What one operation's method answers: its own result type, or nothing for a one-way operation.
 fn answers(service: &str, operation: &OperationDef) -> String {
     result_name(service, operation).unwrap_or_else(|| "void".to_owned())
@@ -207,15 +200,12 @@ fn method(service: &ServiceDef, operation: &OperationDef) -> String {
     let wire = &operation.wire_name;
     let call = &operation.ts_name;
     let checked = validation(service, operation);
-    let sent = if checked.is_empty() {
-        "req"
-    } else {
-        "validated.data"
-    };
     let sending = match operation.outcome {
-        OperationOutcome::OneWay => format!("      await transport.notify(\"{wire}\", {sent});"),
+        OperationOutcome::OneWay => {
+            format!("      await transport.notify(\"{wire}\", validated.data);")
+        }
         OperationOutcome::Reply { .. } => format!(
-            "      return transport.request<{}>(\"{wire}\", {sent});",
+            "      return transport.request<{}>(\"{wire}\", validated.data);",
             answers(&named, operation)
         ),
     };
@@ -249,9 +239,8 @@ fn method_summary(service: &str, operation: &OperationDef) -> String {
     }
 }
 
-/// The outbound check and the refusal it leads to, and nothing at all in a build that publishes no
-/// schema for the message to be checked against.
-#[cfg(feature = "zod")]
+/// The outbound check and the refusal it leads to. It runs on every method, this module being
+/// emitted only where there is a schema for a message to be checked against.
 fn validation(service: &ServiceDef, operation: &OperationDef) -> String {
     let named = service.ident.to_string();
     let prefix = RenameRule::CamelCase.apply_to_variant(&named);
@@ -279,15 +268,8 @@ fn validation(service: &ServiceDef, operation: &OperationDef) -> String {
     )
 }
 
-#[cfg(not(feature = "zod"))]
-const fn validation(_service: &ServiceDef, _operation: &OperationDef) -> String {
-    String::new()
-}
-
 /// What a method's `JSDoc` says it throws. Only a one-way method throws at all — a replying one
-/// answers its refusal into the failure arm it already has — and only in a build that publishes a
-/// schema for a message to be refused against.
-#[cfg(feature = "zod")]
+/// answers its refusal into the failure arm it already has.
 fn throws_clause(service: &str, operation: &OperationDef) -> String {
     match operation.outcome {
         OperationOutcome::OneWay => format!(
@@ -299,11 +281,6 @@ fn throws_clause(service: &str, operation: &OperationDef) -> String {
         ),
         OperationOutcome::Reply { .. } => String::new(),
     }
-}
-
-#[cfg(not(feature = "zod"))]
-const fn throws_clause(_service: &str, _operation: &OperationDef) -> String {
-    String::new()
 }
 
 /// The transport seam: an operation name, a payload, and an answer. Emitted per service for the

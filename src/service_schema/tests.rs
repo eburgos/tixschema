@@ -114,6 +114,37 @@ fn spelled(declared_type: &Type) -> String {
     declared_type.to_token_stream().to_string()
 }
 
+/// The one import that decides where a service may be declared.
+///
+/// The generated module reaches the trait and every message type the author declared beside it
+/// through `super`, so a declaration written inside a function body resolves none of them: a module
+/// nested in a function body has the enclosing module as its parent, not the function. The macro
+/// cannot refuse that placement — an attribute macro is handed the annotated item's tokens and
+/// nothing about the scope around them — so this reads back the mechanism instead, and the doctest
+/// pair on `support::emit` reads the four errors a function-scoped declaration earns.
+#[test]
+fn the_generated_module_reaches_the_author_s_declarations_through_super() {
+    let emitted = expanded(MIXED_SERVICE);
+    assert!(
+        emitted.contains("pub mod usage_service_schema { use super :: * ;"),
+        "the module opens on `use super::*;`, which is the whole of how it reaches what the author \
+         declared beside the trait. Got: {emitted}"
+    );
+    assert!(
+        !emitted.contains("use self :: * ;") && !emitted.contains("use crate :: * ;"),
+        "no other import reaches the author's scope, so `super` is the only path there. \
+         Got: {emitted}"
+    );
+    // The README states the requirement where it documents the construct, so the two cannot drift.
+    let readme = include_str!("../../README.md");
+    assert!(
+        readme.contains("**A service is declared at module scope, never inside a function body.**")
+            && readme.contains("error[E0405]: cannot find trait `UsageService` in module `super`"),
+        "the README no longer states where a service may be declared, or what a function-scoped \
+         one earns"
+    );
+}
+
 #[test]
 fn a_trait_with_no_type_parameter_names_the_context_requirement() {
     assert_eq!(

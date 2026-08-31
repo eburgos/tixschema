@@ -84,7 +84,6 @@ fn the_transport_seam_carries_the_service_name() {
     );
 }
 
-#[cfg(feature = "zod")]
 #[test]
 fn a_message_that_fails_its_schema_answers_a_fault_before_the_transport_is_named() {
     let written = client_of(MIXED_SERVICE);
@@ -109,7 +108,6 @@ fn a_message_that_fails_its_schema_answers_a_fault_before_the_transport_is_named
     );
 }
 
-#[cfg(feature = "zod")]
 #[test]
 fn a_refused_one_way_message_is_thrown_because_there_is_no_arm_to_return_it_in() {
     let written = client_of(MIXED_SERVICE);
@@ -130,7 +128,6 @@ fn a_refused_one_way_message_is_thrown_because_there_is_no_arm_to_return_it_in()
     );
 }
 
-#[cfg(feature = "zod")]
 #[test]
 fn the_shape_a_refused_one_way_message_is_thrown_as_is_published() {
     let written = client_of(MIXED_SERVICE);
@@ -152,7 +149,6 @@ fn the_shape_a_refused_one_way_message_is_thrown_as_is_published() {
     );
 }
 
-#[cfg(feature = "zod")]
 #[test]
 fn a_one_way_method_says_in_its_own_documentation_what_it_throws() {
     let written = client_of(MIXED_SERVICE);
@@ -178,7 +174,6 @@ fn a_one_way_method_says_in_its_own_documentation_what_it_throws() {
     );
 }
 
-#[cfg(feature = "zod")]
 #[test]
 fn a_service_with_no_one_way_operation_publishes_no_refusal() {
     const REPLYING_ONLY: &str = "
@@ -198,7 +193,6 @@ fn a_service_with_no_one_way_operation_publishes_no_refusal() {
     );
 }
 
-#[cfg(feature = "zod")]
 #[test]
 fn the_fault_a_client_builds_names_the_key_that_failed() {
     let written = client_of(MIXED_SERVICE);
@@ -216,45 +210,7 @@ fn the_fault_a_client_builds_names_the_key_that_failed() {
     );
 }
 
-#[cfg(not(feature = "zod"))]
-#[test]
-fn a_build_that_refuses_nothing_promises_no_throw_and_publishes_no_refusal() {
-    let written = client_of(MIXED_SERVICE);
-    assert!(
-        !written.contains("UsageServiceRefusal"),
-        "with no schema there is nothing to refuse and nothing to throw. Got: {written}"
-    );
-    assert!(
-        !written.contains("@throws"),
-        "documenting a throw a build cannot produce is worse than documenting nothing. \
-         Got: {written}"
-    );
-    assert!(
-        written.contains(
-            "  /** Sends `apply-bundle` on `UsageService`, which expects no reply. */\n  \
-             applyBundle(req: ApplyBundleRequest): Promise<void>;"
-        ),
-        "the method and what it answers are the same in either build. Got: {written}"
-    );
-}
-
-#[cfg(not(feature = "zod"))]
-#[test]
-fn a_build_that_publishes_no_schema_names_none() {
-    let written = client_of(MIXED_SERVICE);
-    assert!(
-        !written.contains("$Schema"),
-        "naming a const the bundle does not declare is worse than skipping the check. \
-         Got: {written}"
-    );
-    assert!(
-        written.contains("return transport.request<UsageServiceGetAvailableBalanceResult>"),
-        "got: {written}"
-    );
-}
-
 /// The members of the client type, which is where a method's own documentation is written.
-#[cfg(feature = "zod")]
 fn members_of(written: &str) -> String {
     written
         .split_once("export type UsageServiceClient = {")

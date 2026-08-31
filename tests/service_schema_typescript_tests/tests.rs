@@ -13,6 +13,16 @@ mod the_bundle_one_registration_line_produces {
     use std::fs;
     use std::path::PathBuf;
 
+    /// Every name the seam publishes. The pair below reads for all five: one half asserts a build
+    /// with the Zod surface writes each of them, the other that a build without it writes none.
+    const SEAM_DECLARATIONS: [&str; 5] = [
+        "export type ProbeServiceTransport = {",
+        "export type ProbeServiceClient = {",
+        "export function createProbeServiceClient(",
+        "export interface ProbeServiceImpl<Ctx> {",
+        "export function createProbeServiceDispatcher<Ctx>(",
+    ];
+
     /// The bundle a consuming codebase writes: its own types named by hand, one line each, and the
     /// service named once. Nothing here names a message the macro declared — that is the point.
     fn bundle() -> String {
@@ -24,12 +34,40 @@ mod the_bundle_one_registration_line_produces {
             CreditWriteError::ts_definition(),
         ];
         written.extend(author_schemas());
-        written.extend([
-            ProbeServiceSchema::ts_definition(),
+        written.push(ProbeServiceSchema::ts_definition());
+        written.extend(probe_seam());
+        written.join("\n\n")
+    }
+
+    /// The client and the dispatcher a bundle carries, which only a build with the Zod surface
+    /// publishes: both parse a message against the schema `#[model_schema()]` writes for it, and a
+    /// build that writes none publishes neither rather than a pair that checks nothing.
+    #[cfg(feature = "zod")]
+    fn probe_seam() -> Vec<String> {
+        vec![
             ProbeServiceSchema::ts_client(),
             ProbeServiceSchema::ts_service(),
-        ]);
-        written.join("\n\n")
+        ]
+    }
+
+    #[cfg(not(feature = "zod"))]
+    const fn probe_seam() -> Vec<String> {
+        Vec::new()
+    }
+
+    /// The second service's half of the same pair, so the collision test below reads two full
+    /// services in whichever build it runs in.
+    #[cfg(feature = "zod")]
+    fn audit_seam() -> Vec<String> {
+        vec![
+            AuditServiceSchema::ts_client(),
+            AuditServiceSchema::ts_service(),
+        ]
+    }
+
+    #[cfg(not(feature = "zod"))]
+    const fn audit_seam() -> Vec<String> {
+        Vec::new()
     }
 
     /// The schema line a hand-written type publishes beside its type. The service's own line
@@ -232,20 +270,18 @@ mod the_bundle_one_registration_line_produces {
     /// prefix, TypeScript having no per-service scope to lean on.
     #[test]
     fn two_services_in_one_bundle_declare_nothing_twice() {
-        let two = [
+        let mut both = vec![
             BalanceRequest::ts_definition(),
             BalanceResponse::ts_definition(),
             ApplyBundleReceipt::ts_definition(),
             ProbeError::ts_definition(),
             CreditWriteError::ts_definition(),
             ProbeServiceSchema::ts_definition(),
-            ProbeServiceSchema::ts_client(),
-            ProbeServiceSchema::ts_service(),
-            AuditServiceSchema::ts_definition(),
-            AuditServiceSchema::ts_client(),
-            AuditServiceSchema::ts_service(),
-        ]
-        .join("\n\n");
+        ];
+        both.extend(probe_seam());
+        both.push(AuditServiceSchema::ts_definition());
+        both.extend(audit_seam());
+        let two = both.join("\n\n");
         let mut declared: Vec<&str> = two
             .lines()
             .filter_map(|line| {
@@ -312,24 +348,45 @@ mod the_bundle_one_registration_line_produces {
         );
     }
 
+    #[cfg(feature = "zod")]
     #[test]
     fn the_client_and_the_implementable_service_reach_the_bundle_through_their_own_lines() {
         let (_, written) = written_bundle("tixschema_service_bundle_client_and_service.ts");
-        for declared in [
-            "export type ProbeServiceTransport = {",
-            "export type ProbeServiceClient = {",
-            "export function createProbeServiceClient(",
-            "export interface ProbeServiceImpl<Ctx> {",
-            "export function createProbeServiceDispatcher<Ctx>(",
-        ] {
+        for declared in SEAM_DECLARATIONS {
             assert!(written.contains(declared), "got: {written}");
         }
+    }
+
+    /// The other half: a bundle written by a build with no Zod surface carries none of the five.
+    ///
+    /// Both the client and the dispatcher parse a message against the schema `#[model_schema()]`
+    /// writes for it, and this build writes none. What used to be published here was a client that
+    /// forwarded whatever it was handed and a dispatcher that narrowed an unread payload with `as`
+    /// — a bundle that read like the checked one and admitted anything, while the Rust half of the
+    /// same service went on validating.
+    #[cfg(not(feature = "zod"))]
+    #[test]
+    fn a_bundle_written_without_the_zod_surface_carries_no_client_and_no_dispatcher() {
+        let (_, written) = written_bundle("tixschema_service_bundle_no_seam.ts");
+        for withheld in SEAM_DECLARATIONS {
+            assert!(
+                !written.contains(withheld),
+                "`{withheld}` cannot be published without the schema it parses against. \
+                 Got: {written}"
+            );
+        }
+        assert!(
+            written.contains("export type ProbeServiceGetBalanceResult ="),
+            "the types describe what the Rust half puts on the wire and are published either way. \
+             Got: {written}"
+        );
     }
 
     /// Every name the client and the implementable service refer to is declared by the same
     /// bundle: the message each member takes, the result types, the outcome types and the fault.
     /// Read off the text rather than from a list written here, so a name they start referring to
     /// is checked without this test being edited.
+    #[cfg(feature = "zod")]
     #[test]
     fn the_client_and_the_service_name_only_types_the_bundle_declares() {
         let (_, written) = written_bundle("tixschema_service_bundle_reachable.ts");
@@ -390,10 +447,9 @@ mod the_schema_that_rides_with_the_type {
 /// the arms' members are read off the emitted text, and the two sets are compared.
 #[cfg(feature = "typescript")]
 mod the_envelope_typescript_declares_is_the_one_rust_writes {
-    use super::{
-        BalanceRequest, PreparedAnswer, ProbeServiceSchema, dispatched, poll_once,
-        probe_service_schema, settlements,
-    };
+    #[cfg(feature = "zod")]
+    use super::{BalanceRequest, PreparedAnswer, poll_once, settlements};
+    use super::{ProbeServiceSchema, dispatched, probe_service_schema};
     use core::mem::take;
 
     /// The arm of a published result type whose members start with the given discriminant, read
@@ -653,6 +709,7 @@ mod the_envelope_typescript_declares_is_the_one_rust_writes {
     /// says so twice — the method answers `Promise<void>` and the dispatcher arm returns
     /// `undefined`. If either side started carrying a value the other would be wrong about the
     /// wire, and no envelope comparison would catch it, there being no envelope.
+    #[cfg(feature = "zod")]
     #[test]
     fn a_one_way_operation_puts_nothing_on_the_wire_and_says_so_in_both_languages() {
         let settled = settlements(
@@ -688,6 +745,7 @@ mod the_envelope_typescript_declares_is_the_one_rust_writes {
     }
 
     /// Every operation name the emitted TypeScript dispatcher switches on, read off its own text.
+    #[cfg(feature = "zod")]
     fn typescript_operation_names() -> Vec<String> {
         let written = ProbeServiceSchema::ts_service();
         let mut named: Vec<String> = written
@@ -705,6 +763,7 @@ mod the_envelope_typescript_declares_is_the_one_rust_writes {
     /// The names come off the emitted TypeScript; the verdict comes off the Rust dispatcher driven
     /// over each one. Neither side is a list written here, so an operation renamed on one side and
     /// not the other lands as a fault this reads.
+    #[cfg(feature = "zod")]
     #[test]
     fn every_operation_the_typescript_dispatcher_answers_to_is_one_the_rust_one_answers_to() {
         let named = typescript_operation_names();
@@ -741,6 +800,7 @@ mod the_envelope_typescript_declares_is_the_one_rust_writes {
     /// The other half of the framing: a fault written the way the emitted TypeScript dispatcher
     /// writes one, read back by the generated Rust client. If the tag key or the member the fault
     /// rides in disagreed, this would not narrow.
+    #[cfg(feature = "zod")]
     #[test]
     fn a_fault_framed_the_way_typescript_frames_one_is_read_back_by_the_rust_client() {
         let fault = dispatched("nothing-answers-to-this", b"{}", "probe");
@@ -799,6 +859,10 @@ pub struct Capture {
 // group is asked of a build that writes TypeScript at all.
 #[cfg(feature = "typescript")]
 impl Capture {
+    // Everything a dispatch settled, read only by the group that compares the wire against the
+    // published client and dispatcher — and those are published only where the Zod surface they
+    // parse against is.
+    #[cfg(feature = "zod")]
     fn answered(&self) -> Vec<Vec<u8>> {
         self.answered.lock().unwrap().clone()
     }
@@ -846,18 +910,18 @@ impl probe_service_schema::Reply for Capture {
     }
 }
 
-// Only the group that reads the wire against the published TypeScript drives these, and that
-// group is asked of a build that writes TypeScript at all.
-#[cfg(feature = "typescript")]
+// Read only by the group that compares the wire against the published client and dispatcher, and
+// those are published only where the Zod surface they parse against is.
+#[cfg(all(feature = "typescript", feature = "zod"))]
 /// A transport that hands the client one prepared answer, so an envelope written by hand from the
 /// emitted TypeScript's own shape can be read back by the generated Rust client.
 pub struct PreparedAnswer {
     encoded: Vec<u8>,
 }
 
-// Only the group that reads the wire against the published TypeScript drives these, and that
-// group is asked of a build that writes TypeScript at all.
-#[cfg(feature = "typescript")]
+// Read only by the group that compares the wire against the published client and dispatcher, and
+// those are published only where the Zod surface they parse against is.
+#[cfg(all(feature = "typescript", feature = "zod"))]
 impl probe_service_schema::Transport for PreparedAnswer {
     async fn notify<T>(&self, _operation: &str, _payload: T) -> Result<(), String>
     where
@@ -1131,9 +1195,9 @@ fn the_service_is_still_implementable_and_callable_alongside_its_published_types
     assert_eq!(audited.unwrap().credits, 9);
 }
 
-// Only the group that reads the wire against the published TypeScript drives these, and that
-// group is asked of a build that writes TypeScript at all.
-#[cfg(feature = "typescript")]
+// Read only by the group that compares the wire against the published client and dispatcher, and
+// those are published only where the Zod surface they parse against is.
+#[cfg(all(feature = "typescript", feature = "zod"))]
 /// Everything one dispatch put on the reply handle, which for a one-way arm that ran is nothing.
 fn settlements(operation: &str, payload: &[u8]) -> Vec<Vec<u8>> {
     let capture = Capture::new();

@@ -368,7 +368,8 @@ fn a_wire_name_override_moves_the_wire_name_and_leaves_no_derived_one_behind() {
     );
 }
 
-#[cfg(feature = "typescript")]
+// Read off the published client, which only a build with both surfaces writes.
+#[cfg(all(feature = "typescript", feature = "zod"))]
 #[test]
 fn the_same_declaration_spells_the_operation_in_typescript_the_way_typescript_would() {
     let published = ProbeServiceSchema::ts_client();
