@@ -11,3 +11,10 @@
 #[cfg(test)]
 #[path = "service_schema_tests/tests.rs"]
 mod tests;
+
+// What `$crate` reaches. A client's macro body names everything the declaration generated from the
+// declaring crate's *root*, and the declaration sits in the module above; importing it here puts
+// those names where an expansion looks for them. Private: nothing outside this binary reads them.
+#[cfg(test)]
+#[cfg(feature = "serde")]
+use tests::*;

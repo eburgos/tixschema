@@ -45,7 +45,7 @@
 
 use super::parse::{OperationDef, OperationInputs, OperationOutcome, ServiceDef};
 use proc_macro2::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::Ident;
 
 pub fn emit(service: &ServiceDef) -> TokenStream {
@@ -66,14 +66,17 @@ pub fn emit(service: &ServiceDef) -> TokenStream {
     let incoming = incoming_message();
     let envelope = answered_envelope();
     let validation = message_validation();
-    let in_scope = message_validation_in_scope();
+    let checks = validators(service);
     let readers = violation_readers();
+    let refusals = serde_refusal_readers();
     let guard = panic_guard();
     quote! {
         #incoming
         #envelope
         #validation
+        #checks
         #readers
+        #refusals
         #guard
 
         #[doc = #dispatch_doc]
@@ -89,7 +92,6 @@ pub fn emit(service: &ServiceDef) -> TokenStream {
             R: Reply + Sync,
         {
             async move {
-                #in_scope
                 match message.operation.as_str() {
                     #(#arms)*
                     unrecognised => {
@@ -147,6 +149,7 @@ fn answered_envelope() -> TokenStream {
 /// return from being silent, so a panic is written down on both outcomes.
 fn arm(operation: &OperationDef) -> TokenStream {
     let wire = &operation.wire_name;
+    let check = validator_ident(operation);
     let message = message_type(operation);
     let call = call_arguments(operation);
     let method = &operation.ident;
@@ -175,7 +178,7 @@ fn arm(operation: &OperationDef) -> TokenStream {
                     return reply.fault(refused_payload(#wire, &rejected)).await;
                 }
             };
-            if let Err(violations) = received.validate() {
+            if let Err(violations) = #check(&received) {
                 return reply
                     .fault(ServiceFault::failed_validation(
                         #wire,
@@ -226,7 +229,7 @@ fn incoming_message() -> TokenStream {
 /// What a message answers when it publishes no `validate()` of its own.
 ///
 /// It is shut inside a private module and brought into scope by [`message_validation_in_scope`]
-/// only in the two function bodies that ask a message to validate itself. A blanket `validate()`
+/// only in the function bodies that ask a message to validate itself. A blanket `validate()`
 /// visible across the whole module would be a second candidate for every `validate()` call written
 /// there — the message types `#[service_schema]` generates for an operation's arguments land in
 /// this module, and each walks its own nested fields through a fallback of exactly this shape, so
@@ -255,7 +258,7 @@ fn message_validation() -> TokenStream {
 
 /// Brings the fallback into scope for one function body — see [`message_validation`] for why it is
 /// not in scope for the module that body is written in.
-pub fn message_validation_in_scope() -> TokenStream {
+fn message_validation_in_scope() -> TokenStream {
     quote! {
         use message_validation::MessageValidation;
     }
@@ -273,9 +276,11 @@ fn message_type(operation: &OperationDef) -> TokenStream {
     }
 }
 
-/// The readers that turn a violation report — or a deserializer's own refusal — into what a fault
-/// carries, and the one that decides which fault a refusal is at all.
-fn violation_readers() -> TokenStream {
+/// The readers that turn a violation report into what a fault carries.
+///
+/// Public because a transport's client reads its own outbound refusal the same way, and one report
+/// shape read in two places has to be read by one set of functions.
+pub fn violation_readers() -> TokenStream {
     quote! {
         /// The field one line names, where it is written in the shape every validator
         /// `#[model_schema()]` generates: the field first and in single quotes —
@@ -291,6 +296,24 @@ fn violation_readers() -> TokenStream {
             Some(field)
         }
 
+        /// Everything that failed, in one line, for the fault's detail.
+        fn violation_detail(reported: &[String]) -> String {
+            reported.join("; ")
+        }
+
+        /// The field a violation report names, which is its first line's. A violation naming no
+        /// field, as a constrained newtype's does, leaves the fault's field empty.
+        fn violated_field(reported: &[String]) -> Option<&str> {
+            named_field(reported.first()?)
+        }
+    }
+}
+
+/// The two readers that answer for serde's own refusals: the field one names in its own words, and
+/// which fault a refusal is at all. Only a dispatcher reads a payload off a wire, so only a
+/// dispatcher has either.
+fn serde_refusal_readers() -> TokenStream {
+    quote! {
         /// The field serde names in its own words. It writes one into exactly two sentences —
         /// `missing field \u{60}creditCount\u{60}` and
         /// `unknown field \u{60}extra\u{60}, expected …` — and into both between backticks. A
@@ -334,17 +357,6 @@ fn violation_readers() -> TokenStream {
                 return ServiceFault::failed_validation(operation, named, said);
             }
             ServiceFault::undeserializable_payload(operation, said)
-        }
-
-        /// Everything that failed, in one line, for the fault's detail.
-        fn violation_detail(reported: &[String]) -> String {
-            reported.join("; ")
-        }
-
-        /// The field a violation report names, which is its first line's. A violation naming no
-        /// field, as a constrained newtype's does, leaves the fault's field empty.
-        fn violated_field(reported: &[String]) -> Option<&str> {
-            named_field(reported.first()?)
         }
     }
 }
@@ -440,4 +452,47 @@ fn panic_guard() -> TokenStream {
             "the handler panicked, and said nothing that reads back".to_owned()
         }
     }
+}
+
+/// One check per operation: the message's own `validate()` where it publishes one, and `Ok(())`
+/// where it publishes none.
+///
+/// A function rather than a call written at each site, because which of the two answers depends on
+/// the message's *concrete* type — an inherent method beats the fallback trait's — and a client
+/// placed in another crate reaches that type only through this module. The dispatcher's own arms
+/// call these too, so the two halves of a service ask the question through one answer.
+fn validators(service: &ServiceDef) -> TokenStream {
+    let each = service.operations.iter().map(validator);
+    quote! {
+        #(#each)*
+    }
+}
+
+/// One operation's check.
+fn validator(operation: &OperationDef) -> TokenStream {
+    let named = validator_ident(operation);
+    let message = message_type(operation);
+    let in_scope = message_validation_in_scope();
+    let doc = format!(
+        " What `{}`'s message answers when it is asked to validate itself, which is its own \
+         `validate()` where it declares constraints and `Ok(())` where it declares none.",
+        operation.wire_name
+    );
+    quote! {
+        #[doc = #doc]
+        pub fn #named(message: &#message) -> Result<(), Vec<String>> {
+            #in_scope
+            message.validate()
+        }
+    }
+}
+
+/// The name one operation's check publishes under, read from here by both halves so that neither
+/// can spell it differently.
+pub fn validator_ident(operation: &OperationDef) -> Ident {
+    format_ident!(
+        "validate_{}",
+        operation.ident,
+        span = operation.ident.span()
+    )
 }

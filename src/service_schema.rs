@@ -46,11 +46,14 @@
 //! A crate that forgets it earns one error, spanned on the declaration, naming the crate:
 //! `error[E0433]: cannot find `tracing` in the crate root`. Forgetting `serde_json` earns seven.
 //!
+//! A crate that only *places a client* — a transport's macro, invoked where a caller wants one —
+//! names two of the three. The client serializes what it sends and reads what comes back, so it
+//! reaches `serde` and `serde_json`; it catches no panic, so it has nothing to write down and
+//! reaches no `tracing`.
+//!
 //! **`#[model_schema]` requires none of this.** Only a declared service emits a dispatcher, so a
 //! crate that describes types and declares no service names no `tracing` and reaches no logger.
 
-#[cfg(feature = "serde")]
-mod client;
 #[cfg(feature = "serde")]
 mod dispatch;
 #[cfg(feature = "serde")]
@@ -101,22 +104,24 @@ pub fn exec_service_schema(args: TokenStream, input: TokenStream) -> TokenStream
     // Both readings are answered together, so a service that asks for a transport nobody has and
     // declares a bad operation is told about each rather than about whichever was read first.
     match (asked, parse::parse_service(&declared)) {
-        // The transports the service asked for reach no emitter yet; the reading is what refuses a
-        // list nobody could honour.
-        (Ok(_), Ok(service)) => {
+        (Ok(wanted), Ok(service)) => {
             let messages = messages::emit(&service);
-            // The dispatcher and the client land inside the module `support` opens: both name the
-            // fault, the reply handle and the incoming message unqualified.
-            let inside = [dispatch::emit(&service), client::emit(&service)];
-            let support = support::emit(&service, &quote! { #(#inside)* });
+            // The dispatcher lands inside the module `support` opens: it names the fault, the
+            // reply handle and the incoming message unqualified.
+            let dispatcher = dispatch::emit(&service);
+            let support = support::emit(&service, &dispatcher);
             // The TypeScript artifacts are strings rather than callers of anything private, so they
             // stay at the trait's scope where a bundle can name them.
             let typescript = typescript(&service);
+            // What each transport contributes is a macro at the crate root, so it lands beside the
+            // trait rather than inside the module, and last so a reader meets the contract first.
+            let transports = transport::emit(&wanted, &service);
             quote! {
                 #messages
                 #support
                 #contract
                 #typescript
+                #transports
             }
         }
         (transports, read) => {

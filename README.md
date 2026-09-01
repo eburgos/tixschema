@@ -1823,11 +1823,33 @@ On the Rust side, beside the trait, in a module named for the service (`usage_se
 
 - `ServiceFault` and `ServiceFaultKind` -- readable by anyone, constructible by nothing outside the module. `ServiceFault` is the alias; the struct is declared as `<Service>FaultFields`, which is the name its *fields* publish under in TypeScript, `<Service>Fault` there being the sealed type written over them.
 - `Reply` -- the handle a transport implements to answer one message, with `send` and `fault`.
-- `Transport` -- the seam a client is bound to, with `notify` and `request`. Both answer a `Result`, whose failure arm carries in words what stopped a call from travelling; the client turns it into a fault of kind `transport-failure`.
 - `CallError<E>` -- `Operation(E)` or `Fault(ServiceFault)`.
 - `IncomingMessage` and `dispatch(svc, ctx, message, reply)` -- the dispatcher, generic over the implementing type.
-- `UsageServiceClient` -- one method per operation, over any `Transport`. Each takes that operation's arguments and no context: a context is what an implementation needs, and a caller has nothing to hand one to.
+- `validate_<operation>(message)` -- one check per operation: the message's own `validate()` where its type declares constraints, and `Ok(())` where it declares none. Which of the two answers depends on the message's concrete type, so both halves of a service ask this one function rather than answering for themselves.
 - `ExpireCreditRequest` and `SweepRequest` -- the messages declared for the operations that named none, each an ordinary `#[model_schema()]` type.
+
+The client is not in that module. A crate that *calls* a service and a crate that *answers* one are usually not the same crate -- a caller can see the contract but has no business seeing the backend -- so each transport a service asks for publishes its client as a macro at the declaring crate's root, and whoever wants one invokes it and places it:
+
+```rust
+// in the crate that declares the contract
+#[service_schema(transports = ["amqp_rpc"])]
+pub trait UsageService<Ctx> { /* ... */ }
+```
+
+```rust
+// in a crate that calls it: no backend, no bus library
+mod amqp_client {
+    use usage_contract::*;
+    usage_contract::usage_service_amqp_rpc_client!();
+}
+```
+
+The macro is named `{service_snake_case}_{transport}_client`, takes no arguments and expands to bare items, so the module they land in is the invoking crate's to name:
+
+- `Transport` -- the seam a client is bound to, with `notify` and `request`. Both answer a `Result`, whose failure arm carries in words what stopped a call from travelling; the client turns it into a fault of kind `transport-failure`.
+- `UsageServiceClient` -- one method per operation, over any `Transport`. Each takes that operation's arguments and no context: a context is what an implementation needs, and a caller has nothing to hand one to.
+
+A service naming no transport publishes neither the macro nor a client. `#[macro_export]` puts one name at the declaring crate's root, so the name has to be unique across that crate, and the macro body reaches everything the declaration generated through `$crate` -- which means the trait is declared at that crate's root. The invoking crate names `serde` and `serde_json` in its own manifest, the expansion calling both; it names no `tracing`, nothing in a client catching a panic. The `use` above is what resolves the message types the author declared, which the expansion spells exactly as they were written.
 
 On the TypeScript side, three artifacts, reached through a unit struct named `<Service>Schema`:
 

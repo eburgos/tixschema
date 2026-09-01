@@ -51,14 +51,13 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::Ident;
 
-/// `generated` is what [`dispatch`](super::dispatch) and [`client`](super::client) wrote: it
-/// lands inside the module rather than beside it, because both name the fault, the reply handle and
-/// the incoming message unqualified.
+/// `generated` is what [`dispatch`](super::dispatch) wrote: it lands inside the module rather than
+/// beside it, because it names the fault, the reply handle and the incoming message unqualified.
 ///
 /// # A service is declared at module scope, never inside a function body
 ///
-/// The module opens with `use super::*;`, which is how the dispatcher and the client reach the
-/// trait and the message types the author declared beside it. A module written inside a function
+/// The module opens with `use super::*;`, which is how the dispatcher reaches the trait and the
+/// message types the author declared beside it. A module written inside a function
 /// body has the enclosing *module* as its parent rather than the function, so `super` from there
 /// reaches past every name that function declared and finds none of them. `#[model_schema]` carries
 /// the same requirement, for the same reason and through the same import.

@@ -11,14 +11,24 @@
 //! incomplete until the new one is answered for, so the emitter each transport contributes is bound
 //! in this file and nowhere else, and no existing transport's module is touched to add another.
 //!
-//! Nothing consumes the parsed list yet: the emitters that will read it are landed by their own
-//! tasks, and until then the list is read for the refusals it earns.
+//! # What a transport contributes, and where it lands
+//!
+//! A macro, at the declaring crate's root, that whoever wants the artifact invokes and places. The
+//! two halves of a service usually live in different crates — a crate that calls the service can
+//! see the contract but has no business seeing the server's backend — so an artifact only one half
+//! wants is emitted inert and expanded by the half that wants it.
+//!
+//! [`Transport::client_macro_ident`] is where the name those macros are published under is
+//! derived, so every transport spells it the same way.
 
 mod amqp_rpc;
 
+use super::parse::ServiceDef;
+use crate::rename_rule::RenameRule;
 use proc_macro2::TokenStream;
+use quote::format_ident;
 use syn::spanned::Spanned as _;
-use syn::{Expr, ExprLit, Lit, meta::parser, parse::Parser as _};
+use syn::{Expr, ExprLit, Ident, Lit, meta::parser, parse::Parser as _};
 
 const TRANSPORTS_ARGUMENT: &str = "transports";
 
@@ -42,6 +52,25 @@ impl Transport {
     /// Every transport this version knows, in the order a refusal lists them.
     pub const KNOWN: &'static [Self] = &[Self::AmqpRpc];
 
+    /// The macro this transport's client is published under: `UsageService` over `amqp_rpc` gives
+    /// `usage_service_amqp_rpc_client`. `#[macro_export]` puts it at the declaring crate's root,
+    /// so the name has to be unique across that crate.
+    fn client_macro_ident(self, service: &ServiceDef) -> Ident {
+        format_ident!(
+            "{}_{}_client",
+            RenameRule::SnakeCase.apply_to_variant(&service.ident.to_string()),
+            self.name(),
+            span = service.ident.span()
+        )
+    }
+
+    /// What this transport contributes to a service's expansion.
+    fn emitted(self, service: &ServiceDef) -> TokenStream {
+        match self {
+            Self::AmqpRpc => amqp_rpc::emit(service),
+        }
+    }
+
     fn from_name(written: &str) -> Option<Self> {
         Self::KNOWN
             .iter()
@@ -55,6 +84,18 @@ impl Transport {
             Self::AmqpRpc => "amqp_rpc",
         }
     }
+}
+
+/// What the transports a service asked for contribute, each at most once however many times it was
+/// named: the macros they publish are `#[macro_export]`ed, and one name at a crate root can be
+/// defined once.
+pub fn emit(asked: &[Transport], service: &ServiceDef) -> TokenStream {
+    Transport::KNOWN
+        .iter()
+        .copied()
+        .filter(|known| asked.contains(known))
+        .map(|known| known.emitted(service))
+        .collect()
 }
 
 /// Reads `#[service_schema(...)]`'s own arguments into the transports the service asked for, in the

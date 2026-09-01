@@ -1,4 +1,7 @@
-//! One service, one generated client, and two transports written by hand.
+//! The transports the generated client is driven over, and everything read off it.
+//!
+//! The service, its messages and the module the client was expanded into are declared beside this
+//! one, at the crate root the macro's `$crate` resolves to.
 //!
 //! `ProbeTransport` hands out prepared answers and writes down what it was asked to send, which is
 //! how a test reads the operation name travelling beside the payload rather than inside it. Built
@@ -14,52 +17,19 @@
 //! only transport here that answers in the failure arm, and it is what the fault a caller reads
 //! for a call that never completed is measured against.
 
-#![cfg(feature = "serde")]
-
-/// A service whose message carries no bound of its own, only one its field's *type* declares.
-///
-/// Its own service rather than an operation on the file's: a constrained brand needs a surface
-/// feature to be declared at all, so everything reading one is gated together — the same gate the
-/// dispatcher's constraint module carries, and for the same reason.
-#[cfg(all(
-    feature = "serde",
-    any(feature = "typescript", feature = "zod", feature = "jsonschema")
-))]
+/// What is read off the second service, whose message carries no bound of its own and only one its
+/// field's *type* declares. Gated with the declarations it drives: a constrained brand needs a
+/// surface feature to be declared at all.
+#[cfg(any(feature = "jsonschema", feature = "typescript", feature = "zod"))]
 mod a_bound_the_fields_own_type_declares {
+    use super::{
+        EnrolError, EnrolRequest, EnrolService, Enrolled, Slug, enrol_amqp_client,
+        enrol_service_schema,
+    };
     use super::{ProbeTransport, poll_once};
     use core::future::ready;
-    use serde::{Deserialize, Serialize};
+    use serde::Serialize;
     use std::sync::Mutex;
-    use tixschema::{model_schema, service_schema};
-
-    #[model_schema(minLength = 3)]
-    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-    #[serde(transparent)]
-    pub struct Slug(pub String);
-
-    #[model_schema()]
-    #[derive(Deserialize, Serialize)]
-    pub struct EnrolRequest {
-        pub slug: Slug,
-    }
-
-    #[model_schema()]
-    #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
-    pub struct Enrolled {
-        pub credits: u32,
-    }
-
-    #[model_schema()]
-    #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
-    #[serde(rename_all = "kebab-case", tag = "errorCode")]
-    pub enum EnrolError {
-        DbError,
-    }
-
-    #[service_schema()]
-    pub trait EnrolService<Ctx> {
-        async fn enrol(&self, ctx: &Ctx, req: EnrolRequest) -> Result<Enrolled, EnrolError>;
-    }
 
     /// Answers with the length of the slug it was handed, which a test reads back to say the
     /// message reached it whole.
@@ -79,6 +49,10 @@ mod a_bound_the_fields_own_type_declares {
             Ok(Enrolled {
                 credits: u32::try_from(req.slug.0.len()).unwrap(),
             })
+        }
+
+        async fn withdraw(&self, _ctx: &(), req: EnrolRequest) {
+            let _read = ready(req.slug.0.len()).await;
         }
     }
 
@@ -107,7 +81,7 @@ mod a_bound_the_fields_own_type_declares {
         }
     }
 
-    impl enrol_service_schema::Transport for EnrolLoopback {
+    impl enrol_amqp_client::Transport for EnrolLoopback {
         async fn notify<T>(&self, operation: &str, payload: T) -> Result<(), String>
         where
             T: Serialize + Send,
@@ -141,7 +115,7 @@ mod a_bound_the_fields_own_type_declares {
 
     /// The file's probe transport, answering a second service: a `Transport` is generated per
     /// service, so serving another one means implementing another.
-    impl enrol_service_schema::Transport for ProbeTransport {
+    impl enrol_amqp_client::Transport for ProbeTransport {
         async fn notify<T>(&self, operation: &str, payload: T) -> Result<(), String>
         where
             T: Serialize + Send,
@@ -194,7 +168,7 @@ mod a_bound_the_fields_own_type_declares {
         // Built with no answers: reaching the transport panics, so this test passing at all is the
         // proof it was not touched.
         let transport = ProbeTransport::new(&[]);
-        let client = enrol_service_schema::EnrolServiceClient::new(transport);
+        let client = enrol_amqp_client::EnrolServiceClient::new(transport);
         let answered = poll_once(client.enrol(EnrolRequest {
             slug: Slug("ab".to_owned()),
         }))
@@ -233,7 +207,7 @@ mod a_bound_the_fields_own_type_declares {
     /// both halves of the seam at once.
     #[test]
     fn a_message_whose_bound_its_fields_type_declares_is_satisfiable_end_to_end() {
-        let client = enrol_service_schema::EnrolServiceClient::new(EnrolLoopback);
+        let client = enrol_amqp_client::EnrolServiceClient::new(EnrolLoopback);
         let answered = poll_once(client.enrol(EnrolRequest {
             slug: Slug("abcd".to_owned()),
         }))
@@ -243,6 +217,27 @@ mod a_bound_the_fields_own_type_declares {
             Enrolled { credits: 4 },
             "the implementation answered from the slug it was handed, so the message crossed whole"
         );
+    }
+
+    /// The same bound, on the half of the seam that expects no reply: it is the outgoing message
+    /// that is measured, so a send is refused for exactly what a call is refused for.
+    #[test]
+    fn a_one_way_send_is_measured_against_the_same_bound_a_call_is() {
+        let client = enrol_amqp_client::EnrolServiceClient::new(EnrolLoopback);
+        poll_once(client.withdraw(EnrolRequest {
+            slug: Slug("abcd".to_owned()),
+        }))
+        .unwrap()
+        .unwrap();
+        let refused = ProbeTransport::new(&[]);
+        let refusing = enrol_amqp_client::EnrolServiceClient::new(refused);
+        let reported = poll_once(refusing.withdraw(EnrolRequest {
+            slug: Slug("ab".to_owned()),
+        }))
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(reported.field(), Some("slug"));
+        assert_eq!(reported.operation(), "withdraw");
     }
 }
 
@@ -273,26 +268,41 @@ pub struct BalanceResponse {
     pub credits: u32,
 }
 
-/// What a reply handle captured, encoded as the transport would put it on the wire.
-pub struct Capture {
-    answered: Mutex<Vec<Vec<u8>>>,
+#[cfg(any(feature = "jsonschema", feature = "typescript", feature = "zod"))]
+#[model_schema()]
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case", tag = "errorCode")]
+pub enum EnrolError {
+    DbError,
 }
 
-/// A transport that imposed a deadline of its own and hit it: the call went out and no reply came
-/// back. It records what it was asked to carry, so a test can tell a call that never landed from
-/// one that was never made.
-pub struct DeadlineTransport {
-    calls: Mutex<Vec<String>>,
+#[cfg(any(feature = "jsonschema", feature = "typescript", feature = "zod"))]
+#[model_schema()]
+#[derive(Deserialize, Serialize)]
+pub struct EnrolRequest {
+    pub slug: Slug,
 }
 
-/// A transport that answers by dispatching into the service itself.
-pub struct Loopback {
-    service: ProbeBackEnd,
+/// A service whose message carries no bound of its own, only one its field's *type* declares.
+///
+/// Its own service rather than an operation on the file's: a constrained brand needs a surface
+/// feature to be declared at all, so everything reading one is gated together — the same gate the
+/// dispatcher's constraint module carries, and for the same reason.
+#[cfg(any(feature = "jsonschema", feature = "typescript", feature = "zod"))]
+#[service_schema(transports = ["amqp_rpc"])]
+pub trait EnrolService<Ctx> {
+    async fn enrol(&self, ctx: &Ctx, req: EnrolRequest) -> Result<Enrolled, EnrolError>;
+
+    /// No reply, so the send half of this service's seam is reached as well as the call half.
+    #[service_schema_op(one_way)]
+    async fn withdraw(&self, ctx: &Ctx, req: EnrolRequest);
 }
 
-/// Writes down every operation that reached the far side.
-pub struct ProbeBackEnd {
-    reached: Mutex<Vec<String>>,
+#[cfg(any(feature = "jsonschema", feature = "typescript", feature = "zod"))]
+#[model_schema()]
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Enrolled {
+    pub credits: u32,
 }
 
 #[model_schema()]
@@ -302,15 +312,7 @@ pub enum ProbeError {
     DbError,
 }
 
-/// A transport that hands out prepared answers, one per call, and records what it was asked to
-/// send. Every method takes an answer off the list, so a probe built with none panics the moment
-/// it is reached at all.
-pub struct ProbeTransport {
-    answers: Mutex<Vec<Vec<u8>>>,
-    calls: Mutex<Vec<(String, String)>>,
-}
-
-#[service_schema()]
+#[service_schema(transports = ["amqp_rpc"])]
 pub trait ProbeService<Ctx> {
     /// A message that validates itself, which is what the client checks before it sends.
     async fn admit(&self, ctx: &Ctx, req: AdmitRequest) -> Result<BalanceResponse, ProbeError>;
@@ -338,6 +340,14 @@ pub trait ProbeService<Ctx> {
     async fn sweep(&self, ctx: &Ctx) -> Result<BalanceResponse, ProbeError>;
 }
 
+/// A brand carrying a bound of its own, which is the half of a message's validation the message
+/// itself declares nothing about.
+#[cfg(any(feature = "jsonschema", feature = "typescript", feature = "zod"))]
+#[model_schema(minLength = 3)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct Slug(pub String);
+
 impl AdmitRequest {
     pub fn validate(&self) -> Result<(), Vec<String>> {
         if self.organization_id.len() < 3 {
@@ -348,6 +358,71 @@ impl AdmitRequest {
         }
         Ok(())
     }
+}
+
+/// The client, placed. The macro takes no arguments and expands to bare items, so this module is
+/// this crate's to name; the `use` is what resolves the types the author declared, which the
+/// expansion spells exactly as they were written.
+///
+/// It sits below the declaration it came from because a `macro_export` macro that another macro
+/// *expanded* is reachable inside the crate that declared it by its bare name alone, in the
+/// textual scope it opens: `crate::probe_service_amqp_rpc_client!()` earns
+/// `macro-expanded macro_export macros from the current crate cannot be referred to by absolute
+/// paths`. The path form is what another crate writes, and is the only form that reaches one.
+#[cfg(test)]
+pub mod amqp_client {
+    use super::{AdmitRequest, BalanceRequest, BalanceResponse, ProbeError};
+
+    probe_service_amqp_rpc_client!();
+}
+
+/// The second service's client, under the same gate its declarations carry.
+#[cfg(test)]
+#[cfg(any(feature = "jsonschema", feature = "typescript", feature = "zod"))]
+pub mod enrol_amqp_client {
+    use super::{EnrolError, EnrolRequest, Enrolled};
+
+    enrol_service_amqp_rpc_client!();
+}
+
+/// The same client placed a second time, in a second module of this crate. `#[macro_export]` puts
+/// one name at the crate root and the macro emits bare items, so two placements are two transport
+/// seams and two client types that share nothing.
+#[cfg(test)]
+pub mod spare_amqp_client {
+    use super::{AdmitRequest, BalanceRequest, BalanceResponse, ProbeError};
+
+    probe_service_amqp_rpc_client!();
+}
+
+/// What a reply handle captured, encoded as the transport would put it on the wire.
+pub struct Capture {
+    answered: Mutex<Vec<Vec<u8>>>,
+}
+
+/// A transport that imposed a deadline of its own and hit it: the call went out and no reply came
+/// back. It records what it was asked to carry, so a test can tell a call that never landed from
+/// one that was never made.
+pub struct DeadlineTransport {
+    calls: Mutex<Vec<String>>,
+}
+
+/// A transport that answers by dispatching into the service itself.
+pub struct Loopback {
+    service: ProbeBackEnd,
+}
+
+/// Writes down every operation that reached the far side.
+pub struct ProbeBackEnd {
+    reached: Mutex<Vec<String>>,
+}
+
+/// A transport that hands out prepared answers, one per call, and records what it was asked to
+/// send. Every method takes an answer off the list, so a probe built with none panics the moment
+/// it is reached at all.
+pub struct ProbeTransport {
+    answers: Mutex<Vec<Vec<u8>>>,
+    calls: Mutex<Vec<(String, String)>>,
 }
 
 impl ProbeService<String> for ProbeBackEnd {
@@ -421,7 +496,7 @@ impl probe_service_schema::Reply for Capture {
     }
 }
 
-impl probe_service_schema::Transport for DeadlineTransport {
+impl amqp_client::Transport for DeadlineTransport {
     async fn notify<T>(&self, operation: &str, _payload: T) -> Result<(), String>
     where
         T: Serialize + Send,
@@ -441,7 +516,7 @@ impl probe_service_schema::Transport for DeadlineTransport {
     }
 }
 
-impl probe_service_schema::Transport for Loopback {
+impl amqp_client::Transport for Loopback {
     async fn notify<T>(&self, operation: &str, payload: T) -> Result<(), String>
     where
         T: Serialize + Send,
@@ -473,7 +548,28 @@ impl probe_service_schema::Transport for Loopback {
     }
 }
 
-impl probe_service_schema::Transport for ProbeTransport {
+impl amqp_client::Transport for ProbeTransport {
+    async fn notify<T>(&self, operation: &str, payload: T) -> Result<(), String>
+    where
+        T: Serialize + Send,
+    {
+        ready(()).await;
+        self.record(operation, &payload);
+        self.answer();
+        Ok(())
+    }
+
+    async fn request<T>(&self, operation: &str, payload: T) -> Result<Vec<u8>, String>
+    where
+        T: Serialize + Send,
+    {
+        ready(()).await;
+        self.record(operation, &payload);
+        Ok(self.answer())
+    }
+}
+
+impl spare_amqp_client::Transport for ProbeTransport {
     async fn notify<T>(&self, operation: &str, payload: T) -> Result<(), String>
     where
         T: Serialize + Send,
@@ -624,7 +720,7 @@ fn reported_fault(
 #[test]
 fn an_answer_becomes_the_success_type_the_operation_declared() {
     let transport = ProbeTransport::new(&[r#"{"ok":true,"value":{"credits":7}}"#]);
-    let client = probe_service_schema::ProbeServiceClient::new(transport);
+    let client = amqp_client::ProbeServiceClient::new(transport);
     let answered = poll_once(client.get_balance(BalanceRequest {
         organization_id: "acme".to_owned(),
     }))
@@ -635,7 +731,7 @@ fn an_answer_becomes_the_success_type_the_operation_declared() {
 #[test]
 fn the_error_the_operation_declared_comes_back_in_the_operation_arm() {
     let transport = ProbeTransport::new(&[r#"{"ok":false,"error":{"errorCode":"db-error"}}"#]);
-    let client = probe_service_schema::ProbeServiceClient::new(transport);
+    let client = amqp_client::ProbeServiceClient::new(transport);
     let answered = poll_once(client.get_balance(BalanceRequest {
         organization_id: "unlucky".to_owned(),
     }))
@@ -656,7 +752,7 @@ fn a_fault_the_remote_produced_comes_back_in_the_fault_arm() {
         r#""detail":"the service answers to no operation by that name","field":null,"#,
         r#""kind":"unknown-operation","operation":"get-balance"}}}"#
     )]);
-    let client = probe_service_schema::ProbeServiceClient::new(transport);
+    let client = amqp_client::ProbeServiceClient::new(transport);
     let answered = poll_once(client.get_balance(BalanceRequest {
         organization_id: "acme".to_owned(),
     }))
@@ -675,7 +771,7 @@ fn a_fault_the_remote_produced_comes_back_in_the_fault_arm() {
 #[test]
 fn an_envelope_that_contradicts_itself_is_a_defect_rather_than_an_answer() {
     let transport = ProbeTransport::new(&[r#"{"ok":true}"#]);
-    let client = probe_service_schema::ProbeServiceClient::new(transport);
+    let client = amqp_client::ProbeServiceClient::new(transport);
     let answered = poll_once(client.get_balance(BalanceRequest {
         organization_id: "acme".to_owned(),
     }))
@@ -695,7 +791,7 @@ fn an_envelope_that_contradicts_itself_is_a_defect_rather_than_an_answer() {
 #[test]
 fn the_operation_name_travels_beside_the_payload_and_never_inside_it() {
     let transport = ProbeTransport::new(&[r#"{"ok":true,"value":{"credits":7}}"#]);
-    let client = probe_service_schema::ProbeServiceClient::new(transport);
+    let client = amqp_client::ProbeServiceClient::new(transport);
     poll_once(client.get_balance(BalanceRequest {
         organization_id: "acme".to_owned(),
     }))
@@ -715,7 +811,7 @@ fn the_operation_name_travels_beside_the_payload_and_never_inside_it() {
 #[test]
 fn a_method_declared_from_several_arguments_still_takes_them_separately() {
     let transport = ProbeTransport::new(&[r#"{"ok":true,"value":{"credits":1}}"#]);
-    let client = probe_service_schema::ProbeServiceClient::new(transport);
+    let client = amqp_client::ProbeServiceClient::new(transport);
     poll_once(client.expire_credit("acme".to_owned(), "cr-1".to_owned()))
         .unwrap()
         .unwrap();
@@ -732,7 +828,7 @@ fn a_method_declared_from_several_arguments_still_takes_them_separately() {
 #[test]
 fn a_method_for_an_operation_that_takes_nothing_still_sends_a_payload() {
     let transport = ProbeTransport::new(&[r#"{"ok":true,"value":{"credits":0}}"#]);
-    let client = probe_service_schema::ProbeServiceClient::new(transport);
+    let client = amqp_client::ProbeServiceClient::new(transport);
     poll_once(client.sweep()).unwrap().unwrap();
     assert_eq!(
         client.transport().calls(),
@@ -744,7 +840,7 @@ fn a_method_for_an_operation_that_takes_nothing_still_sends_a_payload() {
 #[test]
 fn a_one_way_method_sends_and_answers_with_nothing_beyond_that() {
     let transport = ProbeTransport::new(&[""]);
-    let client = probe_service_schema::ProbeServiceClient::new(transport);
+    let client = amqp_client::ProbeServiceClient::new(transport);
     let answered = poll_once(client.apply_bundle(AdmitRequest {
         organization_id: "acme".to_owned(),
     }))
@@ -765,7 +861,7 @@ fn a_message_failing_its_own_validation_is_a_fault_and_the_transport_is_never_re
     // Built with no answers: reaching either of its methods panics, so this test passing at all
     // is the proof that the transport was not touched.
     let transport = ProbeTransport::new(&[]);
-    let client = probe_service_schema::ProbeServiceClient::new(transport);
+    let client = amqp_client::ProbeServiceClient::new(transport);
     let answered = poll_once(client.admit(AdmitRequest {
         organization_id: "ab".to_owned(),
     }))
@@ -793,7 +889,7 @@ fn a_message_failing_its_own_validation_is_a_fault_and_the_transport_is_never_re
 #[test]
 fn a_one_way_message_failing_its_own_validation_is_a_fault_and_sends_nothing() {
     let transport = ProbeTransport::new(&[]);
-    let client = probe_service_schema::ProbeServiceClient::new(transport);
+    let client = amqp_client::ProbeServiceClient::new(transport);
     let answered = poll_once(client.apply_bundle(AdmitRequest {
         organization_id: "ab".to_owned(),
     }))
@@ -812,7 +908,7 @@ fn a_one_way_message_failing_its_own_validation_is_a_fault_and_sends_nothing() {
 
 #[test]
 fn a_call_the_transport_could_not_carry_comes_back_as_a_fault_rather_than_never_answering() {
-    let client = probe_service_schema::ProbeServiceClient::new(DeadlineTransport::new());
+    let client = amqp_client::ProbeServiceClient::new(DeadlineTransport::new());
     let answered = poll_once(client.get_balance(BalanceRequest {
         organization_id: "acme".to_owned(),
     }))
@@ -850,7 +946,7 @@ fn a_call_the_transport_could_not_carry_comes_back_as_a_fault_rather_than_never_
 
 #[test]
 fn a_one_way_send_the_transport_could_not_put_out_comes_back_as_a_fault() {
-    let client = probe_service_schema::ProbeServiceClient::new(DeadlineTransport::new());
+    let client = amqp_client::ProbeServiceClient::new(DeadlineTransport::new());
     let answered = poll_once(client.apply_bundle(AdmitRequest {
         organization_id: "acme".to_owned(),
     }))
@@ -873,7 +969,7 @@ fn a_one_way_send_the_transport_could_not_put_out_comes_back_as_a_fault() {
 
 #[test]
 fn a_transport_failure_reads_the_same_way_to_a_caller_as_every_other_defect() {
-    let client = probe_service_schema::ProbeServiceClient::new(DeadlineTransport::new());
+    let client = amqp_client::ProbeServiceClient::new(DeadlineTransport::new());
     let answered = poll_once(client.get_balance(BalanceRequest {
         organization_id: "acme".to_owned(),
     }))
@@ -891,7 +987,7 @@ fn a_transport_failure_reads_the_same_way_to_a_caller_as_every_other_defect() {
 
 #[test]
 fn a_transport_failure_is_reported_only_for_a_message_the_client_did_not_refuse_first() {
-    let client = probe_service_schema::ProbeServiceClient::new(DeadlineTransport::new());
+    let client = amqp_client::ProbeServiceClient::new(DeadlineTransport::new());
     let answered = poll_once(client.admit(AdmitRequest {
         organization_id: "ab".to_owned(),
     }))
@@ -911,7 +1007,7 @@ fn a_transport_failure_is_reported_only_for_a_message_the_client_did_not_refuse_
 
 #[test]
 fn what_the_dispatcher_writes_is_what_the_client_reads() {
-    let client = probe_service_schema::ProbeServiceClient::new(Loopback::new());
+    let client = amqp_client::ProbeServiceClient::new(Loopback::new());
     let answered = poll_once(client.get_balance(BalanceRequest {
         organization_id: "acme".to_owned(),
     }))
@@ -947,5 +1043,54 @@ fn what_the_dispatcher_writes_is_what_the_client_reads() {
             "apply_bundle acme".to_owned(),
         ],
         "every method reached the operation it names"
+    );
+}
+
+/// The second placement is a client of its own: its own transport seam, its own type, and every
+/// operation the service declares. Two placements of one macro in one crate share nothing, which
+/// is what a `#[macro_export]` macro emitting bare items has to survive.
+#[test]
+fn a_second_placement_of_the_client_carries_the_whole_service_over_a_seam_of_its_own() {
+    let transport = ProbeTransport::new(&[
+        r#"{"ok":true,"value":{"credits":7}}"#,
+        "",
+        r#"{"ok":true,"value":{"credits":1}}"#,
+        r#"{"ok":true,"value":{"credits":0}}"#,
+        r#"{"ok":true,"value":{"credits":3}}"#,
+    ]);
+    let client = spare_amqp_client::ProbeServiceClient::new(transport);
+    let balance = poll_once(client.get_balance(BalanceRequest {
+        organization_id: "acme".to_owned(),
+    }))
+    .unwrap();
+    assert_eq!(balance, Ok(BalanceResponse { credits: 7 }));
+    poll_once(client.apply_bundle(AdmitRequest {
+        organization_id: "acme".to_owned(),
+    }))
+    .unwrap()
+    .unwrap();
+    poll_once(client.expire_credit("acme".to_owned(), "cr-1".to_owned()))
+        .unwrap()
+        .unwrap();
+    poll_once(client.sweep()).unwrap().unwrap();
+    poll_once(client.admit(AdmitRequest {
+        organization_id: "acme".to_owned(),
+    }))
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        client
+            .transport()
+            .calls()
+            .iter()
+            .map(|(operation, _payload)| operation.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            "get-balance".to_owned(),
+            "apply-bundle".to_owned(),
+            "expire-credit".to_owned(),
+            "sweep".to_owned(),
+            "admit".to_owned(),
+        ]
     );
 }
