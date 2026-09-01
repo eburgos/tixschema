@@ -16,8 +16,8 @@
 //! `Err(CallError::Fault(…))` naming the field **without touching the transport**: the operation
 //! never ran, so it is not a declared error, and a caller's code is identical whether the fault
 //! came from its own validator or from the far end. This is the second of the two generated places
-//! allowed to build a fault, which is why it is emitted inside the module the constructors are
-//! private to.
+//! that build a fault, and like the dispatcher it is emitted inside the module the fault is
+//! declared in.
 //!
 //! # A transport that could not carry the call has somewhere to say so
 //!
@@ -31,10 +31,10 @@
 //!
 //! # Reading a fault back
 //!
-//! `ServiceFault` derives `Serialize` and deliberately not `Deserialize`, a public `Deserialize`
-//! being a public constructor by another name. So the client deserializes into a private mirror
-//! that does derive it and converts, inside the module, where the fields are reachable. The mirror
-//! is the seam; the seal on the fault survives it.
+//! `ServiceFault` derives `Serialize` and deliberately not `Deserialize`, so a fault never arrives
+//! simply by having been written on the wire. The client deserializes into a private mirror that
+//! does derive it and converts, inside the module, where the fields are reachable. The mirror is
+//! the seam; the seal on the fault survives it.
 //!
 //! # A client takes no context
 //!

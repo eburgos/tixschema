@@ -105,8 +105,8 @@ pub fn exec_service_schema(args: TokenStream, input: TokenStream) -> TokenStream
         // list nobody could honour.
         (Ok(_), Ok(service)) => {
             let messages = messages::emit(&service);
-            // The dispatcher and the client land inside the module `support` opens: they are the
-            // only two builders of a fault, and the constructors are private to it.
+            // The dispatcher and the client land inside the module `support` opens: both name the
+            // fault, the reply handle and the incoming message unqualified.
             let inside = [dispatch::emit(&service), client::emit(&service)];
             let support = support::emit(&service, &quote! { #(#inside)* });
             // The TypeScript artifacts are strings rather than callers of anything private, so they

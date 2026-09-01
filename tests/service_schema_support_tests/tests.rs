@@ -3,9 +3,10 @@
 //!
 //! The reply handle is exercised rather than merely implemented: `send` is handed a value the
 //! transport serializes itself, which is what keeps the wire format out of the generator, and a
-//! one-way operation reaches it with nothing at all. `fault` has no runtime arm here on purpose —
-//! a fault is constructible only inside the generated module, which is the property the
-//! compile-fail run beside the constructors pins.
+//! one-way operation reaches it with nothing at all.
+//!
+//! This file is outside the module the fault is declared in, so what it builds through the fault's
+//! own constructors is what a hand-written dispatcher can build.
 
 #![cfg(feature = "serde")]
 
@@ -236,5 +237,72 @@ fn a_call_error_carries_the_error_the_operation_declared() {
         acted_on(Ok(SweepReport { swept: 3 })),
         "rendered 3",
         "and the success arm is untouched by the failure arm gaining a second shape"
+    );
+}
+
+/// Every kind a fault reports, built from here rather than from inside the generated module.
+///
+/// The path resolving is the whole of what this pins: a dispatcher that cannot name a constructor
+/// has no way to answer a defect, and spelling `pub` in the expansion says nothing about whether
+/// the name reaches a caller.
+#[test]
+fn every_kind_of_fault_is_built_through_its_own_constructor_from_outside_the_module() {
+    use sweep_service_schema::{ServiceFault, ServiceFaultKind};
+
+    let refused = ServiceFault::failed_validation("sweep", Some("organization_id"), "is empty");
+    assert_eq!(refused.kind(), ServiceFaultKind::FailedValidation);
+    assert_eq!(refused.operation(), "sweep");
+    assert_eq!(refused.field(), Some("organization_id"));
+    assert_eq!(refused.detail(), "is empty");
+
+    let unread = ServiceFault::undeserializable_payload("sweep", "expected value at line 1");
+    assert_eq!(unread.kind(), ServiceFaultKind::UndeserializablePayload);
+    assert_eq!(unread.operation(), "sweep");
+    assert_eq!(unread.field(), None, "nothing was read far enough to name");
+    assert_eq!(unread.detail(), "expected value at line 1");
+
+    let panicked = ServiceFault::handler_panic("purge", "index out of bounds");
+    assert_eq!(panicked.kind(), ServiceFaultKind::HandlerPanic);
+    assert_eq!(panicked.operation(), "purge");
+    assert_eq!(panicked.field(), None);
+    assert_eq!(panicked.detail(), "index out of bounds");
+
+    let uncarried = ServiceFault::transport_failure("sweep", "the connection went away");
+    assert_eq!(uncarried.kind(), ServiceFaultKind::TransportFailure);
+    assert_eq!(uncarried.operation(), "sweep");
+    assert_eq!(uncarried.field(), None);
+    assert_eq!(uncarried.detail(), "the connection went away");
+
+    let unrecognised = ServiceFault::unknown_operation("rebuild");
+    assert_eq!(unrecognised.kind(), ServiceFaultKind::UnknownOperation);
+    assert_eq!(unrecognised.operation(), "rebuild");
+    assert_eq!(unrecognised.field(), None);
+    assert_eq!(
+        unrecognised.detail(),
+        "the service answers to no operation by that name",
+        "the one constructor that writes its own detail, the name being all it was given"
+    );
+}
+
+#[test]
+fn a_fault_built_outside_the_module_settles_through_the_reply_handle_a_transport_implements() {
+    use sweep_service_schema::Reply as _;
+
+    let transport = ProbeTransport::new();
+    poll_once(
+        transport.fault(sweep_service_schema::ServiceFault::unknown_operation(
+            "rebuild",
+        )),
+    )
+    .unwrap();
+    assert_eq!(
+        transport.settled(),
+        vec![
+            "unknown operation in operation `rebuild`: the service answers to no operation by \
+             that name"
+                .to_owned()
+        ],
+        "a hand-written dispatcher builds the fault and hands it to the same handle the generated \
+         one does"
     );
 }

@@ -1,5 +1,5 @@
 //! The three types an operation's outcome is carried in, emitted per service into the service's
-//! own module: the fault a caller can receive but no implementation can construct, the reply
+//! own module: the fault a caller can receive but no implementation can answer with, the reply
 //! handle a transport implements, and the client's call-error enum.
 //!
 //! # Why they are generated rather than imported
@@ -13,23 +13,24 @@
 //!
 //! # The seal on `ServiceFault`
 //!
-//! The fault reports a failure the operation never declared, so no implementation may produce one:
-//! an operation's signature admits only its own error type, and the constructors are private to
-//! the generated module. `pub(crate)` would not do it — the macro expands inside the consuming
-//! crate, so a service written beside its own trait would reach a `pub(crate)` constructor, and so
-//! would the compile-fail test that has to prove it cannot.
+//! The fault reports a failure the operation never declared, so no implementation answers with one:
+//! an operation's signature admits only its own error type. The fields stay private, so a literal
+//! written by hand is refused with `E0451` and the constructors are the only way one comes into
+//! being.
 //!
-//! `Deserialize` is deliberately not derived on the fault, for the same reason: a public
-//! `Deserialize` is a public constructor, and an author holding one could report a defect the
-//! operation never declared. `Serialize` is derived, because the transport has to put a fault on
-//! the wire. Reading one back off the wire is the generated client's business and therefore
-//! happens inside the module, where the constructors are.
+//! Those constructors are public. A fault is what a *dispatcher* answers a defect with, and a
+//! dispatcher is not always the one emitted here — a hand-written one works against the contract
+//! surface alone, and it can do nothing with a defect it has no way to report.
+//!
+//! `Deserialize` is deliberately not derived on the fault, so a fault never arrives simply by
+//! having been written on the wire. `Serialize` is derived, because the transport has to put one
+//! there. Reading one back off it is the generated client's business and happens inside the module,
+//! through a mirror that derives what the fault does not.
 //!
 //! **The dispatcher and the Rust client are emitted inside this module**, which is why [`emit`]
-//! takes their tokens rather than being spliced beside them. They are the only two places a fault
-//! is built, so the constructors below stay private and reachable from nowhere else. The module
-//! also opens with `use super::*;`, since both of them name the trait's own message types, which
-//! the author declared beside the trait.
+//! takes their tokens rather than being spliced beside them: both name the fault, the reply handle
+//! and the incoming message unqualified. The module also opens with `use super::*;`, since both of
+//! them name the trait's own message types, which the author declared beside the trait.
 //!
 //! # Why `Reply` has exactly two methods
 //!
@@ -51,8 +52,8 @@ use quote::{format_ident, quote};
 use syn::Ident;
 
 /// `generated` is what [`dispatch`](super::dispatch) and [`client`](super::client) wrote: it
-/// lands inside the module rather than beside it, because both reach constructors that are private
-/// to it.
+/// lands inside the module rather than beside it, because both name the fault, the reply handle and
+/// the incoming message unqualified.
 ///
 /// # A service is declared at module scope, never inside a function body
 ///
@@ -294,9 +295,8 @@ fn call_error_declaration(declared: &Ident) -> TokenStream {
 /// What a receiver reads off a fault. Everything a fault carries is readable and nothing about it
 /// is writable, which is the whole point of the type.
 ///
-/// The read surface resolves from an implementation's own scope — the companion to the
-/// compile-fail run on [`fault_constructors`], which differs from this only by reaching for a
-/// constructor:
+/// The read surface resolves from an implementation's own scope — the companion to the run on
+/// [`fault_constructors`], which is this one with the read swapped for a build:
 ///
 /// ```rust
 /// use tixschema::service_schema;
@@ -366,16 +366,14 @@ fn fault_accessors() -> TokenStream {
     }
 }
 
-/// The five ways a fault comes into being, one per kind, private to the generated module so that
-/// only the dispatcher and the client — the two emitters written inside it — can reach them.
+/// The five ways a fault comes into being, one per kind, public so that a dispatcher written
+/// outside this module can build one.
 ///
-/// A service implementation cannot construct one. This is the run above with a single line added,
-/// so the refusal can only be the constructor's privacy. Which refusal it is was read by compiling
-/// the snippet on its own rather than assumed: `E0624`, the associated function being private.
-/// `compile_fail` asserts only that *some* error is raised, and this toolchain does not check the
-/// error code a doctest names.
+/// A hand-written dispatcher has the contract surface and nothing else, and a fault is what it
+/// answers a defect with, so the constructors have to resolve from anywhere the module is nameable.
+/// This is the run beside the accessors with the read swapped for a build:
 ///
-/// ```rust,compile_fail
+/// ```rust
 /// use tixschema::service_schema;
 ///
 /// #[derive(serde::Deserialize, serde::Serialize)]
@@ -387,12 +385,8 @@ fn fault_accessors() -> TokenStream {
 ///     async fn purge(&self, ctx: &Ctx, req: PurgeRequest);
 /// }
 ///
-/// pub struct SweepBackEnd;
-///
-/// impl SweepService<()> for SweepBackEnd {
-///     async fn purge(&self, _ctx: &(), _req: PurgeRequest) {
-///         let _refused = sweep_service_schema::ServiceFault::unknown_operation("purge");
-///     }
+/// fn refuse(named: &str) -> sweep_service_schema::ServiceFault {
+///     sweep_service_schema::ServiceFault::unknown_operation(named)
 /// }
 ///
 /// fn main() {}
@@ -400,7 +394,9 @@ fn fault_accessors() -> TokenStream {
 fn fault_constructors() -> TokenStream {
     quote! {
         impl ServiceFault {
-            fn failed_validation(operation: &str, field: Option<&str>, detail: &str) -> Self {
+            /// A message that failed its own schema, naming the field when the violation named one.
+            #[must_use]
+            pub fn failed_validation(operation: &str, field: Option<&str>, detail: &str) -> Self {
                 Self {
                     detail: detail.to_owned(),
                     field: field.map(str::to_owned),
@@ -409,7 +405,9 @@ fn fault_constructors() -> TokenStream {
                 }
             }
 
-            fn handler_panic(operation: &str, detail: &str) -> Self {
+            /// A handler that came apart. The transport still settles the delivery.
+            #[must_use]
+            pub fn handler_panic(operation: &str, detail: &str) -> Self {
                 Self {
                     detail: detail.to_owned(),
                     field: None,
@@ -418,7 +416,9 @@ fn fault_constructors() -> TokenStream {
                 }
             }
 
-            fn transport_failure(operation: &str, detail: &str) -> Self {
+            /// A call that never travelled, in the words the transport reported it in.
+            #[must_use]
+            pub fn transport_failure(operation: &str, detail: &str) -> Self {
                 Self {
                     detail: detail.to_owned(),
                     // The transport reports that the call did not travel, not that a value inside
@@ -429,7 +429,9 @@ fn fault_constructors() -> TokenStream {
                 }
             }
 
-            fn undeserializable_payload(operation: &str, detail: &str) -> Self {
+            /// Bytes that were not the document the operation reads its message out of.
+            #[must_use]
+            pub fn undeserializable_payload(operation: &str, detail: &str) -> Self {
                 Self {
                     detail: detail.to_owned(),
                     // `refused_payload` is the only caller, and it sends here only the refusals
@@ -442,7 +444,9 @@ fn fault_constructors() -> TokenStream {
                 }
             }
 
-            fn unknown_operation(operation: &str) -> Self {
+            /// An operation this service answers to under no name.
+            #[must_use]
+            pub fn unknown_operation(operation: &str) -> Self {
                 Self {
                     detail: "the service answers to no operation by that name".to_owned(),
                     field: None,
@@ -455,8 +459,8 @@ fn fault_constructors() -> TokenStream {
 }
 
 /// `ServiceFault` and the kind it reports. Both derive `Serialize`, which is what the transport
-/// needs to put a fault on the wire, and neither derives `Deserialize`, which would be a public
-/// constructor by another name.
+/// needs to put a fault on the wire, and neither derives `Deserialize`, so a fault never arrives
+/// simply by having been written there.
 ///
 /// Both also carry `#[model_schema()]`, so the TypeScript a caller narrows on comes from this
 /// declaration rather than from a literal written beside it: one wire, one source. `model_schema`
@@ -474,8 +478,8 @@ fn fault_constructors() -> TokenStream {
 /// the TypeScript emitter writes over these fields: the same members plus a brand keyed on a symbol
 /// the bundle exports nowhere. That brand is what stops a TypeScript implementation writing a fault
 /// as an object literal, the way private fields stop a Rust one with `E0451`. In Rust there is
-/// nothing to draw that distinction against — the fields below are private and the constructors
-/// with them — so Rust has the one type and TypeScript has the two names.
+/// nothing to draw that distinction against — the fields below are private whatever the
+/// constructors publish — so Rust has the one type and TypeScript has the two names.
 ///
 /// The fields themselves come from this declaration and from nowhere else, in both languages, which
 /// is what keeps the type a caller narrows on and the value the wire carries from drifting apart.
@@ -495,13 +499,13 @@ fn fault_declaration(declared: &Ident) -> TokenStream {
          that failed validation, an operation name nothing recognises, a handler that panicked, a \
          call the transport could not carry.\n\n\
          It is a defect rather than a condition, so it is logged at error level and meant to page \
-         a human. No implementation of [`{declared}`] can produce one — an operation's signature \
-         admits only its own error type, and the constructors are private to this module, which \
-         only the generated dispatcher and the generated client are written inside.\n\n\
+         a human. No implementation of [`{declared}`] answers with one — an operation's signature \
+         admits only its own error type — and its fields are private, so the constructors below \
+         are the only way one comes into being.\n\n\
          In TypeScript this publishes as `{fields}`, which is the fault's fields and nothing else. \
          What a caller reads there is `{declared}Fault`: those same fields under a brand the bundle \
          declares and exports nowhere, so an object written by hand is not one. That brand is the \
-         TypeScript answer to the private constructors above."
+         TypeScript answer to the private fields above."
     );
     let kind_doc = format!("Which kind of defect a `{declared}` fault reports.");
     let alias_doc = format!(

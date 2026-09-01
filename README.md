@@ -1780,7 +1780,7 @@ if (result.ok) {
 }
 ```
 
-**No service implementation can construct a fault.** In Rust an operation's signature admits only its own error type, and the fault's constructors are private to the generated module. In TypeScript the interface an implementation satisfies is typed against an *outcome*, which has no fault member in it:
+**No service implementation can answer with a fault.** In Rust an operation's signature admits only its own error type, so there is nowhere to put one. In TypeScript the interface an implementation satisfies is typed against an *outcome*, which has no fault member in it:
 
 ```typescript
 export type UsageServiceGetAvailableBalanceOutcome =

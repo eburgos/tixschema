@@ -68,9 +68,9 @@
 //!
 //! What the registration adds is the seal. The fields publish under a name of their own,
 //! `<Service>FaultFields`, and [`fault`] declares `<Service>Fault` over them as those fields plus a
-//! brand keyed on a symbol the bundle exports nowhere. Rust refuses a fabricated fault twice over —
-//! `E0451` on the fields, `E0624` on the constructors — and this is what TypeScript can be given in
-//! their place: a type a caller reads exactly as before and an implementation cannot write.
+//! brand keyed on a symbol the bundle exports nowhere. Rust refuses a fabricated fault with `E0451`
+//! on the fields, and this is what TypeScript can be given in its place: a type a caller reads
+//! exactly as before and an implementation cannot write.
 
 #[cfg(feature = "zod")]
 mod client;

@@ -5,9 +5,9 @@
 //!
 //! A fault reports a failure the operation never declared, so an implementation that could mint one
 //! could report a defect it did not have, and a caller reading a fault could not tell that one from
-//! a real one. Rust refuses both routes — building the struct is `E0451`, the fields being private,
-//! and calling a constructor is `E0624` — because Rust has a read-without-construct split and the
-//! generated module is the scope it is drawn in.
+//! a real one. Rust refuses the literal an implementation would write with `E0451`, the fields
+//! being private, and refuses the fault a place to be answered with: an operation's signature
+//! admits only its own error type.
 //!
 //! TypeScript has no such scope, and a plain structural object type is writable by anyone who can
 //! name it. So the fault's own fields publish under a name of their own — the Rust struct is

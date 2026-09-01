@@ -693,7 +693,7 @@ fn dispatch_is_generic_over_the_implementing_type_and_answers_through_the_handle
 }
 
 #[test]
-fn the_dispatcher_and_the_client_are_emitted_inside_the_module_the_constructors_are_private_to() {
+fn the_dispatcher_and_the_client_are_emitted_inside_the_module_the_fault_is_declared_in() {
     let emitted = expanded(MIXED_SERVICE);
     let module = emitted.find("pub mod usage_service_schema").unwrap();
     let contract = emitted.find("pub trait UsageService").unwrap();
@@ -771,6 +771,26 @@ fn every_kind_the_fault_publishes_is_one_the_generated_code_has_a_caller_for() {
             emitted.contains(built),
             "`{variant}` is published as a kind a receiver can be handed, and `{built}` is called \
              from nowhere, so nothing ever produces one. Got: {emitted}"
+        );
+    }
+}
+
+/// A dispatcher is what turns a defect into a fault, and one written by hand — or expanded from a
+/// transport's own macro — sits outside the module the fault is declared in.
+#[test]
+fn every_constructor_the_fault_carries_is_published() {
+    let emitted = expanded(MIXED_SERVICE);
+    for published in [
+        "pub fn failed_validation",
+        "pub fn handler_panic",
+        "pub fn transport_failure",
+        "pub fn undeserializable_payload",
+        "pub fn unknown_operation",
+    ] {
+        assert!(
+            emitted.contains(published),
+            "`{published}` left bare is a kind of defect nothing outside this module can report. \
+             Got: {emitted}"
         );
     }
 }
@@ -1065,8 +1085,8 @@ fn a_fault_is_read_back_through_a_private_mirror_rather_than_by_widening_the_fau
 ///
 /// It carries `Fields` because in TypeScript `UsageServiceFault` is taken by the sealed type
 /// written over these members — the same members plus a brand a hand-written object cannot spell.
-/// Rust needs no such pair, the fields here being private and the constructors with them, so the
-/// one declaration answers to both names.
+/// Rust needs no such pair, the fields here being private whatever the constructors publish, so
+/// the one declaration answers to both names.
 #[test]
 fn the_fault_is_declared_under_the_name_its_fields_publish_as() {
     let emitted = expanded(MIXED_SERVICE);
