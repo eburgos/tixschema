@@ -1767,12 +1767,24 @@ fn every_generated_name_the_client_writes_is_reached_through_the_declaring_crate
              {code}"
         );
     }
-    for message in ["ExpireCreditRequest", "SweepRequest"] {
-        assert!(code.contains(message), "got: {code}");
+    for message in ["ExpireCreditMessage", "SweepMessage"] {
+        assert!(
+            code.contains(&format!("$ crate :: usage_service_schema :: {message}")),
+            "got: {code}"
+        );
         assert_eq!(
             code.matches(message).count(),
-            code.matches(&format!("$ crate :: {message}")).count(),
-            "a message the macro declared sits beside the trait, in the declaring crate. Got: \
+            code.matches(&format!("usage_service_schema :: {message}"))
+                .count(),
+            "a message the macro declared is built through the alias its own module publishes, \
+             the same path the dispatcher reads one through. Got: {code}"
+        );
+    }
+    for beside_the_trait in ["ExpireCreditRequest", "SweepRequest"] {
+        assert!(
+            !code.contains(beside_the_trait),
+            "the ident a declared message sits under beside the trait is reached nowhere, the \
+             module being the whole of what the client asks of the declaring crate's root. Got: \
              {code}"
         );
     }

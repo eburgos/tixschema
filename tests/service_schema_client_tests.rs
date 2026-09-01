@@ -11,11 +11,11 @@
 //! harness that needs both: everything else about the client is read against a transport that
 //! never dispatches, and the crate beside this one places a client with no dispatcher at all.
 //!
-//! The `use` at the foot is what `$crate` reaches. Either macro body names what the declaration
-//! generated from the declaring crate's *root* — the messages beside the trait, and the fault and
-//! the call error inside the service's own module — and the declarations sit in the module beside
-//! this file. Importing them here puts those names where an expansion looks for them. Private,
-//! because nothing outside this test binary reads them.
+//! The `use` at the foot is what `$crate` reaches. Either macro body names two things from the
+//! declaring crate's *root* — the service's own module, which every message, fault and call error
+//! is reached through, and the trait the dispatcher binds — and the declarations sit in the module
+//! beside this file. Importing them here puts those names where an expansion looks for them.
+//! Private, because nothing outside this test binary reads them.
 
 #![cfg(feature = "serde")]
 
@@ -55,9 +55,9 @@ mod enrol_amqp_transport;
 mod enrol_amqp_client;
 
 // Both halves reach what the service declared through `$crate`, which is this binary's root: a
-// service written in a submodule is named here for either expansion to resolve. The messages the
-// macro declared are named beside the trait, and the client builds one per operation that declared
-// no message of its own.
+// service written in a submodule is named here for either expansion to resolve. Two names carry
+// that, whichever half is placed: the service's own module, which the client builds each message
+// it sends through, and the trait.
 #[cfg(all(
     test,
     feature = "serde",
@@ -65,4 +65,4 @@ mod enrol_amqp_client;
 ))]
 use tests::a_bound_the_fields_own_type_declares::{EnrolService, enrol_service_schema};
 #[cfg(all(test, feature = "serde"))]
-use tests::{ExpireCreditRequest, ProbeService, SweepRequest, probe_service_schema};
+use tests::{ProbeService, probe_service_schema};

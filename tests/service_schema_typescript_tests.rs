@@ -18,12 +18,9 @@ mod amqp_transport;
 
 // Both halves a transport contributes reach what the service declared through `$crate`, which is
 // this binary's root: a service written in a submodule is named here for either expansion to
-// resolve, the messages the macro declared included. The gate is the declaration's own rather than
-// the transport module's below it: the declaration anchors these two root names in every build it
-// exists in, which is every build carrying the `serde` feature.
+// resolve. Every message either half handles is reached through the module, so these two are all
+// of it. The gate is the declaration's own rather than the transport module's below it: the
+// declaration anchors these two root names in every build it exists in, which is every build
+// carrying the `serde` feature.
 #[cfg(all(test, feature = "serde"))]
 use tests::{ProbeService, probe_service_schema};
-// The client builds a message for each operation that declared none of its own, and it is placed
-// only where the Zod surface it is read against is.
-#[cfg(all(test, feature = "serde", feature = "typescript", feature = "zod"))]
-use tests::{ApplyBundleRequest, ExpireCreditRequest, SweepRequest};

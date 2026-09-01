@@ -21,8 +21,8 @@ mod tests;
 mod amqp_client;
 
 // The client reaches what the service declared through `$crate`, which is this binary's root: the
-// service's own module, and the message the macro declared for the operation that named none. The
-// trait is named beside them although no client body reaches it: the declaration anchors both root
-// names a transport can reach, whichever half of it this crate goes on to place.
+// service's own module, which every message it sends is built through. The trait is named beside it
+// although no client body reaches it: the declaration anchors both root names a transport can
+// reach, whichever half of it this crate goes on to place.
 #[cfg(all(test, feature = "serde"))]
-use tests::{CallService, SweepRequest, call_service_schema};
+use tests::{CallService, call_service_schema};
