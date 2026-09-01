@@ -1881,6 +1881,22 @@ Another crate reaches either macro by path as above.
 
 `#[macro_export]` places each macro at the declaring crate's root whatever module it was written in, so each name has to be unique across that crate, and `$crate` reads from that same root. A service declared at the crate root needs nothing further; one declared in a submodule re-exports at the crate root its generated module, its trait and the messages the macro declared, which is all either half reaches by name -- every message a dispatcher deserializes is reached as `$crate::{service}_schema::<Operation>Message`.
 
+Two of those three the declaring crate now checks for itself. A service that asked for at least one transport resolves its generated module and its trait against the crate root at the declaration, so leaving either unreachable fails **that** crate's own `cargo build` rather than every crate that goes on to invoke a macro. The caret sits on the trait, with the attribute macro named as the origin:
+
+```text
+error[E0433]: cannot find `usage_service_schema` in `crate`
+  --> src/services/usage.rs:15:11
+   |
+14 | #[service_schema(transports = ["amqp_rpc"])]
+   | -------------------------------------------- in this attribute macro expansion
+15 | pub trait UsageService<Ctx> {
+   |           ^^^^^^^^^^^^ unresolved import
+
+error[E0405]: cannot find trait `UsageService` in the crate root
+```
+
+Each is earned on its own, so re-exporting one leaves the other standing rather than repeating both. Write them as **`pub use`**, not `use`: a private import at the root satisfies an invocation inside the declaring crate -- which is what this crate's own test harnesses rely on -- while a crate invoking the macro from outside earns ``error[E0603]: module `usage_service_schema` is private``. A service that asked for no transport publishes no macro, is checked against no root, and compiles below the crate root with nothing re-exported.
+
 On the TypeScript side, three artifacts, reached through a unit struct named `<Service>Schema`:
 
 ```rust

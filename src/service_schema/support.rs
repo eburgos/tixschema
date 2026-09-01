@@ -54,9 +54,10 @@
 //! transport is emitted none of it.
 
 use super::parse::{OperationDef, OperationInputs, ServiceDef};
+use super::transport::Transport;
 use crate::rename_rule::RenameRule;
-use proc_macro2::TokenStream;
-use quote::{format_ident, quote};
+use proc_macro2::{Span, TokenStream};
+use quote::{format_ident, quote, quote_spanned};
 use syn::Ident;
 
 /// The service's own module, holding everything either half of a service reads and nothing that
@@ -172,7 +173,7 @@ use syn::Ident;
 /// placement and nothing else about the program. The import those four errors resolve against is
 /// what the unit test `the_generated_module_reaches_the_author_s_declarations_through_super` reads
 /// back off the expansion.
-pub fn emit(service: &ServiceDef) -> TokenStream {
+pub fn emit(service: &ServiceDef, asked: &[Transport]) -> TokenStream {
     let declared = &service.ident;
     let module = module_ident(service);
     let module_doc = format!(
@@ -190,6 +191,7 @@ pub fn emit(service: &ServiceDef) -> TokenStream {
     let messages = message_type_aliases(service);
     let validators = message_validators(service);
     let readers = violation_readers();
+    let anchors = root_anchors(service, asked);
     quote! {
         #[doc = #module_doc]
         pub mod #module {
@@ -205,7 +207,193 @@ pub fn emit(service: &ServiceDef) -> TokenStream {
             #messages
             #validators
             #readers
+            #anchors
         }
+    }
+}
+
+/// The two root names a transport's macro reaches through `$crate`, resolved here so a declaration
+/// that leaves them unreachable fails in the crate that can fix it.
+///
+/// `#[macro_export]` hoists a transport's macro to the declaring crate's root and `$crate` reads
+/// from that same root, so a service written below the root owes the root a `pub use` of its
+/// generated module and one of its trait. Nothing checked that before: the declaring crate compiled
+/// clean and every crate invoking the macro failed inside an expansion, in errors naming `$crate`
+/// rather than the crate, pointing at the invocation rather than at the declaration, and saying
+/// nothing about a re-export.
+///
+/// The two unnamed consts below resolve one root name each, where the service is declared. One
+/// carries the module in its own type; the other carries the trait in the bound of a `PhantomData`
+/// anchor no caller can reach, since the whole item lives inside the const. Nothing is instantiated
+/// beyond the zero-sized value the anchor's own const holds, and neither anchor publishes a name.
+///
+/// # Why two unnamed consts and not an import or a published type
+///
+/// Every simpler spelling either resolves nothing or is reported unused, and the emitted code has
+/// to be lint-clean in a crate whose lint levels are not ours to set — no `allow` and no `expect`
+/// is written anywhere in what this crate emits. Measured: `use crate::{Trait as _, module as _};`
+/// resolves both roots and is warned about as an unused import; a `pub use` of a module imported
+/// anonymously is unused always; a function or type alias naming the roots is dead code; and a
+/// **named** struct carrying the bound — public, private, or wrapped in a trait impl that builds
+/// one — is `struct RootAnchor is never constructed` wherever the generated module is not itself
+/// publicly reachable, which is every test binary and every service declared under a private
+/// module. An unnamed const is the one item kind dead-code analysis has no name to report, so each
+/// anchor is one, and the anchor type sits inside the second, where a const of its own builds it.
+///
+/// The pair is clean in a library, in a binary and in an integration test, under
+/// `clippy::pedantic` and `clippy::nursery` alike.
+///
+/// # One type argument, the dispatcher's own
+///
+/// The trait anchor writes `crate::{Trait}<Ctx>`, the shape the dispatcher's own `where` clause
+/// writes, so a trait declaring more than one type parameter earns `E0107` at the declaration
+/// rather than at every consumer of a dispatcher that could never have compiled. Mirroring the
+/// trait's full generics instead would let the anchor pass while the macro it stands for stayed
+/// broken. The unit tests read both out of one expansion, so the two cannot drift.
+///
+/// # A service that asked for no transport is emitted neither
+///
+/// It publishes no macro, so it reaches no root and owes none, and it keeps compiling below the
+/// crate root with nothing re-exported.
+///
+/// # The pair, both directions
+///
+/// The service below is declared two modules down and its crate root names neither of the two, so
+/// the crate that declares it no longer builds:
+///
+/// ```rust,compile_fail
+/// mod services {
+///     pub mod usage {
+///         use tixschema::service_schema;
+///
+///         #[derive(serde::Deserialize, serde::Serialize)]
+///         pub struct BalanceRequest;
+///
+///         #[derive(serde::Deserialize, serde::Serialize)]
+///         pub struct BalanceResponse;
+///
+///         #[derive(serde::Deserialize, serde::Serialize)]
+///         pub enum BalanceError {
+///             DbError,
+///         }
+///
+///         #[service_schema(transports = ["amqp_rpc"])]
+///         pub trait UsageService<Ctx> {
+///             async fn get_balance(
+///                 &self,
+///                 ctx: &Ctx,
+///                 req: BalanceRequest,
+///             ) -> Result<BalanceResponse, BalanceError>;
+///         }
+///     }
+/// }
+///
+/// fn main() {}
+/// ```
+///
+/// The same source with one line added and nothing else changed compiles:
+///
+/// ```rust
+/// pub use services::usage::{UsageService, usage_service_schema};
+///
+/// mod services {
+///     pub mod usage {
+///         use tixschema::service_schema;
+///
+///         #[derive(serde::Deserialize, serde::Serialize)]
+///         pub struct BalanceRequest;
+///
+///         #[derive(serde::Deserialize, serde::Serialize)]
+///         pub struct BalanceResponse;
+///
+///         #[derive(serde::Deserialize, serde::Serialize)]
+///         pub enum BalanceError {
+///             DbError,
+///         }
+///
+///         #[service_schema(transports = ["amqp_rpc"])]
+///         pub trait UsageService<Ctx> {
+///             async fn get_balance(
+///                 &self,
+///                 ctx: &Ctx,
+///                 req: BalanceRequest,
+///             ) -> Result<BalanceResponse, BalanceError>;
+///         }
+///     }
+/// }
+///
+/// fn main() {}
+/// ```
+///
+/// # What the declaring crate is told
+///
+/// A `compile_fail` doctest asserts only that *some* error was raised, so the same arrangement was
+/// compiled standalone as a library crate — the service in `src/services/usage.rs`, the crate root
+/// naming neither — and the diagnostics read off that run, verbatim. These two were all of them,
+/// one per anchor, so a crate that re-exports one of the pair is told about the other rather than
+/// about both again (both measured on their own):
+///
+/// ```text
+/// error[E0433]: cannot find `usage_service_schema` in `crate`
+///   --> src/services/usage.rs:15:11
+///    |
+/// 14 | #[service_schema(transports = ["amqp_rpc"])]
+///    | -------------------------------------------- in this attribute macro expansion
+/// 15 | pub trait UsageService<Ctx> {
+///    |           ^^^^^^^^^^^^ unresolved import
+///    |
+///    = note: this error originates in the attribute macro `service_schema` (in Nightly builds, run with -Z macro-backtrace for more info)
+/// help: a similar path exists
+///    |
+/// 15 - pub trait UsageService<Ctx> {
+/// 15 + pub trait services::usage::usage_service_schema<Ctx> {
+///    |
+///
+/// error[E0405]: cannot find trait `UsageService` in the crate root
+///   --> src/services/usage.rs:15:11
+///    |
+/// 14 | #[service_schema(transports = ["amqp_rpc"])]
+///    | -------------------------------------------- in this attribute macro expansion
+/// 15 | pub trait UsageService<Ctx> {
+///    |           ^^^^^^^^^^^^ not found in the crate root
+///    |
+///    = help: consider importing this trait:
+///            crate::services::usage::UsageService
+///    = note: this error originates in the attribute macro `service_schema` (in Nightly builds, run with -Z macro-backtrace for more info)
+///
+/// error: could not compile `declaring` (lib) due to 2 previous errors
+/// ```
+///
+/// The wording is rustc's, and that is a measured limit rather than a choice: nothing can attach a
+/// sentence of ours to a path that does not resolve. An aliased import never prints its alias, and
+/// a const-eval `panic!` that would print one has nothing it can read to tell whether the re-export
+/// is missing. What the change buys is where the error lands, how early, and against which crate —
+/// and the second of the two does name the `pub use` to write.
+fn root_anchors(service: &ServiceDef, asked: &[Transport]) -> TokenStream {
+    if asked.is_empty() {
+        return TokenStream::new();
+    }
+    let contract = &service.ident;
+    // Located at the trait's ident so the caret sits on the declaration, resolved at the call site
+    // so rustc names the attribute macro that asked for a name the author never wrote.
+    let anchored = contract.span().resolved_at(Span::call_site());
+    let module = format_ident!("{}", module_ident(service), span = anchored);
+    let bound = format_ident!("{}", contract, span = anchored);
+    quote_spanned! { anchored=>
+        const _: ::core::marker::PhantomData<crate::#module::ServiceFault> =
+            ::core::marker::PhantomData;
+
+        const _: () = {
+            struct RootAnchor<S, Ctx>(::core::marker::PhantomData<(S, Ctx)>);
+
+            impl<S, Ctx> RootAnchor<S, Ctx>
+            where
+                S: crate::#bound<Ctx>,
+            {
+            }
+
+            const _: RootAnchor<(), ()> = RootAnchor(::core::marker::PhantomData);
+        };
     }
 }
 
