@@ -1179,7 +1179,8 @@ fn a_service_that_asked_for_no_transport_is_anchored_at_no_root() {
 #[test]
 fn the_trait_anchor_binds_what_the_dispatcher_s_where_clause_binds() {
     let expansion = expansion_over_amqp_rpc(MIXED_SERVICE);
-    let dispatched = macro_rules_body(expansion.clone(), "usage_service_amqp_rpc_dispatcher");
+    let dispatched =
+        macro_rules_stream(expansion.clone(), "usage_service_amqp_rpc_dispatcher").to_string();
     let held = module_body(expansion, "usage_service_schema").to_string();
     assert_eq!(
         bound_on_s(&held, "S : "),
