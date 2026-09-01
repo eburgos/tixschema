@@ -1879,9 +1879,9 @@ error: macro-expanded `macro_export` macros from the current crate cannot be ref
 
 Another crate reaches either macro by path as above.
 
-`#[macro_export]` places each macro at the declaring crate's root whatever module it was written in, so each name has to be unique across that crate, and `$crate` reads from that same root. A service declared at the crate root needs nothing further; one declared in a submodule re-exports at the crate root its generated module, its trait and the messages the macro declared, which is all either half reaches by name -- every message a dispatcher deserializes is reached as `$crate::{service}_schema::<Operation>Message`.
+`#[macro_export]` places each macro at the declaring crate's root whatever module it was written in, so each name has to be unique across that crate, and `$crate` reads from that same root. A service declared at the crate root needs nothing further; one declared in a submodule re-exports at the crate root its generated module and its trait, which is all either half reaches by name -- every message a dispatcher deserializes, and every message a client builds, is reached as `$crate::{service}_schema::<Operation>Message`. A message the *author* named is spelled as they wrote it where a client method takes it, and resolves in the module the macro was invoked in.
 
-Two of those three the declaring crate now checks for itself. A service that asked for at least one transport resolves its generated module and its trait against the crate root at the declaration, so leaving either unreachable fails **that** crate's own `cargo build` rather than every crate that goes on to invoke a macro. The caret sits on the trait, with the attribute macro named as the origin:
+Both of those the declaring crate checks for itself. A service that asked for at least one transport resolves its generated module and its trait against the crate root at the declaration, so leaving either unreachable fails **that** crate's own `cargo build` rather than every crate that goes on to invoke a macro. The caret sits on the trait, with the attribute macro named as the origin:
 
 ```text
 error[E0433]: cannot find `usage_service_schema` in `crate`

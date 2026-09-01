@@ -19,6 +19,7 @@ mod amqp_transport;
 
 // Both halves a transport contributes reach what the service declared through `$crate`, which is
 // this binary's root: a service written in a submodule is named here for either expansion to
-// resolve, the messages the macro declared included.
+// resolve. Every message either half handles is reached through the module, so these two are all
+// of it.
 #[cfg(all(test, feature = "serde"))]
-use tests::{ExpireCreditRequest, ProbeService, SweepRequest, probe_service_schema};
+use tests::{ProbeService, probe_service_schema};

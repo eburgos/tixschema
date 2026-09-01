@@ -135,15 +135,15 @@
 //! # Where a path inside the macro resolves
 //!
 //! Paths in a `macro_rules!` body resolve at the *invocation* site, so the two kinds are spelled
-//! apart. Everything tixschema generated is reached through `$crate::` — the trait and the message
-//! types at the scope the author declared them in, and the fault, the envelope, the message aliases
-//! and the per-operation validators inside `$crate::{service}_schema` — which resolves in the crate
-//! that *defined* the macro. Every runtime crate is reached through a leading `::` and resolves in
-//! the invoking crate, which is therefore the one that names it: `::serde`, `::serde_json`,
-//! `::tracing`, `::core` and `::std` for the dispatcher, `::serde`, `::serde_json` and `::core` for
-//! the client. The client reaches no `::tracing` — nothing there catches a panic, so nothing there
-//! has anything to write down, and a caller that only wants to make calls names one crate fewer
-//! than a crate that answers them.
+//! apart. Everything tixschema generated is reached through `$crate::` — the trait at the scope the
+//! author declared it in, and the fault, the envelope, the message aliases and the per-operation
+//! validators inside `$crate::{service}_schema` — which resolves in the crate that *defined* the
+//! macro. Every runtime crate is reached through a leading `::` and resolves in the invoking crate,
+//! which is therefore the one that names it: `::serde`, `::serde_json`, `::tracing`, `::core` and
+//! `::std` for the dispatcher, `::serde`, `::serde_json` and `::core` for the client. The client
+//! reaches no `::tracing` — nothing there catches a panic, so nothing there has anything to write
+//! down, and a caller that only wants to make calls names one crate fewer than a crate that answers
+//! them.
 //!
 //! What each macro writes itself is named bare: those items land in the module the caller supplied
 //! and exist nowhere else. The dispatcher's are `IncomingMessage`, the `Reply` handle, the panic
@@ -172,10 +172,10 @@
 //! written: the service's generated module, which everything below the dispatcher is reached
 //! through, and the trait, which the dispatcher's `where` clause binds. `support::root_anchors`
 //! resolves both at the declaration, so a crate that leaves either unreachable stops compiling
-//! itself rather than breaking every crate that goes on to invoke a macro. The client adds one
-//! more class, unchecked: it builds each message the macro declared as `$crate::{Operation}Request`
-//! at the root, so a service in a submodule re-exports those too. A service declared at the crate
-//! root hoists nothing.
+//! itself rather than breaking every crate that goes on to invoke a macro. The client adds no
+//! class of its own: it builds each message the macro declared through that module's own
+//! `{Operation}Message` alias, the same path the dispatcher reads one through, so the module is the
+//! whole of what it reaches. A service declared at the crate root hoists nothing.
 
 use super::Transport;
 use crate::service_schema::parse::{OperationDef, OperationInputs, OperationOutcome, ServiceDef};
@@ -347,14 +347,21 @@ fn call_arguments(operation: &OperationDef) -> Vec<TokenStream> {
 
 /// The arguments an operation's client method takes, and the message they are packed into before it
 /// is sent.
-fn call_message(operation: &OperationDef) -> (Vec<TokenStream>, TokenStream) {
+///
+/// A message the macro declared is built through the alias its own module publishes, the same path
+/// the dispatcher deserializes into, so the client reaches nothing at the declaring crate's root
+/// beyond the module itself.
+fn call_message(operation: &OperationDef, module: &Ident) -> (Vec<TokenStream>, TokenStream) {
     match &operation.inputs {
         OperationInputs::Empty => {
-            let declared = operation.generated_message_ident();
-            (Vec::new(), quote! { let sending = $crate::#declared {}; })
+            let declared = message_alias_ident(operation);
+            (
+                Vec::new(),
+                quote! { let sending = $crate::#module::#declared {}; },
+            )
         }
         OperationInputs::Generated(arguments) => {
-            let declared = operation.generated_message_ident();
+            let declared = message_alias_ident(operation);
             let taken = arguments
                 .iter()
                 .map(|(field, carried)| quote! { #field: #carried })
@@ -362,7 +369,7 @@ fn call_message(operation: &OperationDef) -> (Vec<TokenStream>, TokenStream) {
             let fields = arguments.iter().map(|(field, _)| field);
             (
                 taken,
-                quote! { let sending = $crate::#declared { #(#fields,)* }; },
+                quote! { let sending = $crate::#module::#declared { #(#fields,)* }; },
             )
         }
         OperationInputs::Named(declared) => (
@@ -732,7 +739,7 @@ fn method(operation: &OperationDef, generated: &Generated) -> TokenStream {
     let wire = &operation.wire_name;
     let named = &operation.ident;
     let check = message_validator_ident(operation);
-    let (taken, packed) = call_message(operation);
+    let (taken, packed) = call_message(operation, module);
     let refusal = outbound_refusal(operation, generated);
     let answered = match &operation.outcome {
         OperationOutcome::OneWay => quote! {

@@ -35,7 +35,7 @@ mod note_amqp_client;
 mod note_amqp_transport;
 
 // Every half reaches what the service declared through `$crate`, which is this binary's root: the
-// traits, the services' own modules, and the message the macro declared for the operation that
-// named none.
+// traits, and the services' own modules, which every message either half handles is reached
+// through.
 #[cfg(all(test, feature = "serde"))]
-use tests::{BareService, NoteRequest, NoteService, bare_service_schema, note_service_schema};
+use tests::{BareService, NoteService, bare_service_schema, note_service_schema};
