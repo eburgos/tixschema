@@ -139,9 +139,9 @@ fn the_fault_s_fields_are_asked_for_rather_than_written_here() {
 /// The two declarations the seal is: a symbol the bundle exports nowhere, and the fault a caller
 /// names, declared as the asked-for fields plus one property keyed on that symbol.
 ///
-/// This is what TypeScript is given in place of the read-without-construct split Rust has. The Rust
-/// fault refuses both routes an implementation would take — `E0451` on the private fields, `E0624`
-/// on the private constructors — and a plain structural object type refuses neither.
+/// This is what TypeScript is given in place of the private fields Rust has. The Rust fault refuses
+/// the literal an implementation would write with `E0451`, and a plain structural object type
+/// refuses nothing at all.
 #[test]
 fn the_published_fault_is_the_asked_for_fields_under_a_brand_the_bundle_exports_nowhere() {
     let rendered = registration(MIXED_SERVICE);
