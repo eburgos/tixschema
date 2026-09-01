@@ -77,19 +77,60 @@
 //! entirely: `IncomingMessage`'s operation-name-over-opaque-bytes routing is one transport model,
 //! and a service that asks for no transport is emitted none of it.
 //!
+//! # Where each macro is placed, and why the placement is the consumer's problem
+//!
 //! Each macro emits bare items and opens no module of its own, so the caller names the module and
-//! two transports in one crate cannot collide:
+//! two transports in one crate cannot collide. Which module, though, is not free: what a
+//! `macro_rules!` body expands to is linted under the *invoking* crate's levels, and three of the
+//! lints a strict consumer denies are decided by where they put the invocation rather than by
+//! anything emitted here.
+//!
+//! Each invocation goes in a module of its own **file**, and the `mod` declarations go above the
+//! crate's `use` items:
 //!
 //! ```text
-//! mod amqp_transport {
-//!     declaring_crate::usage_service_amqp_rpc_dispatcher!();
-//! }
+//! // src/lib.rs
+//! mod amqp_client;
+//! mod amqp_transport;
 //!
-//! mod amqp_client {
-//!     use declaring_crate::*;
-//!     declaring_crate::usage_service_amqp_rpc_client!();
-//! }
+//! use crate::contract::UsageService;
 //! ```
+//!
+//! ```text
+//! // src/amqp_transport.rs
+//! declaring_crate::usage_service_amqp_rpc_dispatcher!();
+//! ```
+//!
+//! ```text
+//! // src/amqp_client.rs
+//! use declaring_crate::{AvailableBalanceRequest, AvailableBalanceResponse};
+//!
+//! declaring_crate::usage_service_amqp_rpc_client!();
+//! ```
+//!
+//! An inline `mod amqp_transport { … }` earns `clippy::inline_modules`; a `mod` written below a
+//! `use` earns `clippy::arbitrary_source_item_ordering`; and reaching the author's own types
+//! through `use declaring_crate::*;` earns `clippy::wildcard_imports`. The client module names
+//! them one by one instead — the messages, the successes and the errors a method signature
+//! spells, which the expansion writes exactly as the author wrote them.
+//!
+//! A consumer is free to publish either module: what they publish is documented, and nothing in
+//! it publishes a field or answers a `Result` without saying under `# Errors` what the failure arm
+//! holds.
+//!
+//! # The declaring crate invokes by bare name, never by path
+//!
+//! A crate that declares a service *and* places one of its halves reaches the macro by its bare
+//! name in textual scope — `usage_service_amqp_rpc_dispatcher!();` below the declaration, with
+//! `#[macro_use] mod contract;` carrying it out of a submodule. Both `crate::…!()` and
+//! `use crate::…;` are refused there, a proc macro having been what defined the macro:
+//!
+//! ```text
+//! error: macro-expanded `macro_export` macros from the current crate cannot be referred to by absolute paths
+//!    = note: `#[deny(macro_expanded_macro_exports_accessed_by_absolute_paths)]` (part of `#[deny(future_incompatible)]`) on by default
+//! ```
+//!
+//! Any other crate reaches either macro by path, as above.
 //!
 //! # Where a path inside the macro resolves
 //!
@@ -109,6 +150,16 @@
 //! guard and the reader that classifies a serde refusal; the client's are the `Transport` trait,
 //! the fault mirror, the client type and the reader that turns one envelope into three outcomes.
 //! The two sets do not overlap, so a crate that wants both can place them in one module.
+//!
+//! Four of those are emitted only where the service reaches them, `dead_code` being an error in
+//! plenty of consumers' builds and unfixable from where they stand. The panic guard and the
+//! refusal reader are an arm's, so a service declaring no operation is emitted neither, and its
+//! `dispatch` binds neither an implementation nor a context. The fault mirror and the answer
+//! reader read a reply, so a service declaring only one-way operations is emitted neither.
+//!
+//! Each macro's items are emitted types first, then `impl` blocks, then functions — the grouping
+//! `clippy::arbitrary_source_item_ordering` asks for by default, which costs nothing to hold and
+//! which a function emitted above a type would break for every consumer at once.
 //!
 //! A type the *author* wrote is the one thing spelled as they wrote it: `Vec<Slug>` and `String`
 //! share no crate prefix that would be true of both. The module the client macro is invoked in
@@ -253,7 +304,7 @@ fn arm(module: &Ident, operation: &OperationDef) -> TokenStream {
     quote! {
         #wire => {
             let received = match ::serde_json::from_slice::<$crate::#module::#message>(
-                &message.payload,
+                message.payload(),
             ) {
                 Ok(received) => received,
                 Err(rejected) => {
@@ -326,21 +377,25 @@ fn client_macro(service: &ServiceDef, transport: Transport) -> TokenStream {
         .operations
         .iter()
         .map(|operation| method(operation, &generated));
+    let placement = placement_doc(
+        &published,
+        "amqp_client",
+        "use the_contract_crate::{AvailableBalanceRequest, AvailableBalanceResponse};\n\n\
+         the_contract_crate::",
+    );
     let macro_doc = format!(
         "The `{contract}` client for the `{}` transport, held as tokens rather than compiled \
          here.\n\n\
          It takes no arguments and emits bare items - the transport seam, the client type and one \
-         method per operation - so the module they land in is the invoking crate's to name:\n\n\
-         ```text\n\
-         mod amqp_client {{\n    \
-         use the_contract_crate::*;\n    \
-         the_contract_crate::{published}!();\n\
-         }}\n\
-         ```\n\n\
+         method per operation - so the module they land in is the invoking crate's to name.\n\n\
          The invoking crate names `serde` and `serde_json` in its own manifest, the expansion \
          calling both. It names no `tracing`: nothing here catches a panic, so nothing here has \
-         anything to write down. The `use` above is what resolves the types the author declared, \
-         which are spelled here as they were written there.",
+         anything to write down.\n\n\
+         {placement}\n\n\
+         The `use` names the types the author declared one by one - the messages, the successes \
+         and the errors a method signature spells, which this expansion writes exactly as they \
+         were written there. `use the_contract_crate::*;` would resolve the same names and earn \
+         the consumer a `clippy::wildcard_imports` they cannot fix from where they stand.",
         transport.name()
     );
     let client_doc = format!(
@@ -353,8 +408,18 @@ fn client_macro(service: &ServiceDef, transport: Transport) -> TokenStream {
          was handed fails its own validation or the transport could not put it out."
     );
     let seam = transport_trait(contract);
-    let mirror = fault_mirror(&generated);
-    let reader = answer_reader(&generated);
+    // A fault and an answer both arrive in a reply, so a service that declares none has nothing
+    // for either to read: the mirror, its readers and the answer reader are emitted only where an
+    // operation answers, rather than emitted dead into whatever module the consumer placed.
+    let (mirror, minting, reader) = if declares_a_reply(service) {
+        (
+            fault_mirror(),
+            fault_mirror_readers(&generated),
+            answer_reader(&generated),
+        )
+    } else {
+        (TokenStream::new(), TokenStream::new(), TokenStream::new())
+    };
     quote! {
         #[doc = #macro_doc]
         #[macro_export]
@@ -367,6 +432,8 @@ fn client_macro(service: &ServiceDef, transport: Transport) -> TokenStream {
                 pub struct #client<T: Transport> {
                     transport: T,
                 }
+
+                #minting
 
                 impl<T: Transport> #client<T> {
                     /// Binds a client to a transport.
@@ -393,6 +460,15 @@ fn client_macro(service: &ServiceDef, transport: Transport) -> TokenStream {
     }
 }
 
+/// Whether the service declares an operation that answers, which is what reads a reply back and
+/// therefore the only thing that needs a fault mirror or an answer reader.
+fn declares_a_reply(service: &ServiceDef) -> bool {
+    service
+        .operations
+        .iter()
+        .any(|operation| matches!(operation.outcome, OperationOutcome::Reply { .. }))
+}
+
 /// The dispatcher half: everything that turns one delivery into a call on an implementation, held
 /// as tokens for whoever answers the service.
 fn dispatcher_macro(service: &ServiceDef, transport: Transport) -> TokenStream {
@@ -403,13 +479,15 @@ fn dispatcher_macro(service: &ServiceDef, transport: Transport) -> TokenStream {
         .operations
         .iter()
         .map(|operation| arm(&module, operation));
+    let placement = placement_doc(&macro_name, "amqp_transport", "the_contract_crate::");
     let macro_doc = format!(
         "The `{contract}` dispatcher for the `{}` transport, held as tokens rather than compiled \
          here.\n\n\
-         It takes no arguments and emits bare items — `IncomingMessage`, `Reply`, the panic guard \
-         and `dispatch` — so the caller supplies the module they land in and two transports in one \
-         crate cannot collide. The invoking crate names `serde`, `serde_json` and `tracing` in its \
-         own manifest, because the items below call them.",
+         It takes no arguments and emits bare items - `IncomingMessage`, `Reply` and `dispatch`, \
+         beside the readers an arm needs - so the caller supplies the module they land in and two \
+         transports in one crate cannot collide. The invoking crate names `serde`, `serde_json` \
+         and `tracing` in its own manifest, because the items below call them.\n\n\
+         {placement}",
         transport.name()
     );
     let dispatch_doc = format!(
@@ -425,9 +503,22 @@ fn dispatcher_macro(service: &ServiceDef, transport: Transport) -> TokenStream {
          desugaring the trait itself is emitted in, so a consumer loop can spawn it."
     );
     let incoming = incoming_message();
+    let accessors = incoming_message_accessors();
     let reply = reply_trait(contract, &module);
-    let reader = refusal_reader(&module);
-    let guard = panic_guard();
+    // Both readers are an arm's: one classifies the refusal an arm's own deserialization earned,
+    // the other is what an arm calls its implementation behind. A service declaring no operation
+    // has no arm, so neither is emitted, and the implementation and the context it would hand one
+    // are not bound either - the fallback arm reads the operation name and nothing else.
+    let (reader, guard, implementation, context) = if service.operations.is_empty() {
+        (TokenStream::new(), TokenStream::new(), quote!(_), quote!(_))
+    } else {
+        (
+            refusal_reader(&module),
+            panic_guard(),
+            quote!(svc),
+            quote!(ctx),
+        )
+    };
     quote! {
         #[doc = #macro_doc]
         #[macro_export]
@@ -435,13 +526,14 @@ fn dispatcher_macro(service: &ServiceDef, transport: Transport) -> TokenStream {
             () => {
                 #incoming
                 #reply
+                #accessors
                 #reader
                 #guard
 
                 #[doc = #dispatch_doc]
                 pub fn dispatch<S, Ctx, R>(
-                    svc: &S,
-                    ctx: &Ctx,
+                    #implementation: &S,
+                    #context: &Ctx,
                     message: &IncomingMessage,
                     reply: &R,
                 ) -> impl ::core::future::Future<Output = ()> + Send
@@ -451,7 +543,7 @@ fn dispatcher_macro(service: &ServiceDef, transport: Transport) -> TokenStream {
                     R: Reply + Sync,
                 {
                     async move {
-                        match message.operation.as_str() {
+                        match message.operation() {
                             #(#arms)*
                             unrecognised => {
                                 reply
@@ -471,11 +563,11 @@ fn dispatcher_macro(service: &ServiceDef, transport: Transport) -> TokenStream {
 /// The private mirror of `ServiceFault`, the only thing here that deserializes one, and the tagged
 /// member the failure arm carries it in.
 ///
-/// A fault is minted through the constructors the service's module publishes rather than written as
-/// a literal: the fields are private and this expands outside the module they are private to. Each
-/// kind therefore carries exactly what its own constructor carries.
-fn fault_mirror(generated: &Generated) -> TokenStream {
-    let Generated { fault, .. } = generated;
+/// Emitted only for a service declaring at least one request-and-reply operation: a fault arrives
+/// in an answer, and a service that answers nothing has no answer to read one out of. The readers
+/// that mint from it are [`fault_mirror_readers`], emitted under the same condition and separately
+/// so that every type either macro writes is emitted above every `impl`.
+fn fault_mirror() -> TokenStream {
     quote! {
         /// A fault as it arrives, which is the one shape that reads one back. `ServiceFault`
         /// derives no `Deserialize` of its own, that being a public constructor by another name.
@@ -516,7 +608,17 @@ fn fault_mirror(generated: &Generated) -> TokenStream {
             Fault(TaggedFault),
             Operation(E),
         }
+    }
+}
 
+/// What mints a `ServiceFault` from the mirror the wire filled.
+///
+/// A fault is minted through the constructors the service's module publishes rather than written as
+/// a literal: the fields are private and this expands outside the module they are private to. Each
+/// kind therefore carries exactly what its own constructor carries.
+fn fault_mirror_readers(generated: &Generated) -> TokenStream {
+    let Generated { fault, .. } = generated;
+    quote! {
         impl FaultOnTheWire {
             /// The fault itself, minted through the constructors the service's own module
             /// publishes: its fields are private, and this reads a fault back from wherever the
@@ -563,6 +665,12 @@ fn fault_mirror(generated: &Generated) -> TokenStream {
 
 /// `IncomingMessage`: everything the dispatcher reads off the wire, which is the operation and the
 /// bytes.
+///
+/// The two are private, read through the accessors [`incoming_message_accessors`] emits. A struct
+/// whose every field is public is one a consumer publishing this module has their own lint refuse,
+/// and the only fix from where they stand would be an `#[allow]` over an attribute they did not
+/// write. `ServiceFault` is already shaped this way, so the constructor and the two readers are
+/// what the rest of the generated surface already looks like.
 fn incoming_message() -> TokenStream {
     quote! {
         /// One message as the transport read it: the operation it names, and the payload it
@@ -571,12 +679,37 @@ fn incoming_message() -> TokenStream {
         /// The operation travels beside the payload rather than inside it — the `operation-name`
         /// header on AMQP, the method name on gRPC, the path on HTTP — so no message type has to
         /// reserve a key for routing.
+        ///
+        /// Built through [`new`](IncomingMessage::new) by whichever crate owns the bus, and read
+        /// through [`operation`](IncomingMessage::operation) and
+        /// [`payload`](IncomingMessage::payload).
         pub struct IncomingMessage {
+            operation: String,
+            payload: Vec<u8>,
+        }
+    }
+}
+
+/// How one delivery is built and read: the constructor a transport adapter calls per delivery, and
+/// the two readers the arms go through.
+fn incoming_message_accessors() -> TokenStream {
+    quote! {
+        impl IncomingMessage {
+            /// Binds the operation name the transport read off the wire to the bytes beside it.
+            pub const fn new(operation: String, payload: Vec<u8>) -> Self {
+                Self { operation, payload }
+            }
+
             /// The wire name of the operation this message is for.
-            pub operation: String,
+            pub fn operation(&self) -> &str {
+                &self.operation
+            }
+
             /// The encoded message, which the dispatcher deserializes into the operation's own
             /// message type.
-            pub payload: Vec<u8>,
+            pub fn payload(&self) -> &[u8] {
+                &self.payload
+            }
         }
     }
 }
@@ -630,6 +763,12 @@ fn method(operation: &OperationDef, generated: &Generated) -> TokenStream {
     }
 }
 
+/// One method's documentation, whose failure prose sits under an `# Errors` heading.
+///
+/// Every method here answers a `Result`, and `clippy::missing_errors_doc` reaches a `pub fn`
+/// answering one whether it answers it directly or through an `impl Future`. The consumer cannot
+/// write that section - the doc comment is generated - so the heading is written where the prose
+/// already was, with the context sentence moved above it to keep the heading last.
 fn method_doc(operation: &OperationDef) -> String {
     let named = &operation.ident;
     let carried = &operation.wire_name;
@@ -638,20 +777,22 @@ fn method_doc(operation: &OperationDef) -> String {
     match operation.outcome {
         OperationOutcome::OneWay => format!(
             " Sends `{carried}`, which expects no reply.\n\n\
-             Nothing is awaited beyond the send, there being no reply to carry an error. The two \
-             failures it can report are both about the send itself: a message that fails its own \
-             validator never reaches the transport, and the fault names the field; a message the \
-             transport could not put out comes back as a `transport-failure` fault carrying what \
-             the transport said.\n\n\
-            {context}"
+             Nothing is awaited beyond the send, there being no reply to carry an error.\n\n\
+            {context}\n\n\
+             # Errors\n\n\
+             The two failures it can report are both about the send itself: a message that fails \
+             its own validator never reaches the transport, and the fault names the field; a \
+             message the transport could not put out comes back as a `transport-failure` fault \
+             carrying what the transport said."
         ),
         OperationOutcome::Reply { .. } => format!(
             " Calls `{carried}` and waits for the answer.\n\n\
+            {context}\n\n\
+             # Errors\n\n\
              `Err(CallError::Operation(…))` is the error `{named}` declared. \
              `Err(CallError::Fault(…))` is a defect: the remote produced one, this client refused \
              the message it was about to send, in which case the transport was never reached, or \
-             the transport reported that the call never landed.\n\n\
-            {context}"
+             the transport reported that the call never landed."
         ),
     }
 }
@@ -768,6 +909,42 @@ fn panic_guard() -> TokenStream {
             "the handler panicked, and said nothing that reads back".to_owned()
         }
     }
+}
+
+/// The placement section both macros carry: where the invocation goes, and the one form the
+/// declaring crate can reach it by.
+///
+/// A `macro_rules!` body is linted under the levels of the crate that *invokes* it, and the three
+/// diagnostics a placement decides — an inline module, a `mod` below a `use`, a glob import — are
+/// the consumer's to avoid and nobody else's to fix. `placed` is what the module's own file holds,
+/// ending in the path the invocation is written under so the macro name follows it.
+fn placement_doc(macro_name: &Ident, module: &str, placed: &str) -> String {
+    format!(
+        "# Where to put it\n\n\
+         In a module of its own file, with the `mod` declaration above the crate's `use` \
+         items:\n\n\
+         ```text\n\
+         // src/lib.rs\n\
+         mod {module};\n\
+         \n\
+         // src/{module}.rs\n\
+         {placed}{macro_name}!();\n\
+         ```\n\n\
+         An inline `mod {module} {{ ... }}` earns `clippy::inline_modules`, and a `mod` written \
+         below a `use` earns `clippy::arbitrary_source_item_ordering`. Both land in the \
+         consumer's build rather than in this one.\n\n\
+         The crate that *declared* the service reaches this by its bare name in textual scope, \
+         below the declaration, `#[macro_use] mod contract;` carrying it out of a submodule. \
+         `crate::{macro_name}!()` and `use crate::{macro_name};` are both refused there, a proc \
+         macro having been what defined the macro:\n\n\
+         ```text\n\
+         error: macro-expanded `macro_export` macros from the current crate cannot be referred \
+         to by absolute paths\n   \
+         = note: `#[deny(macro_expanded_macro_exports_accessed_by_absolute_paths)]` (part of \
+         `#[deny(future_incompatible)]`) on by default\n\
+         ```\n\n\
+         Any other crate reaches it by path, as above."
+    )
 }
 
 /// Which fault a `serde_json` refusal is, and the reader of the field serde names in its own words.

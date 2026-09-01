@@ -158,10 +158,10 @@ fn a_one_way_operation_runs_and_leaves_the_handle_it_was_given_untouched() {
     poll_once(amqp_transport::dispatch(
         &service,
         &ctx,
-        &amqp_transport::IncomingMessage {
-            operation: "purge".to_owned(),
-            payload: br#"{"organization_id":"acme"}"#.to_vec(),
-        },
+        &amqp_transport::IncomingMessage::new(
+            "purge".to_owned(),
+            br#"{"organization_id":"acme"}"#.to_vec(),
+        ),
         &transport,
     ))
     .unwrap();
@@ -221,10 +221,7 @@ fn a_second_service_s_dispatcher_stands_beside_the_first_in_one_crate() {
     poll_once(usage_amqp_transport::dispatch(
         &service,
         &ctx,
-        &usage_amqp_transport::IncomingMessage {
-            operation: "count".to_owned(),
-            payload: b"{}".to_vec(),
-        },
+        &usage_amqp_transport::IncomingMessage::new("count".to_owned(), b"{}".to_vec()),
         &transport,
     ))
     .unwrap();

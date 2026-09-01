@@ -192,10 +192,10 @@ pub mod a_bound_the_fields_own_type_declares {
     where
         T: Serialize,
     {
-        enrol_amqp_transport::IncomingMessage {
-            operation: operation.to_owned(),
-            payload: serde_json::to_vec(payload).unwrap(),
-        }
+        enrol_amqp_transport::IncomingMessage::new(
+            operation.to_owned(),
+            serde_json::to_vec(payload).unwrap(),
+        )
     }
 
     /// The outbound half of a brand's bound, and the half its serde hook cannot cover: a message
@@ -647,10 +647,7 @@ fn incoming<T>(operation: &str, payload: &T) -> amqp_transport::IncomingMessage
 where
     T: Serialize,
 {
-    amqp_transport::IncomingMessage {
-        operation: operation.to_owned(),
-        payload: serde_json::to_vec(payload).unwrap(),
-    }
+    amqp_transport::IncomingMessage::new(operation.to_owned(), serde_json::to_vec(payload).unwrap())
 }
 
 /// The probe never suspends, so one poll answers it; `None` says an assumption about the bodies

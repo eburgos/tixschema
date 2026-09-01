@@ -1384,10 +1384,7 @@ fn settlements(operation: &str, payload: &[u8]) -> Vec<Vec<u8>> {
         &ProbeContext {
             logger_name: "probe".to_owned(),
         },
-        &amqp_transport::IncomingMessage {
-            operation: operation.to_owned(),
-            payload: payload.to_vec(),
-        },
+        &amqp_transport::IncomingMessage::new(operation.to_owned(), payload.to_vec()),
         &capture,
     ));
     assert!(settled.is_some(), "the probe never suspends");
@@ -1404,10 +1401,7 @@ fn dispatched(operation: &str, payload: &[u8], logger_name: &str) -> Vec<u8> {
         &ProbeContext {
             logger_name: logger_name.to_owned(),
         },
-        &amqp_transport::IncomingMessage {
-            operation: operation.to_owned(),
-            payload: payload.to_vec(),
-        },
+        &amqp_transport::IncomingMessage::new(operation.to_owned(), payload.to_vec()),
         &capture,
     ));
     assert!(settled.is_some(), "the probe never suspends");

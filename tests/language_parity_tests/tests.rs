@@ -210,10 +210,7 @@ pub mod refusals {
         poll_once(amqp_transport::dispatch(
             &service,
             &(),
-            &amqp_transport::IncomingMessage {
-                operation: "admit".to_owned(),
-                payload: payload.as_bytes().to_vec(),
-            },
+            &amqp_transport::IncomingMessage::new("admit".to_owned(), payload.as_bytes().to_vec()),
             &reply,
         ))
         .unwrap();

@@ -1840,27 +1840,44 @@ Two macros rather than one, because the two halves of a service usually live in 
 // In the crate that declares the service: nothing below is built here.
 #[service_schema(transports = ["amqp_rpc"])]
 pub trait UsageService<Ctx> { /* ... */ }
-
-// In the crate that serves it, in a module that crate names:
-mod amqp_transport {
-    declaring_crate::usage_service_amqp_rpc_dispatcher!();
-}
-
-// In a crate that calls it: no backend, no bus library.
-mod amqp_client {
-    use declaring_crate::*;
-    declaring_crate::usage_service_amqp_rpc_client!();
-}
 ```
 
-Each macro takes no arguments and emits bare items rather than a module of its own, so the caller names the module and two transports in one crate cannot collide. The dispatcher emits `IncomingMessage`, `Reply` -- the handle a transport implements to answer one message, with `send` and `fault` -- a panic guard, and `dispatch(svc, ctx, message, reply)`, generic over the implementing type. The client emits:
+Each invocation goes in a module of its own **file**, and those `mod` declarations go above the crate's `use` items. A `macro_rules!` body is linted under the levels of the crate that *invokes* it, and this is the placement that measures clean: an inline `mod amqp_transport { ... }` earns `clippy::inline_modules`, a `mod` written below a `use` earns `clippy::arbitrary_source_item_ordering`, and reaching the author's own types through `use declaring_crate::*;` earns `clippy::wildcard_imports`.
+
+```text
+// In the crate that serves it -- src/lib.rs
+mod amqp_transport;
+
+// src/amqp_transport.rs
+declaring_crate::usage_service_amqp_rpc_dispatcher!();
+```
+
+```text
+// In a crate that calls it -- src/lib.rs: no backend, no bus library.
+mod amqp_client;
+
+// src/amqp_client.rs
+use declaring_crate::{AvailableBalanceRequest, AvailableBalanceResponse};
+
+declaring_crate::usage_service_amqp_rpc_client!();
+```
+
+Each macro takes no arguments and emits bare items rather than a module of its own, so the caller names the module and two transports in one crate cannot collide. The dispatcher emits `IncomingMessage` -- built with `IncomingMessage::new(operation, payload)` by whichever crate owns the bus and read through `operation()` and `payload()`, its two fields being private -- `Reply`, the handle a transport implements to answer one message, with `send` and `fault`, and `dispatch(svc, ctx, message, reply)`, generic over the implementing type. Beside them go the panic guard an arm calls its implementation behind and the reader that classifies a refused payload, both emitted only where the service declares an operation for them to serve. The client emits:
 
 - `Transport` -- the seam a client is bound to, with `notify` and `request`. Both answer a `Result`, whose failure arm carries in words what stopped a call from travelling; the client turns it into a fault of kind `transport-failure`.
-- `UsageServiceClient` -- one method per operation, over any `Transport`. Each takes that operation's arguments and no context: a context is what an implementation needs, and a caller has nothing to hand one to.
+- `UsageServiceClient` -- one method per operation, over any `Transport`. Each takes that operation's arguments and no context: a context is what an implementation needs, and a caller has nothing to hand one to. Every method answers a `Result`, and every method's generated documentation says under an `# Errors` heading what its failure arm can hold.
+- The mirror that reads a fault back off the wire and the reader that turns one envelope into three outcomes, emitted only where the service declares an operation that answers. A service declaring only one-way operations is emitted neither, there being no reply for either to read.
 
 Paths inside a `macro_rules!` body resolve where the macro is *invoked*, so the two kinds are spelled apart. Everything tixschema generated is reached through `$crate::`, which resolves in the crate that declared the service; every runtime crate is reached through a leading `::` and resolves in the invoking crate, **which is therefore the one that names `serde`, `serde_json` and `tracing` in its own manifest**. That is the point of the shape: a crate that only declares services names serde alone. A crate that places only a client names `serde` and `serde_json` and not `tracing`, nothing in a client catching a panic; the `use` in the client module above is what resolves the message types the author declared, which the expansion spells exactly as they were written.
 
-A crate that declares a service *and* places one of its halves invokes that macro by name rather than by path -- `usage_service_amqp_rpc_dispatcher!()` -- after the declaration and inside it or a module below it, `#[macro_use]` carrying it out of a submodule. Rust refuses an absolute path to a `macro_export` macro that a macro produced, from within the crate that produced it; another crate reaches it by path as above.
+A crate that declares a service *and* places one of its halves invokes that macro by name rather than by path -- `usage_service_amqp_rpc_dispatcher!()` -- after the declaration and inside it or a module below it, `#[macro_use]` carrying it out of a submodule. Rust refuses an absolute path to a `macro_export` macro that a macro produced, from within the crate that produced it -- `crate::usage_service_amqp_rpc_dispatcher!()` and `use crate::usage_service_amqp_rpc_dispatcher;` both earn a deny-by-default future-incompatibility:
+
+```text
+error: macro-expanded `macro_export` macros from the current crate cannot be referred to by absolute paths
+   = note: `#[deny(macro_expanded_macro_exports_accessed_by_absolute_paths)]` (part of `#[deny(future_incompatible)]`) on by default
+```
+
+Another crate reaches either macro by path as above.
 
 `#[macro_export]` places each macro at the declaring crate's root whatever module it was written in, so each name has to be unique across that crate, and `$crate` reads from that same root. A service declared at the crate root needs nothing further; one declared in a submodule re-exports at the crate root its generated module, its trait and the messages the macro declared, which is all either half reaches by name -- every message a dispatcher deserializes is reached as `$crate::{service}_schema::<Operation>Message`.
 

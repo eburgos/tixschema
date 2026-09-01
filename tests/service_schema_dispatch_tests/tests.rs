@@ -411,10 +411,10 @@ pub mod a_message_annotated_with_a_constraint {
         poll_once(gate_amqp_transport::dispatch(
             &service,
             &(),
-            &gate_amqp_transport::IncomingMessage {
-                operation: "admit".to_owned(),
-                payload: br#"{"organization_id":"ab"}"#.to_vec(),
-            },
+            &gate_amqp_transport::IncomingMessage::new(
+                "admit".to_owned(),
+                br#"{"organization_id":"ab"}"#.to_vec(),
+            ),
             &reply,
         ))
         .unwrap();
@@ -477,10 +477,7 @@ pub mod a_message_annotated_with_a_constraint {
             poll_once(gate_amqp_transport::dispatch(
                 &service,
                 &(),
-                &gate_amqp_transport::IncomingMessage {
-                    operation: "admit".to_owned(),
-                    payload: payload.clone(),
-                },
+                &gate_amqp_transport::IncomingMessage::new("admit".to_owned(), payload.clone()),
                 &reply,
             ))
             .unwrap();
@@ -525,10 +522,10 @@ pub mod a_message_annotated_with_a_constraint {
         poll_once(gate_amqp_transport::dispatch(
             &service,
             &(),
-            &gate_amqp_transport::IncomingMessage {
-                operation: "hold".to_owned(),
-                payload: br#"{"holds":{"name":"a"}}"#.to_vec(),
-            },
+            &gate_amqp_transport::IncomingMessage::new(
+                "hold".to_owned(),
+                br#"{"holds":{"name":"a"}}"#.to_vec(),
+            ),
             &reply,
         ))
         .unwrap();
@@ -570,10 +567,10 @@ pub mod a_message_annotated_with_a_constraint {
         poll_once(gate_amqp_transport::dispatch(
             &service,
             &(),
-            &gate_amqp_transport::IncomingMessage {
-                operation: "hold".to_owned(),
-                payload: br#"{"holds":{"name":"abc"}}"#.to_vec(),
-            },
+            &gate_amqp_transport::IncomingMessage::new(
+                "hold".to_owned(),
+                br#"{"holds":{"name":"abc"}}"#.to_vec(),
+            ),
             &reply,
         ))
         .unwrap();
@@ -604,10 +601,10 @@ pub mod a_message_annotated_with_a_constraint {
         poll_once(gate_amqp_transport::dispatch(
             &service,
             &(),
-            &gate_amqp_transport::IncomingMessage {
-                operation: "enrol".to_owned(),
-                payload: br#"{"slug":"ab"}"#.to_vec(),
-            },
+            &gate_amqp_transport::IncomingMessage::new(
+                "enrol".to_owned(),
+                br#"{"slug":"ab"}"#.to_vec(),
+            ),
             &reply,
         ))
         .unwrap();
@@ -654,10 +651,7 @@ pub mod a_message_annotated_with_a_constraint {
         poll_once(gate_amqp_transport::dispatch(
             &service,
             &(),
-            &gate_amqp_transport::IncomingMessage {
-                operation: operation.to_owned(),
-                payload: payload.to_vec(),
-            },
+            &gate_amqp_transport::IncomingMessage::new(operation.to_owned(), payload.to_vec()),
             &reply,
         ))
         .unwrap();
@@ -839,10 +833,10 @@ pub mod a_message_annotated_with_a_constraint {
         poll_once(gate_amqp_transport::dispatch(
             &service,
             &(),
-            &gate_amqp_transport::IncomingMessage {
-                operation: "open-ledger".to_owned(),
-                payload: br#"{"ledger_id":"ab"}"#.to_vec(),
-            },
+            &gate_amqp_transport::IncomingMessage::new(
+                "open-ledger".to_owned(),
+                br#"{"ledger_id":"ab"}"#.to_vec(),
+            ),
             &reply,
         ))
         .unwrap();
@@ -1238,10 +1232,10 @@ fn dispatched_twice_over(operation: &str, payload: &str) -> (Vec<String>, Vec<Se
     poll_once(second_amqp_transport::dispatch(
         &service,
         &ctx,
-        &second_amqp_transport::IncomingMessage {
-            operation: operation.to_owned(),
-            payload: payload.as_bytes().to_vec(),
-        },
+        &second_amqp_transport::IncomingMessage::new(
+            operation.to_owned(),
+            payload.as_bytes().to_vec(),
+        ),
         &reply,
     ))
     .unwrap();
@@ -1256,10 +1250,7 @@ fn dispatched(operation: &str, payload: &str) -> (Vec<String>, Vec<Settled>) {
     poll_once(amqp_transport::dispatch(
         &service,
         &ctx,
-        &amqp_transport::IncomingMessage {
-            operation: operation.to_owned(),
-            payload: payload.as_bytes().to_vec(),
-        },
+        &amqp_transport::IncomingMessage::new(operation.to_owned(), payload.as_bytes().to_vec()),
         &reply,
     ))
     .unwrap();
@@ -1495,10 +1486,10 @@ fn dispatch_returns_after_a_handler_panics_so_the_transport_can_still_settle_the
     let returned = poll_once(amqp_transport::dispatch(
         &service,
         &ctx,
-        &amqp_transport::IncomingMessage {
-            operation: "collapse".to_owned(),
-            payload: br#"{"organization_id":"acme"}"#.to_vec(),
-        },
+        &amqp_transport::IncomingMessage::new(
+            "collapse".to_owned(),
+            br#"{"organization_id":"acme"}"#.to_vec(),
+        ),
         &reply,
     ));
     assert_eq!(
