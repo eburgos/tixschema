@@ -109,7 +109,10 @@ pub fn exec_service_schema(args: TokenStream, input: TokenStream) -> TokenStream
     match (asked, parse::parse_service(&declared)) {
         (Ok(wanted), Ok(service)) => {
             let messages = messages::emit(&service);
-            let support = support::emit(&service);
+            // The module is handed the asked-for list as well: it anchors, at the declaration, the
+            // root names a transport's macro reaches through `$crate`, and a service that asked
+            // for no transport publishes no macro and so owes no root anything.
+            let support = support::emit(&service, &wanted);
             // Both halves a transport contributes are `macro_rules!` bodies rather than compiled
             // items, so they stay at the trait's scope; `#[macro_export]` hoists each name to the
             // crate root from wherever the service was written.

@@ -85,6 +85,52 @@ fn published_macro(source: &str, named: &str) -> String {
     macro_rules_body(expansion_over_amqp_rpc(source), named)
 }
 
+/// The tokens the service's own module holds, read off the expansion the same way a macro's rules
+/// are: the module runs to a brace, and it is the one place the root anchors sit.
+fn module_body(expansion: TokenStream, named: &str) -> TokenStream {
+    let mut reached_the_keyword = false;
+    let mut reached_the_name = false;
+    let mut held = None;
+    for token in expansion {
+        match token {
+            TokenTree::Ident(spelled) if spelled == "mod" => reached_the_keyword = true,
+            TokenTree::Ident(spelled) => {
+                reached_the_name = reached_the_keyword && spelled == named;
+                reached_the_keyword = false;
+            }
+            TokenTree::Group(carried) if reached_the_name => {
+                held = Some(carried.stream());
+                reached_the_name = false;
+            }
+            TokenTree::Group(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => (),
+        }
+    }
+    held.unwrap()
+}
+
+/// Every span carried by an ident spelled `named` anywhere in `tokens`, groups walked into.
+fn spans_of_idents_named(tokens: TokenStream, named: &str) -> Vec<Span> {
+    let mut found = Vec::new();
+    for token in tokens {
+        match token {
+            TokenTree::Group(carried) => {
+                found.extend(spans_of_idents_named(carried.stream(), named));
+            }
+            TokenTree::Ident(spelled) if spelled == named => found.push(spelled.span()),
+            TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => (),
+        }
+    }
+    found
+}
+
+/// The bound written on `S` at the first `opening`, up to whatever ends it. The path's argument
+/// list is part of what comes back, which is what makes two of them comparable.
+fn bound_on_s(text: &str, opening: &str) -> String {
+    let at = text.find(opening).unwrap() + opening.len();
+    let rest = &text[at..];
+    rest[..rest.find(['+', ',']).unwrap()].trim().to_owned()
+}
+
 /// The rules a `macro_rules!` published under `named` stores, read off the expansion's own tokens
 /// rather than off a slice of its rendering: the expansion publishes more than one macro, and each
 /// runs to a brace a search over text has to match for itself.
@@ -874,6 +920,97 @@ fn every_generated_name_the_macro_body_reaches_is_written_through_crate() {
             "`{reached}` is reached unqualified somewhere in the macro body, which resolves in \
              whichever crate invoked the macro. Got: {body}"
         );
+    }
+}
+
+/// A transport's macro reaches the trait and the service's own module through `$crate`, which is
+/// the declaring crate's *root* however far below it the service was written. The module carries
+/// one anchor per name, so the crate that owes the re-exports is the crate that stops compiling
+/// without them.
+#[test]
+fn the_module_anchors_both_root_names_a_transport_macro_reaches() {
+    let held = module_body(
+        expansion_over_amqp_rpc(MIXED_SERVICE),
+        "usage_service_schema",
+    )
+    .to_string();
+    assert!(
+        held.contains(
+            "const _ : :: core :: marker :: PhantomData < crate :: usage_service_schema :: \
+             ServiceFault > = :: core :: marker :: PhantomData ;"
+        ),
+        "the module is not anchored at the crate root, so a service below the root publishes a \
+         macro whose `$crate::{{service}}_schema` resolves nowhere. Got: {held}"
+    );
+    assert!(
+        held.contains("S : crate :: UsageService < Ctx >"),
+        "the trait is not anchored at the crate root, so a service below the root publishes a \
+         macro whose `$crate::{{Trait}}` resolves nowhere. Got: {held}"
+    );
+}
+
+/// A service that named no transport publishes no macro, reaches no root and owes none, so the
+/// bare-service surface does not grow.
+#[test]
+fn a_service_that_asked_for_no_transport_is_anchored_at_no_root() {
+    let held = module_body(
+        exec_service_schema(
+            TokenStream::new(),
+            declared(MIXED_SERVICE).to_token_stream(),
+        ),
+        "usage_service_schema",
+    )
+    .to_string();
+    for anchored in [
+        "crate :: usage_service_schema",
+        "RootAnchor",
+        "crate :: UsageService",
+    ] {
+        assert!(
+            !held.contains(anchored),
+            "`{anchored}` is anchored for a service that asked for no transport, so a declaration \
+             below the crate root is refused a re-export nothing reaches. Got: {held}"
+        );
+    }
+}
+
+/// The anchor stands for the dispatcher's own `where` clause, so it is written the way that clause
+/// is: one type argument, whatever the trait declares. Both are read off one expansion, so a trait
+/// the dispatcher could never bind is refused at the declaration rather than at every consumer.
+#[test]
+fn the_trait_anchor_binds_what_the_dispatcher_s_where_clause_binds() {
+    let expansion = expansion_over_amqp_rpc(MIXED_SERVICE);
+    let dispatched = macro_rules_body(expansion.clone(), "usage_service_amqp_rpc_dispatcher");
+    let held = module_body(expansion, "usage_service_schema").to_string();
+    assert_eq!(
+        bound_on_s(&held, "S : "),
+        bound_on_s(&dispatched, "S : ").replace("$ crate", "crate"),
+        "the anchor and the dispatcher bind `S` differently, so one of them can pass while the \
+         other cannot compile. Anchored in: {held}"
+    );
+}
+
+/// Both anchors are located on the trait's own ident, so the caret a missing re-export earns sits
+/// on the declaration rather than on tokens with no source of their own.
+#[test]
+fn both_root_anchors_are_spanned_on_the_trait_s_ident() {
+    let held = module_body(
+        expansion_over_amqp_rpc(MIXED_SERVICE),
+        "usage_service_schema",
+    );
+    for anchored in ["usage_service_schema", "RootAnchor"] {
+        let spans = spans_of_idents_named(held.clone(), anchored);
+        assert!(
+            !spans.is_empty(),
+            "`{anchored}` is not in the module at all"
+        );
+        for span in spans {
+            assert_eq!(
+                span.source_text().as_deref(),
+                Some("UsageService"),
+                "`{anchored}` is spanned somewhere other than the trait's ident"
+            );
+        }
     }
 }
 
