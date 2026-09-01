@@ -159,7 +159,7 @@ pub mod refusals {
         }
     }
 
-    impl gate_service_schema::Reply for Recorder {
+    impl amqp_transport::Reply for Recorder {
         async fn fault(&self, fault: gate_service_schema::ServiceFault) {
             ready(()).await;
             self.settled

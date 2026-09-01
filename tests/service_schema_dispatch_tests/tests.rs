@@ -224,8 +224,8 @@ pub mod a_message_annotated_with_a_constraint {
         DbError,
     }
 
-    /// This service's own reply handle: the types are generated per service, so serving a second
-    /// one means implementing a second `Reply`.
+    /// This service's own reply handle: the handle travels with the dispatcher, so serving a
+    /// second service means implementing the `Reply` that service's dispatcher declared.
     pub struct GateReply {
         faults: Mutex<Vec<gate_service_schema::ServiceFault>>,
         settled: Mutex<Vec<String>>,
@@ -340,7 +340,7 @@ pub mod a_message_annotated_with_a_constraint {
         }
     }
 
-    impl gate_service_schema::Reply for GateReply {
+    impl gate_amqp_transport::Reply for GateReply {
         async fn fault(&self, fault: gate_service_schema::ServiceFault) {
             ready(()).await;
             self.settled.lock().unwrap().push(fault.to_string());
@@ -1052,7 +1052,24 @@ impl ProbeService<String> for ProbeBackEnd {
     }
 }
 
-impl probe_service_schema::Reply for ProbeReply {
+impl amqp_transport::Reply for ProbeReply {
+    async fn fault(&self, fault: probe_service_schema::ServiceFault) {
+        ready(()).await;
+        self.record(Settled::Fault(fault));
+    }
+
+    async fn send<T>(&self, value: T)
+    where
+        T: Serialize + Send,
+    {
+        ready(()).await;
+        self.record(Settled::Sent(serde_json::to_string(&value).unwrap()));
+    }
+}
+
+// The handle is one of the bare items each expansion writes, so the second placement declares its
+// own and one handle serving both dispatchers implements both.
+impl second_amqp_transport::Reply for ProbeReply {
     async fn fault(&self, fault: probe_service_schema::ServiceFault) {
         ready(()).await;
         self.record(Settled::Fault(fault));

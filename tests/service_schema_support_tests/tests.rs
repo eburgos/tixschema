@@ -10,7 +10,7 @@
 
 #![cfg(feature = "serde")]
 
-use crate::amqp_transport;
+use crate::{amqp_transport, usage_amqp_transport};
 use core::future::{Future, ready};
 use core::pin::pin;
 use core::task::{Context as PollContext, Poll, Waker};
@@ -52,7 +52,7 @@ pub trait SweepService<Ctx> {
     async fn sweep(&self, ctx: &Ctx) -> Result<SweepReport, SweepError>;
 }
 
-#[service_schema()]
+#[service_schema(transports = ["amqp_rpc"])]
 pub trait UsageService<Ctx> {
     async fn count(&self, ctx: &Ctx) -> Result<SweepReport, SweepError>;
 }
@@ -79,9 +79,9 @@ impl UsageService<String> for ProbeBackEnd {
     }
 }
 
-// One transport, two services, two unrelated reply handles: the types are generated per service,
-// so serving both means implementing both.
-impl sweep_service_schema::Reply for ProbeTransport {
+// One transport, two services, two unrelated reply handles: the handle travels with each service's
+// own dispatcher, so serving both means implementing both.
+impl amqp_transport::Reply for ProbeTransport {
     async fn fault(&self, fault: sweep_service_schema::ServiceFault) {
         self.record(fault.to_string());
     }
@@ -94,7 +94,7 @@ impl sweep_service_schema::Reply for ProbeTransport {
     }
 }
 
-impl usage_service_schema::Reply for ProbeTransport {
+impl usage_amqp_transport::Reply for ProbeTransport {
     async fn fault(&self, fault: usage_service_schema::ServiceFault) {
         self.record(fault.to_string());
     }
@@ -180,7 +180,7 @@ fn a_one_way_operation_runs_and_leaves_the_handle_it_was_given_untouched() {
 
 #[test]
 fn a_reply_is_handed_the_value_and_the_transport_serializes_it() {
-    use sweep_service_schema::Reply as _;
+    use amqp_transport::Reply as _;
 
     let service = ProbeBackEnd::new(12);
     let transport = ProbeTransport::new();
@@ -200,8 +200,8 @@ fn one_transport_serves_two_services_through_two_reply_handles() {
     let transport = ProbeTransport::new();
     let ctx = "probe".to_owned();
     let counted = poll_once(service.count(&ctx)).unwrap().unwrap();
-    poll_once(usage_service_schema::Reply::send(&transport, counted)).unwrap();
-    poll_once(sweep_service_schema::Reply::send(
+    poll_once(usage_amqp_transport::Reply::send(&transport, counted)).unwrap();
+    poll_once(amqp_transport::Reply::send(
         &transport,
         SweepReport { swept: 7 },
     ))
@@ -209,7 +209,30 @@ fn one_transport_serves_two_services_through_two_reply_handles() {
     assert_eq!(
         transport.settled(),
         vec![r#"{"swept":12}"#.to_owned(), r#"{"swept":7}"#.to_owned()],
-        "each service generates its own `Reply`, so nothing is shared between the two"
+        "each service's dispatcher declares its own `Reply`, so nothing is shared between the two"
+    );
+}
+
+#[test]
+fn a_second_service_s_dispatcher_stands_beside_the_first_in_one_crate() {
+    let service = ProbeBackEnd::new(12);
+    let transport = ProbeTransport::new();
+    let ctx = "probe".to_owned();
+    poll_once(usage_amqp_transport::dispatch(
+        &service,
+        &ctx,
+        &usage_amqp_transport::IncomingMessage {
+            operation: "count".to_owned(),
+            payload: b"{}".to_vec(),
+        },
+        &transport,
+    ))
+    .unwrap();
+    assert_eq!(
+        transport.settled(),
+        vec![r#"{"ok":true,"value":{"swept":12}}"#.to_owned()],
+        "the second placement is its own set of items, and answers through the handle it declared \
+         itself"
     );
 }
 
@@ -287,7 +310,7 @@ fn every_kind_of_fault_is_built_through_its_own_constructor_from_outside_the_mod
 
 #[test]
 fn a_fault_built_outside_the_module_settles_through_the_reply_handle_a_transport_implements() {
-    use sweep_service_schema::Reply as _;
+    use amqp_transport::Reply as _;
 
     let transport = ProbeTransport::new();
     poll_once(

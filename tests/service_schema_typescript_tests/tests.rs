@@ -1052,7 +1052,7 @@ impl Capture {
 // Only the group that reads the wire against the published TypeScript drives these, and that
 // group is asked of a build that writes TypeScript at all.
 #[cfg(feature = "typescript")]
-impl probe_service_schema::Reply for Capture {
+impl amqp_transport::Reply for Capture {
     async fn fault(&self, fault: probe_service_schema::ServiceFault) {
         ready(()).await;
         // The fault alone, unframed. What frames it is the transport, and what that framing has to

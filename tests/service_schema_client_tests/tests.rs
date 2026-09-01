@@ -95,7 +95,7 @@ pub mod a_bound_the_fields_own_type_declares {
         }
     }
 
-    impl enrol_service_schema::Reply for EnrolCapture {
+    impl enrol_amqp_transport::Reply for EnrolCapture {
         async fn fault(&self, fault: enrol_service_schema::ServiceFault) {
             ready(()).await;
             let framed = serde_json::json!({
@@ -429,7 +429,7 @@ impl ProbeService<String> for ProbeBackEnd {
     }
 }
 
-impl probe_service_schema::Reply for Capture {
+impl amqp_transport::Reply for Capture {
     async fn fault(&self, fault: probe_service_schema::ServiceFault) {
         ready(()).await;
         // The framing is the transport's business: a fault rides tagged inside the failure arm,
