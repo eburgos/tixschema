@@ -24,24 +24,22 @@
 //!
 //! `Deserialize` is deliberately not derived on the fault, so a fault never arrives simply by
 //! having been written on the wire. `Serialize` is derived, because the transport has to put one
-//! there. Reading one back off it is the generated client's business and happens inside the module,
-//! through a mirror that derives what the fault does not.
+//! there. Reading one back off it is the generated client's business, and it happens through a
+//! mirror that derives what the fault does not and then mints the fault through the constructors
+//! published here.
 //!
-//! **The Rust client is emitted inside this module**, which is why [`emit`] takes its tokens
-//! rather than being spliced beside them: it names the fault and the answer envelope unqualified.
+//! # What a dispatcher or a client expanded elsewhere reads from here
 //!
-//! # What a dispatcher expanded elsewhere reads from here
+//! The `Answered` envelope one writes and the other reads, the readers that turn a violation report
+//! into the field and the detail a fault carries, and — one of each per operation — the name its
+//! message is reached under and the validator that message runs. Both halves of a service are held
+//! as macro tokens and expanded in crates that are usually not this one, so everything either of
+//! them reaches is published for the same reason the fault's constructors are.
 //!
-//! The `Answered` envelope it answers in, the readers that turn a violation report into the field
-//! and the detail a fault carries, and — one of each per operation — the name its message is
-//! reached under and the validator that message runs. All of them are published for the same
-//! reason the fault's constructors are, and the first two live here rather than travelling with a
-//! transport because the client reads them too.
-//!
-//! An operation's message is republished here under `{Operation}Message` so that a dispatcher
-//! names one path for every spelling: an author's own type, a type the macro declared, a type
-//! written under a module of its own. It also gives two services in one crate room to receive
-//! same-named messages, each module being its own namespace where the crate root is not.
+//! An operation's message is republished here under `{Operation}Message` so that either half names
+//! one path for every spelling: an author's own type, a type the macro declared, a type written
+//! under a module of its own. It also gives two services in one crate room to receive same-named
+//! messages, each module being its own namespace where the crate root is not.
 //!
 //! The validators are here because the fallback they run behind is: `MessageValidation` is shut in
 //! a module of its own so that two blanket `validate()` methods are never in scope at once, and an
@@ -68,16 +66,17 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::Ident;
 
-/// `generated` is what [`client`](super::client) wrote: it lands inside the module rather than
-/// beside it, because it names the fault and the answer envelope unqualified.
+/// The service's own module, holding everything either half of a service reads and nothing that
+/// belongs to one of them.
 ///
 /// # A service is declared at module scope, never inside a function body
 ///
-/// The module opens with `use super::*;`, which is how the client reaches the trait and the
-/// message types the author declared beside it. A module written inside a function
-/// body has the enclosing *module* as its parent rather than the function, so `super` from there
-/// reaches past every name that function declared and finds none of them. `#[model_schema]` carries
-/// the same requirement, for the same reason and through the same import.
+/// The module opens with `use super::*;`, which is how the message aliases and the validators
+/// behind them reach the trait and the message types the author declared beside it. A module
+/// written inside a function body has the enclosing *module* as its parent rather than the
+/// function, so `super` from there reaches past every name that function declared and finds none
+/// of them. `#[model_schema]` carries the same requirement, for the same reason and through the
+/// same import.
 ///
 /// The macro cannot refuse the placement. An attribute macro is handed the annotated item's own
 /// tokens and nothing about the scope it was written in, and a trait written inside a function is
@@ -180,7 +179,7 @@ use syn::Ident;
 /// placement and nothing else about the program. The import those four errors resolve against is
 /// what the unit test `the_generated_module_reaches_the_author_s_declarations_through_super` reads
 /// back off the expansion.
-pub fn emit(service: &ServiceDef, generated: &TokenStream) -> TokenStream {
+pub fn emit(service: &ServiceDef) -> TokenStream {
     let declared = &service.ident;
     let module = module_ident(service);
     let module_doc = format!(
@@ -215,7 +214,6 @@ pub fn emit(service: &ServiceDef, generated: &TokenStream) -> TokenStream {
             #messages
             #validators
             #readers
-            #generated
         }
     }
 }
@@ -223,7 +221,8 @@ pub fn emit(service: &ServiceDef, generated: &TokenStream) -> TokenStream {
 /// The `{ ok, value }` / `{ ok, error }` envelope a request-and-reply operation answers in, which
 /// the client reads back and a TypeScript caller of the same operation narrows on.
 ///
-/// Published because a dispatcher answers in it and no longer sits in this module.
+/// Published, with a constructor and a reader, because neither half sits in this module any more:
+/// a dispatcher answers in it and a client reads one back, both from wherever they were expanded.
 fn answered_envelope() -> TokenStream {
     quote! {
         /// What a request-and-reply operation puts on the wire: the envelope, with the message the
@@ -252,6 +251,19 @@ fn answered_envelope() -> TokenStream {
                         ok: false,
                         value: None,
                     },
+                }
+            }
+
+            /// What the envelope said, for a client reading one back from outside this module.
+            ///
+            /// The arm is the `ok` flag's, and what it carries is `None` where the envelope
+            /// contradicted itself — `ok` with no value, a failure with no error. That is a defect
+            /// on the wire, which the reader answers for rather than this.
+            pub fn carried(self) -> Result<Option<T>, Option<E>> {
+                if self.ok {
+                    Ok(self.value)
+                } else {
+                    Err(self.error)
                 }
             }
         }

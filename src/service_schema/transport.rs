@@ -13,13 +13,18 @@
 //!
 //! # What a named transport contributes
 //!
-//! One `#[macro_export] macro_rules!` per transport the service asked for, named
-//! `{service}_{transport}_dispatcher` and emitted at the trait's own scope. Nothing inside it is
-//! compiled where the service is declared, and a service that named no transport is emitted
-//! nothing here at all.
+//! Two `#[macro_export] macro_rules!` per transport the service asked for, named
+//! `{service}_{transport}_dispatcher` and `{service}_{transport}_client` and emitted at the trait's
+//! own scope. Nothing inside either is compiled where the service is declared, and a service that
+//! named no transport is emitted nothing here at all.
+//!
+//! Two macros rather than one, because the two halves of a service usually live in different
+//! crates — a crate that calls the service can see the contract but has no business seeing the
+//! server's backend. Each is invoked and placed by the half that wants it, and neither drags in the
+//! other.
 //!
 //! [`emit`] walks [`Transport::KNOWN`] rather than the list as written, so a transport named twice
-//! contributes one macro rather than two definitions of one exported name.
+//! contributes one pair rather than two definitions of one exported name.
 
 mod amqp_rpc;
 
@@ -67,20 +72,34 @@ impl Transport {
     }
 }
 
+/// The name a transport's client macro publishes under: `{service}_{transport}_client`.
+pub fn client_macro_ident(service: &ServiceDef, transport: Transport) -> Ident {
+    macro_ident(service, transport, "client")
+}
+
 /// The name a transport's dispatcher macro publishes under: `{service}_{transport}_dispatcher`.
-///
-/// `#[macro_export]` places it at the declaring crate's root whatever module it was written in, so
-/// the service name is what keeps two services in one crate from claiming one name.
 pub fn dispatcher_macro_ident(service: &ServiceDef, transport: Transport) -> Ident {
+    macro_ident(service, transport, "dispatcher")
+}
+
+/// Either half's macro name, spelled in one place so the two cannot drift apart.
+///
+/// `#[macro_export]` places each at the declaring crate's root whatever module it was written in,
+/// so the service name is what keeps two services in one crate from claiming one name.
+fn macro_ident(service: &ServiceDef, transport: Transport, half: &str) -> Ident {
     format_ident!(
-        "{}_{}_dispatcher",
+        "{}_{}_{}",
         RenameRule::SnakeCase.apply_to_variant(&service.ident.to_string()),
         transport.name(),
+        half,
         span = service.ident.span()
     )
 }
 
 /// What every transport the service asked for contributes, in the registry's own order.
+///
+/// Each contributes at most once however many times it was named: what it publishes is
+/// `#[macro_export]`ed, and one name at a crate root can be defined once.
 pub fn emit(service: &ServiceDef, asked: &[Transport]) -> TokenStream {
     Transport::KNOWN
         .iter()

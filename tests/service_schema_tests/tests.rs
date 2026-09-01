@@ -129,6 +129,16 @@ impl ProbeService<ProbeContext> for ProbeBackEnd {
     }
 }
 
+/// The client, placed: the macro takes no arguments and emits bare items, so the module is this
+/// crate's to name. It sits below the declaration it came from, that being the only scope a
+/// `macro_export` macro another macro expanded is reachable from inside the declaring crate.
+#[cfg(test)]
+pub mod amqp_client {
+    use super::{BalanceRequest, BalanceResponse, ProbeError};
+
+    probe_service_amqp_rpc_client!();
+}
+
 /// A transport that answers by dispatching straight back into the service, so a client call and
 /// the arm that serves it are the two ends of one seam rather than two fixtures.
 pub struct Loopback {
@@ -167,7 +177,7 @@ impl probe_service_schema::Reply for Capture {
     }
 }
 
-impl probe_service_schema::Transport for Loopback {
+impl amqp_client::Transport for Loopback {
     async fn notify<T>(&self, operation: &str, payload: T) -> Result<(), String>
     where
         T: Serialize + Send,
@@ -391,7 +401,7 @@ fn the_same_declaration_spells_the_operation_in_typescript_the_way_typescript_wo
 
 #[test]
 fn a_client_call_answers_the_declared_success_type_or_a_call_error_over_the_declared_error() {
-    let client = probe_service_schema::ProbeServiceClient::new(Loopback {
+    let client = amqp_client::ProbeServiceClient::new(Loopback {
         service: ProbeBackEnd { granted_credits: 5 },
     });
     // Annotated rather than inferred: the failure arm being `CallError<ProbeError>` rather than
@@ -403,4 +413,41 @@ fn a_client_call_answers_the_declared_success_type_or_a_call_error_over_the_decl
         }))
         .unwrap();
     assert_eq!(answering, Ok(BalanceResponse { credits: 9 }));
+}
+
+/// Every operation, over the same loop back into the dispatcher: the client publishes one method
+/// per declared operation, each under the wire name its own arm answers to, and each carrying what
+/// the implementation returned.
+#[test]
+fn every_operation_the_service_declares_is_reachable_through_the_client_it_publishes() {
+    let client = amqp_client::ProbeServiceClient::new(Loopback {
+        service: ProbeBackEnd { granted_credits: 5 },
+    });
+    let request = || BalanceRequest {
+        organization_id: "acme".to_owned(),
+    };
+    assert_eq!(
+        poll_once(client.can_generate(request())).unwrap(),
+        Ok(BalanceResponse { credits: 9 }),
+        "a wire-name override moves the name the transport carries and nothing about the method"
+    );
+    assert_eq!(
+        poll_once(client.expire_credit("acme".to_owned(), "cr-1".to_owned())).unwrap(),
+        Ok(BalanceResponse { credits: 8 }),
+        "the arguments after the context are packed into the message the macro declared"
+    );
+    assert_eq!(
+        poll_once(client.sweep()).unwrap(),
+        Ok(BalanceResponse { credits: 5 }),
+        "an operation that takes nothing still sends the empty message declared for it"
+    );
+    assert!(
+        poll_once(client.apply_bundle(request())).unwrap().is_ok(),
+        "a one-way send answers nothing beyond the send itself"
+    );
+    assert_eq!(
+        client.transport().service.granted_credits,
+        5,
+        "the client keeps the transport it was bound to rather than consuming it"
+    );
 }

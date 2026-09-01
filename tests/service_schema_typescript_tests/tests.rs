@@ -560,7 +560,7 @@ mod the_schema_that_rides_with_the_type {
 #[cfg(feature = "typescript")]
 mod the_envelope_typescript_declares_is_the_one_rust_writes {
     #[cfg(feature = "zod")]
-    use super::{BalanceRequest, PreparedAnswer, poll_once, settlements};
+    use super::{BalanceRequest, PreparedAnswer, amqp_client, poll_once, settlements};
     use super::{ProbeServiceSchema, dispatched, probe_service_schema};
     use core::mem::take;
 
@@ -580,6 +580,30 @@ mod the_envelope_typescript_declares_is_the_one_rust_writes {
             .map(ToOwned::to_owned);
         assert!(found.is_some(), "no `ok: {discriminant}` arm in: {body}");
         found.unwrap()
+    }
+
+    /// The fault a call error carries, or nothing where it carries the operation's own error.
+    #[cfg(feature = "zod")]
+    fn faulted<S, E>(
+        answered: Result<S, probe_service_schema::CallError<E>>,
+    ) -> Option<probe_service_schema::ServiceFault> {
+        match answered {
+            Err(probe_service_schema::CallError::Fault(carried)) => Some(carried),
+            Ok(_) | Err(probe_service_schema::CallError::Operation(_)) => None,
+        }
+    }
+
+    /// One settled fault, framed the way the emitted TypeScript dispatcher frames one.
+    #[cfg(feature = "zod")]
+    fn framed_fault(fault: &[u8]) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "ok": false,
+            "error": {
+                "isServiceFault": true,
+                "fault": serde_json::from_slice::<serde_json::Value>(fault).unwrap(),
+            },
+        }))
+        .unwrap()
     }
 
     /// The keys one JSON object carries, sorted, so a set is compared rather than a spelling.
@@ -926,24 +950,14 @@ mod the_envelope_typescript_declares_is_the_one_rust_writes {
             written.contains("return { ok: false, error: { isServiceFault: true, fault } };"),
             "the framing this test writes by hand is the one the emitter writes. Got: {written}"
         );
-        let framed = serde_json::to_vec(&serde_json::json!({
-            "ok": false,
-            "error": {
-                "isServiceFault": true,
-                "fault": serde_json::from_slice::<serde_json::Value>(&fault).unwrap(),
-            },
-        }))
-        .unwrap();
-        let client =
-            probe_service_schema::ProbeServiceClient::new(PreparedAnswer { encoded: framed });
+        let client = amqp_client::ProbeServiceClient::new(PreparedAnswer {
+            encoded: framed_fault(&fault),
+        });
         let answered = poll_once(client.get_balance(BalanceRequest {
             organization_id: "acme".to_owned(),
         }))
         .unwrap();
-        let reported = match answered {
-            Err(probe_service_schema::CallError::Fault(carried)) => Some(carried),
-            Ok(_) | Err(probe_service_schema::CallError::Operation(_)) => None,
-        };
+        let reported = faulted(answered);
         assert!(
             reported.is_some(),
             "a framed fault is a fault, not the operation's declared error"
@@ -954,6 +968,38 @@ mod the_envelope_typescript_declares_is_the_one_rust_writes {
             probe_service_schema::ProbeServiceFaultKind::UnknownOperation
         );
         assert_eq!(read.operation(), "nothing-answers-to-this");
+    }
+
+    /// The pair above is the shape of every operation rather than of one: each method the client
+    /// publishes sends under its own wire name and reads that same framing back through the same
+    /// reader, whichever arms the operation declared.
+    #[cfg(feature = "zod")]
+    #[test]
+    fn every_operation_the_client_publishes_reads_that_framing_back_the_same_way() {
+        let fault = dispatched("nothing-answers-to-this", b"{}", "probe");
+        let client = amqp_client::ProbeServiceClient::new(PreparedAnswer {
+            encoded: framed_fault(&fault),
+        });
+        let request = || BalanceRequest {
+            organization_id: "acme".to_owned(),
+        };
+        assert!(faulted(poll_once(client.get_balance(request())).unwrap()).is_some());
+        assert!(faulted(poll_once(client.settle(request())).unwrap()).is_some());
+        assert!(faulted(poll_once(client.sweep()).unwrap()).is_some());
+        assert!(
+            faulted(poll_once(client.expire_credit("acme".to_owned(), "cr-1".to_owned())).unwrap())
+                .is_some()
+        );
+        assert!(
+            poll_once(client.apply_bundle("acme".to_owned(), "b-1".to_owned()))
+                .unwrap()
+                .is_ok(),
+            "a one-way operation answers nothing beyond the send"
+        );
+        assert!(
+            !client.transport().encoded.is_empty(),
+            "the client keeps the transport it was bound to rather than consuming it"
+        );
     }
 }
 
@@ -1041,7 +1087,7 @@ pub struct PreparedAnswer {
 // Read only by the group that compares the wire against the published client and dispatcher, and
 // those are published only where the Zod surface they parse against is.
 #[cfg(all(feature = "typescript", feature = "zod"))]
-impl probe_service_schema::Transport for PreparedAnswer {
+impl amqp_client::Transport for PreparedAnswer {
     async fn notify<T>(&self, _operation: &str, _payload: T) -> Result<(), String>
     where
         T: serde::Serialize + Send,
@@ -1130,6 +1176,19 @@ pub trait ProbeService<Ctx> {
 
     /// None at all: an empty message is declared for it.
     async fn sweep(&self, ctx: &Ctx) -> Result<BalanceResponse, ProbeError>;
+}
+
+/// The client, placed: the macro takes no arguments and emits bare items, so the module is this
+/// crate's to name. It is read only by the group that compares the wire against the published
+/// client, and that group is gated where the Zod surface it parses against is.
+#[cfg(test)]
+#[cfg(all(feature = "typescript", feature = "zod"))]
+pub mod amqp_client {
+    use super::{
+        ApplyBundleReceipt, BalanceRequest, BalanceResponse, CreditWriteError, ProbeError,
+    };
+
+    probe_service_amqp_rpc_client!();
 }
 
 /// A second service in the same bundle, declaring an operation the first one declares too. It

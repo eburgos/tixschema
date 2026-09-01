@@ -26,16 +26,18 @@
 //!
 //! # What a crate declaring a service names in its own manifest
 //!
-//! Two runtime crates, because the generated code calls them: `serde` and `serde_json`. tixschema
-//! itself is build-time only and neither is reached through it — a service names them the way it
-//! names any dependency of code it compiles.
+//! One runtime crate, because the generated code calls it: `serde`. Every declared message and
+//! both fault types derive what serde writes, and with both halves of a service held as tokens
+//! nothing else at the trait's own scope reaches a runtime crate at all. tixschema itself is
+//! build-time only and serde is not reached through it — a service names it the way it names any
+//! dependency of code it compiles.
 //!
-//! `tracing` is named by the crate that *invokes* a transport's dispatcher macro rather than by
-//! the one that declares the service, because that is where the arm calling `tracing::error!` is
-//! compiled. So is a second copy of `serde_json`'s name, the payload being read there. A caught
-//! panic is written down for the same reason it is caught: a dispatcher catches a panicking
-//! handler in order to return so the transport can settle the delivery, and catching without
-//! recording would trade a stalled consumer for a silent one.
+//! `serde_json` and `tracing` are named by the crate that *invokes* a transport's macro rather than
+//! by the one that declares the service, because that is where the code calling them is compiled.
+//! A dispatcher reads its payload through `serde_json` and writes a caught panic down through
+//! `tracing`. A caught panic is written down for the same reason it is caught: a dispatcher catches
+//! a panicking handler in order to return so the transport can settle the delivery, and catching
+//! without recording would trade a stalled consumer for a silent one.
 //!
 //! It costs a consumer that wants no logging very little. With no subscriber installed the
 //! callsite registers against `NoSubscriber`, whose `register_callsite` answers `Interest::never()`
@@ -48,12 +50,15 @@
 //! A crate that invokes a dispatcher macro and forgets `tracing` earns one error naming the crate:
 //! `error[E0433]: cannot find `tracing` in the crate root`. Forgetting `serde_json` earns seven.
 //!
+//! A crate that only *places a client* — a transport's client macro, invoked where a caller wants
+//! one — names one of the two. The client serializes what it sends and reads what comes back
+//! through `serde_json`; it catches no panic, so it has nothing to write down and reaches no
+//! `tracing`.
+//!
 //! **`#[model_schema]` requires none of this.** Only an invoked dispatcher macro reaches a logger,
 //! so a crate that describes types and declares no service names neither `serde_json` nor
 //! `tracing`.
 
-#[cfg(feature = "serde")]
-mod client;
 #[cfg(feature = "serde")]
 mod messages;
 #[cfg(feature = "serde")]
@@ -104,13 +109,10 @@ pub fn exec_service_schema(args: TokenStream, input: TokenStream) -> TokenStream
     match (asked, parse::parse_service(&declared)) {
         (Ok(wanted), Ok(service)) => {
             let messages = messages::emit(&service);
-            // The client lands inside the module `support` opens: it names the fault and the
-            // answer envelope unqualified.
-            let inside = [client::emit(&service)];
-            let support = support::emit(&service, &quote! { #(#inside)* });
-            // A transport's dispatcher is a `macro_rules!` body rather than compiled items, so it
-            // stays at the trait's scope; `#[macro_export]` hoists the name to the crate root from
-            // wherever the service was written.
+            let support = support::emit(&service);
+            // Both halves a transport contributes are `macro_rules!` bodies rather than compiled
+            // items, so they stay at the trait's scope; `#[macro_export]` hoists each name to the
+            // crate root from wherever the service was written.
             let transports = transport::emit(&service, &wanted);
             // The TypeScript artifacts are strings rather than callers of anything private, so they
             // stay at the trait's scope where a bundle can name them.
