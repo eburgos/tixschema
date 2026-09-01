@@ -9,7 +9,7 @@
 use super::parse::{OperationDef, OperationInputs, OperationOutcome, ServiceDef, parse_service};
 use super::{emitted_trait, exec_service_schema};
 use crate::model_schema::exec_model_schema;
-use proc_macro2::TokenStream;
+use proc_macro2::{Group, Span, TokenStream, TokenTree};
 use quote::{ToTokens as _, quote};
 use syn::{Ident, ItemTrait, Type};
 
@@ -62,6 +62,59 @@ fn client_emission(emitted: &str) -> String {
 
 fn expanded(source: &str) -> String {
     exec_service_schema(TokenStream::new(), declared(source).to_token_stream()).to_string()
+}
+
+/// The same expansion for a service that asked for the one transport this version has, which is
+/// what carries a dispatcher.
+fn expanded_over_amqp_rpc(source: &str) -> String {
+    expansion_over_amqp_rpc(source).to_string()
+}
+
+fn expansion_over_amqp_rpc(source: &str) -> TokenStream {
+    exec_service_schema(
+        quote! { transports = ["amqp_rpc"] },
+        declared(source).to_token_stream(),
+    )
+}
+
+/// Whether every mention of `named` in the macro body is written under `qualifier`. A mention that
+/// is part of a longer identifier — `serde_named_field` carrying `named_field` — is not one.
+fn every_mention_is_qualified(body: &str, named: &str, qualifier: &str) -> bool {
+    body.match_indices(named)
+        .map(|(at, _)| &body[..at])
+        .filter(|before| !before.ends_with(|last: char| last.is_alphanumeric() || last == '_'))
+        .all(|before| before.ends_with(qualifier))
+}
+
+/// The macro's stored tokens and nothing beside them, with every literal blanked so a name a doc
+/// comment mentions is not read as a path.
+fn macro_body(source: &str) -> String {
+    let mut reached_the_macro = false;
+    let mut rules = None;
+    for token in without_literals(expansion_over_amqp_rpc(source)) {
+        match token {
+            TokenTree::Ident(named) => reached_the_macro |= named == "macro_rules",
+            TokenTree::Group(carried) if reached_the_macro && rules.is_none() => {
+                rules = Some(carried.stream().to_string());
+            }
+            TokenTree::Group(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => (),
+        }
+    }
+    rules.unwrap()
+}
+
+fn without_literals(tokens: TokenStream) -> TokenStream {
+    tokens
+        .into_iter()
+        .map(|token| match token {
+            TokenTree::Group(group) => TokenTree::Group(Group::new(
+                group.delimiter(),
+                without_literals(group.stream()),
+            )),
+            TokenTree::Literal(_) => TokenTree::Ident(Ident::new("literal", Span::call_site())),
+            other @ (TokenTree::Ident(_) | TokenTree::Punct(_)) => other,
+        })
+        .collect()
 }
 
 fn generated_inputs(operation: &OperationDef) -> Option<&[(Ident, Type)]> {
@@ -676,12 +729,13 @@ fn a_declared_message_sharing_a_name_with_a_type_written_elsewhere_is_not_refuse
 
 #[test]
 fn dispatch_is_generic_over_the_implementing_type_and_answers_through_the_handle() {
-    let emitted = expanded(MIXED_SERVICE);
+    let emitted = expanded_over_amqp_rpc(MIXED_SERVICE);
     assert!(
         emitted.contains(
             "pub fn dispatch < S , Ctx , R > (svc : & S , ctx : & Ctx , message : & \
              IncomingMessage , reply : & R ,) -> impl :: core :: future :: Future < Output = () > \
-             + Send where S : super :: UsageService < Ctx > + Sync , Ctx : Sync , R : Reply + Sync"
+             + Send where S : $ crate :: UsageService < Ctx > + Sync , Ctx : Sync , \
+             R : $ crate :: usage_service_schema :: Reply + Sync"
         ),
         "it returns nothing, and a trait with `async fn` has no `dyn` form to offer. Got: \
          {emitted}"
@@ -693,23 +747,146 @@ fn dispatch_is_generic_over_the_implementing_type_and_answers_through_the_handle
 }
 
 #[test]
-fn the_dispatcher_and_the_client_are_emitted_inside_the_module_the_fault_is_declared_in() {
+fn the_client_is_emitted_inside_the_module_the_fault_is_declared_in() {
     let emitted = expanded(MIXED_SERVICE);
     let module = emitted.find("pub mod usage_service_schema").unwrap();
     let contract = emitted.find("pub trait UsageService").unwrap();
-    for inside in ["pub fn dispatch", "pub struct UsageServiceClient"] {
-        let at = emitted.find(inside).unwrap();
+    let at = emitted.find("pub struct UsageServiceClient").unwrap();
+    assert!(
+        at > module && at < contract,
+        "the client has to sit between the module opening and the trait that follows it, or it is \
+         not inside the module at all. Got: {emitted}"
+    );
+}
+
+/// The dispatcher is a stored token sequence, not compiled items: nothing of it is built where the
+/// service is declared, and the only `dispatch` in the expansion is the one inside the macro.
+#[test]
+fn the_dispatcher_is_emitted_inside_the_macro_and_nowhere_at_the_trait_s_own_scope() {
+    let emitted = expanded_over_amqp_rpc(MIXED_SERVICE);
+    let macro_at = emitted
+        .find("macro_rules ! usage_service_amqp_rpc_dispatcher")
+        .unwrap();
+    assert_eq!(
+        emitted.matches("pub fn dispatch").count(),
+        1,
+        "got: {emitted}"
+    );
+    assert!(
+        emitted.find("pub fn dispatch").unwrap() > macro_at,
+        "a dispatcher outside the macro is compiled where the service is declared, which is the \
+         whole of what this moves. Got: {emitted}"
+    );
+    assert!(
+        emitted.contains("# [macro_export]"),
+        "the macro is reached from another crate, so it is exported. Got: {emitted}"
+    );
+}
+
+/// The list is read as the service wrote it, duplicates and all, and the emission walks the
+/// registry instead — one `#[macro_export]` name cannot be defined twice in one crate.
+#[test]
+fn a_transport_named_twice_contributes_one_macro() {
+    let emitted = exec_service_schema(
+        quote! { transports = ["amqp_rpc", "amqp_rpc"] },
+        declared(MIXED_SERVICE).to_token_stream(),
+    )
+    .to_string();
+    assert_eq!(
+        emitted
+            .matches("macro_rules ! usage_service_amqp_rpc_dispatcher")
+            .count(),
+        1,
+        "got: {emitted}"
+    );
+}
+
+/// A service that asked for no transport is emitted nothing transport-shaped at all — not the
+/// macro, and not a dispatcher beside it.
+#[test]
+fn a_service_asking_for_no_transport_is_emitted_neither_a_macro_nor_a_dispatcher() {
+    let emitted = expanded(MIXED_SERVICE);
+    for absent in [
+        "macro_rules",
+        "pub fn dispatch",
+        "IncomingMessage",
+        ":: tracing :: error !",
+    ] {
         assert!(
-            at > module && at < contract,
-            "`{inside}` has to sit between the module opening and the trait that follows it, or \
-             it is not inside the module at all. Got: {emitted}"
+            !emitted.contains(absent),
+            "`{absent}` belongs to a transport, and this service asked for none. Got: {emitted}"
+        );
+    }
+}
+
+/// The macro takes no arguments and opens no module: the caller supplies the module, which is what
+/// keeps two transports in one crate from colliding.
+#[test]
+fn the_dispatcher_macro_takes_no_arguments_and_opens_no_module_of_its_own() {
+    let emitted = expanded_over_amqp_rpc(MIXED_SERVICE);
+    assert!(
+        emitted.contains("macro_rules ! usage_service_amqp_rpc_dispatcher { () => {"),
+        "the one rule matches an empty invocation. Got: {emitted}"
+    );
+    let body = macro_body(MIXED_SERVICE);
+    assert!(
+        !body.contains(" mod "),
+        "the items are bare, so the caller names the module they land in. Got: {body}"
+    );
+}
+
+/// Every runtime crate the macro body calls is written with a leading `::`, so it resolves in the
+/// crate that invoked the macro — which is the crate that names it in its own manifest, and the
+/// whole reason the tokens travel rather than being compiled where the service is declared.
+#[test]
+fn every_runtime_crate_the_macro_body_calls_is_written_with_a_leading_colon_pair() {
+    let body = macro_body(MIXED_SERVICE);
+    for called in ["serde_json", "tracing", "core", "std"] {
+        assert!(
+            every_mention_is_qualified(&body, called, ":: "),
+            "`{called}` is reached without a leading `::` somewhere in the macro body, so it \
+             resolves against whatever the invoking crate happens to have in scope. Got: {body}"
+        );
+    }
+}
+
+/// Every name the macro body reaches in the declaring crate is written through `$crate`, because a
+/// path in a `macro_rules!` body resolves where the macro was *invoked*. An unqualified one
+/// compiles only while the caller happens to share the declaring crate's scope.
+#[test]
+fn every_generated_name_the_macro_body_reaches_is_written_through_crate() {
+    let body = macro_body(MIXED_SERVICE);
+    assert!(
+        every_mention_is_qualified(&body, "UsageService", "$ crate :: "),
+        "the trait is reached unqualified somewhere in the macro body, which resolves in whichever \
+         crate invoked the macro. Got: {body}"
+    );
+    for reached in [
+        "Reply",
+        "ServiceFault",
+        "Answered",
+        "named_field",
+        "violated_field",
+        "violation_detail",
+        "GetAvailableBalanceMessage",
+        "ExpireCreditMessage",
+        "SweepMessage",
+        "CanGenerateMessage",
+        "ApplyBundleMessage",
+        "validated_get_available_balance",
+        "validated_apply_bundle",
+    ] {
+        assert!(
+            every_mention_is_qualified(&body, reached, "$ crate :: usage_service_schema :: "),
+            "`{reached}` is reached unqualified somewhere in the macro body, which resolves in \
+             whichever crate invoked the macro. Got: {body}"
         );
     }
 }
 
 #[test]
 fn every_arm_is_keyed_on_the_wire_name_and_never_on_anything_in_the_payload() {
-    let emitted = expanded(MIXED_SERVICE);
+    let emitted = expanded_over_amqp_rpc(MIXED_SERVICE);
     for carried in [
         "\"get-available-balance\" =>",
         "\"expire-credit\" =>",
@@ -727,11 +904,16 @@ fn every_arm_is_keyed_on_the_wire_name_and_never_on_anything_in_the_payload() {
 
 #[test]
 fn an_arm_validates_before_it_calls_and_faults_on_both_ways_the_message_can_be_wrong() {
-    let emitted = expanded(MIXED_SERVICE);
+    let emitted = expanded_over_amqp_rpc(MIXED_SERVICE);
     let deserialized = emitted
-        .find("serde_json :: from_slice :: < AvailableBalanceRequest >")
+        .find(
+            "serde_json :: from_slice :: < $ crate :: usage_service_schema :: \
+             GetAvailableBalanceMessage >",
+        )
         .unwrap();
-    let validated = emitted.find("received . validate ()").unwrap();
+    let validated = emitted
+        .find("$ crate :: usage_service_schema :: validated_get_available_balance (& received)")
+        .unwrap();
     let called = emitted.find("svc . get_available_balance").unwrap();
     assert!(
         deserialized < validated && validated < called,
@@ -748,7 +930,7 @@ fn an_arm_validates_before_it_calls_and_faults_on_both_ways_the_message_can_be_w
 
 #[test]
 fn every_kind_the_fault_publishes_is_one_the_generated_code_has_a_caller_for() {
-    let emitted = expanded(MIXED_SERVICE);
+    let emitted = expanded_over_amqp_rpc(MIXED_SERVICE);
     // Both halves, so the comparison cannot be satisfied by a kind that was quietly dropped: every
     // variant the enum declares, and a constructor call for each of them. A kind with no caller is
     // a shape a TypeScript consumer narrows on and nothing ever produces.
@@ -797,7 +979,7 @@ fn every_constructor_the_fault_carries_is_published() {
 
 #[test]
 fn every_arm_calls_its_implementation_behind_the_panic_guard() {
-    let emitted = expanded(MIXED_SERVICE);
+    let emitted = expanded_over_amqp_rpc(MIXED_SERVICE);
     for method in [
         "get_available_balance",
         "expire_credit",
@@ -820,11 +1002,11 @@ fn every_arm_calls_its_implementation_behind_the_panic_guard() {
 
 #[test]
 fn a_request_and_reply_arm_answers_a_caught_panic_with_a_fault_naming_its_own_wire_name() {
-    let emitted = expanded(MIXED_SERVICE);
+    let emitted = expanded_over_amqp_rpc(MIXED_SERVICE);
     assert!(
         emitted.contains(
             "Err (panicked) => { record_panic (\"usage-generation-request\" , & panicked) ; \
-             reply . fault (ServiceFault :: handler_panic \
+             reply . fault ($ crate :: usage_service_schema :: ServiceFault :: handler_panic \
              (\"usage-generation-request\" , & panicked)) . await }"
         ),
         "the arm that answered to the name is the one that reports the defect, and it reports it \
@@ -834,7 +1016,7 @@ fn a_request_and_reply_arm_answers_a_caught_panic_with_a_fault_naming_its_own_wi
 
 #[test]
 fn every_arm_writes_a_caught_panic_down_before_it_answers() {
-    let emitted = expanded(MIXED_SERVICE);
+    let emitted = expanded_over_amqp_rpc(MIXED_SERVICE);
     assert!(
         emitted.contains(
             "if let Err (panicked) = caught (move || svc . apply_bundle (ctx , received)) . await \
@@ -857,12 +1039,12 @@ fn every_arm_writes_a_caught_panic_down_before_it_answers() {
 }
 
 #[test]
-fn a_declared_service_names_tracing_and_a_declared_type_does_not() {
-    let emitted = expanded(MIXED_SERVICE);
+fn the_dispatcher_macro_names_tracing_and_a_declared_type_does_not() {
+    let emitted = expanded_over_amqp_rpc(MIXED_SERVICE);
     assert!(
         emitted.contains(":: tracing :: error !"),
-        "a crate declaring a service names `tracing` in its own manifest, beside `serde` and \
-         `serde_json`, because the generated dispatcher calls it. Got: {emitted}"
+        "the crate that invokes a transport's dispatcher macro names `tracing` in its own \
+         manifest, beside `serde_json`, because the dispatcher calls it. Got: {emitted}"
     );
     let described = exec_model_schema(
         TokenStream::new(),
@@ -882,7 +1064,7 @@ fn a_declared_service_names_tracing_and_a_declared_type_does_not() {
 
 #[test]
 fn a_refusal_and_a_violation_are_read_for_a_field_name_by_the_same_reader() {
-    let emitted = expanded(MIXED_SERVICE);
+    let emitted = expanded_over_amqp_rpc(MIXED_SERVICE);
     assert!(
         emitted.contains("fn named_field (reported : & str)"),
         "got: {emitted}"
@@ -895,7 +1077,10 @@ fn a_refusal_and_a_violation_are_read_for_a_field_name_by_the_same_reader() {
         "a violation report's field is the first line's, read by the one reader. Got: {emitted}"
     );
     assert!(
-        emitted.contains("let named = named_field (said) . or_else (|| serde_named_field (said))"),
+        emitted.contains(
+            "let named = $ crate :: usage_service_schema :: named_field (said) . or_else \
+             (|| serde_named_field (said))"
+        ),
         "a serde refusal is read for a field by the reader a violation is read by — a hook hands \
          serde a validator's message verbatim — and, failing that, by serde's own naming. \
          Got: {emitted}"
@@ -910,7 +1095,7 @@ fn a_refusal_and_a_violation_are_read_for_a_field_name_by_the_same_reader() {
 
 #[test]
 fn a_one_way_arm_calls_the_implementation_and_then_touches_the_handle_with_nothing() {
-    let emitted = expanded(MIXED_SERVICE);
+    let emitted = expanded_over_amqp_rpc(MIXED_SERVICE);
     // From the call to the end of the arm: the two fault guards sit above the call, so anything
     // naming the handle below it would be an answer on a path the operation declared no reply for.
     let called = emitted.find("svc . apply_bundle").unwrap();

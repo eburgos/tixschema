@@ -1454,7 +1454,7 @@ export const DocumentId$SchemaDefault: typeof DocumentId$RawSchemaDefault = Docu
 
 `#[service_schema()]` declares a service as a trait: one trait, one context, and one message in and one message out per operation. Failing to implement an operation is a compile error, which is the whole reason the construct is a trait rather than a table of handlers.
 
-**Services need the `serde` feature.** A service's messages derive `Serialize` and `Deserialize`, its dispatcher reads payloads through `serde_json`, and the camelCase and kebab-case keys it puts on the wire come from serde attributes the macro writes. A build without the feature is refused at the declaration rather than left to publish TypeScript that names Rust fields the wire never carries:
+**Services need the `serde` feature.** A service's messages derive `Serialize` and `Deserialize`, a dispatcher reads payloads through `serde_json`, and the camelCase and kebab-case keys it puts on the wire come from serde attributes the macro writes. A build without the feature is refused at the declaration rather than left to publish TypeScript that names Rust fields the wire never carries:
 
 ```text
 service_schema: a service needs tixschema's `serde` feature, and this build does not have it
@@ -1493,10 +1493,11 @@ error[E0599]: no associated function or constant named `ts_client` found for str
 ```
 
 **A service is declared at module scope, never inside a function body.** The module the macro
-generates opens with `use super::*;`, which is how the dispatcher and the client reach the trait and
-the message types declared beside it. A module written inside a function body has the enclosing
-*module* as its parent rather than the function, so `super` from there reaches past every name that
-function declared. `#[model_schema()]` carries the same requirement, for the same reason.
+generates opens with `use super::*;`, which is how the client and the per-operation validators
+reach the trait and the message types declared beside it. A module written inside a function body
+has the enclosing *module* as its parent rather than the function, so `super` from there reaches
+past every name that function declared. `#[model_schema()]` carries the same requirement, for the
+same reason.
 
 The macro cannot refuse the placement: an attribute macro is handed the annotated item's own tokens
 and nothing about the scope it was written in, and a trait written inside a function is the same
@@ -1825,9 +1826,34 @@ On the Rust side, beside the trait, in a module named for the service (`usage_se
 - `Reply` -- the handle a transport implements to answer one message, with `send` and `fault`.
 - `Transport` -- the seam a client is bound to, with `notify` and `request`. Both answer a `Result`, whose failure arm carries in words what stopped a call from travelling; the client turns it into a fault of kind `transport-failure`.
 - `CallError<E>` -- `Operation(E)` or `Fault(ServiceFault)`.
-- `IncomingMessage` and `dispatch(svc, ctx, message, reply)` -- the dispatcher, generic over the implementing type.
+- `<Operation>Message` and `validated_<operation>` -- the name each operation's message is republished under, and the validator that message runs. A dispatcher expanded in another crate reaches both.
 - `UsageServiceClient` -- one method per operation, over any `Transport`. Each takes that operation's arguments and no context: a context is what an implementation needs, and a caller has nothing to hand one to.
 - `ExpireCreditRequest` and `SweepRequest` -- the messages declared for the operations that named none, each an ordinary `#[model_schema()]` type.
+
+Beside the trait, one `macro_rules!` per transport the service asked for -- see [Transports](#transports) -- and nothing else transport-shaped. A service that asks for no transport is emitted no dispatcher at all.
+
+#### Transports
+
+`#[service_schema(transports = ["amqp_rpc"])]` says which transports the service wants. Each one contributes a `#[macro_export]` macro named `{service_snake_case}_{transport}_dispatcher`, whose body holds that transport's dispatcher as *tokens*: nothing inside it is compiled where the service is declared.
+
+```rust,ignore
+// In the crate that declares the service: nothing below is built here.
+#[service_schema(transports = ["amqp_rpc"])]
+pub trait UsageService<Ctx> { /* ... */ }
+
+// In the crate that serves it, in a module that crate names:
+mod amqp_transport {
+    declaring_crate::usage_service_amqp_rpc_dispatcher!();
+}
+```
+
+The macro takes no arguments and emits bare items -- `IncomingMessage`, a panic guard, and `dispatch(svc, ctx, message, reply)` -- rather than a module of its own, so the caller names the module and two transports in one crate cannot collide.
+
+Paths inside a `macro_rules!` body resolve where the macro is *invoked*, so the two kinds are spelled apart. Everything tixschema generated is reached through `$crate::`, which resolves in the crate that declared the service; every runtime crate is reached through a leading `::` and resolves in the invoking crate, **which is therefore the one that names `serde_json` and `tracing` in its own manifest**. That is the point of the shape: a crate that only declares services names neither.
+
+A crate that declares a service *and* serves it invokes the macro by name rather than by path -- `usage_service_amqp_rpc_dispatcher!()` -- after the declaration and inside it or a module below it, `#[macro_use]` carrying it out of a submodule. Rust refuses an absolute path to a `macro_export` macro that a macro produced, from within the crate that produced it; another crate reaches it by path as above.
+
+`#[macro_export]` places the macro at the declaring crate's root whatever module it was written in, and `$crate` reads from that same root. A service declared at the crate root needs nothing further; one declared in a submodule re-exports its generated module and its trait at the crate root, which is all a dispatcher reaches by name -- every message it deserializes is reached as `$crate::{service}_schema::<Operation>Message`.
 
 On the TypeScript side, three artifacts, reached through a unit struct named `<Service>Schema`:
 

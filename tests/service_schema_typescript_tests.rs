@@ -8,5 +8,15 @@
 //! TypeScript writes any.
 
 #[cfg(test)]
+#[macro_use]
 #[path = "service_schema_typescript_tests/tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "serde", feature = "typescript"))]
+#[path = "service_schema_typescript_tests/amqp_transport.rs"]
+mod amqp_transport;
+
+// A transport's dispatcher reaches what the service declared through `$crate`, which is this
+// binary's root: a service written in a submodule is named here for the expansion to resolve.
+#[cfg(all(test, feature = "serde", feature = "typescript"))]
+use tests::{ProbeService, probe_service_schema};

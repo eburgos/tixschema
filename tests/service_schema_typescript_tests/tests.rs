@@ -957,6 +957,8 @@ mod the_envelope_typescript_declares_is_the_one_rust_writes {
     }
 }
 
+#[cfg(feature = "typescript")]
+use crate::amqp_transport;
 use core::future::{Future, ready};
 use core::pin::pin;
 use core::task::{Context as PollContext, Poll, Waker};
@@ -1097,7 +1099,7 @@ pub struct ProbeContext {
     pub logger_name: String,
 }
 
-#[service_schema()]
+#[service_schema(transports = ["amqp_rpc"])]
 pub trait ProbeService<Ctx> {
     /// Answers nothing, and still receives a message a caller has to construct.
     #[service_schema_op(one_way)]
@@ -1318,12 +1320,12 @@ fn the_service_is_still_implementable_and_callable_alongside_its_published_types
 /// Everything one dispatch put on the reply handle, which for a one-way arm that ran is nothing.
 fn settlements(operation: &str, payload: &[u8]) -> Vec<Vec<u8>> {
     let capture = Capture::new();
-    let settled = poll_once(probe_service_schema::dispatch(
+    let settled = poll_once(amqp_transport::dispatch(
         &ProbeBackEnd { granted_credits: 5 },
         &ProbeContext {
             logger_name: "probe".to_owned(),
         },
-        &probe_service_schema::IncomingMessage {
+        &amqp_transport::IncomingMessage {
             operation: operation.to_owned(),
             payload: payload.to_vec(),
         },
@@ -1338,12 +1340,12 @@ fn settlements(operation: &str, payload: &[u8]) -> Vec<Vec<u8>> {
 /// handed.
 fn dispatched(operation: &str, payload: &[u8], logger_name: &str) -> Vec<u8> {
     let capture = Capture::new();
-    let settled = poll_once(probe_service_schema::dispatch(
+    let settled = poll_once(amqp_transport::dispatch(
         &ProbeBackEnd { granted_credits: 5 },
         &ProbeContext {
             logger_name: logger_name.to_owned(),
         },
-        &probe_service_schema::IncomingMessage {
+        &amqp_transport::IncomingMessage {
             operation: operation.to_owned(),
             payload: payload.to_vec(),
         },

@@ -10,6 +10,7 @@
 
 #![cfg(feature = "serde")]
 
+use crate::amqp_transport;
 use core::future::{Future, ready};
 use core::pin::pin;
 use core::task::{Context as PollContext, Poll, Waker};
@@ -43,7 +44,7 @@ pub struct ProbeTransport {
     settled: Mutex<Vec<String>>,
 }
 
-#[service_schema()]
+#[service_schema(transports = ["amqp_rpc"])]
 pub trait SweepService<Ctx> {
     #[service_schema_op(one_way)]
     async fn purge(&self, ctx: &Ctx, req: PurgeRequest);
@@ -154,10 +155,10 @@ fn a_one_way_operation_runs_and_leaves_the_handle_it_was_given_untouched() {
     let service = ProbeBackEnd::new(12);
     let transport = ProbeTransport::new();
     let ctx = "probe".to_owned();
-    poll_once(sweep_service_schema::dispatch(
+    poll_once(amqp_transport::dispatch(
         &service,
         &ctx,
-        &sweep_service_schema::IncomingMessage {
+        &amqp_transport::IncomingMessage {
             operation: "purge".to_owned(),
             payload: br#"{"organization_id":"acme"}"#.to_vec(),
         },

@@ -31,8 +31,10 @@
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
 ))]
-mod a_message_annotated_with_a_constraint {
+#[macro_use]
+pub mod a_message_annotated_with_a_constraint {
     use super::poll_once;
+    use crate::gate_amqp_transport;
     use core::future::ready;
     use serde::de::Error as DeError;
     use serde::{Deserialize, Serialize};
@@ -229,7 +231,7 @@ mod a_message_annotated_with_a_constraint {
         settled: Mutex<Vec<String>>,
     }
 
-    #[service_schema()]
+    #[service_schema(transports = ["amqp_rpc"])]
     pub trait GateService<Ctx> {
         async fn admit(&self, ctx: &Ctx, req: GateRequest) -> Result<Admitted, GateError>;
 
@@ -406,10 +408,10 @@ mod a_message_annotated_with_a_constraint {
     fn a_payload_carrying_a_value_the_constraint_refuses_fails_validation_and_names_the_field() {
         let service = GateBackEnd::new();
         let reply = GateReply::new();
-        poll_once(gate_service_schema::dispatch(
+        poll_once(gate_amqp_transport::dispatch(
             &service,
             &(),
-            &gate_service_schema::IncomingMessage {
+            &gate_amqp_transport::IncomingMessage {
                 operation: "admit".to_owned(),
                 payload: br#"{"organization_id":"ab"}"#.to_vec(),
             },
@@ -472,10 +474,10 @@ mod a_message_annotated_with_a_constraint {
         ] {
             let service = GateBackEnd::new();
             let reply = GateReply::new();
-            poll_once(gate_service_schema::dispatch(
+            poll_once(gate_amqp_transport::dispatch(
                 &service,
                 &(),
-                &gate_service_schema::IncomingMessage {
+                &gate_amqp_transport::IncomingMessage {
                     operation: "admit".to_owned(),
                     payload: payload.clone(),
                 },
@@ -520,10 +522,10 @@ mod a_message_annotated_with_a_constraint {
     fn a_bound_a_fields_own_type_declares_fails_validation_and_names_the_field_that_held_it() {
         let service = GateBackEnd::new();
         let reply = GateReply::new();
-        poll_once(gate_service_schema::dispatch(
+        poll_once(gate_amqp_transport::dispatch(
             &service,
             &(),
-            &gate_service_schema::IncomingMessage {
+            &gate_amqp_transport::IncomingMessage {
                 operation: "hold".to_owned(),
                 payload: br#"{"holds":{"name":"a"}}"#.to_vec(),
             },
@@ -565,10 +567,10 @@ mod a_message_annotated_with_a_constraint {
     fn a_message_whose_nested_bound_is_satisfied_reaches_the_implementation() {
         let service = GateBackEnd::new();
         let reply = GateReply::new();
-        poll_once(gate_service_schema::dispatch(
+        poll_once(gate_amqp_transport::dispatch(
             &service,
             &(),
-            &gate_service_schema::IncomingMessage {
+            &gate_amqp_transport::IncomingMessage {
                 operation: "hold".to_owned(),
                 payload: br#"{"holds":{"name":"abc"}}"#.to_vec(),
             },
@@ -599,10 +601,10 @@ mod a_message_annotated_with_a_constraint {
     fn a_brands_bound_still_refuses_the_payload_on_the_read() {
         let service = GateBackEnd::new();
         let reply = GateReply::new();
-        poll_once(gate_service_schema::dispatch(
+        poll_once(gate_amqp_transport::dispatch(
             &service,
             &(),
-            &gate_service_schema::IncomingMessage {
+            &gate_amqp_transport::IncomingMessage {
                 operation: "enrol".to_owned(),
                 payload: br#"{"slug":"ab"}"#.to_vec(),
             },
@@ -649,10 +651,10 @@ mod a_message_annotated_with_a_constraint {
     ) -> (Vec<String>, Vec<gate_service_schema::ServiceFault>) {
         let service = GateBackEnd::new();
         let reply = GateReply::new();
-        poll_once(gate_service_schema::dispatch(
+        poll_once(gate_amqp_transport::dispatch(
             &service,
             &(),
-            &gate_service_schema::IncomingMessage {
+            &gate_amqp_transport::IncomingMessage {
                 operation: operation.to_owned(),
                 payload: payload.to_vec(),
             },
@@ -834,10 +836,10 @@ mod a_message_annotated_with_a_constraint {
     fn a_refusal_written_in_a_validator_s_words_still_names_the_field_it_refused() {
         let service = GateBackEnd::new();
         let reply = GateReply::new();
-        poll_once(gate_service_schema::dispatch(
+        poll_once(gate_amqp_transport::dispatch(
             &service,
             &(),
-            &gate_service_schema::IncomingMessage {
+            &gate_amqp_transport::IncomingMessage {
                 operation: "open-ledger".to_owned(),
                 payload: br#"{"ledger_id":"ab"}"#.to_vec(),
             },
@@ -864,6 +866,7 @@ mod a_message_annotated_with_a_constraint {
     }
 }
 
+use crate::{amqp_transport, second_amqp_transport};
 use core::cell::RefCell;
 use core::fmt::{self, Debug, Display, Write as _};
 use core::future::{Future, ready};
@@ -951,7 +954,7 @@ pub enum Settled {
     Sent(String),
 }
 
-#[service_schema()]
+#[service_schema(transports = ["amqp_rpc"])]
 pub trait ProbeService<Ctx> {
     /// A message that validates itself, and an arm that runs that validator before entering here.
     async fn admit(&self, ctx: &Ctx, req: AdmitRequest) -> Result<BalanceResponse, ProbeError>;
@@ -1209,15 +1212,34 @@ fn come_apart(formatted: bool, organization_id: &str) {
     assert!(formatted, "the ledger is not a ledger");
 }
 
+/// Dispatches one message through the *second* expansion of the same macro, which is a separate
+/// set of items in a module of its own.
+fn dispatched_twice_over(operation: &str, payload: &str) -> (Vec<String>, Vec<Settled>) {
+    let service = ProbeBackEnd::new();
+    let reply = ProbeReply::new();
+    let ctx = "probe".to_owned();
+    poll_once(second_amqp_transport::dispatch(
+        &service,
+        &ctx,
+        &second_amqp_transport::IncomingMessage {
+            operation: operation.to_owned(),
+            payload: payload.as_bytes().to_vec(),
+        },
+        &reply,
+    ))
+    .unwrap();
+    (service.reached(), reply.settled())
+}
+
 /// Dispatches one message and answers with what the service saw and how the message was settled.
 fn dispatched(operation: &str, payload: &str) -> (Vec<String>, Vec<Settled>) {
     let service = ProbeBackEnd::new();
     let reply = ProbeReply::new();
     let ctx = "probe".to_owned();
-    poll_once(probe_service_schema::dispatch(
+    poll_once(amqp_transport::dispatch(
         &service,
         &ctx,
-        &probe_service_schema::IncomingMessage {
+        &amqp_transport::IncomingMessage {
             operation: operation.to_owned(),
             payload: payload.as_bytes().to_vec(),
         },
@@ -1453,10 +1475,10 @@ fn dispatch_returns_after_a_handler_panics_so_the_transport_can_still_settle_the
     let service = ProbeBackEnd::new();
     let reply = ProbeReply::new();
     let ctx = "probe".to_owned();
-    let returned = poll_once(probe_service_schema::dispatch(
+    let returned = poll_once(amqp_transport::dispatch(
         &service,
         &ctx,
-        &probe_service_schema::IncomingMessage {
+        &amqp_transport::IncomingMessage {
             operation: "collapse".to_owned(),
             payload: br#"{"organization_id":"acme"}"#.to_vec(),
         },
@@ -1634,4 +1656,25 @@ fn a_one_way_message_refused_before_it_ran_is_the_one_thing_that_arm_answers() {
          itself declares no reply"
     );
     assert_eq!(reported.operation(), "apply-bundle");
+}
+
+/// The macro invoked twice in one crate, in two differently-named modules, both compiling and both
+/// dispatching. Nothing in the macro names a module, so the caller's two names are the only ones
+/// there are and neither expansion can collide with the other.
+#[test]
+fn the_same_macro_invoked_in_a_second_module_dispatches_the_same_way() {
+    let payload = r#"{"organization_id":"acme"}"#;
+    let (reached, settled) = dispatched("get-balance", payload);
+    let (reached_again, settled_again) = dispatched_twice_over("get-balance", payload);
+    assert_eq!(reached, ["get_balance acme"], "got: {reached:?}");
+    assert_eq!(reached, reached_again, "one service, one call either way");
+    assert_eq!(
+        format!("{settled:?}"),
+        format!("{settled_again:?}"),
+        "the second expansion is the same dispatcher, so it settles the same message the same way"
+    );
+    assert!(
+        matches!(settled_again.as_slice(), [Settled::Sent(_)]),
+        "an answer rather than a fault, or the two agree about nothing. Got: {settled_again:?}"
+    );
 }

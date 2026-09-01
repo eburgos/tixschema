@@ -25,8 +25,10 @@
     feature = "serde",
     any(feature = "typescript", feature = "zod", feature = "jsonschema")
 ))]
-mod a_bound_the_fields_own_type_declares {
+#[macro_use]
+pub mod a_bound_the_fields_own_type_declares {
     use super::{ProbeTransport, poll_once};
+    use crate::enrol_amqp_transport;
     use core::future::ready;
     use serde::{Deserialize, Serialize};
     use std::sync::Mutex;
@@ -56,7 +58,7 @@ mod a_bound_the_fields_own_type_declares {
         DbError,
     }
 
-    #[service_schema()]
+    #[service_schema(transports = ["amqp_rpc"])]
     pub trait EnrolService<Ctx> {
         async fn enrol(&self, ctx: &Ctx, req: EnrolRequest) -> Result<Enrolled, EnrolError>;
     }
@@ -113,7 +115,7 @@ mod a_bound_the_fields_own_type_declares {
             T: Serialize + Send,
         {
             let capture = EnrolCapture::new();
-            enrol_service_schema::dispatch(
+            enrol_amqp_transport::dispatch(
                 &EnrolBackEnd,
                 &(),
                 &incoming(operation, &payload),
@@ -128,7 +130,7 @@ mod a_bound_the_fields_own_type_declares {
             T: Serialize + Send,
         {
             let capture = EnrolCapture::new();
-            enrol_service_schema::dispatch(
+            enrol_amqp_transport::dispatch(
                 &EnrolBackEnd,
                 &(),
                 &incoming(operation, &payload),
@@ -175,11 +177,11 @@ mod a_bound_the_fields_own_type_declares {
     }
 
     /// The message shape is generated per service, so this service builds its own.
-    fn incoming<T>(operation: &str, payload: &T) -> enrol_service_schema::IncomingMessage
+    fn incoming<T>(operation: &str, payload: &T) -> enrol_amqp_transport::IncomingMessage
     where
         T: Serialize,
     {
-        enrol_service_schema::IncomingMessage {
+        enrol_amqp_transport::IncomingMessage {
             operation: operation.to_owned(),
             payload: serde_json::to_vec(payload).unwrap(),
         }
@@ -246,6 +248,7 @@ mod a_bound_the_fields_own_type_declares {
     }
 }
 
+use crate::amqp_transport;
 use core::future::{Future, ready};
 use core::pin::pin;
 use core::task::{Context as PollContext, Poll, Waker};
@@ -310,7 +313,7 @@ pub struct ProbeTransport {
     calls: Mutex<Vec<(String, String)>>,
 }
 
-#[service_schema()]
+#[service_schema(transports = ["amqp_rpc"])]
 pub trait ProbeService<Ctx> {
     /// A message that validates itself, which is what the client checks before it sends.
     async fn admit(&self, ctx: &Ctx, req: AdmitRequest) -> Result<BalanceResponse, ProbeError>;
@@ -447,7 +450,7 @@ impl probe_service_schema::Transport for Loopback {
         T: Serialize + Send,
     {
         let capture = Capture::new();
-        probe_service_schema::dispatch(
+        amqp_transport::dispatch(
             &self.service,
             &"probe".to_owned(),
             &incoming(operation, &payload),
@@ -462,7 +465,7 @@ impl probe_service_schema::Transport for Loopback {
         T: Serialize + Send,
     {
         let capture = Capture::new();
-        probe_service_schema::dispatch(
+        amqp_transport::dispatch(
             &self.service,
             &"probe".to_owned(),
             &incoming(operation, &payload),
@@ -587,11 +590,11 @@ impl ProbeTransport {
 }
 
 /// One message as the dispatcher on the far side reads it.
-fn incoming<T>(operation: &str, payload: &T) -> probe_service_schema::IncomingMessage
+fn incoming<T>(operation: &str, payload: &T) -> amqp_transport::IncomingMessage
 where
     T: Serialize,
 {
-    probe_service_schema::IncomingMessage {
+    amqp_transport::IncomingMessage {
         operation: operation.to_owned(),
         payload: serde_json::to_vec(payload).unwrap(),
     }

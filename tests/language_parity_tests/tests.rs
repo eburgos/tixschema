@@ -96,8 +96,10 @@ mod declarations {
 /// declares that type at all — a build without it has the Rust dispatcher and nothing to hold it
 /// against, which is a comparison that cannot be written rather than one that passes trivially.
 #[cfg(all(feature = "serde", feature = "typescript", feature = "zod"))]
-mod refusals {
+#[macro_use]
+pub mod refusals {
     use super::declarations::{Account, OrganizationId};
+    use crate::amqp_transport;
     // The schema module each held type publishes is named beside the type, and the emitted code
     // reaches it unqualified — so a type declared elsewhere is held by bringing its module along.
     // Only the JSON-schema emission reaches for a sibling module that way; the Zod and TypeScript
@@ -128,7 +130,7 @@ mod refusals {
         pub admitted: bool,
     }
 
-    #[service_schema]
+    #[service_schema(transports = ["amqp_rpc"])]
     pub trait GateService<Ctx> {
         async fn admit(&self, ctx: &Ctx, req: AdmitRequest) -> Result<Admitted, String>;
     }
@@ -205,10 +207,10 @@ mod refusals {
     pub fn refused(payload: &str) -> serde_json::Value {
         let service = NeverEntered::default();
         let reply = Recorder::default();
-        poll_once(gate_service_schema::dispatch(
+        poll_once(amqp_transport::dispatch(
             &service,
             &(),
-            &gate_service_schema::IncomingMessage {
+            &amqp_transport::IncomingMessage {
                 operation: "admit".to_owned(),
                 payload: payload.as_bytes().to_vec(),
             },
