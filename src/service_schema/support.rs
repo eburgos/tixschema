@@ -1,15 +1,15 @@
-//! The three types an operation's outcome is carried in, emitted per service into the service's
-//! own module: the fault a caller can receive but no implementation can answer with, the reply
-//! handle a transport implements, and the client's call-error enum.
+//! The two types an operation's outcome is carried in, emitted per service into the service's own
+//! module: the fault a caller can receive but no implementation can answer with, and the client's
+//! call-error enum.
 //!
 //! # Why they are generated rather than imported
 //!
 //! tixschema is a build-time macro crate and stays one. A service that had to depend on it at
 //! runtime to name `ServiceFault` is exactly what was rejected when a marker type was proposed for
 //! one-way operations, so each service gets its own copies in its own module. Two services in one
-//! crate therefore carry two unrelated `ServiceFault` types and two unrelated `Reply` traits, and
-//! a transport serving both implements both — that is the cost of the crate staying build-time
-//! only, and it is the cost the design accepted.
+//! crate therefore carry two unrelated `ServiceFault` types, and a transport serving both answers
+//! with both — that is the cost of the crate staying build-time only, and it is the cost the
+//! design accepted.
 //!
 //! # The seal on `ServiceFault`
 //!
@@ -47,18 +47,11 @@
 //! published an inherent `validate()` of its own. One per operation rather than one generic
 //! function, because an inherent method only wins at a concrete type.
 //!
-//! # Why `Reply` has exactly two methods
+//! # What is not here
 //!
-//! Replying is all the handle does. A request-and-reply operation answers with `send` or `fault`;
-//! a one-way operation never touches it at all, so nothing about replying appears on a path
-//! that never replies. Acknowledgement is the transport's: `dispatch` returns nothing, so the
-//! adapter that called it still holds the delivery when the arm finishes and acknowledges there,
-//! for every message including a one-way one. That placement matters on the bus this was measured
-//! against, where every acknowledgement sits inside a send, there is no `nack`, and the consumer
-//! one-way traffic reaches asks for manual acknowledgement with no dead-letter exchange, no
-//! message TTL and no timeout behind it. `send` takes a serializable value rather than bytes
-//! because the transport mutates what it is handed before serializing — an error flag and the
-//! correlation id go in — and neither is reachable behind an encoded buffer.
+//! The `Reply` handle. Its shape is one transport model's — one reply per message, answered with a
+//! value or a defect — so it travels inside a transport's own macro, and a service that asks for no
+//! transport is emitted none of it.
 
 use super::parse::{OperationDef, OperationInputs, ServiceDef};
 use crate::rename_rule::RenameRule;
@@ -189,7 +182,6 @@ pub fn emit(service: &ServiceDef) -> TokenStream {
     );
     let fault = fault_declaration(declared);
     let call_error = call_error_declaration(declared);
-    let reply = reply_declaration(declared);
     let accessors = fault_accessors();
     let constructors = fault_constructors();
     let renderings = renderings();
@@ -205,7 +197,6 @@ pub fn emit(service: &ServiceDef) -> TokenStream {
 
             #fault
             #call_error
-            #reply
             #accessors
             #constructors
             #renderings
@@ -707,8 +698,8 @@ fn fault_constructors() -> TokenStream {
 ///
 /// Rust needs no prefix at all, this module being the scope TypeScript lacks, so `ServiceFault` is
 /// bound beside it as an alias — the unstuttering spelling everything generated here writes, and
-/// the one a transport implementing [`Reply`](reply_declaration) names. An alias reaches Rust
-/// alone and publishes nothing, so the flat name stays claimed exactly once per service.
+/// the one a transport implementing a reply handle names. An alias reaches Rust alone and publishes
+/// nothing, so the flat name stays claimed exactly once per service.
 ///
 /// The kind is declared before the fault that carries it, so the field walk resolves its name off
 /// the registry rather than falling back to a spelling written before the type expanded.
@@ -777,71 +768,6 @@ fn fault_declaration(declared: &Ident) -> TokenStream {
 
         #[doc = #kind_alias_doc]
         pub type ServiceFaultKind = #kind;
-    }
-}
-
-/// The `Reply` trait, which a transport implements once per service it serves.
-///
-/// It is implementable by hand — an `async fn` satisfies each returned future, and the value
-/// `send` is handed is serialized by the transport rather than by the generator:
-///
-/// ```rust
-/// use std::sync::Mutex;
-/// use tixschema::service_schema;
-///
-/// #[derive(serde::Deserialize, serde::Serialize)]
-/// pub struct PurgeRequest;
-///
-/// #[service_schema()]
-/// pub trait SweepService<Ctx> {
-///     #[service_schema_op(one_way)]
-///     async fn purge(&self, ctx: &Ctx, req: PurgeRequest);
-/// }
-///
-/// /// A transport that writes down what it was asked to do instead of publishing it.
-/// pub struct ProbeTransport {
-///     settled: Mutex<Vec<String>>,
-/// }
-///
-/// impl sweep_service_schema::Reply for ProbeTransport {
-///     async fn fault(&self, fault: sweep_service_schema::ServiceFault) {
-///         self.settled.lock().unwrap().push(fault.to_string());
-///     }
-///
-///     async fn send<T>(&self, value: T)
-///     where
-///         T: serde::Serialize + Send,
-///     {
-///         self.settled.lock().unwrap().push(serde_json::to_string(&value).unwrap());
-///     }
-/// }
-///
-/// fn main() {}
-/// ```
-fn reply_declaration(declared: &Ident) -> TokenStream {
-    let reply_doc = format!(
-        "The handle a transport gives the `{declared}` dispatcher so it can settle *this* \
-         message.\n\n\
-         A request-and-reply operation answers with [`send`](Reply::send) or \
-         [`fault`](Reply::fault). A one-way operation calls neither, and the transport \
-         acknowledges the delivery after dispatch returns. Encoding sits behind the trait, which \
-         is what keeps the generator out of the wire format."
-    );
-    quote! {
-        #[doc = #reply_doc]
-        pub trait Reply {
-            /// Answer with a defect the operation never declared.
-            fn fault(
-                &self,
-                fault: ServiceFault,
-            ) -> impl ::core::future::Future<Output = ()> + Send;
-
-            /// Answer with a value. The transport serializes it, which is why it is handed the
-            /// value rather than an encoded buffer.
-            fn send<T>(&self, value: T) -> impl ::core::future::Future<Output = ()> + Send
-            where
-                T: ::serde::Serialize + Send;
-        }
     }
 }
 

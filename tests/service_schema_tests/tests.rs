@@ -150,7 +150,7 @@ pub struct Capture {
     answered: Mutex<Vec<Vec<u8>>>,
 }
 
-impl probe_service_schema::Reply for Capture {
+impl amqp_transport::Reply for Capture {
     async fn fault(&self, fault: probe_service_schema::ServiceFault) {
         ready(()).await;
         // The framing is the transport's business: a fault rides tagged inside the failure arm,
