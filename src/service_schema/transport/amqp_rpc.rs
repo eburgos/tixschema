@@ -117,8 +117,14 @@
 //!
 //! `#[macro_export]` puts each macro at the declaring crate's root whatever module it was written
 //! in, and `$crate` reads from that same root — so a service declared in a submodule is reached by
-//! the names it hoists there, one `pub use` covering the module and one covering each type the
-//! macro names. A service declared at the crate root hoists nothing.
+//! the names it hoists there. Two of them are the declaration's own and are checked where it is
+//! written: the service's generated module, which everything below the dispatcher is reached
+//! through, and the trait, which the dispatcher's `where` clause binds. `support::root_anchors`
+//! resolves both at the declaration, so a crate that leaves either unreachable stops compiling
+//! itself rather than breaking every crate that goes on to invoke a macro. The client adds one
+//! more class, unchecked: it builds each message the macro declared as `$crate::{Operation}Request`
+//! at the root, so a service in a submodule re-exports those too. A service declared at the crate
+//! root hoists nothing.
 
 use super::Transport;
 use crate::service_schema::parse::{OperationDef, OperationInputs, OperationOutcome, ServiceDef};
