@@ -9,12 +9,16 @@
 //! TypeScript writes any.
 
 #[cfg(test)]
+#[macro_use]
 #[path = "service_schema_tests/tests.rs"]
 mod tests;
 
-// What `$crate` reaches. A client's macro body names everything the declaration generated from the
-// declaring crate's *root*, and the declaration sits in the module above; importing it here puts
-// those names where an expansion looks for them. Private: nothing outside this binary reads them.
-#[cfg(test)]
-#[cfg(feature = "serde")]
-use tests::*;
+#[cfg(all(test, feature = "serde"))]
+#[path = "service_schema_tests/amqp_transport.rs"]
+mod amqp_transport;
+
+// Both halves a transport contributes reach what the service declared through `$crate`, which is
+// this binary's root: a service written in a submodule is named here for either expansion to
+// resolve, the messages the macro declared included.
+#[cfg(all(test, feature = "serde"))]
+use tests::{ExpireCreditRequest, ProbeService, SweepRequest, probe_service_schema};

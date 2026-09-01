@@ -24,13 +24,28 @@
 //!
 //! `Deserialize` is deliberately not derived on the fault, so a fault never arrives simply by
 //! having been written on the wire. `Serialize` is derived, because the transport has to put one
-//! there. Reading one back off it is the generated client's business and happens inside the module,
-//! through a mirror that derives what the fault does not.
+//! there. Reading one back off it is the generated client's business, and it happens through a
+//! mirror that derives what the fault does not and then mints the fault through the constructors
+//! published here.
 //!
-//! **The dispatcher and the Rust client are emitted inside this module**, which is why [`emit`]
-//! takes their tokens rather than being spliced beside them: both name the fault, the reply handle
-//! and the incoming message unqualified. The module also opens with `use super::*;`, since both of
-//! them name the trait's own message types, which the author declared beside the trait.
+//! # What a dispatcher or a client expanded elsewhere reads from here
+//!
+//! The `Answered` envelope one writes and the other reads, the readers that turn a violation report
+//! into the field and the detail a fault carries, and — one of each per operation — the name its
+//! message is reached under and the validator that message runs. Both halves of a service are held
+//! as macro tokens and expanded in crates that are usually not this one, so everything either of
+//! them reaches is published for the same reason the fault's constructors are.
+//!
+//! An operation's message is republished here under `{Operation}Message` so that either half names
+//! one path for every spelling: an author's own type, a type the macro declared, a type written
+//! under a module of its own. It also gives two services in one crate room to receive same-named
+//! messages, each module being its own namespace where the crate root is not.
+//!
+//! The validators are here because the fallback they run behind is: `MessageValidation` is shut in
+//! a module of its own so that two blanket `validate()` methods are never in scope at once, and an
+//! import written inside a transport's `macro_rules!` body is reported unused wherever the message
+//! published an inherent `validate()` of its own. One per operation rather than one generic
+//! function, because an inherent method only wins at a concrete type.
 //!
 //! # Why `Reply` has exactly two methods
 //!
@@ -45,22 +60,23 @@
 //! because the transport mutates what it is handed before serializing — an error flag and the
 //! correlation id go in — and neither is reachable behind an encoded buffer.
 
-use super::parse::ServiceDef;
+use super::parse::{OperationDef, OperationInputs, ServiceDef};
 use crate::rename_rule::RenameRule;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::Ident;
 
-/// `generated` is what [`dispatch`](super::dispatch) wrote: it lands inside the module rather than
-/// beside it, because it names the fault, the reply handle and the incoming message unqualified.
+/// The service's own module, holding everything either half of a service reads and nothing that
+/// belongs to one of them.
 ///
 /// # A service is declared at module scope, never inside a function body
 ///
-/// The module opens with `use super::*;`, which is how the dispatcher reaches the trait and the
-/// message types the author declared beside it. A module written inside a function
-/// body has the enclosing *module* as its parent rather than the function, so `super` from there
-/// reaches past every name that function declared and finds none of them. `#[model_schema]` carries
-/// the same requirement, for the same reason and through the same import.
+/// The module opens with `use super::*;`, which is how the message aliases and the validators
+/// behind them reach the trait and the message types the author declared beside it. A module
+/// written inside a function body has the enclosing *module* as its parent rather than the
+/// function, so `super` from there reaches past every name that function declared and finds none
+/// of them. `#[model_schema]` carries the same requirement, for the same reason and through the
+/// same import.
 ///
 /// The macro cannot refuse the placement. An attribute macro is handed the annotated item's own
 /// tokens and nothing about the scope it was written in, and a trait written inside a function is
@@ -163,7 +179,7 @@ use syn::Ident;
 /// placement and nothing else about the program. The import those four errors resolve against is
 /// what the unit test `the_generated_module_reaches_the_author_s_declarations_through_super` reads
 /// back off the expansion.
-pub fn emit(service: &ServiceDef, generated: &TokenStream) -> TokenStream {
+pub fn emit(service: &ServiceDef) -> TokenStream {
     let declared = &service.ident;
     let module = module_ident(service);
     let module_doc = format!(
@@ -177,6 +193,11 @@ pub fn emit(service: &ServiceDef, generated: &TokenStream) -> TokenStream {
     let accessors = fault_accessors();
     let constructors = fault_constructors();
     let renderings = renderings();
+    let envelope = answered_envelope();
+    let validation = message_validation();
+    let messages = message_type_aliases(service);
+    let validators = message_validators(service);
+    let readers = violation_readers();
     quote! {
         #[doc = #module_doc]
         pub mod #module {
@@ -188,7 +209,208 @@ pub fn emit(service: &ServiceDef, generated: &TokenStream) -> TokenStream {
             #accessors
             #constructors
             #renderings
-            #generated
+            #envelope
+            #validation
+            #messages
+            #validators
+            #readers
+        }
+    }
+}
+
+/// The `{ ok, value }` / `{ ok, error }` envelope a request-and-reply operation answers in, which
+/// the client reads back and a TypeScript caller of the same operation narrows on.
+///
+/// Published, with a constructor and a reader, because neither half sits in this module any more:
+/// a dispatcher answers in it and a client reads one back, both from wherever they were expanded.
+fn answered_envelope() -> TokenStream {
+    quote! {
+        /// What a request-and-reply operation puts on the wire: the envelope, with the message the
+        /// operation declared left exactly as it is inside it.
+        #[derive(::serde::Deserialize, ::serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        pub struct Answered<T, E> {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            error: Option<E>,
+            ok: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            value: Option<T>,
+        }
+
+        impl<T, E> Answered<T, E> {
+            /// The envelope around the outcome an implementation produced.
+            pub fn answering(outcome: Result<T, E>) -> Self {
+                match outcome {
+                    Ok(value) => Self {
+                        error: None,
+                        ok: true,
+                        value: Some(value),
+                    },
+                    Err(declared) => Self {
+                        error: Some(declared),
+                        ok: false,
+                        value: None,
+                    },
+                }
+            }
+
+            /// What the envelope said, for a client reading one back from outside this module.
+            ///
+            /// The arm is the `ok` flag's, and what it carries is `None` where the envelope
+            /// contradicted itself — `ok` with no value, a failure with no error. That is a defect
+            /// on the wire, which the reader answers for rather than this.
+            pub fn carried(self) -> Result<Option<T>, Option<E>> {
+                if self.ok {
+                    Ok(self.value)
+                } else {
+                    Err(self.error)
+                }
+            }
+        }
+    }
+}
+
+/// What a message answers when it publishes no `validate()` of its own.
+///
+/// It is shut inside a module of its own and brought into scope by
+/// [`message_validation_in_scope`] only in the function bodies that ask a message to validate
+/// itself. A blanket `validate()` visible across the whole module would be a second candidate for
+/// every `validate()` call written there — an operation's generated message type is in scope here
+/// through `use super::*`, and each walks its own nested fields through a fallback of exactly this
+/// shape, so two in scope at once is `E0034` on a declaration that named neither.
+fn message_validation() -> TokenStream {
+    quote! {
+        pub mod message_validation {
+            /// The answer a message with no declared constraints gives when asked to validate
+            /// itself.
+            ///
+            /// `#[model_schema()]` writes an inherent `validate()` onto a type with constrained
+            /// fields and none onto a type without one, and an inherent method takes precedence
+            /// over a trait's — so a message that declared constraints runs them, and one that
+            /// declared none passes here.
+            pub trait MessageValidation {
+                /// `Ok(())`, there being nothing declared to check.
+                fn validate(&self) -> Result<(), Vec<String>> {
+                    Ok(())
+                }
+            }
+
+            impl<T> MessageValidation for T {}
+        }
+    }
+}
+
+/// Brings the fallback into scope for one function body written *inside* the module — see
+/// [`message_validation`] for why it is not in scope for the module that body is written in.
+pub fn message_validation_in_scope() -> TokenStream {
+    quote! {
+        use message_validation::MessageValidation;
+    }
+}
+
+/// One name per operation for the message it receives, so a dispatcher outside this module reaches
+/// every spelling of one the same way.
+fn message_type_aliases(service: &ServiceDef) -> TokenStream {
+    let declared = service.operations.iter().map(|operation| {
+        let named = message_alias_ident(operation);
+        let message = message_type(operation);
+        let doc = format!("The message operation `{}` receives.", operation.wire_name);
+        quote! {
+            #[doc = #doc]
+            pub type #named = #message;
+        }
+    });
+    quote! {
+        #(#declared)*
+    }
+}
+
+/// The name an operation's validator is published under: `read_balance` becomes
+/// `validated_read_balance`.
+pub fn message_validator_ident(operation: &OperationDef) -> Ident {
+    format_ident!(
+        "validated_{}",
+        operation.ident,
+        span = operation.ident.span()
+    )
+}
+
+/// The name an operation's message is republished under: `read_balance` becomes
+/// `ReadBalanceMessage`.
+pub fn message_alias_ident(operation: &OperationDef) -> Ident {
+    format_ident!(
+        "{}Message",
+        RenameRule::PascalCase.apply_to_field(&operation.ident.to_string()),
+        span = operation.ident.span()
+    )
+}
+
+/// One validator per operation: the operation's message asked to validate itself, at the concrete
+/// type an inherent `validate()` needs to win at.
+fn message_validators(service: &ServiceDef) -> TokenStream {
+    let declared = service.operations.iter().map(|operation| {
+        let named = message_validator_ident(operation);
+        let message = message_alias_ident(operation);
+        let doc = format!(
+            "What operation `{}` answers when its message is asked to validate itself.",
+            operation.wire_name
+        );
+        let in_scope = message_validation_in_scope();
+        quote! {
+            #[doc = #doc]
+            pub fn #named(received: &#message) -> Result<(), Vec<String>> {
+                #in_scope
+                received.validate()
+            }
+        }
+    });
+    quote! {
+        #(#declared)*
+    }
+}
+
+/// The type an operation's payload deserializes into, named as it resolves inside the module.
+fn message_type(operation: &OperationDef) -> TokenStream {
+    match &operation.inputs {
+        OperationInputs::Named(declared) => quote! { #declared },
+        OperationInputs::Empty | OperationInputs::Generated(_) => {
+            let declared: Option<Ident> = operation.generated_message_ident();
+            quote! { #declared }
+        }
+    }
+}
+
+/// The readers that turn a violation report into what a fault carries.
+///
+/// `named_field` reads a deserializer's refusal as well as a validator's report, so a dispatcher
+/// reaches it from wherever it was expanded; the reader that classifies a refusal travels with the
+/// dispatcher instead, since it is the only caller and it is the side holding the `serde_json`
+/// error.
+fn violation_readers() -> TokenStream {
+    quote! {
+        /// The field one line names, where it is written in the shape every validator
+        /// `#[model_schema()]` generates: the field first and in single quotes —
+        /// `'organization_id': too short: …`. A line written any other way names none.
+        ///
+        /// It is read off a deserializer's refusal as well as off a validator's report, because
+        /// those are the same message. A field carrying a constraint gets a serde
+        /// `deserialize_with` hook running the very check `validate()` runs, and the hook hands
+        /// serde that check's message verbatim — so a payload refused before it ever became a
+        /// message still names the field it got wrong.
+        pub fn named_field(reported: &str) -> Option<&str> {
+            let (field, _rest) = reported.strip_prefix('\'')?.split_once('\'')?;
+            Some(field)
+        }
+
+        /// Everything that failed, in one line, for the fault's detail.
+        pub fn violation_detail(reported: &[String]) -> String {
+            reported.join("; ")
+        }
+
+        /// The field a violation report names, which is its first line's. A violation naming no
+        /// field, as a constrained newtype's does, leaves the fault's field empty.
+        pub fn violated_field(reported: &[String]) -> Option<&str> {
+            named_field(reported.first()?)
         }
     }
 }

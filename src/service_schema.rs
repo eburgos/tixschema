@@ -26,14 +26,18 @@
 //!
 //! # What a crate declaring a service names in its own manifest
 //!
-//! Three runtime crates, because the generated code calls them: `serde`, `serde_json` and
-//! `tracing`. tixschema itself is build-time only and none of the three is reached through it —
-//! a service names them the way it names any dependency of code it compiles.
+//! One runtime crate, because the generated code calls it: `serde`. Every declared message and
+//! both fault types derive what serde writes, and with both halves of a service held as tokens
+//! nothing else at the trait's own scope reaches a runtime crate at all. tixschema itself is
+//! build-time only and serde is not reached through it — a service names it the way it names any
+//! dependency of code it compiles.
 //!
-//! `tracing` is the newest of the three and is there so that a caught panic is written down. A
-//! dispatcher catches a panicking handler in order to return, so the transport can settle the
-//! delivery; catching without recording would trade a stalled consumer for a silent one, so the
-//! arm emits `tracing::error!` naming the operation and what the panic said.
+//! `serde_json` and `tracing` are named by the crate that *invokes* a transport's macro rather than
+//! by the one that declares the service, because that is where the code calling them is compiled.
+//! A dispatcher reads its payload through `serde_json` and writes a caught panic down through
+//! `tracing`. A caught panic is written down for the same reason it is caught: a dispatcher catches
+//! a panicking handler in order to return so the transport can settle the delivery, and catching
+//! without recording would trade a stalled consumer for a silent one.
 //!
 //! It costs a consumer that wants no logging very little. With no subscriber installed the
 //! callsite registers against `NoSubscriber`, whose `register_callsite` answers `Interest::never()`
@@ -43,19 +47,18 @@
 //! nothing more. The machinery that formats and writes records lives in `tracing-subscriber`,
 //! which is not named here and which only a service that wants output adds.
 //!
-//! A crate that forgets it earns one error, spanned on the declaration, naming the crate:
+//! A crate that invokes a dispatcher macro and forgets `tracing` earns one error naming the crate:
 //! `error[E0433]: cannot find `tracing` in the crate root`. Forgetting `serde_json` earns seven.
 //!
-//! A crate that only *places a client* — a transport's macro, invoked where a caller wants one —
-//! names two of the three. The client serializes what it sends and reads what comes back, so it
-//! reaches `serde` and `serde_json`; it catches no panic, so it has nothing to write down and
-//! reaches no `tracing`.
+//! A crate that only *places a client* — a transport's client macro, invoked where a caller wants
+//! one — names one of the two. The client serializes what it sends and reads what comes back
+//! through `serde_json`; it catches no panic, so it has nothing to write down and reaches no
+//! `tracing`.
 //!
-//! **`#[model_schema]` requires none of this.** Only a declared service emits a dispatcher, so a
-//! crate that describes types and declares no service names no `tracing` and reaches no logger.
+//! **`#[model_schema]` requires none of this.** Only an invoked dispatcher macro reaches a logger,
+//! so a crate that describes types and declares no service names neither `serde_json` nor
+//! `tracing`.
 
-#[cfg(feature = "serde")]
-mod dispatch;
 #[cfg(feature = "serde")]
 mod messages;
 #[cfg(feature = "serde")]
@@ -106,22 +109,20 @@ pub fn exec_service_schema(args: TokenStream, input: TokenStream) -> TokenStream
     match (asked, parse::parse_service(&declared)) {
         (Ok(wanted), Ok(service)) => {
             let messages = messages::emit(&service);
-            // The dispatcher lands inside the module `support` opens: it names the fault, the
-            // reply handle and the incoming message unqualified.
-            let dispatcher = dispatch::emit(&service);
-            let support = support::emit(&service, &dispatcher);
+            let support = support::emit(&service);
+            // Both halves a transport contributes are `macro_rules!` bodies rather than compiled
+            // items, so they stay at the trait's scope; `#[macro_export]` hoists each name to the
+            // crate root from wherever the service was written.
+            let transports = transport::emit(&service, &wanted);
             // The TypeScript artifacts are strings rather than callers of anything private, so they
             // stay at the trait's scope where a bundle can name them.
             let typescript = typescript(&service);
-            // What each transport contributes is a macro at the crate root, so it lands beside the
-            // trait rather than inside the module, and last so a reader meets the contract first.
-            let transports = transport::emit(&wanted, &service);
             quote! {
                 #messages
                 #support
                 #contract
-                #typescript
                 #transports
+                #typescript
             }
         }
         (transports, read) => {

@@ -1,7 +1,7 @@
 //! The transports the generated client is driven over, and everything read off it.
 //!
-//! The service, its messages and the module the client was expanded into are declared beside this
-//! one, at the crate root the macro's `$crate` resolves to.
+//! The service and its messages are declared here; the modules the client and the dispatcher were
+//! each expanded into sit beside this file, at the crate root the macros' `$crate` resolves to.
 //!
 //! `ProbeTransport` hands out prepared answers and writes down what it was asked to send, which is
 //! how a test reads the operation name travelling beside the payload rather than inside it. Built
@@ -17,19 +17,58 @@
 //! only transport here that answers in the failure arm, and it is what the fault a caller reads
 //! for a call that never completed is measured against.
 
-/// What is read off the second service, whose message carries no bound of its own and only one its
-/// field's *type* declares. Gated with the declarations it drives: a constrained brand needs a
-/// surface feature to be declared at all.
-#[cfg(any(feature = "jsonschema", feature = "typescript", feature = "zod"))]
-mod a_bound_the_fields_own_type_declares {
-    use super::{
-        EnrolError, EnrolRequest, EnrolService, Enrolled, Slug, enrol_amqp_client,
-        enrol_service_schema,
-    };
+#![cfg(feature = "serde")]
+
+/// A service whose message carries no bound of its own, only one its field's *type* declares.
+///
+/// Its own service rather than an operation on the file's: a constrained brand needs a surface
+/// feature to be declared at all, so everything reading one is gated together — the same gate the
+/// dispatcher's constraint module carries, and for the same reason.
+#[cfg(all(
+    feature = "serde",
+    any(feature = "typescript", feature = "zod", feature = "jsonschema")
+))]
+#[macro_use]
+pub mod a_bound_the_fields_own_type_declares {
     use super::{ProbeTransport, poll_once};
+    use crate::{enrol_amqp_client, enrol_amqp_transport};
     use core::future::ready;
-    use serde::Serialize;
+    use serde::{Deserialize, Serialize};
     use std::sync::Mutex;
+    use tixschema::{model_schema, service_schema};
+
+    #[model_schema(minLength = 3)]
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(transparent)]
+    pub struct Slug(pub String);
+
+    #[model_schema()]
+    #[derive(Deserialize, Serialize)]
+    pub struct EnrolRequest {
+        pub slug: Slug,
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+    pub struct Enrolled {
+        pub credits: u32,
+    }
+
+    #[model_schema()]
+    #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+    #[serde(rename_all = "kebab-case", tag = "errorCode")]
+    pub enum EnrolError {
+        DbError,
+    }
+
+    #[service_schema(transports = ["amqp_rpc"])]
+    pub trait EnrolService<Ctx> {
+        async fn enrol(&self, ctx: &Ctx, req: EnrolRequest) -> Result<Enrolled, EnrolError>;
+
+        /// No reply, so the send half of this service's seam is reached as well as the call half.
+        #[service_schema_op(one_way)]
+        async fn withdraw(&self, ctx: &Ctx, req: EnrolRequest);
+    }
 
     /// Answers with the length of the slug it was handed, which a test reads back to say the
     /// message reached it whole.
@@ -87,7 +126,7 @@ mod a_bound_the_fields_own_type_declares {
             T: Serialize + Send,
         {
             let capture = EnrolCapture::new();
-            enrol_service_schema::dispatch(
+            enrol_amqp_transport::dispatch(
                 &EnrolBackEnd,
                 &(),
                 &incoming(operation, &payload),
@@ -102,7 +141,7 @@ mod a_bound_the_fields_own_type_declares {
             T: Serialize + Send,
         {
             let capture = EnrolCapture::new();
-            enrol_service_schema::dispatch(
+            enrol_amqp_transport::dispatch(
                 &EnrolBackEnd,
                 &(),
                 &incoming(operation, &payload),
@@ -149,11 +188,11 @@ mod a_bound_the_fields_own_type_declares {
     }
 
     /// The message shape is generated per service, so this service builds its own.
-    fn incoming<T>(operation: &str, payload: &T) -> enrol_service_schema::IncomingMessage
+    fn incoming<T>(operation: &str, payload: &T) -> enrol_amqp_transport::IncomingMessage
     where
         T: Serialize,
     {
-        enrol_service_schema::IncomingMessage {
+        enrol_amqp_transport::IncomingMessage {
             operation: operation.to_owned(),
             payload: serde_json::to_vec(payload).unwrap(),
         }
@@ -241,6 +280,7 @@ mod a_bound_the_fields_own_type_declares {
     }
 }
 
+use crate::{amqp_client, amqp_transport, spare_amqp_client};
 use core::future::{Future, ready};
 use core::pin::pin;
 use core::task::{Context as PollContext, Poll, Waker};
@@ -265,43 +305,6 @@ pub struct BalanceRequest {
 #[model_schema()]
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BalanceResponse {
-    pub credits: u32,
-}
-
-#[cfg(any(feature = "jsonschema", feature = "typescript", feature = "zod"))]
-#[model_schema()]
-#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case", tag = "errorCode")]
-pub enum EnrolError {
-    DbError,
-}
-
-#[cfg(any(feature = "jsonschema", feature = "typescript", feature = "zod"))]
-#[model_schema()]
-#[derive(Deserialize, Serialize)]
-pub struct EnrolRequest {
-    pub slug: Slug,
-}
-
-/// A service whose message carries no bound of its own, only one its field's *type* declares.
-///
-/// Its own service rather than an operation on the file's: a constrained brand needs a surface
-/// feature to be declared at all, so everything reading one is gated together — the same gate the
-/// dispatcher's constraint module carries, and for the same reason.
-#[cfg(any(feature = "jsonschema", feature = "typescript", feature = "zod"))]
-#[service_schema(transports = ["amqp_rpc"])]
-pub trait EnrolService<Ctx> {
-    async fn enrol(&self, ctx: &Ctx, req: EnrolRequest) -> Result<Enrolled, EnrolError>;
-
-    /// No reply, so the send half of this service's seam is reached as well as the call half.
-    #[service_schema_op(one_way)]
-    async fn withdraw(&self, ctx: &Ctx, req: EnrolRequest);
-}
-
-#[cfg(any(feature = "jsonschema", feature = "typescript", feature = "zod"))]
-#[model_schema()]
-#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct Enrolled {
     pub credits: u32,
 }
 
@@ -340,14 +343,6 @@ pub trait ProbeService<Ctx> {
     async fn sweep(&self, ctx: &Ctx) -> Result<BalanceResponse, ProbeError>;
 }
 
-/// A brand carrying a bound of its own, which is the half of a message's validation the message
-/// itself declares nothing about.
-#[cfg(any(feature = "jsonschema", feature = "typescript", feature = "zod"))]
-#[model_schema(minLength = 3)]
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(transparent)]
-pub struct Slug(pub String);
-
 impl AdmitRequest {
     pub fn validate(&self) -> Result<(), Vec<String>> {
         if self.organization_id.len() < 3 {
@@ -358,41 +353,6 @@ impl AdmitRequest {
         }
         Ok(())
     }
-}
-
-/// The client, placed. The macro takes no arguments and expands to bare items, so this module is
-/// this crate's to name; the `use` is what resolves the types the author declared, which the
-/// expansion spells exactly as they were written.
-///
-/// It sits below the declaration it came from because a `macro_export` macro that another macro
-/// *expanded* is reachable inside the crate that declared it by its bare name alone, in the
-/// textual scope it opens: `crate::probe_service_amqp_rpc_client!()` earns
-/// `macro-expanded macro_export macros from the current crate cannot be referred to by absolute
-/// paths`. The path form is what another crate writes, and is the only form that reaches one.
-#[cfg(test)]
-pub mod amqp_client {
-    use super::{AdmitRequest, BalanceRequest, BalanceResponse, ProbeError};
-
-    probe_service_amqp_rpc_client!();
-}
-
-/// The second service's client, under the same gate its declarations carry.
-#[cfg(test)]
-#[cfg(any(feature = "jsonschema", feature = "typescript", feature = "zod"))]
-pub mod enrol_amqp_client {
-    use super::{EnrolError, EnrolRequest, Enrolled};
-
-    enrol_service_amqp_rpc_client!();
-}
-
-/// The same client placed a second time, in a second module of this crate. `#[macro_export]` puts
-/// one name at the crate root and the macro emits bare items, so two placements are two transport
-/// seams and two client types that share nothing.
-#[cfg(test)]
-pub mod spare_amqp_client {
-    use super::{AdmitRequest, BalanceRequest, BalanceResponse, ProbeError};
-
-    probe_service_amqp_rpc_client!();
 }
 
 /// What a reply handle captured, encoded as the transport would put it on the wire.
@@ -522,7 +482,7 @@ impl amqp_client::Transport for Loopback {
         T: Serialize + Send,
     {
         let capture = Capture::new();
-        probe_service_schema::dispatch(
+        amqp_transport::dispatch(
             &self.service,
             &"probe".to_owned(),
             &incoming(operation, &payload),
@@ -537,7 +497,7 @@ impl amqp_client::Transport for Loopback {
         T: Serialize + Send,
     {
         let capture = Capture::new();
-        probe_service_schema::dispatch(
+        amqp_transport::dispatch(
             &self.service,
             &"probe".to_owned(),
             &incoming(operation, &payload),
@@ -683,11 +643,11 @@ impl ProbeTransport {
 }
 
 /// One message as the dispatcher on the far side reads it.
-fn incoming<T>(operation: &str, payload: &T) -> probe_service_schema::IncomingMessage
+fn incoming<T>(operation: &str, payload: &T) -> amqp_transport::IncomingMessage
 where
     T: Serialize,
 {
-    probe_service_schema::IncomingMessage {
+    amqp_transport::IncomingMessage {
         operation: operation.to_owned(),
         payload: serde_json::to_vec(payload).unwrap(),
     }

@@ -10,6 +10,7 @@
 
 #![cfg(feature = "serde")]
 
+use crate::amqp_transport;
 use core::future::{Future, ready};
 use core::pin::pin;
 use core::task::{Context as PollContext, Poll, Waker};
@@ -182,7 +183,7 @@ impl amqp_client::Transport for Loopback {
         T: Serialize + Send,
     {
         let capture = Capture::new();
-        probe_service_schema::dispatch(
+        amqp_transport::dispatch(
             &self.service,
             &ProbeContext {
                 logger_name: "probe".to_owned(),
@@ -199,7 +200,7 @@ impl amqp_client::Transport for Loopback {
         T: Serialize + Send,
     {
         let capture = Capture::new();
-        probe_service_schema::dispatch(
+        amqp_transport::dispatch(
             &self.service,
             &ProbeContext {
                 logger_name: "probe".to_owned(),
@@ -228,12 +229,12 @@ impl Capture {
 /// wire.
 fn answered(operation: &str, payload: &str) -> String {
     let capture = Capture::new();
-    poll_once(probe_service_schema::dispatch(
+    poll_once(amqp_transport::dispatch(
         &ProbeBackEnd { granted_credits: 5 },
         &ProbeContext {
             logger_name: "probe".to_owned(),
         },
-        &probe_service_schema::IncomingMessage {
+        &amqp_transport::IncomingMessage {
             operation: operation.to_owned(),
             payload: payload.as_bytes().to_vec(),
         },
@@ -244,11 +245,11 @@ fn answered(operation: &str, payload: &str) -> String {
 }
 
 /// One message as the dispatcher on the far side reads it.
-fn incoming<T>(operation: &str, payload: &T) -> probe_service_schema::IncomingMessage
+fn incoming<T>(operation: &str, payload: &T) -> amqp_transport::IncomingMessage
 where
     T: Serialize,
 {
-    probe_service_schema::IncomingMessage {
+    amqp_transport::IncomingMessage {
         operation: operation.to_owned(),
         payload: serde_json::to_vec(payload).unwrap(),
     }

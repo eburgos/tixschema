@@ -8,12 +8,20 @@
 //! TypeScript writes any.
 
 #[cfg(test)]
+#[macro_use]
 #[path = "service_schema_typescript_tests/tests.rs"]
 mod tests;
 
-// What `$crate` reaches. A client's macro body names everything the declaration generated from the
-// declaring crate's *root*, and the declaration sits in the module above; importing it here puts
-// those names where an expansion looks for them. Private: nothing outside this binary reads them.
-#[cfg(test)]
-#[cfg(all(feature = "serde", feature = "typescript", feature = "zod"))]
-use tests::*;
+#[cfg(all(test, feature = "serde", feature = "typescript"))]
+#[path = "service_schema_typescript_tests/amqp_transport.rs"]
+mod amqp_transport;
+
+// Both halves a transport contributes reach what the service declared through `$crate`, which is
+// this binary's root: a service written in a submodule is named here for either expansion to
+// resolve, the messages the macro declared included.
+#[cfg(all(test, feature = "serde", feature = "typescript"))]
+use tests::{ProbeService, probe_service_schema};
+// The client builds a message for each operation that declared none of its own, and it is placed
+// only where the Zod surface it is read against is.
+#[cfg(all(test, feature = "serde", feature = "typescript", feature = "zod"))]
+use tests::{ApplyBundleRequest, ExpireCreditRequest, SweepRequest};

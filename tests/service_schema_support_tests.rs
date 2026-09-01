@@ -7,5 +7,15 @@
 //! here is gated any further — what the construct emits carries no other surface a feature writes.
 
 #[cfg(test)]
+#[macro_use]
 #[path = "service_schema_support_tests/tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "serde"))]
+#[path = "service_schema_support_tests/amqp_transport.rs"]
+mod amqp_transport;
+
+// A transport's dispatcher reaches what the service declared through `$crate`, which is this
+// binary's root: a service written in a submodule is named here for the expansion to resolve.
+#[cfg(all(test, feature = "serde"))]
+use tests::{SweepService, sweep_service_schema};
