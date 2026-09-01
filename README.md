@@ -1823,7 +1823,6 @@ The field is named wherever the refusal named one: a validator's report names it
 On the Rust side, beside the trait, in a module named for the service (`usage_service_schema`):
 
 - `ServiceFault` and `ServiceFaultKind` -- readable by anyone, constructible by nothing outside the module. `ServiceFault` is the alias; the struct is declared as `<Service>FaultFields`, which is the name its *fields* publish under in TypeScript, `<Service>Fault` there being the sealed type written over them.
-- `Reply` -- the handle a transport implements to answer one message, with `send` and `fault`.
 - `CallError<E>` -- `Operation(E)` or `Fault(ServiceFault)`.
 - `<Operation>Message` and `validated_<operation>` -- the name each operation's message is republished under, and the validator that message runs. Which of the two answers a check gives depends on the message's concrete type, so both halves of a service ask this one function rather than answering for themselves, from wherever they were expanded.
 - `Answered<T, E>` -- the envelope a request-and-reply operation answers in, written by a dispatcher and read back by a client.
@@ -1854,12 +1853,12 @@ mod amqp_client {
 }
 ```
 
-Each macro takes no arguments and emits bare items rather than a module of its own, so the caller names the module and two transports in one crate cannot collide. The dispatcher emits `IncomingMessage`, a panic guard, and `dispatch(svc, ctx, message, reply)`, generic over the implementing type. The client emits:
+Each macro takes no arguments and emits bare items rather than a module of its own, so the caller names the module and two transports in one crate cannot collide. The dispatcher emits `IncomingMessage`, `Reply` -- the handle a transport implements to answer one message, with `send` and `fault` -- a panic guard, and `dispatch(svc, ctx, message, reply)`, generic over the implementing type. The client emits:
 
 - `Transport` -- the seam a client is bound to, with `notify` and `request`. Both answer a `Result`, whose failure arm carries in words what stopped a call from travelling; the client turns it into a fault of kind `transport-failure`.
 - `UsageServiceClient` -- one method per operation, over any `Transport`. Each takes that operation's arguments and no context: a context is what an implementation needs, and a caller has nothing to hand one to.
 
-Paths inside a `macro_rules!` body resolve where the macro is *invoked*, so the two kinds are spelled apart. Everything tixschema generated is reached through `$crate::`, which resolves in the crate that declared the service; every runtime crate is reached through a leading `::` and resolves in the invoking crate, **which is therefore the one that names `serde_json` and `tracing` in its own manifest**. That is the point of the shape: a crate that only declares services names neither. A crate that places only a client names `serde_json` and not `tracing`, nothing in a client catching a panic; the `use` in the client module above is what resolves the message types the author declared, which the expansion spells exactly as they were written.
+Paths inside a `macro_rules!` body resolve where the macro is *invoked*, so the two kinds are spelled apart. Everything tixschema generated is reached through `$crate::`, which resolves in the crate that declared the service; every runtime crate is reached through a leading `::` and resolves in the invoking crate, **which is therefore the one that names `serde`, `serde_json` and `tracing` in its own manifest**. That is the point of the shape: a crate that only declares services names serde alone. A crate that places only a client names `serde` and `serde_json` and not `tracing`, nothing in a client catching a panic; the `use` in the client module above is what resolves the message types the author declared, which the expansion spells exactly as they were written.
 
 A crate that declares a service *and* places one of its halves invokes that macro by name rather than by path -- `usage_service_amqp_rpc_dispatcher!()` -- after the declaration and inside it or a module below it, `#[macro_use]` carrying it out of a submodule. Rust refuses an absolute path to a `macro_export` macro that a macro produced, from within the crate that produced it; another crate reaches it by path as above.
 

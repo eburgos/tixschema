@@ -98,17 +98,17 @@
 //! types at the scope the author declared them in, and the fault, the envelope, the message aliases
 //! and the per-operation validators inside `$crate::{service}_schema` — which resolves in the crate
 //! that *defined* the macro. Every runtime crate is reached through a leading `::` and resolves in
-//! the invoking crate, which is therefore the one that names it: `::serde_json`, `::tracing`,
-//! `::core` and `::std` for the dispatcher, `::serde`, `::serde_json` and `::core` for the client.
-//! The client reaches no `::tracing` — nothing there catches a panic, so nothing there has anything
-//! to write down, and a caller that only wants to make calls names one crate fewer than a crate
-//! that answers them.
+//! the invoking crate, which is therefore the one that names it: `::serde`, `::serde_json`,
+//! `::tracing`, `::core` and `::std` for the dispatcher, `::serde`, `::serde_json` and `::core` for
+//! the client. The client reaches no `::tracing` — nothing there catches a panic, so nothing there
+//! has anything to write down, and a caller that only wants to make calls names one crate fewer
+//! than a crate that answers them.
 //!
 //! What each macro writes itself is named bare: those items land in the module the caller supplied
-//! and exist nowhere else. The dispatcher's are `IncomingMessage`, the panic guard and the reader
-//! that classifies a serde refusal; the client's are the `Transport` trait, the fault mirror, the
-//! client type and the reader that turns one envelope into three outcomes. The two sets do not
-//! overlap, so a crate that wants both can place them in one module.
+//! and exist nowhere else. The dispatcher's are `IncomingMessage`, the `Reply` handle, the panic
+//! guard and the reader that classifies a serde refusal; the client's are the `Transport` trait,
+//! the fault mirror, the client type and the reader that turns one envelope into three outcomes.
+//! The two sets do not overlap, so a crate that wants both can place them in one module.
 //!
 //! A type the *author* wrote is the one thing spelled as they wrote it: `Vec<Slug>` and `String`
 //! share no crate prefix that would be true of both. The module the client macro is invoked in
@@ -412,10 +412,10 @@ fn dispatcher_macro(service: &ServiceDef, transport: Transport) -> TokenStream {
     let macro_doc = format!(
         "The `{contract}` dispatcher for the `{}` transport, held as tokens rather than compiled \
          here.\n\n\
-         It takes no arguments and emits bare items — `IncomingMessage`, the panic guard and \
-         `dispatch` — so the caller supplies the module they land in and two transports in one \
-         crate cannot collide. The invoking crate names `serde_json` and `tracing` in its own \
-         manifest, because the items below call them.",
+         It takes no arguments and emits bare items — `IncomingMessage`, `Reply`, the panic guard \
+         and `dispatch` — so the caller supplies the module they land in and two transports in one \
+         crate cannot collide. The invoking crate names `serde`, `serde_json` and `tracing` in its \
+         own manifest, because the items below call them.",
         transport.name()
     );
     let dispatch_doc = format!(
@@ -431,6 +431,7 @@ fn dispatcher_macro(service: &ServiceDef, transport: Transport) -> TokenStream {
          desugaring the trait itself is emitted in, so a consumer loop can spawn it."
     );
     let incoming = incoming_message();
+    let reply = reply_trait(contract, &module);
     let reader = refusal_reader(&module);
     let guard = panic_guard();
     quote! {
@@ -439,6 +440,7 @@ fn dispatcher_macro(service: &ServiceDef, transport: Transport) -> TokenStream {
         macro_rules! #macro_name {
             () => {
                 #incoming
+                #reply
                 #reader
                 #guard
 
@@ -452,7 +454,7 @@ fn dispatcher_macro(service: &ServiceDef, transport: Transport) -> TokenStream {
                 where
                     S: $crate::#contract<Ctx> + Sync,
                     Ctx: Sync,
-                    R: $crate::#module::Reply + Sync,
+                    R: Reply + Sync,
                 {
                     async move {
                         match message.operation.as_str() {
@@ -693,9 +695,9 @@ fn outbound_refusal(operation: &OperationDef, generated: &Generated) -> TokenStr
 /// something its operation never declared, which is exactly what a fault reports.
 ///
 /// Catching a panic without writing it down would trade a stalled consumer for a silent one, so
-/// every caught panic is recorded through `tracing::error!`. `tracing` is one of the two runtime
-/// crates the *invoking* crate names in its own manifest, beside `serde_json`, and it is named for
-/// the same reason: the tokens below call it.
+/// every caught panic is recorded through `tracing::error!`. `tracing` is one of the runtime crates
+/// the *invoking* crate names in its own manifest, beside `serde` and `serde_json`, and it is named
+/// for the same reason: the tokens below call it.
 fn panic_guard() -> TokenStream {
     quote! {
         /// Runs a handler, answering `Err` with what it said where it panicked rather than letting
@@ -827,6 +829,37 @@ fn refusal_reader(module: &Ident) -> TokenStream {
                 return $crate::#module::ServiceFault::failed_validation(operation, named, said);
             }
             $crate::#module::ServiceFault::undeserializable_payload(operation, said)
+        }
+    }
+}
+
+/// The `Reply` trait, which a transport implements once per dispatcher it places.
+///
+/// It travels with the dispatcher because its shape is the dispatcher's: one reply per message,
+/// answered with a value or with a defect.
+fn reply_trait(contract: &Ident, module: &Ident) -> TokenStream {
+    let reply_doc = format!(
+        "The handle a transport gives the `{contract}` dispatcher so it can settle *this* \
+         message.\n\n\
+         A request-and-reply operation answers with [`send`](Reply::send) or \
+         [`fault`](Reply::fault). A one-way operation calls neither, and the transport \
+         acknowledges the delivery after dispatch returns. Encoding sits behind the trait, which \
+         is what keeps the generator out of the wire format."
+    );
+    quote! {
+        #[doc = #reply_doc]
+        pub trait Reply {
+            /// Answer with a defect the operation never declared.
+            fn fault(
+                &self,
+                fault: $crate::#module::ServiceFault,
+            ) -> impl ::core::future::Future<Output = ()> + Send;
+
+            /// Answer with a value. The transport serializes it, which is why it is handed the
+            /// value rather than an encoded buffer.
+            fn send<T>(&self, value: T) -> impl ::core::future::Future<Output = ()> + Send
+            where
+                T: ::serde::Serialize + Send;
         }
     }
 }

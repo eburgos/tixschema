@@ -36,9 +36,9 @@ regex = ">=1.10"
 # Test-only: `span-locations` makes `Span::source_text()` work outside a real macro expansion,
 # which is how the unit tests assert that generated tokens are spanned on the user's source.
 proc-macro2 = { version = "1", features = ["span-locations"] }
-# A dispatcher records a handler that came apart through `tracing::error!`, so a crate declaring a
-# service names `tracing` in its own manifest the way it already names `serde` and `serde_json`.
-# Here it is a dev-dependency for the same reason those two are: the tests are the consumer.
+# A dispatcher records a handler that came apart through `tracing::error!`, so the crate that
+# invokes a transport's dispatcher macro names `tracing` in its own manifest, beside `serde` and
+# `serde_json`. Here it is a dev-dependency for the same reason those two are: the tests invoke it.
 tracing = "0.1"
 
 # Transitive dep floors — pinned to fix known vulnerabilities:

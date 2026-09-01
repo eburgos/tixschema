@@ -169,6 +169,17 @@ fn without_literals(tokens: TokenStream) -> TokenStream {
         .collect()
 }
 
+/// Whether `declaration` carries `#[model_schema()]`, which is what publishes its `ts_definition()`,
+/// `zod_schema()` and `json_schema()` under their respective features. The attribute is the item's
+/// own only where nothing else is declared between the two.
+fn is_described(emitted: &str, declaration: &str) -> bool {
+    let at = emitted.find(declaration).unwrap();
+    let before = &emitted[..at];
+    before
+        .rfind("# [:: tixschema :: model_schema ()]")
+        .is_some_and(|annotated| !before[annotated..].contains("pub "))
+}
+
 fn generated_inputs(operation: &OperationDef) -> Option<&[(Ident, Type)]> {
     match &operation.inputs {
         OperationInputs::Generated(carried) => Some(carried.as_slice()),
@@ -787,7 +798,7 @@ fn dispatch_is_generic_over_the_implementing_type_and_answers_through_the_handle
             "pub fn dispatch < S , Ctx , R > (svc : & S , ctx : & Ctx , message : & \
              IncomingMessage , reply : & R ,) -> impl :: core :: future :: Future < Output = () > \
              + Send where S : $ crate :: UsageService < Ctx > + Sync , Ctx : Sync , \
-             R : $ crate :: usage_service_schema :: Reply + Sync"
+             R : Reply + Sync"
         ),
         "it returns nothing, and a trait with `async fn` has no `dyn` form to offer. Got: \
          {emitted}"
@@ -840,22 +851,81 @@ fn a_transport_named_twice_contributes_one_macro() {
     );
 }
 
-/// A service that asked for no transport is emitted nothing transport-shaped at all — not the
-/// macro, and not a dispatcher beside it.
+/// A service that asked for no transport is emitted its contract and nothing else.
+///
+/// Both halves are read here rather than the absences alone: a regression that stopped emitting the
+/// contract would pass a test that only asked what is missing, and the contract is what a
+/// hand-written dispatcher is written against.
 #[test]
-fn a_service_asking_for_no_transport_is_emitted_neither_a_macro_nor_a_dispatcher() {
+fn a_service_asking_for_no_transport_is_emitted_the_contract_and_nothing_else() {
     let emitted = expanded(MIXED_SERVICE);
     for absent in [
         "macro_rules",
         "pub fn dispatch",
         "IncomingMessage",
-        ":: tracing :: error !",
+        "pub trait Reply",
+        "pub trait Transport",
+        "pub struct UsageServiceClient",
+        "serde_json",
+        "tracing",
     ] {
         assert!(
             !emitted.contains(absent),
             "`{absent}` belongs to a transport, and this service asked for none. Got: {emitted}"
         );
     }
+    for present in [
+        "pub trait UsageService < Ctx >",
+        "pub struct ExpireCreditRequest",
+        "pub struct SweepRequest",
+        "pub struct UsageServiceFaultFields",
+        "pub enum UsageServiceFaultKind",
+        "pub type ServiceFault = UsageServiceFaultFields",
+        "pub type ServiceFaultKind = UsageServiceFaultKind",
+        "pub fn failed_validation",
+        "pub fn handler_panic",
+        "pub fn transport_failure",
+        "pub fn undeserializable_payload",
+        "pub fn unknown_operation",
+        "pub trait MessageValidation",
+        "fn validate (& self)",
+        "pub enum CallError",
+    ] {
+        assert!(
+            emitted.contains(present),
+            "`{present}` is contract rather than transport, and a service is no use without it. \
+             Got: {emitted}"
+        );
+    }
+    for described in [
+        "pub struct ExpireCreditRequest",
+        "pub struct SweepRequest",
+        "pub struct UsageServiceFaultFields",
+        "pub enum UsageServiceFaultKind",
+    ] {
+        assert!(
+            is_described(&emitted, described),
+            "`{described}` crosses the wire, so it is described on every surface this build \
+             writes. Got: {emitted}"
+        );
+    }
+    // The service's own TypeScript is the one artifact a feature decides the existence of.
+    #[cfg(feature = "typescript")]
+    assert!(
+        emitted.contains("pub fn ts_definition"),
+        "a build that writes TypeScript publishes the service's types. Got: {emitted}"
+    );
+    #[cfg(not(feature = "typescript"))]
+    assert!(
+        !emitted.contains("pub fn ts_definition"),
+        "a build that writes no TypeScript publishes none of it. Got: {emitted}"
+    );
+    #[cfg(all(feature = "typescript", feature = "zod"))]
+    assert!(
+        emitted.contains("ExpireCreditRequest :: zod_schema"),
+        "and a build with a schema to publish brings each message's along with its type. \
+         Got: {emitted}"
+    );
 }
 
 /// The macro takes no arguments and opens no module: the caller supplies the module, which is what
@@ -880,7 +950,7 @@ fn the_dispatcher_macro_takes_no_arguments_and_opens_no_module_of_its_own() {
 #[test]
 fn every_runtime_crate_the_macro_body_calls_is_written_with_a_leading_colon_pair() {
     let body = macro_body(MIXED_SERVICE, "usage_service_amqp_rpc_dispatcher");
-    for called in ["serde_json", "tracing", "core", "std"] {
+    for called in ["serde :: Serialize", "serde_json", "tracing", "core", "std"] {
         assert!(
             every_mention_is_qualified(&body, called, ":: "),
             "`{called}` is reached without a leading `::` somewhere in the macro body, so it \
@@ -901,7 +971,6 @@ fn every_generated_name_the_macro_body_reaches_is_written_through_crate() {
          crate invoked the macro. Got: {body}"
     );
     for reached in [
-        "Reply",
         "ServiceFault",
         "Answered",
         "named_field",
@@ -1509,21 +1578,6 @@ fn a_service_asking_for_a_transport_publishes_its_client_as_a_macro_and_not_as_a
             !emitted[..at].contains(inside),
             "the two halves of a service usually live in different crates, so `{inside}` is \
              emitted inert and placed by whoever wants it. Got: {emitted}"
-        );
-    }
-}
-
-#[test]
-fn a_service_naming_no_transport_publishes_neither_the_macro_nor_the_client() {
-    let emitted = expanded(MIXED_SERVICE);
-    for absent in [
-        "macro_rules !",
-        "pub trait Transport",
-        "pub struct UsageServiceClient < T",
-    ] {
-        assert!(
-            !emitted.contains(absent),
-            "a service that asked for no transport gets nothing transport-shaped. Got: {emitted}"
         );
     }
 }

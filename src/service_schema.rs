@@ -33,8 +33,9 @@
 //! dependency of code it compiles.
 //!
 //! `serde_json` and `tracing` are named by the crate that *invokes* a transport's macro rather than
-//! by the one that declares the service, because that is where the code calling them is compiled.
-//! A dispatcher reads its payload through `serde_json` and writes a caught panic down through
+//! by the one that declares the service, because that is where the code calling them is compiled —
+//! and that crate names `serde` again, for what a transport's own items derive and bind. A
+//! dispatcher reads its payload through `serde_json` and writes a caught panic down through
 //! `tracing`. A caught panic is written down for the same reason it is caught: a dispatcher catches
 //! a panicking handler in order to return so the transport can settle the delivery, and catching
 //! without recording would trade a stalled consumer for a silent one.
@@ -52,8 +53,8 @@
 //!
 //! A crate that only *places a client* — a transport's client macro, invoked where a caller wants
 //! one — names one of the two. The client serializes what it sends and reads what comes back
-//! through `serde_json`; it catches no panic, so it has nothing to write down and reaches no
-//! `tracing`.
+//! through `serde` and `serde_json`; it catches no panic, so it has nothing to write down and
+//! reaches no `tracing`.
 //!
 //! **`#[model_schema]` requires none of this.** Only an invoked dispatcher macro reaches a logger,
 //! so a crate that describes types and declares no service names neither `serde_json` nor
