@@ -7,18 +7,28 @@
 //!
 //! # Adding one
 //!
-//! A module beside [`amqp_rpc`], and one variant here. The variant makes every match on a transport
+//! A module beside [`amqp_rpc`], and one variant here. The variant makes the match in [`emit`]
 //! incomplete until the new one is answered for, so the emitter each transport contributes is bound
 //! in this file and nowhere else, and no existing transport's module is touched to add another.
 //!
-//! Nothing consumes the parsed list yet: the emitters that will read it are landed by their own
-//! tasks, and until then the list is read for the refusals it earns.
+//! # What a named transport contributes
+//!
+//! One `#[macro_export] macro_rules!` per transport the service asked for, named
+//! `{service}_{transport}_dispatcher` and emitted at the trait's own scope. Nothing inside it is
+//! compiled where the service is declared, and a service that named no transport is emitted
+//! nothing here at all.
+//!
+//! [`emit`] walks [`Transport::KNOWN`] rather than the list as written, so a transport named twice
+//! contributes one macro rather than two definitions of one exported name.
 
 mod amqp_rpc;
 
+use super::parse::ServiceDef;
+use crate::rename_rule::RenameRule;
 use proc_macro2::TokenStream;
+use quote::format_ident;
 use syn::spanned::Spanned as _;
-use syn::{Expr, ExprLit, Lit, meta::parser, parse::Parser as _};
+use syn::{Expr, ExprLit, Ident, Lit, meta::parser, parse::Parser as _};
 
 const TRANSPORTS_ARGUMENT: &str = "transports";
 
@@ -55,6 +65,30 @@ impl Transport {
             Self::AmqpRpc => "amqp_rpc",
         }
     }
+}
+
+/// The name a transport's dispatcher macro publishes under: `{service}_{transport}_dispatcher`.
+///
+/// `#[macro_export]` places it at the declaring crate's root whatever module it was written in, so
+/// the service name is what keeps two services in one crate from claiming one name.
+pub fn dispatcher_macro_ident(service: &ServiceDef, transport: Transport) -> Ident {
+    format_ident!(
+        "{}_{}_dispatcher",
+        RenameRule::SnakeCase.apply_to_variant(&service.ident.to_string()),
+        transport.name(),
+        span = service.ident.span()
+    )
+}
+
+/// What every transport the service asked for contributes, in the registry's own order.
+pub fn emit(service: &ServiceDef, asked: &[Transport]) -> TokenStream {
+    Transport::KNOWN
+        .iter()
+        .filter(|known| asked.contains(known))
+        .map(|known| match *known {
+            Transport::AmqpRpc => amqp_rpc::emit(service, *known),
+        })
+        .collect()
 }
 
 /// Reads `#[service_schema(...)]`'s own arguments into the transports the service asked for, in the

@@ -16,8 +16,8 @@
 //! `Err(CallError::Fault(…))` naming the field **without touching the transport**: the operation
 //! never ran, so it is not a declared error, and a caller's code is identical whether the fault
 //! came from its own validator or from the far end. This is the second of the two generated places
-//! that build a fault, and like the dispatcher it is emitted inside the module the fault is
-//! declared in.
+//! that build a fault, and it is emitted inside the module the fault is declared in, where a
+//! dispatcher reaches the same constructors from wherever its transport's macro was invoked.
 //!
 //! # A transport that could not carry the call has somewhere to say so
 //!
@@ -43,12 +43,12 @@
 //! implementation to hand one to, so a client method takes the operation's arguments and nothing
 //! else — which is what the generated TypeScript client has always taken.
 //!
-//! # What this file reads from [`dispatch`](super::dispatch)
+//! # What this file reads from [`support`](super::support)
 //!
 //! `Answered`, `MessageValidation`, `violated_field` and `violation_detail`, all of which land in
-//! the same module. The dispatcher writes the envelope this reads, which is the point of their
+//! the same module. A dispatcher writes the envelope this reads, which is the point of their
 //! sharing one. `MessageValidation` is the one of the four that is not in scope where it lands —
-//! it is shut in a private module, so each client method opens its body by `use`ing it.
+//! it is shut in a module of its own, so each client method opens its body by `use`ing it.
 
 use super::parse::{OperationDef, OperationInputs, OperationOutcome, ServiceDef};
 use proc_macro2::TokenStream;
@@ -275,7 +275,7 @@ fn method(operation: &OperationDef) -> TokenStream {
     };
     let answers = answers(operation);
     let doc = method_doc(operation);
-    let in_scope = super::dispatch::message_validation_in_scope();
+    let in_scope = super::support::message_validation_in_scope();
     quote! {
         #[doc = #doc]
         pub fn #named(
