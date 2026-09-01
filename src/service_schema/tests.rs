@@ -9,7 +9,8 @@
 use super::parse::{OperationDef, OperationInputs, OperationOutcome, ServiceDef, parse_service};
 use super::{emitted_trait, exec_service_schema};
 use crate::model_schema::exec_model_schema;
-use proc_macro2::{Group, Span, TokenStream, TokenTree};
+use core::mem::take;
+use proc_macro2::{Delimiter, Group, Span, TokenStream, TokenTree};
 use quote::{ToTokens as _, quote};
 use syn::{Ident, ItemTrait, Type};
 
@@ -42,6 +43,32 @@ const MIXED_SERVICE: &str = r#"
         async fn apply_bundle(&self, ctx: &Ctx, req: ApplyBundleRequest);
     }
 "#;
+
+/// A service declaring no operation at all, whose dispatcher has only the arm that answers a name
+/// nothing recognises.
+const BARE_SERVICE: &str = "
+    pub trait BareService<Ctx> {}
+";
+
+/// A service whose every operation expects no reply, so nothing it emits ever reads an answer back.
+const ONE_WAY_SERVICE: &str = "
+    pub trait NoteService<Ctx> {
+        #[service_schema_op(one_way)]
+        async fn apply_bundle(&self, ctx: &Ctx, req: ApplyBundleRequest);
+
+        #[service_schema_op(one_way)]
+        async fn note(&self, ctx: &Ctx, slug: String);
+    }
+";
+
+/// One item as either macro body emits it: what its doc attributes said, everything ahead of the
+/// block it opens, the keyword that opened it, and that block.
+struct EmittedItem {
+    block: TokenStream,
+    docs: String,
+    head: String,
+    keyword: String,
+}
 
 fn declared(source: &str) -> ItemTrait {
     syn::parse_str::<ItemTrait>(source).unwrap()
@@ -76,13 +103,108 @@ fn every_mention_is_qualified(body: &str, named: &str, qualifier: &str) -> bool 
 /// One published macro's stored tokens and nothing beside them, with every literal blanked so a
 /// name a doc comment mentions is not read as a path.
 fn macro_body(source: &str, named: &str) -> String {
-    macro_rules_body(without_literals(expansion_over_amqp_rpc(source)), named)
+    macro_rules_stream(without_literals(expansion_over_amqp_rpc(source)), named).to_string()
 }
 
 /// The same tokens with their literals left as written, for a test reading what the body says
 /// rather than which names it reaches.
 fn published_macro(source: &str, named: &str) -> String {
-    macro_rules_body(expansion_over_amqp_rpc(source), named)
+    macro_rules_stream(expansion_over_amqp_rpc(source), named).to_string()
+}
+
+/// Every item a token stream declares, in the order it declares them.
+///
+/// Read off tokens rather than through `syn`, a body carrying `$crate` being no parseable item. An
+/// item runs to the first brace-delimited group after it, and its keyword is the first one that
+/// opens an item - which is why the `impl` in `-> impl Future` is never read as one, `fn` having
+/// opened that item several tokens earlier.
+fn emitted_items(items: TokenStream) -> Vec<EmittedItem> {
+    let mut declared = Vec::new();
+    let mut docs = String::new();
+    let mut head = String::new();
+    let mut keyword = String::new();
+    let mut attribute = false;
+    for token in items {
+        match token {
+            TokenTree::Group(carried) if carried.delimiter() == Delimiter::Brace => {
+                declared.push(EmittedItem {
+                    block: carried.stream(),
+                    docs: take(&mut docs),
+                    head: take(&mut head),
+                    keyword: take(&mut keyword),
+                });
+                attribute = false;
+            }
+            TokenTree::Group(carried) if attribute && carried.delimiter() == Delimiter::Bracket => {
+                attribute = false;
+                let written = carried.stream().to_string();
+                if let Some(said) = written.strip_prefix("doc = ") {
+                    docs.push_str(said);
+                    docs.push('\n');
+                }
+            }
+            // An attribute's `#` is left out of the head, so a documented item's head opens on
+            // whatever the item itself opens on.
+            TokenTree::Punct(punct) if punct.as_char() == '#' => attribute = true,
+            other @ (TokenTree::Group(_)
+            | TokenTree::Ident(_)
+            | TokenTree::Punct(_)
+            | TokenTree::Literal(_)) => {
+                attribute = false;
+                if let TokenTree::Ident(spelled) = &other {
+                    let named = spelled.to_string();
+                    if keyword.is_empty() && opens_an_item(&named) {
+                        keyword = named;
+                    }
+                }
+                head.push_str(&other.to_string());
+                head.push(' ');
+            }
+        }
+    }
+    declared
+}
+
+/// Whether a keyword is one that opens an item this walk classifies. `impl` is among them, so an
+/// `impl` block is an item; the `impl` of an `impl Trait` return type is not, its item having been
+/// opened by the `fn` ahead of it.
+fn opens_an_item(keyword: &str) -> bool {
+    matches!(
+        keyword,
+        "enum" | "fn" | "impl" | "struct" | "trait" | "type" | "union"
+    )
+}
+
+/// Every `pub fn` a body publishes, free or inherent, as its documentation beside its signature.
+/// `impl` blocks are walked into for the same reason the lint reaches through them: an inherent
+/// method answering a `Result` is as public as a free function answering one.
+fn published_functions(items: TokenStream) -> Vec<(String, String)> {
+    let mut published = Vec::new();
+    for item in emitted_items(items) {
+        match item.keyword.as_str() {
+            "impl" => published.extend(published_functions(item.block)),
+            "fn" if item.head.starts_with("pub ") => published.push((item.docs, item.head)),
+            _ => (),
+        }
+    }
+    published
+}
+
+/// The items one published macro stores: the transcriber of its one rule, with the matcher and the
+/// arrow ahead of it left behind, so a walk sees items and nothing else.
+fn macro_rules_items(source: &str, named: &str) -> TokenStream {
+    macro_rules_stream(expansion_over_amqp_rpc(source), named)
+        .into_iter()
+        .find_map(|token| match token {
+            TokenTree::Group(carried) if carried.delimiter() == Delimiter::Brace => {
+                Some(carried.stream())
+            }
+            TokenTree::Group(_)
+            | TokenTree::Ident(_)
+            | TokenTree::Punct(_)
+            | TokenTree::Literal(_) => None,
+        })
+        .unwrap()
 }
 
 /// The tokens the service's own module holds, read off the expansion the same way a macro's rules
@@ -134,7 +256,7 @@ fn bound_on_s(text: &str, opening: &str) -> String {
 /// The rules a `macro_rules!` published under `named` stores, read off the expansion's own tokens
 /// rather than off a slice of its rendering: the expansion publishes more than one macro, and each
 /// runs to a brace a search over text has to match for itself.
-fn macro_rules_body(expansion: TokenStream, named: &str) -> String {
+fn macro_rules_stream(expansion: TokenStream, named: &str) -> TokenStream {
     let mut reached_the_keyword = false;
     let mut reached_the_name = false;
     let mut rules = None;
@@ -146,7 +268,7 @@ fn macro_rules_body(expansion: TokenStream, named: &str) -> String {
                 reached_the_keyword = false;
             }
             TokenTree::Group(carried) if reached_the_name => {
-                rules = Some(carried.stream().to_string());
+                rules = Some(carried.stream());
                 reached_the_name = false;
             }
             TokenTree::Group(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => (),
@@ -178,6 +300,14 @@ fn is_described(emitted: &str, declaration: &str) -> bool {
     before
         .rfind("# [:: tixschema :: model_schema ()]")
         .is_some_and(|annotated| !before[annotated..].contains("pub "))
+}
+
+/// Whether `declaration` carries a doc comment of its own, which is the `#[doc = "…"]` the tokens
+/// immediately ahead of it spell. A `#[derive(…)]` or a `#[serde(…)]` closes on `)]` rather than on
+/// a string, so neither is read as one.
+fn is_documented(body: &str, declaration: &str) -> bool {
+    let at = body.find(declaration).unwrap();
+    body[..at].trim_end().ends_with("\"]")
 }
 
 fn generated_inputs(operation: &OperationDef) -> Option<&[(Ident, Type)]> {
@@ -1049,7 +1179,8 @@ fn a_service_that_asked_for_no_transport_is_anchored_at_no_root() {
 #[test]
 fn the_trait_anchor_binds_what_the_dispatcher_s_where_clause_binds() {
     let expansion = expansion_over_amqp_rpc(MIXED_SERVICE);
-    let dispatched = macro_rules_body(expansion.clone(), "usage_service_amqp_rpc_dispatcher");
+    let dispatched =
+        macro_rules_stream(expansion.clone(), "usage_service_amqp_rpc_dispatcher").to_string();
     let held = module_body(expansion, "usage_service_schema").to_string();
     assert_eq!(
         bound_on_s(&held, "S : "),
@@ -1096,8 +1227,9 @@ fn every_arm_is_keyed_on_the_wire_name_and_never_on_anything_in_the_payload() {
         assert!(emitted.contains(carried), "got: {emitted}");
     }
     assert!(
-        emitted.contains("match message . operation . as_str ()"),
-        "the operation is the one the transport read off the wire. Got: {emitted}"
+        emitted.contains("match message . operation ()"),
+        "the operation is the one the transport read off the wire, read through the accessor \
+         rather than off a public field. Got: {emitted}"
     );
 }
 
@@ -1710,6 +1842,327 @@ fn both_halves_ask_one_operation_s_check_rather_than_a_copy_each() {
             !body.contains("message_validation") && !body.contains(". validate ()"),
             "a copy of the check inside `{half}` answers at whatever type is in scope where the \
              macro was placed. Got: {body}"
+        );
+    }
+}
+
+/// The struct is generated, so a consumer publishing the module it lands in cannot answer for its
+/// shape: a struct whose every field is public earns them `clippy::exhaustive_structs`, and the
+/// only fix from where they stand is an `#[allow]` over an attribute they did not write. The
+/// constructor is what keeps a transport adapter in another crate able to build one, which
+/// `#[non_exhaustive]` would have taken away from exactly the crate that needs it.
+#[test]
+fn the_incoming_message_publishes_a_constructor_and_two_readers_rather_than_its_fields() {
+    let body = published_macro(MIXED_SERVICE, "usage_service_amqp_rpc_dispatcher");
+    assert!(
+        body.contains("pub struct IncomingMessage { operation : String , payload : Vec < u8 > , }"),
+        "neither field is published, so nothing outside reads or writes one directly. Got: {body}"
+    );
+    for published in [
+        "pub const fn new (operation : String , payload : Vec < u8 >) -> Self",
+        "pub fn operation (& self) -> & str",
+        "pub fn payload (& self) -> & [u8]",
+    ] {
+        assert!(
+            body.contains(published),
+            "`{published}` is missing. Got: {body}"
+        );
+        assert!(
+            is_documented(&body, published),
+            "`{published}` is what a consumer builds and reads one with, and it is published \
+             undocumented. Got: {body}"
+        );
+    }
+}
+
+/// The two readers are what the dispatcher itself goes through, which is what keeps the fields
+/// private rather than merely spelled private.
+#[test]
+fn the_dispatcher_reads_an_incoming_message_through_its_accessors() {
+    let body = published_macro(MIXED_SERVICE, "usage_service_amqp_rpc_dispatcher");
+    assert!(
+        body.contains("match message . operation ()"),
+        "the operation is matched through the reader. Got: {body}"
+    );
+    assert!(
+        body.contains(
+            "from_slice :: < $ crate :: usage_service_schema :: GetAvailableBalanceMessage > \
+             (message . payload () ,)"
+        ),
+        "the payload is handed to serde through the reader. Got: {body}"
+    );
+    for (reached, through) in [
+        ("message . operation", "message . operation ()"),
+        ("message . payload", "message . payload ()"),
+    ] {
+        assert_eq!(
+            body.matches(reached).count(),
+            body.matches(through).count(),
+            "`{reached}` is reached somewhere as a field rather than through the reader. \
+             Got: {body}"
+        );
+    }
+}
+
+/// `clippy::missing_errors_doc` reaches a `pub fn` - free or inherent - answering `Result<…>` or
+/// `impl Future<Output = Result<…>>`, and a consumer cannot write the section: the doc comment is
+/// generated. Walked rather than listed, so a method added later is covered without touching this.
+#[test]
+fn every_published_function_answering_a_result_says_under_errors_what_the_failure_arm_holds() {
+    let mut reached = 0_usize;
+    for half in [
+        "usage_service_amqp_rpc_dispatcher",
+        "usage_service_amqp_rpc_client",
+    ] {
+        for (docs, head) in published_functions(macro_rules_items(MIXED_SERVICE, half)) {
+            if !head.contains("-> Result <") && !head.contains("Output = Result <") {
+                continue;
+            }
+            reached += 1;
+            assert!(
+                docs.contains("# Errors"),
+                "`{head}` answers a `Result` and says nothing under an `# Errors` heading about \
+                 what its failure arm holds. Got: {docs}"
+            );
+        }
+    }
+    assert!(
+        reached >= 5,
+        "the client publishes one method per operation and every one of them answers a `Result`, \
+         so a walk reaching {reached} of them is not seeing them"
+    );
+}
+
+/// A fault and an answer both arrive in a reply. A service that declares none has no reply to read
+/// either out of, so emitting the mirror and the reader anyway leaves seven items dead in whatever
+/// module the consumer placed - and `dead_code` is an error in plenty of consumers' builds.
+#[test]
+fn the_fault_mirror_and_the_answer_reader_are_emitted_only_where_an_operation_answers() {
+    let reading = [
+        "struct FaultOnTheWire",
+        "enum FaultKindOnTheWire",
+        "struct TaggedFault",
+        "enum ReportedError",
+        "fn into_fault",
+        "fn reported",
+        "fn read_answer",
+    ];
+    let answering = published_macro(MIXED_SERVICE, "usage_service_amqp_rpc_client");
+    for emitted in reading {
+        assert!(
+            answering.contains(emitted),
+            "`{emitted}` reads a reply back, and this service declares operations that reply. \
+             Got: {answering}"
+        );
+    }
+    let one_way = published_macro(ONE_WAY_SERVICE, "note_service_amqp_rpc_client");
+    for absent in reading {
+        assert!(
+            !one_way.contains(absent),
+            "`{absent}` is reached only from an operation that answers, and this service declares \
+             none. Got: {one_way}"
+        );
+    }
+    for present in [
+        "pub trait Transport",
+        "pub struct NoteServiceClient",
+        "pub fn apply_bundle",
+        "pub fn note",
+    ] {
+        assert!(
+            one_way.contains(present),
+            "`{present}` is what a caller of a one-way service reaches. Got: {one_way}"
+        );
+    }
+}
+
+/// A service with no operation has no arm, so the guard an arm calls its implementation behind and
+/// the reader that classifies an arm's own deserialization refusal are reached from nowhere - and
+/// neither is the implementation nor the context `dispatch` would hand one.
+#[test]
+fn a_service_declaring_no_operation_is_emitted_no_item_nothing_reaches() {
+    let dispatcher = published_macro(BARE_SERVICE, "bare_service_amqp_rpc_dispatcher");
+    for absent in [
+        "fn caught",
+        "fn panic_detail",
+        "fn record_panic",
+        "fn refused_payload",
+        "fn serde_named_field",
+        "tracing",
+    ] {
+        assert!(
+            !dispatcher.contains(absent),
+            "`{absent}` is an arm's, and this service declares no arm. Got: {dispatcher}"
+        );
+    }
+    assert!(
+        dispatcher.contains(
+            "pub fn dispatch < S , Ctx , R > (_ : & S , _ : & Ctx , message : & IncomingMessage , \
+             reply : & R ,)"
+        ),
+        "the fallback arm reads the operation name and answers through the handle, so neither the \
+         implementation nor the context is bound. Got: {dispatcher}"
+    );
+    for present in [
+        "pub struct IncomingMessage",
+        "pub trait Reply",
+        "unknown_operation",
+    ] {
+        assert!(
+            dispatcher.contains(present),
+            "`{present}` is what a delivery naming nothing is still settled through. Got: \
+             {dispatcher}"
+        );
+    }
+    let client = published_macro(BARE_SERVICE, "bare_service_amqp_rpc_client");
+    for absent in [
+        "FaultOnTheWire",
+        "TaggedFault",
+        "ReportedError",
+        "read_answer",
+    ] {
+        assert!(
+            !client.contains(absent),
+            "`{absent}` reads a reply, and this service declares no operation to have one. Got: \
+             {client}"
+        );
+    }
+    assert!(
+        client.contains("pub trait Transport") && client.contains("pub struct BareServiceClient"),
+        "the seam and the client itself are what a service says nothing about. Got: {client}"
+    );
+}
+
+/// Clippy's default grouping puts every type ahead of every function, so a function emitted above a
+/// type is a diagnostic in every strict consumer's build at once. Within a group nothing is
+/// ordered, but the three-way grouping costs nothing to hold and is asserted whole.
+#[test]
+fn each_macro_body_emits_its_types_then_its_impls_then_its_functions() {
+    for (source, half) in [
+        (MIXED_SERVICE, "usage_service_amqp_rpc_dispatcher"),
+        (MIXED_SERVICE, "usage_service_amqp_rpc_client"),
+        (ONE_WAY_SERVICE, "note_service_amqp_rpc_dispatcher"),
+        (ONE_WAY_SERVICE, "note_service_amqp_rpc_client"),
+        (BARE_SERVICE, "bare_service_amqp_rpc_dispatcher"),
+        (BARE_SERVICE, "bare_service_amqp_rpc_client"),
+    ] {
+        let emitted = emitted_items(macro_rules_items(source, half));
+        assert!(!emitted.is_empty(), "`{half}` emitted nothing to group");
+        let grouped: Vec<(usize, &str)> = emitted
+            .iter()
+            .map(|item| {
+                let rank = match item.keyword.as_str() {
+                    "enum" | "struct" | "trait" | "type" | "union" => 0_usize,
+                    "impl" => 1,
+                    "fn" => 2,
+                    // `opens_an_item` admits nothing else, so a rank of three is an item kind the
+                    // walk learned to see and this test never learned to place.
+                    _ => 3,
+                };
+                (rank, item.head.as_str())
+            })
+            .collect();
+        assert!(
+            grouped.iter().all(|(rank, _)| *rank < 3),
+            "`{half}` emits an item kind nothing here groups: {grouped:?}"
+        );
+        assert!(
+            grouped.iter().map(|(rank, _)| *rank).is_sorted(),
+            "`{half}` emits its items out of the grouping clippy asks for: {grouped:?}"
+        );
+    }
+}
+
+/// An `#[allow]` written into a consumer's expansion silences a check they chose, in their build,
+/// with no line of their source to explain it. `#[doc(hidden)]` reached for to the same end mutes
+/// the one lint that exists to make a fallible method documented, while hiding it from every
+/// consumer who publishes it. Neither is emitted, and neither is anything else that quiets a lint.
+#[test]
+fn neither_macro_body_carries_an_attribute_that_quiets_a_lint() {
+    for (source, half) in [
+        (MIXED_SERVICE, "usage_service_amqp_rpc_dispatcher"),
+        (MIXED_SERVICE, "usage_service_amqp_rpc_client"),
+        (ONE_WAY_SERVICE, "note_service_amqp_rpc_dispatcher"),
+        (ONE_WAY_SERVICE, "note_service_amqp_rpc_client"),
+        (BARE_SERVICE, "bare_service_amqp_rpc_dispatcher"),
+        (BARE_SERVICE, "bare_service_amqp_rpc_client"),
+    ] {
+        // Literals blanked, so a doc comment saying the word `allow` is not read as an attribute.
+        let body = macro_body(source, half);
+        for quieting in ["allow", "expect", "doc (hidden)", "automatically_derived"] {
+            assert!(
+                !body.contains(quieting),
+                "`{half}` writes `{quieting}` into a consumer's build, where nothing in their own \
+                 source explains it. Got: {body}"
+            );
+        }
+    }
+}
+
+/// The placement a consumer chooses decides three of the lints they see, and nothing but the
+/// documentation tells them which one measures clean. Both macros carry it, and both quote the
+/// refusal a path earns verbatim so a consumer who hits it recognises what they are reading.
+#[test]
+fn both_macro_docs_prescribe_a_file_placement_and_quote_what_a_path_is_refused_with() {
+    let emitted = expanded_over_amqp_rpc(MIXED_SERVICE);
+    for placed in [
+        "// src/amqp_transport.rs\\nthe_contract_crate::usage_service_amqp_rpc_dispatcher!();",
+        "// src/amqp_client.rs\\nuse the_contract_crate::{AvailableBalanceRequest, \
+         AvailableBalanceResponse};\\n\\nthe_contract_crate::usage_service_amqp_rpc_client!();",
+    ] {
+        assert!(
+            emitted.contains(placed),
+            "the example placement is a module of its own file, with the author's types named one \
+             by one. Got: {emitted}"
+        );
+    }
+    for quoted in [
+        "error: macro-expanded `macro_export` macros from the current crate cannot be referred to \
+         by absolute paths",
+        "`#[deny(macro_expanded_macro_exports_accessed_by_absolute_paths)]` (part of \
+         `#[deny(future_incompatible)]`) on by default",
+    ] {
+        assert_eq!(
+            emitted.matches(quoted).count(),
+            2,
+            "both macros quote what `crate::…!()` and `use crate::…;` are refused with, since \
+             either is what a declaring crate reaches for first. Got: {emitted}"
+        );
+    }
+    assert_eq!(
+        emitted.matches("# Where to put it").count(),
+        2,
+        "each macro carries the placement, a consumer placing one half having no reason to read \
+         the other's documentation. Got: {emitted}"
+    );
+}
+
+/// The module header is what a reader of this crate sees, and it prescribed a placement that
+/// measures dirty until this changed: an inline module and a glob import, one guaranteed
+/// `clippy::inline_modules` and one guaranteed `clippy::wildcard_imports`.
+#[test]
+fn the_transport_module_header_prescribes_the_same_placement_the_macros_do() {
+    let header = include_str!("transport/amqp_rpc.rs");
+    for prescribed in [
+        "//! // src/amqp_transport.rs",
+        "//! // src/amqp_client.rs",
+        "//! use declaring_crate::{AvailableBalanceRequest, AvailableBalanceResponse};",
+        "//! error: macro-expanded `macro_export` macros from the current crate cannot be \
+         referred to by absolute paths",
+    ] {
+        assert!(
+            header.contains(prescribed),
+            "the module header no longer says `{prescribed}`"
+        );
+    }
+    for shown in [
+        "//!     declaring_crate::usage_service",
+        "//!     use declaring_crate::*;",
+    ] {
+        assert!(
+            !header.contains(shown),
+            "`{shown}` is the inside of an inline module, which is the placement that measures \
+             dirty"
         );
     }
 }

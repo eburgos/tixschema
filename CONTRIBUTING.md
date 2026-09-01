@@ -55,6 +55,58 @@ never require one, and a run that did not type-check anything says so rather tha
 just typecheck-ts
 ```
 
+### Measuring What a Consumer's Lint Levels Say About the Transport Macros
+
+`#[service_schema(transports = [...])]` hands both halves of a service to the consumer as
+`macro_rules!` bodies. What a `macro_rules!` body expands to is linted under the levels of the
+crate that **invokes** it, so a consumer denying clippy's `restriction` and `nursery` sets is
+denying them over code this crate wrote. Two things decide what they see, and neither can be
+staged inside a `tests/` binary here:
+
+- **whether the crate that declares the service is the crate that invokes the macro.** Same crate,
+  the body is linted almost as if it were hand-written; different crates, rustc and most of clippy
+  treat it as an external macro. `clippy::exhaustive_structs` and `clippy::exhaustive_enums` are
+  the only two lints in the denied set that reach a cross-crate consumer.
+- **whether the consumer publishes the module they placed it in.** `dead_code` reaches a private
+  placement that drives nothing; `exhaustive_structs` and `missing_errors_doc` reach a public one.
+
+Every `tests/` binary in this repository is the same-crate case, so the cross-crate half is
+measured by hand rather than by `cargo test`. It is not wired into `just ci`: it needs a scratch
+workspace outside the repository, and shelling out to `cargo clippy` from a test would run a
+nested build in each of the feature combinations `just test` already walks.
+
+Build a scratch workspace outside the repository with a `declaring` library that carries four
+services — one with both outcomes, one with only one-way operations, one with only
+request-and-reply operations, and one with no operation at all — and four consumers of it, each
+carrying this repository's own deny set (`clippy::all`, `pedantic`, `restriction` and `nursery`
+at deny, minus the allow list in `Cargo.toml`), each placing both halves of all four services with
+one invocation per module file:
+
+1. a cross-crate **binary** driving every emitted item from `main`;
+2. a cross-crate **library** publishing every module;
+3. a cross-crate **library** keeping every module private and exercising nothing;
+4. a **same-crate** library that declares the services and publishes every module, reaching each
+   macro by its bare name through `#[macro_use] mod contract;`.
+
+Run `cargo clippy -p <consumer> -- -D warnings` over each. What the placements earn, measured on
+rustc/clippy 1.98.0-beta.7:
+
+| Consumer | Expected |
+|---|---|
+| cross-crate binary | no diagnostics |
+| cross-crate library, modules published | no diagnostics |
+| cross-crate library, modules private | no diagnostics |
+| same-crate library, modules published | one `clippy::pub_use` on the consumer's own hoisting line, and `exhaustive_structs`/`exhaustive_enums` on the *proc macro's* own message and support types — never `dead_code`, never `missing_errors_doc`, and nothing originating in either `macro_rules!` body |
+
+The last row's two remaining kinds are the proc macro's own emissions rather than a
+`macro_rules!` body's, and clearing them means deciding whether a generated wire message may be
+`#[non_exhaustive]` — a public-API question tracked separately.
+
+An `#[allow]`, `#[expect]` or `#[doc(hidden)]` emitted into a consumer's expansion is **not** an
+acceptable way to bring any of these to zero: it silences a check the consumer chose, in the
+consumer's build, with no line of their own source to explain it. `just quick` asserts that
+neither macro body carries one.
+
 ### Full CI Pipeline
 
 ```bash

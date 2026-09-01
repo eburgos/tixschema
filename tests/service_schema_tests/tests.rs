@@ -234,10 +234,7 @@ fn answered(operation: &str, payload: &str) -> String {
         &ProbeContext {
             logger_name: "probe".to_owned(),
         },
-        &amqp_transport::IncomingMessage {
-            operation: operation.to_owned(),
-            payload: payload.as_bytes().to_vec(),
-        },
+        &amqp_transport::IncomingMessage::new(operation.to_owned(), payload.as_bytes().to_vec()),
         &capture,
     ))
     .unwrap();
@@ -249,10 +246,7 @@ fn incoming<T>(operation: &str, payload: &T) -> amqp_transport::IncomingMessage
 where
     T: Serialize,
 {
-    amqp_transport::IncomingMessage {
-        operation: operation.to_owned(),
-        payload: serde_json::to_vec(payload).unwrap(),
-    }
+    amqp_transport::IncomingMessage::new(operation.to_owned(), serde_json::to_vec(payload).unwrap())
 }
 
 /// The probe never suspends, so one poll answers it; `None` says an assumption about the bodies
