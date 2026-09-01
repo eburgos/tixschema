@@ -59,6 +59,8 @@ mod messages;
 pub mod parse;
 #[cfg(feature = "serde")]
 pub mod support;
+#[cfg(feature = "serde")]
+pub mod transport;
 
 #[cfg(all(feature = "serde", feature = "typescript"))]
 use crate::features::service_schema::emit as emit_typescript;
@@ -86,7 +88,8 @@ pub fn exec_service_schema(_args: TokenStream, input: TokenStream) -> TokenStrea
 }
 
 #[cfg(feature = "serde")]
-pub fn exec_service_schema(_args: TokenStream, input: TokenStream) -> TokenStream {
+pub fn exec_service_schema(args: TokenStream, input: TokenStream) -> TokenStream {
+    let asked = transport::parse_transports(args);
     let declared = match syn::parse2::<ItemTrait>(input) {
         Ok(parsed) => parsed,
         Err(rejection) => return rejection.to_compile_error(),
@@ -95,8 +98,12 @@ pub fn exec_service_schema(_args: TokenStream, input: TokenStream) -> TokenStrea
     // reports that operation rather than burying it under an unresolved trait name at every
     // implementation and every call site.
     let contract = emitted_trait(&declared);
-    match parse::parse_service(&declared) {
-        Ok(service) => {
+    // Both readings are answered together, so a service that asks for a transport nobody has and
+    // declares a bad operation is told about each rather than about whichever was read first.
+    match (asked, parse::parse_service(&declared)) {
+        // The transports the service asked for reach no emitter yet; the reading is what refuses a
+        // list nobody could honour.
+        (Ok(_), Ok(service)) => {
             let messages = messages::emit(&service);
             // The dispatcher and the client land inside the module `support` opens: both name the
             // fault, the reply handle and the incoming message unqualified.
@@ -112,8 +119,12 @@ pub fn exec_service_schema(_args: TokenStream, input: TokenStream) -> TokenStrea
                 #typescript
             }
         }
-        Err(refusal) => {
-            let refusals = refusal.to_compile_error();
+        (transports, read) => {
+            let refusals: TokenStream = [transports.err(), read.err()]
+                .into_iter()
+                .flatten()
+                .map(|refusal| refusal.to_compile_error())
+                .collect();
             quote! {
                 #refusals
                 #contract
