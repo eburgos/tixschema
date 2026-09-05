@@ -1828,13 +1828,13 @@ On the Rust side, beside the trait, in a module named for the service (`usage_se
 - `Answered<T, E>` -- the envelope a request-and-reply operation answers in, written by a dispatcher and read back by a client.
 - `ExpireCreditRequest` and `SweepRequest` -- the messages declared for the operations that named none, each an ordinary `#[model_schema()]` type.
 
-Beside the trait, two `macro_rules!` per transport the service asked for -- see [Transports](#transports) -- and nothing else transport-shaped. A service that asks for no transport is emitted neither a dispatcher nor a client.
+Beside the trait, three `macro_rules!` per transport the service asked for -- see [Transports](#transports) -- and nothing else transport-shaped. A service that asks for no transport is emitted none of the three.
 
 #### Transports
 
-`#[service_schema(transports = ["amqp_rpc"])]` says which transports the service wants. Each one contributes two `#[macro_export]` macros, `{service_snake_case}_{transport}_dispatcher` and `{service_snake_case}_{transport}_client`, whose bodies hold that transport's two halves as *tokens*: nothing inside either is compiled where the service is declared.
+`#[service_schema(transports = ["amqp_rpc"])]` says which transports the service wants. Each one contributes three `#[macro_export]` macros, `{service_snake_case}_{transport}_dispatcher`, `{service_snake_case}_{transport}_client` and `{service_snake_case}_{transport}_server`, whose bodies hold that transport's halves as *tokens*: nothing inside any of them is compiled where the service is declared.
 
-Two macros rather than one, because the two halves of a service usually live in different crates -- a crate that calls the service can see the contract but has no business seeing the server's backend, and a server crate has no use for a client. Each is invoked and placed by the half that wants it, and neither drags in the other.
+Three macros rather than one, because the halves of a service usually live in different crates -- a crate that calls the service can see the contract but has no business seeing the server's backend, a server crate has no use for a client, and a crate that only wants `dispatch` -- a hand-rolled adapter, or a test with no broker in reach -- has no business seeing `lapin`, `tokio` or `futures` either. Each is invoked and placed by the half that wants it, none drags in another, and a crate that wants more than one places more than one.
 
 ```rust,ignore
 // In the crate that declares the service: nothing below is built here.
@@ -1862,11 +1862,28 @@ use declaring_crate::{AvailableBalanceRequest, AvailableBalanceResponse};
 declaring_crate::usage_service_amqp_rpc_client!();
 ```
 
+```text
+// In the crate that serves it for real, over a real `lapin::Channel` -- src/lib.rs
+mod amqp;
+
+// src/amqp.rs
+declaring_crate::usage_service_amqp_rpc_server!();
+```
+
 Each macro takes no arguments and emits bare items rather than a module of its own, so the caller names the module and two transports in one crate cannot collide. The dispatcher emits `IncomingMessage` -- built with `IncomingMessage::new(operation, payload)` by whichever crate owns the bus and read through `operation()` and `payload()`, its two fields being private -- `Reply`, the handle a transport implements to answer one message, with `send` and `fault`, and `dispatch(svc, ctx, message, reply)`, generic over the implementing type. Beside them go the panic guard an arm calls its implementation behind and the reader that classifies a refused payload, both emitted only where the service declares an operation for them to serve. The client emits:
 
 - `Transport` -- the seam a client is bound to, with `notify` and `request`. Both answer a `Result`, whose failure arm carries in words what stopped a call from travelling; the client turns it into a fault of kind `transport-failure`.
 - `UsageServiceClient` -- one method per operation, over any `Transport`. Each takes that operation's arguments and no context: a context is what an implementation needs, and a caller has nothing to hand one to. Every method answers a `Result`, and every method's generated documentation says under an `# Errors` heading what its failure arm can hold.
 - The mirror that reads a fault back off the wire and the reader that turns one envelope into three outcomes, emitted only where the service declares an operation that answers. A service declaring only one-way operations is emitted neither, there being no reply for either to read.
+
+The server emits everything the dispatcher does, plus the pieces that turn a real delivery into a call on an implementation:
+
+- `Context { pub logger: tracing::Span }` -- what the service is handed beside every message.
+- `ReplyHandle` -- implements the dispatcher's own `Reply` over a `lapin::Channel`: `fault` and `send` both publish through the wire framing below; a handle whose delivery carried no `reply_to` publishes nothing, and a publish the channel refuses is logged at error and dropped rather than propagated.
+- `legacy_reply` and `framed_fault` -- the wire framing a reply and a fault are built through, read back by nothing a generated service sees.
+- `serve_until(channel: &lapin::Channel, queue: &str, service: &S, shutdown: F) -> Result<Stopped, lapin::Error>` -- the consumer loop itself: declares the queue, sets the prefetch, and races taking the next delivery against `shutdown`, so a delivery already in hand is dispatched and acknowledged before the loop breaks. The queue is a runtime `&str`; the span the loop opens is `tracing::info_span!("amqp_service", queue, operation = operation.as_str())`.
+
+A crate that invokes the server macro names all six of `lapin`, `tokio`, `futures`, `serde`, `serde_json` and `tracing` in its own manifest, the emitted consumer loop calling every one of them.
 
 Paths inside a `macro_rules!` body resolve where the macro is *invoked*, so the two kinds are spelled apart. Everything tixschema generated is reached through `$crate::`, which resolves in the crate that declared the service; every runtime crate is reached through a leading `::` and resolves in the invoking crate, **which is therefore the one that names `serde`, `serde_json` and `tracing` in its own manifest**. That is the point of the shape: a crate that only declares services names serde alone. A crate that places only a client names `serde` and `serde_json` and not `tracing`, nothing in a client catching a panic; the `use` in the client module above is what resolves the message types the author declared, which the expansion spells exactly as they were written.
 
@@ -1964,7 +1981,7 @@ Every member is required, so an implementation missing one is refused where it r
 
 #### Transports
 
-tixschema generates no transport. What it emits is the seam either side of one:
+tixschema generates no transport of its own -- what it emits is the seam either side of one -- with one exception: the `amqp_rpc` transport's server macro also emits a real consumer loop over `lapin`, since AMQP's own request-and-reply shape is fixed enough that the loop is the same for every service that places it. The seam below is what every transport, `amqp_rpc` included, is built on:
 
 - **The operation name arrives from the transport**, beside the payload and never inside it, so no message type has to reserve a key for routing. `dispatch` is handed the name and matches on it; a gRPC method name or an HTTP path serves the same role on those transports.
 - **The encoding lives behind `Reply`.** `Reply::send` is handed a value rather than bytes, because a transport merges its own fields -- a correlation id, an error flag -- into the object before serializing it, and neither is reachable behind an encoded buffer.

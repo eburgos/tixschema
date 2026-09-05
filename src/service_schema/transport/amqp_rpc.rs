@@ -1,10 +1,26 @@
-//! The AMQP request-and-reply transport: two inert macros, `{service}_amqp_rpc_dispatcher!` and
-//! `{service}_amqp_rpc_client!`, and nothing compiled where the service is declared.
+//! The AMQP request-and-reply transport: three inert macros, `{service}_amqp_rpc_dispatcher!`,
+//! `{service}_amqp_rpc_client!` and `{service}_amqp_rpc_server!`, and nothing compiled where the
+//! service is declared.
 //!
-//! Two macros rather than one, because the two halves of a service usually live in different
-//! crates: a crate that calls the service can see the contract but has no business seeing the
-//! server's backend, and a server crate has no use for a client. Each is invoked and placed by the
-//! half that wants it, neither drags in the other, and a crate that wants both places both.
+//! Three macros rather than one, because the halves of a service usually live in different crates:
+//! a crate that calls the service can see the contract but has no business seeing the server's
+//! backend, a server crate has no use for a client, and a crate that only wants `dispatch` — a
+//! hand-rolled adapter, or a test with no broker in reach — has no business seeing `lapin`, `tokio`
+//! or `futures` either. Each is invoked and placed by the half that wants it, none drags in
+//! another, and a crate that wants more than one places more than one.
+//!
+//! # The server: what the dispatcher cannot grow into
+//!
+//! `{service}_amqp_rpc_server!` emits everything the dispatcher does, plus the pieces that turn a
+//! real `lapin::Channel` delivery into a call on an implementation: `Context`, a `ReplyHandle` that
+//! implements the dispatcher's own `Reply`, the wire framing a reply is built through, and
+//! `serve_until`, the consumer loop itself. [`dispatcher_items`] is the one emitter both the
+//! dispatcher and the server macro build `dispatch` from, so the two can never answer one message
+//! two different ways.
+//!
+//! A crate that places the server macro is the one crate on the bus: it names `lapin`, `tokio` and
+//! `futures` in its own manifest, beside `serde`, `serde_json` and `tracing`, because the items
+//! below call all six.
 //!
 //! # The dispatcher: what one arm does, and in what order
 //!
@@ -205,9 +221,11 @@ impl Generated {
 pub fn emit(service: &ServiceDef, transport: Transport) -> TokenStream {
     let dispatcher = dispatcher_macro(service, transport);
     let client = client_macro(service, transport);
+    let server = server_macro(service, transport);
     quote! {
         #dispatcher
         #client
+        #server
     }
 }
 
@@ -473,6 +491,220 @@ fn client_macro(service: &ServiceDef, transport: Transport) -> TokenStream {
     }
 }
 
+/// The constants [`consumer_loop`]'s `serve_until` is built from.
+fn consumer_loop_consts() -> TokenStream {
+    quote! {
+        /// Where the operation travels: beside the payload, never inside it.
+        pub const OPERATION_NAME_HEADER: &str = "operation-name";
+        /// Deliveries outstanding at once; every one is settled by this loop.
+        pub const PREFETCH: u16 = 10;
+        const MAX_PRIORITY: i32 = 10;
+    }
+}
+
+/// `Stopped`, the one type [`consumer_loop`]'s `serve_until` answers with.
+fn consumer_loop_type() -> TokenStream {
+    quote! {
+        /// Why [`serve_until`] returned.
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        pub enum Stopped {
+            /// `shutdown` completed; a delivery in hand was dispatched and acknowledged first.
+            ShutdownRequested,
+            /// The broker closed the consumer.
+            ConsumerClosed,
+        }
+    }
+}
+
+/// The consumer loop: `serve_until` itself. [`consumer_loop_helpers`] is the private helpers a
+/// delivery passes through on its way to [`dispatch`](dispatcher_items) and back — split out only
+/// so that neither function runs long.
+///
+/// Every runtime crate below is reached through a leading `::` — `::lapin`, `::tokio`,
+/// `::futures`, `::tracing` — so each resolves in the crate that places this macro rather than in
+/// the crate that generated it.
+fn consumer_loop(contract: &Ident) -> TokenStream {
+    quote! {
+        /// Serves `service` on `queue` until `shutdown` completes or the broker closes the
+        /// consumer.
+        ///
+        /// # Errors
+        ///
+        /// When the queue cannot be declared or consumed. A delivery that cannot be read or
+        /// acknowledged is logged and the loop carries on.
+        pub async fn serve_until<S, F>(
+            channel: &::lapin::Channel,
+            queue: &str,
+            service: &S,
+            shutdown: F,
+        ) -> Result<Stopped, ::lapin::Error>
+        where
+            S: $crate::#contract<Context> + Sync,
+            F: ::core::future::Future<Output = ()> + Send,
+        {
+            declare(channel, queue).await?;
+            channel
+                .basic_qos(PREFETCH, ::lapin::options::BasicQosOptions::default())
+                .await?;
+            let mut deliveries = channel
+                .basic_consume(
+                    ::lapin::types::ShortString::from(queue),
+                    ::lapin::types::ShortString::from(""),
+                    ::lapin::options::BasicConsumeOptions::default(),
+                    ::lapin::types::FieldTable::default(),
+                )
+                .await?;
+            ::tracing::info!(queue, "serving");
+
+            let mut shutdown = ::core::pin::pin!(shutdown);
+            let stopped = loop {
+                let delivered = ::tokio::select! {
+                    biased;
+                    () = &mut shutdown => break Stopped::ShutdownRequested,
+                    delivered = ::futures::StreamExt::next(&mut deliveries) => match delivered {
+                        Some(delivered) => delivered,
+                        None => break Stopped::ConsumerClosed,
+                    },
+                };
+
+                match delivered {
+                    Ok(mut delivery) => {
+                        let payload = ::core::mem::take(&mut delivery.data);
+                        let Some(operation) = operation_name(&delivery) else {
+                            reject_unaddressed(&delivery).await;
+                            continue;
+                        };
+                        let reply = ReplyHandle {
+                            channel,
+                            correlation_id: delivery.properties.correlation_id().clone(),
+                            reply_to: delivery.properties.reply_to().clone(),
+                        };
+                        let ctx = Context {
+                            logger: ::tracing::info_span!(
+                                "amqp_service",
+                                queue,
+                                operation = operation.as_str()
+                            ),
+                        };
+                        let message = IncomingMessage::new(operation, payload);
+                        dispatch(service, &ctx, &message, &reply).await;
+                        acknowledge(&delivery).await;
+                    }
+                    Err(lost) => {
+                        ::tracing::error!(error = %lost, queue, "a delivery could not be read");
+                    }
+                }
+            };
+
+            if stopped == Stopped::ShutdownRequested {
+                stop_consuming(channel, deliveries.tag(), queue).await;
+            }
+
+            Ok(stopped)
+        }
+    }
+}
+
+/// The private helpers [`consumer_loop`]'s `serve_until` passes a delivery through: declaring the
+/// queue, settling a delivery once dispatch is done with it, and reading the operation off a
+/// delivery's headers.
+fn consumer_loop_helpers() -> TokenStream {
+    quote! {
+        /// The declaration every service on this bus makes for its own queue: durable, with a
+        /// priority ceiling.
+        async fn declare(
+            channel: &::lapin::Channel,
+            queue: &str,
+        ) -> Result<::lapin::Queue, ::lapin::Error> {
+            let mut arguments = ::lapin::types::FieldTable::default();
+            arguments.insert(
+                ::lapin::types::ShortString::from("x-max-priority"),
+                ::lapin::types::AMQPValue::LongInt(MAX_PRIORITY),
+            );
+
+            channel
+                .queue_declare(
+                    ::lapin::types::ShortString::from(queue),
+                    ::lapin::options::QueueDeclareOptions {
+                        durable: true,
+                        ..::lapin::options::QueueDeclareOptions::default()
+                    },
+                    arguments,
+                )
+                .await
+        }
+
+        /// Tells the broker to stop pushing, so what is still queued stays there.
+        async fn stop_consuming(
+            channel: &::lapin::Channel,
+            consumer_tag: ::lapin::types::ShortString,
+            queue: &str,
+        ) {
+            if let Err(refused) = channel
+                .basic_cancel(consumer_tag, ::lapin::options::BasicCancelOptions::default())
+                .await
+            {
+                ::tracing::error!(error = %refused, queue, "the consumer could not be cancelled");
+            }
+        }
+
+        /// Settles the delivery, dispatch being done with it.
+        async fn acknowledge(delivery: &::lapin::message::Delivery) {
+            if let Err(refused) = delivery
+                .acker
+                .ack(::lapin::options::BasicAckOptions::default())
+                .await
+            {
+                ::tracing::error!(
+                    error = %refused,
+                    delivery_tag = delivery.delivery_tag,
+                    "a delivery could not be acknowledged and will be redelivered when the \
+                     channel closes",
+                );
+            }
+        }
+
+        /// Drops a delivery that named no operation. It is a defect at the publisher — every
+        /// publisher on this bus sets the header — so it is logged at error level and meant to be
+        /// seen.
+        async fn reject_unaddressed(delivery: &::lapin::message::Delivery) {
+            ::tracing::error!(
+                delivery_tag = delivery.delivery_tag,
+                correlation_id = delivery
+                    .properties
+                    .correlation_id()
+                    .as_ref()
+                    .map(::lapin::types::ShortString::as_str)
+                    .unwrap_or_default(),
+                header = OPERATION_NAME_HEADER,
+                "a delivery carried no operation-name header and was rejected without being \
+                 dispatched",
+            );
+            if let Err(refused) = delivery
+                .acker
+                .reject(::lapin::options::BasicRejectOptions { requeue: false })
+                .await
+            {
+                ::tracing::error!(error = %refused, "an unaddressed delivery could not be rejected");
+            }
+        }
+
+        /// The operation this delivery names, read from its header and from nowhere else.
+        ///
+        /// Both string encodings are accepted because a publisher chooses one and the choice is
+        /// invisible to it.
+        fn operation_name(delivery: &::lapin::message::Delivery) -> Option<String> {
+            let headers = delivery.properties.headers().as_ref()?;
+
+            match headers.inner().get(OPERATION_NAME_HEADER)? {
+                ::lapin::types::AMQPValue::LongString(named) => Some(named.to_string()),
+                ::lapin::types::AMQPValue::ShortString(named) => Some(named.to_string()),
+                _ => None,
+            }
+        }
+    }
+}
+
 /// Whether the service declares an operation that answers, which is what reads a reply back and
 /// therefore the only thing that needs a fault mirror or an answer reader.
 fn declares_a_reply(service: &ServiceDef) -> bool {
@@ -482,27 +714,52 @@ fn declares_a_reply(service: &ServiceDef) -> bool {
         .any(|operation| matches!(operation.outcome, OperationOutcome::Reply { .. }))
 }
 
-/// The dispatcher half: everything that turns one delivery into a call on an implementation, held
-/// as tokens for whoever answers the service.
-fn dispatcher_macro(service: &ServiceDef, transport: Transport) -> TokenStream {
+/// Everything a dispatcher emits between its macro's opening brace and its closing one:
+/// `IncomingMessage`, `Reply`, the readers an arm needs, and `dispatch` itself.
+///
+/// Called once by [`dispatcher_macro`], which wants the three kinds concatenated in this order.
+/// [`server_macro`] calls [`dispatcher_types`], [`dispatcher_impls`] and [`dispatcher_fns`]
+/// separately instead, interleaving its own types, impls and functions between them so the whole
+/// macro stays grouped types-then-impls-then-functions; either way the one `dispatch` a service
+/// answers through is built by the same emitter and cannot drift between the two macros'
+/// definitions.
+fn dispatcher_items(service: &ServiceDef) -> TokenStream {
+    let types = dispatcher_types(service);
+    let impls = dispatcher_impls();
+    let fns = dispatcher_fns(service);
+    quote! {
+        #types
+        #impls
+        #fns
+    }
+}
+
+/// `IncomingMessage` and `Reply`, the two types [`dispatcher_fns`] and a placed transport read and
+/// implement.
+fn dispatcher_types(service: &ServiceDef) -> TokenStream {
     let contract = &service.ident;
     let module = module_ident(service);
-    let macro_name = super::dispatcher_macro_ident(service, transport);
+    let incoming = incoming_message();
+    let reply = reply_trait(contract, &module);
+    quote! {
+        #incoming
+        #reply
+    }
+}
+
+/// The one impl a dispatcher emits: the accessors `IncomingMessage`'s fields are read through.
+fn dispatcher_impls() -> TokenStream {
+    incoming_message_accessors()
+}
+
+/// The readers an arm needs, and `dispatch` itself.
+fn dispatcher_fns(service: &ServiceDef) -> TokenStream {
+    let contract = &service.ident;
+    let module = module_ident(service);
     let arms = service
         .operations
         .iter()
         .map(|operation| arm(&module, operation));
-    let placement = placement_doc(&macro_name, "amqp_transport", "the_contract_crate::");
-    let macro_doc = format!(
-        "The `{contract}` dispatcher for the `{}` transport, held as tokens rather than compiled \
-         here.\n\n\
-         It takes no arguments and emits bare items - `IncomingMessage`, `Reply` and `dispatch`, \
-         beside the readers an arm needs - so the caller supplies the module they land in and two \
-         transports in one crate cannot collide. The invoking crate names `serde`, `serde_json` \
-         and `tracing` in its own manifest, because the items below call them.\n\n\
-         {placement}",
-        transport.name()
-    );
     let dispatch_doc = format!(
         "Turns one incoming message into a call on a `{contract}` implementation, and settles \
          it.\n\n\
@@ -515,9 +772,6 @@ fn dispatcher_macro(service: &ServiceDef, transport: Transport) -> TokenStream {
          it hands back carries nothing but `()`, written in the same `-> impl Future + Send` \
          desugaring the trait itself is emitted in, so a consumer loop can spawn it."
     );
-    let incoming = incoming_message();
-    let accessors = incoming_message_accessors();
-    let reply = reply_trait(contract, &module);
     // Both readers are an arm's: one classifies the refusal an arm's own deserialization earned,
     // the other is what an arm calls its implementation behind. A service declaring no operation
     // has no arm, so neither is emitted, and the implementation and the context it would hand one
@@ -533,41 +787,60 @@ fn dispatcher_macro(service: &ServiceDef, transport: Transport) -> TokenStream {
         )
     };
     quote! {
+        #reader
+        #guard
+
+        #[doc = #dispatch_doc]
+        pub fn dispatch<S, Ctx, R>(
+            #implementation: &S,
+            #context: &Ctx,
+            message: &IncomingMessage,
+            reply: &R,
+        ) -> impl ::core::future::Future<Output = ()> + Send
+        where
+            S: $crate::#contract<Ctx> + Sync,
+            Ctx: Sync,
+            R: Reply + Sync,
+        {
+            async move {
+                match message.operation() {
+                    #(#arms)*
+                    unrecognised => {
+                        reply
+                            .fault($crate::#module::ServiceFault::unknown_operation(
+                                unrecognised,
+                            ))
+                            .await
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The dispatcher half: everything that turns one delivery into a call on an implementation, held
+/// as tokens for whoever answers the service.
+fn dispatcher_macro(service: &ServiceDef, transport: Transport) -> TokenStream {
+    let contract = &service.ident;
+    let macro_name = super::dispatcher_macro_ident(service, transport);
+    let placement = placement_doc(&macro_name, "amqp_transport", "the_contract_crate::");
+    let macro_doc = format!(
+        "The `{contract}` dispatcher for the `{}` transport, held as tokens rather than compiled \
+         here.\n\n\
+         It takes no arguments and emits bare items - `IncomingMessage`, `Reply` and `dispatch`, \
+         beside the readers an arm needs - so the caller supplies the module they land in and two \
+         transports in one crate cannot collide. The invoking crate names `serde`, `serde_json` \
+         and `tracing` in its own manifest, because the items below call them.\n\n\
+         {placement}",
+        transport.name()
+    );
+    let items = dispatcher_items(service);
+    quote! {
         #[doc = #macro_doc]
         #[macro_export]
         macro_rules! #macro_name {
             () => {
-                #incoming
-                #reply
-                #accessors
-                #reader
-                #guard
-
-                #[doc = #dispatch_doc]
-                pub fn dispatch<S, Ctx, R>(
-                    #implementation: &S,
-                    #context: &Ctx,
-                    message: &IncomingMessage,
-                    reply: &R,
-                ) -> impl ::core::future::Future<Output = ()> + Send
-                where
-                    S: $crate::#contract<Ctx> + Sync,
-                    Ctx: Sync,
-                    R: Reply + Sync,
-                {
-                    async move {
-                        match message.operation() {
-                            #(#arms)*
-                            unrecognised => {
-                                reply
-                                    .fault($crate::#module::ServiceFault::unknown_operation(
-                                        unrecognised,
-                                    ))
-                                    .await
-                            }
-                        }
-                    }
-                }
+                #items
             };
         }
     }
@@ -1017,6 +1290,99 @@ fn refusal_reader(module: &Ident) -> TokenStream {
     }
 }
 
+/// `ReplyHandle`, the type the server macro's own consumer loop hands the dispatcher: one per
+/// delivery, answering over the very `lapin::Channel` the delivery arrived on.
+fn reply_handle_type() -> TokenStream {
+    quote! {
+        /// Everything answering one message needs.
+        pub struct ReplyHandle<'reply> {
+            channel: &'reply ::lapin::Channel,
+            correlation_id: Option<::lapin::types::ShortString>,
+            reply_to: Option<::lapin::types::ShortString>,
+        }
+    }
+}
+
+/// What `ReplyHandle` does with an answer: implements the dispatcher's own `Reply`, and publishes.
+///
+/// A one-way publish carries no `replyTo` at all, and a handle built from such a delivery
+/// publishes nothing; a publish the channel refuses is logged and dropped rather than propagated,
+/// there being no failure a caller already waiting for a reply could be told about.
+fn reply_handle_impls(module: &Ident) -> TokenStream {
+    quote! {
+        impl Reply for ReplyHandle<'_> {
+            async fn fault(&self, fault: $crate::#module::ServiceFault) {
+                match ::serde_json::to_value(fault) {
+                    Ok(fault) => {
+                        self.publish(&legacy_reply(&framed_fault(&fault), self.correlation()))
+                            .await;
+                    }
+                    Err(unserializable) => ::tracing::error!(
+                        error = %unserializable,
+                        "a service fault would not serialize; the caller is left without a reply",
+                    ),
+                }
+            }
+
+            async fn send<T>(&self, value: T)
+            where
+                T: ::serde::Serialize + Send,
+            {
+                match ::serde_json::to_value(value) {
+                    Ok(answered) => {
+                        self.publish(&legacy_reply(&answered, self.correlation())).await;
+                    }
+                    Err(unserializable) => ::tracing::error!(
+                        error = %unserializable,
+                        "an answer would not serialize; the caller is left without a reply",
+                    ),
+                }
+            }
+        }
+
+        impl ReplyHandle<'_> {
+            fn correlation(&self) -> Option<&str> {
+                self.correlation_id.as_ref().map(::lapin::types::ShortString::as_str)
+            }
+
+            /// Publishes to the reply queue, or to nowhere when the delivery named none.
+            async fn publish(&self, reply: &::serde_json::Value) {
+                let Some(reply_to) = self.reply_to.clone() else {
+                    return;
+                };
+                let encoded = match ::serde_json::to_vec(reply) {
+                    Ok(encoded) => encoded,
+                    Err(unserializable) => {
+                        ::tracing::error!(error = %unserializable, "a reply would not encode");
+                        return;
+                    }
+                };
+                let mut properties = ::lapin::BasicProperties::default();
+                if let Some(correlation_id) = self.correlation_id.clone() {
+                    properties = properties.with_correlation_id(correlation_id);
+                }
+                if let Err(refused) = self
+                    .channel
+                    .basic_publish(
+                        ::lapin::types::ShortString::from(""),
+                        reply_to.clone(),
+                        ::lapin::options::BasicPublishOptions::default(),
+                        &encoded,
+                        properties,
+                    )
+                    .await
+                {
+                    ::tracing::error!(
+                        error = %refused,
+                        reply_queue = reply_to.as_str(),
+                        "the reply could not be published",
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// The `Reply` trait, which a transport implements once per dispatcher it places.
 ///
 /// It travels with the dispatcher because its shape is the dispatcher's: one reply per message,
@@ -1048,7 +1414,102 @@ fn reply_trait(contract: &Ident, module: &Ident) -> TokenStream {
     }
 }
 
-/// The `Transport` trait, which is what a caller supplies to bind a client to a bus.
+/// What the service is handed beside every message the consumer loop reads.
+fn server_context() -> TokenStream {
+    quote! {
+        /// What the service is handed beside every message.
+        pub struct Context {
+            /// The span every log line of the operation lands in.
+            pub logger: ::tracing::Span,
+        }
+    }
+}
+
+/// The server half: everything the dispatcher emits, plus the wire framing, the reply handle, the
+/// context and the consumer loop that turn a real `lapin::Channel` delivery into a call on an
+/// implementation.
+///
+/// Built from the same [`dispatcher_items`] call the dispatcher macro's own definition is, rather
+/// than by invoking that macro: a macro-expanded `#[macro_export]` macro cannot be reached by
+/// `$crate::` from the very crate that declared it, which is exactly the placement a service's own
+/// test harness needs. Reusing the emitter is what keeps the two definitions from drifting apart
+/// instead.
+fn server_macro(service: &ServiceDef, transport: Transport) -> TokenStream {
+    let contract = &service.ident;
+    let module = module_ident(service);
+    let macro_name = super::server_macro_ident(service, transport);
+    let macro_doc = format!(
+        "The `{contract}` server for the `{}` transport, held as tokens rather than compiled \
+         here.\n\n\
+         It takes no arguments and emits every item the dispatcher does, plus `Context`, a \
+         `ReplyHandle` that implements `Reply`, the wire framing a reply is built through, and \
+         `serve_until`, the consumer loop itself. The caller supplies the module they land in, and \
+         two transports in one crate cannot collide. The invoking crate names `lapin`, `tokio`, \
+         `futures`, `serde`, `serde_json` and `tracing` in its own manifest, because the items \
+         below call all six.\n\n\
+         # Where to place it\n\n\
+         In a module of its own file, with the `mod` declaration above the crate's `use` \
+         items:\n\n\
+         ```text\n\
+         // src/lib.rs\n\
+         mod amqp;\n\
+         \n\
+         // src/amqp.rs\n\
+         the_contract_crate::{macro_name}!();\n\
+         ```\n\n\
+         An inline `mod amqp {{ ... }}` earns `clippy::inline_modules`, and a `mod` written below a \
+         `use` earns `clippy::arbitrary_source_item_ordering`. Both land in the consumer's build \
+         rather than in this one.\n\n\
+         The crate that *declared* the service reaches this by its bare name in textual scope, \
+         below the declaration, the same way it reaches the dispatcher and client macros. Any \
+         other crate reaches it by path, as above.",
+        transport.name()
+    );
+    // Grouped types, then impls, then functions, whole macro through: `dispatcher_types` and
+    // `dispatcher_fns` are what `dispatcher_items` calls too, so the one `dispatch` this and the
+    // dispatcher macro answer through is still the one emitter — just interleaved here with the
+    // server's own types, impls and functions instead of run back to back.
+    let framing_consts = wire_framing_consts();
+    let loop_consts = consumer_loop_consts();
+    let context = server_context();
+    let framing_type = wire_framing_type();
+    let dispatch_types = dispatcher_types(service);
+    let reply_type = reply_handle_type();
+    let loop_type = consumer_loop_type();
+    let dispatch_impls = dispatcher_impls();
+    let reply_impls = reply_handle_impls(&module);
+    let dispatch_fns = dispatcher_fns(service);
+    let framing_fns = wire_framing_fns();
+    let framing_helpers = wire_framing_helpers();
+    let loop_fn = consumer_loop(contract);
+    let loop_helpers = consumer_loop_helpers();
+    quote! {
+        #[doc = #macro_doc]
+        #[macro_export]
+        macro_rules! #macro_name {
+            () => {
+                #framing_consts
+                #loop_consts
+
+                #context
+                #framing_type
+                #dispatch_types
+                #reply_type
+                #loop_type
+
+                #dispatch_impls
+                #reply_impls
+
+                #dispatch_fns
+                #framing_fns
+                #framing_helpers
+                #loop_fn
+                #loop_helpers
+            };
+        }
+    }
+}
+
 fn transport_trait(contract: &Ident) -> TokenStream {
     let transport_doc = format!(
         "What binds a `{contract}` client to a bus.\n\n\
@@ -1085,6 +1546,203 @@ fn transport_trait(contract: &Ident) -> TokenStream {
             ) -> impl ::core::future::Future<Output = Result<Vec<u8>, String>> + Send
             where
                 T: ::serde::Serialize + Send;
+        }
+    }
+}
+
+/// The constants the wire framing is built from.
+fn wire_framing_consts() -> TokenStream {
+    quote! {
+        /// The `type` a reply carries when the operation answered with the value it declared.
+        const RESPONSE: &str = "response";
+        /// The `type` a reply carries when the operation answered with the error it declared.
+        const ERROR: &str = "error";
+        /// The `type` a reply carries when the message was refused before the operation ran. It
+        /// is what a fault becomes, that being the shape this bus has always reported a defect
+        /// in.
+        const INVALID_REQUEST: &str = "invalid-request";
+        /// What the runtime replies when an error names no code of its own.
+        const FALLBACK_ERROR_CODE: &str = "server-error";
+    }
+}
+
+/// `Fault`, the one type the wire framing reads a failure arm into.
+///
+/// Travels with the server macro rather than the dispatcher, because nothing reads it back except
+/// [`ReplyHandle`](reply_handle_impls) — a generated service never sees its own reply framed this
+/// way.
+fn wire_framing_type() -> TokenStream {
+    quote! {
+        /// What a fault says, read off the failure arm without naming any service's fault type.
+        struct Fault {
+            detail: String,
+            kind: String,
+        }
+    }
+}
+
+/// The wire framing a reply and a fault are built through: the shapes this bus has always carried,
+/// unwrapped from the envelope a generated `dispatch` answered with. [`wire_framing_helpers`] is
+/// the rest of it, split out only so that neither function runs long.
+fn wire_framing_fns() -> TokenStream {
+    quote! {
+        /// One answer, turned into the reply an unmodified caller on this bus already parses.
+        ///
+        /// The correlation id and `isError` are the transport's own injections.
+        pub fn legacy_reply(
+            answered: &::serde_json::Value,
+            correlation_id: Option<&str>,
+        ) -> ::serde_json::Value {
+            let mut reply = translate(answered);
+            if reply.get("type").and_then(::serde_json::Value::as_str) == Some(ERROR) {
+                insert(&mut reply, "isError", ::serde_json::Value::Bool(true));
+            }
+            if let Some(correlation_id) = correlation_id {
+                insert(&mut reply, "correlationId", ::serde_json::json!(correlation_id));
+            }
+
+            ::serde_json::Value::Object(reply)
+        }
+
+        /// A fault, framed the way a dispatcher frames one before it reaches a caller, so that a
+        /// defect and a declared error take the same path through [`legacy_reply`].
+        pub fn framed_fault(fault: &::serde_json::Value) -> ::serde_json::Value {
+            ::serde_json::json!({ "ok": false, "error": { "isServiceFault": true, "fault": fault } })
+        }
+
+        /// The envelope, unwrapped into one of the three shapes this bus carries.
+        fn translate(
+            answered: &::serde_json::Value,
+        ) -> ::serde_json::Map<String, ::serde_json::Value> {
+            let Some(answered) = answered.as_object() else {
+                return refused(
+                    "undeserializable-payload",
+                    "the service answered with no message",
+                );
+            };
+            if answered.get("ok") == Some(&::serde_json::Value::Bool(true)) {
+                return answered_with(answered.get("value"));
+            }
+            let Some(error) = answered.get("error").and_then(::serde_json::Value::as_object)
+            else {
+                return refused(
+                    "undeserializable-payload",
+                    "the service answered with no error",
+                );
+            };
+
+            match read_fault(error) {
+                Some(fault) => refused(&fault.kind, &fault.detail),
+                None => declared_error(error),
+            }
+        }
+    }
+}
+
+/// The rest of [`wire_framing`]: what `translate` calls to build each of the three shapes.
+fn wire_framing_helpers() -> TokenStream {
+    quote! {
+        /// The reply a value crosses in.
+        ///
+        /// A ported operation's success type is the response message it already answered with,
+        /// `type: "response"` and all, so the envelope is unwrapped and the object inside crosses
+        /// untouched. A value that carries no such marker gets one, which is what makes an
+        /// operation whose success type was never a bus message answerable here at all.
+        fn answered_with(
+            value: Option<&::serde_json::Value>,
+        ) -> ::serde_json::Map<String, ::serde_json::Value> {
+            match value.and_then(::serde_json::Value::as_object) {
+                Some(value)
+                    if value.get("type").and_then(::serde_json::Value::as_str)
+                        == Some(RESPONSE) =>
+                {
+                    value.clone()
+                }
+                Some(value) => {
+                    let mut reply = ::serde_json::Map::new();
+                    reply.insert("type".to_owned(), ::serde_json::json!(RESPONSE));
+                    for (key, held) in value {
+                        reply.insert(key.clone(), held.clone());
+                    }
+
+                    reply
+                }
+                None => {
+                    let mut reply = ::serde_json::Map::new();
+                    reply.insert("type".to_owned(), ::serde_json::json!(RESPONSE));
+
+                    reply
+                }
+            }
+        }
+
+        /// The reply an error the operation declared crosses in: the code and the message a
+        /// caller has always branched on, under the `type` it has always arrived with.
+        fn declared_error(
+            error: &::serde_json::Map<String, ::serde_json::Value>,
+        ) -> ::serde_json::Map<String, ::serde_json::Value> {
+            let mut reply = ::serde_json::Map::new();
+            reply.insert("type".to_owned(), ::serde_json::json!(ERROR));
+            reply.insert(
+                "errorCode".to_owned(),
+                ::serde_json::json!(
+                    read_string(error, "errorCode").unwrap_or(FALLBACK_ERROR_CODE)
+                ),
+            );
+            reply.insert(
+                "errorMessage".to_owned(),
+                ::serde_json::json!(read_string(error, "errorMessage").unwrap_or_default()),
+            );
+
+            reply
+        }
+
+        /// The reply a defect crosses in, carrying the fault's kind as the error code so the far
+        /// end can report the same defect it was told about.
+        fn refused(
+            error_code: &str,
+            message: &str,
+        ) -> ::serde_json::Map<String, ::serde_json::Value> {
+            let mut reply = ::serde_json::Map::new();
+            reply.insert("type".to_owned(), ::serde_json::json!(INVALID_REQUEST));
+            reply.insert(
+                "errors".to_owned(),
+                ::serde_json::json!([{ "errorCode": error_code, "message": message }]),
+            );
+
+            reply
+        }
+
+        /// The fault inside a failure arm, if the arm carries one. A `field` the fault names is
+        /// folded into the detail, there being one message on the wire and not two.
+        fn read_fault(error: &::serde_json::Map<String, ::serde_json::Value>) -> Option<Fault> {
+            if error.get("isServiceFault") != Some(&::serde_json::Value::Bool(true)) {
+                return None;
+            }
+            let fault = error.get("fault")?.as_object()?;
+            let detail = read_string(fault, "detail")?;
+            let kind = read_string(fault, "kind")?;
+
+            Some(Fault {
+                detail: read_string(fault, "field")
+                    .map_or_else(|| detail.to_owned(), |field| format!("'{field}': {detail}")),
+                kind: kind.to_owned(),
+            })
+        }
+
+        fn insert(
+            reply: &mut ::serde_json::Map<String, ::serde_json::Value>,
+            key: &str,
+            value: ::serde_json::Value,
+        ) {
+            reply.insert(key.to_owned(), value);
+        }
+
+        fn read_string<'held>(
+            held: &'held ::serde_json::Map<String, ::serde_json::Value>,
+            key: &str,
+        ) -> Option<&'held str> {
+            held.get(key)?.as_str()
         }
     }
 }

@@ -40,6 +40,13 @@ proc-macro2 = { version = "1", features = ["span-locations"] }
 # invokes a transport's dispatcher macro names `tracing` in its own manifest, beside `serde` and
 # `serde_json`. Here it is a dev-dependency for the same reason those two are: the tests invoke it.
 tracing = "0.1"
+# A crate that invokes the `amqp_rpc` transport's server macro names these three in its own
+# manifest, beside `serde`, `serde_json` and `tracing`, because the emitted consumer loop calls all
+# six. Dev-only: the harness compiles that expansion, but tixschema itself stays a proc-macro crate
+# with no runtime dependency of its own.
+lapin = ">=4.10.0"
+tokio = { version = ">=1.53.1", features = ["macros", "rt-multi-thread"] }
+futures = ">=0.3.33"
 
 # Transitive dep floors — pinned to fix known vulnerabilities:
 # - bytes >=1.11.1: RUSTSEC-2026-0007 (integer overflow in BytesMut::reserve)

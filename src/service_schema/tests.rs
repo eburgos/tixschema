@@ -940,7 +940,9 @@ fn dispatch_is_generic_over_the_implementing_type_and_answers_through_the_handle
 }
 
 /// The dispatcher is a stored token sequence, not compiled items: nothing of it is built where the
-/// service is declared, and the only `dispatch` in the expansion is the one inside the macro.
+/// service is declared, and every `dispatch` in the expansion is inside a macro rather than at the
+/// trait's own scope. The server macro carries its own copy beside the dispatcher's, built by the
+/// same emitter, because a consumer may place either macro without the other.
 #[test]
 fn the_dispatcher_is_emitted_inside_the_macro_and_nowhere_at_the_trait_s_own_scope() {
     let emitted = expanded_over_amqp_rpc(MIXED_SERVICE);
@@ -949,8 +951,9 @@ fn the_dispatcher_is_emitted_inside_the_macro_and_nowhere_at_the_trait_s_own_sco
         .unwrap();
     assert_eq!(
         emitted.matches("pub fn dispatch").count(),
-        1,
-        "got: {emitted}"
+        2,
+        "the dispatcher and server macros each carry their own copy of `dispatch`, built by the \
+         one emitter so the two cannot drift. Got: {emitted}"
     );
     assert!(
         emitted.find("pub fn dispatch").unwrap() > macro_at,
@@ -998,6 +1001,10 @@ fn a_service_asking_for_no_transport_is_emitted_the_contract_and_nothing_else() 
         "pub struct UsageServiceClient",
         "serde_json",
         "tracing",
+        "pub struct Context",
+        "pub struct ReplyHandle",
+        "pub async fn serve_until",
+        "lapin",
     ] {
         assert!(
             !emitted.contains(absent),
