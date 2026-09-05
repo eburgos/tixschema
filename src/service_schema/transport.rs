@@ -13,15 +13,17 @@
 //!
 //! # What a named transport contributes
 //!
-//! Two `#[macro_export] macro_rules!` per transport the service asked for, named
-//! `{service}_{transport}_dispatcher` and `{service}_{transport}_client` and emitted at the trait's
-//! own scope. Nothing inside either is compiled where the service is declared, and a service that
-//! named no transport is emitted nothing here at all.
+//! Three `#[macro_export] macro_rules!` per transport the service asked for, named
+//! `{service}_{transport}_dispatcher`, `{service}_{transport}_client` and
+//! `{service}_{transport}_server`, and emitted at the trait's own scope. Nothing inside any of them
+//! is compiled where the service is declared, and a service that named no transport is emitted
+//! nothing here at all.
 //!
-//! Two macros rather than one, because the two halves of a service usually live in different
-//! crates — a crate that calls the service can see the contract but has no business seeing the
-//! server's backend. Each is invoked and placed by the half that wants it, and neither drags in the
-//! other.
+//! Three macros rather than one, because the halves of a service usually live in different crates —
+//! a crate that calls the service can see the contract but has no business seeing the server's
+//! backend, and a crate that only wants `dispatch` itself (a hand-rolled adapter, or a test with no
+//! broker in reach) has no business seeing the server macro's `lapin`, `tokio` and `futures`
+//! either. Each is invoked and placed by the half that wants it, and none drags in another.
 //!
 //! [`emit`] walks [`Transport::KNOWN`] rather than the list as written, so a transport named twice
 //! contributes one pair rather than two definitions of one exported name.
@@ -80,6 +82,11 @@ pub fn client_macro_ident(service: &ServiceDef, transport: Transport) -> Ident {
 /// The name a transport's dispatcher macro publishes under: `{service}_{transport}_dispatcher`.
 pub fn dispatcher_macro_ident(service: &ServiceDef, transport: Transport) -> Ident {
     macro_ident(service, transport, "dispatcher")
+}
+
+/// The name a transport's server macro publishes under: `{service}_{transport}_server`.
+pub fn server_macro_ident(service: &ServiceDef, transport: Transport) -> Ident {
+    macro_ident(service, transport, "server")
 }
 
 /// Either half's macro name, spelled in one place so the two cannot drift apart.
