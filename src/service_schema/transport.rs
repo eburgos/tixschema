@@ -13,17 +13,21 @@
 //!
 //! # What a named transport contributes
 //!
-//! Three `#[macro_export] macro_rules!` per transport the service asked for, named
-//! `{service}_{transport}_dispatcher`, `{service}_{transport}_client` and
-//! `{service}_{transport}_server`, and emitted at the trait's own scope. Nothing inside any of them
-//! is compiled where the service is declared, and a service that named no transport is emitted
-//! nothing here at all.
+//! `#[macro_export] macro_rules!` at the trait's own scope, named `{service}_{transport}_dispatcher`
+//! and `{service}_{transport}_client` for every transport the service asked for, plus a third,
+//! `{service}_{transport}_server`, for `amqp_rpc` alone — three macros there, two for `http_rest`
+//! and two for `ws_rpc`. Nothing inside any of them is compiled where the service is declared, and a
+//! service that named no transport is emitted nothing here at all.
 //!
-//! Three macros rather than one, because the halves of a service usually live in different crates —
-//! a crate that calls the service can see the contract but has no business seeing the server's
-//! backend, and a crate that only wants `dispatch` itself (a hand-rolled adapter, or a test with no
-//! broker in reach) has no business seeing the server macro's `lapin`, `tokio` and `futures`
-//! either. Each is invoked and placed by the half that wants it, and none drags in another.
+//! Two macros rather than one, because the halves of a service usually live in different crates — a
+//! crate that calls the service can see the contract but has no business seeing the server's
+//! backend. `amqp_rpc` earns a third: AMQP's own request-and-reply shape is fixed enough that one
+//! consumer loop over `lapin` serves every service that places it, so that loop is generated rather
+//! than left to a hand-written adapter. `http_rest` and `ws_rpc` have no such fixed loop — what a
+//! server looks like is the hosting application's own router or socket handler — so both stop at the
+//! dispatcher and the client, and a crate that only wants `dispatch` itself (a hand-rolled adapter,
+//! or a test with no broker in reach) has no business seeing the server macro's `lapin`, `tokio` and
+//! `futures` either. Each is invoked and placed by the half that wants it, and none drags in another.
 //!
 //! [`emit`] walks [`Transport::KNOWN`] rather than the list as written, so a transport named twice
 //! contributes one pair rather than two definitions of one exported name.
