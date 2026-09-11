@@ -3,19 +3,21 @@
 //!
 //! `{service}_ws_rpc_dispatcher!()` emits every item every transport built on the shared
 //! dispatcher seam publishes — `IncomingMessage`, `Reply`, `dispatch` and the arm readers — plus
-//! this transport's own frame codec (`Frame`, its `decode`, `ping_frame`/`pong_frame`),
-//! `FrameReply` and `answer`: the one call an adapter makes per inbound text frame, decoding it,
-//! dispatching a request or a notify, answering a ping with a pong, and returning the reply frame
-//! to send, or nothing.
+//! this transport's own frame codec (`Frame`, its `decode`, `pong_frame`), `FrameReply` and
+//! `answer`: the one call an adapter makes per inbound text frame, decoding it, dispatching a
+//! request or a notify, answering a ping with a pong, and returning the reply frame to send, or
+//! nothing. Its `Frame` reads request, notify and ping frames alone — a reply or a pong, read by
+//! the client macro instead, decodes to `Frame::Ignored` rather than a refusal.
 //!
 //! `{service}_ws_rpc_client!()` emits everything the shared client seam publishes for every
 //! transport — `Transport`, `{Service}Client`, the fault mirror and the envelope readers — plus
-//! its own copy of the frame codec, `request_frame`, `notify_frame`, `FrameWriter` and
-//! `FrameSession`. Both transports are generated in `core` and `std` alone: `FrameWriter` wraps a
-//! boxed send function into a one-way `Transport`, and `FrameSession` adds the request-and-reply
-//! half — a correlation map keyed on an id from an atomic counter, settled by `deliver` — so a
-//! caller's own adapter shrinks to that one send function plus one call to `deliver` per inbound
-//! frame.
+//! its own copy of the frame codec, `ping_frame`, `request_frame`, `notify_frame`, `FrameWriter`
+//! and `FrameSession`. Its `Frame` reads reply, ping and pong frames alone — a request or a
+//! notify, read by the dispatcher macro instead, decodes to `Frame::Ignored` rather than a
+//! refusal. Both transports are generated in `core` and `std` alone: `FrameWriter` wraps a boxed
+//! send function into a one-way `Transport`, and `FrameSession` adds the request-and-reply half —
+//! a correlation map keyed on an id from an atomic counter, settled by `deliver` — so a caller's
+//! own adapter shrinks to that one send function plus one call to `deliver` per inbound frame.
 
 use super::Transport;
 use super::amqp_rpc::{
@@ -28,6 +30,15 @@ use crate::service_schema::support::module_ident;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::Ident;
+
+/// Which half of the wire a `Frame` codec belongs to. A frame naming a `kind` the other side
+/// reads decodes to `Frame::Ignored` rather than a refusal, so each side's own `_ => None` /
+/// `_ => {}` arm still covers it.
+#[derive(Clone, Copy)]
+enum Side {
+    Client,
+    Dispatcher,
+}
 
 pub fn emit(service: &ServiceDef, transport: Transport) -> TokenStream {
     let dispatcher = dispatcher_macro(service, transport);
@@ -66,14 +77,15 @@ fn dispatcher_macro(service: &ServiceDef, transport: Transport) -> TokenStream {
         transport.name()
     );
     let claims_headers = declares_header_in(service);
+    let with_send = declares_a_reply(service);
     let service_const = frame_codec_const(&contract.to_string());
-    let frame_type = frame_codec_type();
+    let frame_type = frame_codec_type(Side::Dispatcher);
     let reply_struct_type = frame_reply_type();
     let incoming_type = incoming_message(claims_headers);
-    let reply_trait_type = reply_trait(contract, &module);
-    let frame_impl = frame_codec_impl();
+    let reply_trait_type = reply_trait(contract, &module, with_send);
+    let frame_impl = frame_codec_impl(Side::Dispatcher);
     let reply_struct_impl = frame_reply_impl();
-    let reply_trait_impl = frame_reply_trait_impl(&module);
+    let reply_trait_impl = frame_reply_trait_impl(&module, with_send);
     let incoming_impl = incoming_message_accessors(claims_headers);
     let dispatch_fns = dispatcher_fns(service);
     let codec_fns = frame_codec_fns();
@@ -137,95 +149,120 @@ fn frame_codec_const(contract_name: &str) -> TokenStream {
     }
 }
 
-/// `Frame`, the one type a frame off the socket reads into.
-fn frame_codec_type() -> TokenStream {
-    quote! {
-        /// One frame as read off the socket: a call this service is asked to make and must
-        /// answer, a call it is told about and owes no reply, an answer to a call this side made
-        /// over the client macro, or a liveness probe.
-        pub enum Frame {
-            /// A call this service is asked to make and must answer.
-            Request {
-                id: String,
-                service: String,
-                message: IncomingMessage,
-            },
-            /// A call this service is told about and owes no reply.
-            Notify { service: String, message: IncomingMessage },
-            /// An answer to a call this side made, read by the client macro.
-            Reply {
-                id: String,
-                service: String,
-                envelope: ::serde_json::Map<String, ::serde_json::Value>,
-            },
-            /// A liveness probe this side answers with a pong.
-            Ping,
-            /// A liveness answer to a ping this side sent.
-            Pong,
-        }
+/// `Frame`, the one type a frame off the socket reads into — the dispatcher's own reads request,
+/// notify and ping; the client's own reads reply, ping and pong. Either carries `Ignored` for a
+/// frame belonging to the other side.
+fn frame_codec_type(side: Side) -> TokenStream {
+    match side {
+        Side::Dispatcher => quote! {
+            /// One frame as read off the socket: a call this service is asked to make and must
+            /// answer, a call it is told about and owes no reply, a liveness probe, or a frame
+            /// this side has nothing to do with.
+            pub enum Frame {
+                /// A call this service is asked to make and must answer.
+                Request {
+                    id: String,
+                    service: String,
+                    message: IncomingMessage,
+                },
+                /// A call this service is told about and owes no reply.
+                Notify { service: String, message: IncomingMessage },
+                /// A liveness probe this side answers with a pong.
+                Ping,
+                /// A reply or a pong: read by the client macro instead.
+                Ignored,
+            }
+        },
+        Side::Client => quote! {
+            /// One frame as read off the socket: an answer to a call this side made, a liveness
+            /// probe or its answer, or a frame this side has nothing to do with.
+            pub enum Frame {
+                /// An answer to a call this side made.
+                Reply {
+                    id: String,
+                    service: String,
+                    envelope: ::serde_json::Map<String, ::serde_json::Value>,
+                },
+                /// A liveness probe this side answers with a pong.
+                Ping,
+                /// A liveness answer to a ping this side sent.
+                Pong,
+                /// A request or a notify: read by the dispatcher macro instead.
+                Ignored,
+            }
+        },
     }
 }
 
 /// `Frame::decode`, the one reader every frame kind above is read through.
-fn frame_codec_impl() -> TokenStream {
+fn frame_codec_impl(side: Side) -> TokenStream {
+    let arms = match side {
+        Side::Dispatcher => quote! {
+            let read_message = |on: &::serde_json::Map<String, ::serde_json::Value>| -> Result<IncomingMessage, String> {
+                let payload = on.get("payload").cloned().unwrap_or(::serde_json::Value::Null);
+                Ok(IncomingMessage::new(
+                    string_of(on, "operation")?,
+                    ::serde_json::to_vec(&payload)
+                        .map_err(|unrepresentable| unrepresentable.to_string())?,
+                    headers_of(on),
+                ))
+            };
+            match string_of(&frame, "kind")?.as_str() {
+                "request" => Ok(Frame::Request {
+                    id: string_of(&frame, "id")?,
+                    service: string_of(&frame, "service")?,
+                    message: read_message(&frame)?,
+                }),
+                "notify" => Ok(Frame::Notify {
+                    service: string_of(&frame, "service")?,
+                    message: read_message(&frame)?,
+                }),
+                "ping" => Ok(Frame::Ping),
+                "reply" | "pong" => Ok(Frame::Ignored),
+                other => Err(format!("unknown frame kind `{other}`")),
+            }
+        },
+        Side::Client => quote! {
+            match string_of(&frame, "kind")?.as_str() {
+                "reply" => {
+                    let mut envelope = frame.clone();
+                    for key in ["kind", "id", "service"] {
+                        envelope.remove(key);
+                    }
+                    Ok(Frame::Reply {
+                        id: string_of(&frame, "id")?,
+                        service: string_of(&frame, "service")?,
+                        envelope,
+                    })
+                }
+                "ping" => Ok(Frame::Ping),
+                "pong" => Ok(Frame::Pong),
+                "request" | "notify" => Ok(Frame::Ignored),
+                other => Err(format!("unknown frame kind `{other}`")),
+            }
+        },
+    };
     quote! {
         impl Frame {
             /// Reads one frame off the wire. Text that is not JSON, is not a JSON object, or
-            /// names no `kind` this transport recognises, is refused, naming why.
+            /// names no `kind` this transport recognises, is refused, naming why. A frame naming
+            /// a `kind` the other side reads decodes to `Frame::Ignored` instead.
             pub fn decode(text: &str) -> Result<Frame, String> {
                 let parsed: ::serde_json::Value = ::serde_json::from_str(text)
                     .map_err(|refused| format!("not JSON: {refused}"))?;
                 let ::serde_json::Value::Object(frame) = parsed else {
                     return Err("frame is not an object".to_owned());
                 };
-                let read_message = |on: &::serde_json::Map<String, ::serde_json::Value>| -> Result<IncomingMessage, String> {
-                    let payload = on.get("payload").cloned().unwrap_or(::serde_json::Value::Null);
-                    Ok(IncomingMessage::new(
-                        string_of(on, "operation")?,
-                        ::serde_json::to_vec(&payload)
-                            .map_err(|unrepresentable| unrepresentable.to_string())?,
-                        headers_of(on),
-                    ))
-                };
-                match string_of(&frame, "kind")?.as_str() {
-                    "request" => Ok(Frame::Request {
-                        id: string_of(&frame, "id")?,
-                        service: string_of(&frame, "service")?,
-                        message: read_message(&frame)?,
-                    }),
-                    "notify" => Ok(Frame::Notify {
-                        service: string_of(&frame, "service")?,
-                        message: read_message(&frame)?,
-                    }),
-                    "reply" => {
-                        let mut envelope = frame.clone();
-                        for key in ["kind", "id", "service"] {
-                            envelope.remove(key);
-                        }
-                        Ok(Frame::Reply {
-                            id: string_of(&frame, "id")?,
-                            service: string_of(&frame, "service")?,
-                            envelope,
-                        })
-                    }
-                    "ping" => Ok(Frame::Ping),
-                    "pong" => Ok(Frame::Pong),
-                    other => Err(format!("unknown frame kind `{other}`")),
-                }
+                #arms
             }
         }
     }
 }
 
-/// `ping_frame`/`pong_frame`, and the private helpers `Frame::decode` and `FrameReply::write`
-/// read a frame's fields and its headers through.
+/// `pong_frame`, emitted on both sides, and the private helpers `Frame::decode` and
+/// `FrameReply::write` read a frame's fields and its headers through.
 fn frame_codec_fns() -> TokenStream {
     quote! {
-        /// The text frame a liveness probe is sent as.
-        pub fn ping_frame() -> String {
-            ::serde_json::json!({ "kind": "ping" }).to_string()
-        }
-
         /// The text frame a liveness probe is answered with.
         pub fn pong_frame() -> String {
             ::serde_json::json!({ "kind": "pong" }).to_string()
@@ -346,26 +383,13 @@ fn frame_reply_impl() -> TokenStream {
     }
 }
 
-/// `impl Reply for FrameReply`: `fault` and `send`, in that alphabetical order. Both write to
-/// `self.written` synchronously and awake nothing — a `Future` this trait needs only for the seam
-/// every transport's `Reply` shares, not for any wait `FrameReply` itself has to do.
-fn frame_reply_trait_impl(module: &Ident) -> TokenStream {
-    quote! {
-        impl Reply for FrameReply {
-            fn fault(
-                &self,
-                fault: $crate::#module::ServiceFault,
-            ) -> impl ::core::future::Future<Output = ()> + Send {
-                self.write(
-                    ::serde_json::json!({
-                        "ok": false,
-                        "error": { "isServiceFault": true, "fault": fault },
-                    }),
-                    Vec::new(),
-                );
-                ::core::future::ready(())
-            }
-
+/// `impl Reply for FrameReply`: `fault` always, and `send` only where the service declares a
+/// reply-shaped operation — alphabetical where both are present. Both write to `self.written`
+/// synchronously and awake nothing — a `Future` this trait needs only for the seam every
+/// transport's `Reply` shares, not for any wait `FrameReply` itself has to do.
+fn frame_reply_trait_impl(module: &Ident, with_send: bool) -> TokenStream {
+    let send = with_send.then(|| {
+        quote! {
             fn send<T>(
                 &self,
                 value: T,
@@ -383,6 +407,25 @@ fn frame_reply_trait_impl(module: &Ident) -> TokenStream {
                 }
                 ::core::future::ready(())
             }
+        }
+    });
+    quote! {
+        impl Reply for FrameReply {
+            fn fault(
+                &self,
+                fault: $crate::#module::ServiceFault,
+            ) -> impl ::core::future::Future<Output = ()> + Send {
+                self.write(
+                    ::serde_json::json!({
+                        "ok": false,
+                        "error": { "isServiceFault": true, "fault": fault },
+                    }),
+                    Vec::new(),
+                );
+                ::core::future::ready(())
+            }
+
+            #send
         }
     }
 }
@@ -449,13 +492,10 @@ fn client_macro(service: &ServiceDef, transport: Transport) -> TokenStream {
         .iter()
         .map(|operation| method(operation, &generated));
     let (macro_doc, client_doc) = client_macro_docs(contract, transport, &published);
-    let claims_headers = declares_header_in(service);
     let service_const = frame_codec_const(&contract.to_string());
     let seam = transport_trait(contract);
-    let incoming_type = incoming_message(claims_headers);
-    let incoming_impl = incoming_message_accessors(claims_headers);
-    let frame_type = frame_codec_type();
-    let frame_impl = frame_codec_impl();
+    let frame_type = frame_codec_type(Side::Client);
+    let frame_impl = frame_codec_impl(Side::Client);
     let send_type = send_frame_type();
     let writer_type = frame_writer_type();
     let writer_impl = frame_writer_impl();
@@ -489,7 +529,6 @@ fn client_macro(service: &ServiceDef, transport: Transport) -> TokenStream {
                 #service_const
                 #seam
                 #mirror
-                #incoming_type
                 #frame_type
                 #send_type
                 #writer_type
@@ -501,7 +540,6 @@ fn client_macro(service: &ServiceDef, transport: Transport) -> TokenStream {
                 }
 
                 #minting
-                #incoming_impl
                 #frame_impl
                 #writer_impl
                 #writer_transport_impl
@@ -803,9 +841,16 @@ fn frame_session_transport_impl() -> TokenStream {
     }
 }
 
-/// `request_frame`, `notify_frame` and the private helper both build a frame through.
+/// `ping_frame`, `request_frame`, `notify_frame` and the private helper both build a frame
+/// through. `ping_frame` is the client's alone to call — a dispatcher answers a ping, it never
+/// originates one.
 fn frame_encoders() -> TokenStream {
     quote! {
+        /// The text frame a liveness probe is sent as.
+        pub fn ping_frame() -> String {
+            ::serde_json::json!({ "kind": "ping" }).to_string()
+        }
+
         /// The text frame one request-and-reply call sends: this call's own id, the operation and
         /// payload, and, where the operation claimed any, the outgoing `header_in` values.
         pub fn request_frame<T>(

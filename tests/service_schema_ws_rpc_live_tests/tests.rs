@@ -291,30 +291,15 @@ async fn ledger_socket(
                 }
             })),
         };
-        while let Some(Ok(Message::Text(text))) = stream.next().await {
+        while let Some(Ok(message)) = stream.next().await {
+            let Message::Text(text) = message else {
+                continue;
+            };
             if let Some(reply) = ledger_ws::answer(&text, &*back_end, &session).await {
                 let _: Result<(), _> = out.send(reply).await;
             }
         }
     })
-}
-
-/// A bare axum socket that answers nothing and never carries `Ledger` traffic; it exists only to
-/// hold its read loop open past a protocol-level ping, which is what a queued pong reply needs to
-/// actually be flushed (see [`a_client_ping_is_answered_with_a_pong`]).
-async fn spawn_ping_probe() -> (SocketAddr, JoinHandle<()>) {
-    async fn probe(ws: WebSocketUpgrade) -> impl IntoResponse {
-        ws.on_upgrade(|mut socket| async move { while socket.recv().await.is_some() {} })
-    }
-    let app = Router::new().route("/probe", any(probe));
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    (
-        addr,
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        }),
-    )
 }
 
 /// A `LedgerBackEnd` bound to its own dedicated runtime, so the runtime itself — not just the
@@ -374,7 +359,10 @@ async fn connect(
     let (posted_out, posted_in) = mpsc::channel(16);
     let screen = Screen(posted_out);
     tokio::spawn(async move {
-        while let Some(Ok(Message::Text(text))) = stream.next().await {
+        while let Some(Ok(message)) = stream.next().await {
+            let Message::Text(text) = message else {
+                continue;
+            };
             reader.deliver(&text).await; // replies to my requests, and pongs
             screen_ws::answer(&text, &screen, &()).await; // pushes from the server
         }
@@ -458,14 +446,8 @@ async fn create_transaction_for_an_unknown_account_answers_the_declared_error() 
 
 #[tokio::test]
 async fn a_client_ping_is_answered_with_a_pong() {
-    // Not `ledger_socket`: its read loop ends on the first frame that is not `Message::Text` and
-    // never polls the connection again — so a queued pong reply, which tungstenite only flushes on
-    // a *subsequent* read, write or flush, is left unsent. See the bug filed from this test for
-    // that finding; this probe stays on the read loop long enough to prove the claim the assertion
-    // below is actually about — that tokio-tungstenite and axum answer a protocol ping themselves —
-    // independent of that defect.
-    let (addr, server) = spawn_ping_probe().await;
-    let (mut socket, _response) = connect_async(format!("ws://{addr}/probe")).await.unwrap();
+    let (addr, server) = serve(Arc::new(LedgerBackEnd::seeded())).await;
+    let (mut socket, _response) = connect_async(format!("ws://{addr}/ledger")).await.unwrap();
 
     socket
         .send(Message::Ping(Bytes::from_static(b"ping")))
@@ -503,98 +485,22 @@ async fn dropping_the_server_settles_a_waiting_call_with_a_transport_failure_fau
 }
 
 // The six tests above drive every module through the one path a live socket actually takes.
-// Each of the four expansions below also carries frame-kind arms and accessors that path never
-// reaches — `ledger_ws` never answers with a `Frame::Reply`, `ledger_client_ws` never receives a
-// `Frame::Request` or `Frame::Notify`, `ledger_events_ws` never runs a `FrameSession` since
-// `LedgerEvents` is push-only, and `screen_ws` never sends a reply since its own one operation is
-// one-way too. What follows drives each directly, the same way the hand-driven proof tests
-// (`tests/service_schema_ws_rpc_tests`) cover the same shapes with no socket at all.
-
-/// `ping_frame` is the client macro's — a session sends one, a dispatcher only ever answers one —
-/// but the two share one codec, so the dispatcher publishes it too.
-#[tokio::test]
-async fn ledger_ws_ping_frame_encodes_the_kind_ping_frame() {
-    assert_eq!(ledger_ws::ping_frame(), r#"{"kind":"ping"}"#);
-}
-
-/// `Frame::Reply` is the client macro's own frame kind — the `Ledger` dispatcher never answers
-/// with one, it only decodes one, which `answer` itself has no reason to do.
-#[tokio::test]
-async fn ledger_ws_frame_decode_reads_a_reply_frame_into_its_id_service_and_envelope() {
-    let decoded = ledger_ws::Frame::decode(
-        r#"{"kind":"reply","id":"1","service":"Ledger","ok":true,"value":{"id":"tx-1"}}"#,
-    )
-    .unwrap();
-    let (id, service, envelope) = match decoded {
-        ledger_ws::Frame::Reply {
-            id,
-            service,
-            envelope,
-        } => Some((id, service, envelope)),
-        ledger_ws::Frame::Request { .. }
-        | ledger_ws::Frame::Notify { .. }
-        | ledger_ws::Frame::Ping
-        | ledger_ws::Frame::Pong => None,
-    }
-    .unwrap();
-    assert_eq!(id, "1");
-    assert_eq!(service, "Ledger");
-    assert_eq!(
-        envelope.get("value"),
-        Some(&serde_json::json!({ "id": "tx-1" })),
-    );
-}
+// `Frame` no longer means one shared codec: each macro now reads only the frame kinds its own
+// side receives, so a dispatcher's `Frame` cannot name a reply and a client's cannot name a
+// request or a notify — there is nothing to hand-decode on either side that the type system does
+// not already refuse to construct. A one-way-only service's `Reply` carries no `send` either, for
+// the same reason: `LedgerEvents` never answers, so its dispatcher never publishes a method to
+// answer with. What follows drives only what still cannot be reached through the live socket
+// above: a session's own `ping_frame`, a `FrameWriter`'s construction and its refusal of
+// `request`, the `.transport()` accessor every generated client publishes, and — since
+// `LedgerEvents`'s own client is only ever bound to a `FrameWriter` on the live path — a
+// `FrameSession` round trip and its own ping/pong handling for `ledger_events_ws`.
 
 /// `ledger_client_ws`'s own copy of `ping_frame`, published beside `FrameSession`'s liveness
 /// probe — a dispatcher never sends one.
 #[tokio::test]
 async fn ledger_client_ws_ping_frame_encodes_the_kind_ping_frame() {
     assert_eq!(ledger_client_ws::ping_frame(), r#"{"kind":"ping"}"#);
-}
-
-/// `ledger_client_ws::Frame::decode` reads a request and a notify frame into an
-/// `IncomingMessage`, the same way `ledger_ws`'s own copy does — nothing in `Ledger`'s client ever
-/// receives one, but the codec is one copy shared with every frame kind.
-#[tokio::test]
-async fn ledger_client_ws_frame_decode_reads_a_request_and_a_notify_frame() {
-    let decoded = ledger_client_ws::Frame::decode(
-        r#"{"kind":"request","id":"9","service":"Ledger","operation":"probe","payload":{"n":1}}"#,
-    )
-    .unwrap();
-    let (id, service, message) = match decoded {
-        ledger_client_ws::Frame::Request {
-            id,
-            service,
-            message,
-        } => Some((id, service, message)),
-        ledger_client_ws::Frame::Notify { .. }
-        | ledger_client_ws::Frame::Reply { .. }
-        | ledger_client_ws::Frame::Ping
-        | ledger_client_ws::Frame::Pong => None,
-    }
-    .unwrap();
-    assert_eq!(id, "9");
-    assert_eq!(service, "Ledger");
-    assert_eq!(message.operation(), "probe");
-    assert_eq!(message.payload(), br#"{"n":1}"#);
-
-    let notified = ledger_client_ws::Frame::decode(
-        r#"{"kind":"notify","service":"Ledger","operation":"probe","payload":{"n":1}}"#,
-    )
-    .unwrap();
-    let (notify_service, notify_message) = match notified {
-        ledger_client_ws::Frame::Notify {
-            service: notify_service,
-            message: notify_message,
-        } => Some((notify_service, notify_message)),
-        ledger_client_ws::Frame::Request { .. }
-        | ledger_client_ws::Frame::Reply { .. }
-        | ledger_client_ws::Frame::Ping
-        | ledger_client_ws::Frame::Pong => None,
-    }
-    .unwrap();
-    assert_eq!(notify_service, "Ledger");
-    assert_eq!(notify_message.operation(), "probe");
 }
 
 /// A `FrameWriter` carries no correlation map, so `request` is refused outright, naming the
@@ -672,51 +578,6 @@ async fn the_ledger_events_frame_session_answers_a_ping_with_a_pong() {
     );
 }
 
-/// `ledger_events_ws::Frame::decode` reads a request and a notify frame into an `IncomingMessage`
-/// the same way `ledger_client_ws`'s own copy does — nothing `LedgerEvents` declares is a request
-/// or a notify sent *to* the server, but the codec is one copy shared with every frame kind.
-#[tokio::test]
-async fn ledger_events_ws_frame_decode_reads_a_request_and_a_notify_frame() {
-    let decoded = ledger_events_ws::Frame::decode(
-        r#"{"kind":"request","id":"9","service":"LedgerEvents","operation":"probe","payload":{"n":1}}"#,
-    )
-    .unwrap();
-    let (id, service, message) = match decoded {
-        ledger_events_ws::Frame::Request {
-            id,
-            service,
-            message,
-        } => Some((id, service, message)),
-        ledger_events_ws::Frame::Notify { .. }
-        | ledger_events_ws::Frame::Reply { .. }
-        | ledger_events_ws::Frame::Ping
-        | ledger_events_ws::Frame::Pong => None,
-    }
-    .unwrap();
-    assert_eq!(id, "9");
-    assert_eq!(service, "LedgerEvents");
-    assert_eq!(message.operation(), "probe");
-    assert_eq!(message.payload(), br#"{"n":1}"#);
-
-    let notified = ledger_events_ws::Frame::decode(
-        r#"{"kind":"notify","service":"LedgerEvents","operation":"probe","payload":{"n":1}}"#,
-    )
-    .unwrap();
-    let (notify_service, notify_message) = match notified {
-        ledger_events_ws::Frame::Notify {
-            service: notify_service,
-            message: notify_message,
-        } => Some((notify_service, notify_message)),
-        ledger_events_ws::Frame::Request { .. }
-        | ledger_events_ws::Frame::Reply { .. }
-        | ledger_events_ws::Frame::Ping
-        | ledger_events_ws::Frame::Pong => None,
-    }
-    .unwrap();
-    assert_eq!(notify_service, "LedgerEvents");
-    assert_eq!(notify_message.operation(), "probe");
-}
-
 /// The `ledger_events_ws` module's own `FrameSession` completes a request-and-reply round trip
 /// exactly like `ledger_client_ws`'s, even though `LedgerEvents` declares no reply operation of
 /// its own to exercise it through a generated method — the transport machinery does not read the
@@ -787,49 +648,5 @@ async fn a_ledger_events_client_exposes_the_transport_it_was_bound_to() {
             "payload": null,
             "service": "LedgerEvents",
         }),
-    );
-}
-
-/// `screen_ws`'s own copy of `ping_frame` — a session sends one, a dispatcher only ever answers
-/// one.
-#[tokio::test]
-async fn screen_ws_ping_frame_encodes_the_kind_ping_frame() {
-    assert_eq!(screen_ws::ping_frame(), r#"{"kind":"ping"}"#);
-}
-
-/// `Frame::Reply` is the client macro's own frame kind — the `LedgerEvents` dispatcher never
-/// answers with one, it only decodes one, which `answer` itself has no reason to do.
-#[tokio::test]
-async fn screen_ws_frame_decode_reads_a_reply_frame_into_its_id_service_and_envelope() {
-    let decoded =
-        screen_ws::Frame::decode(r#"{"kind":"reply","id":"1","service":"LedgerEvents","ok":true}"#)
-            .unwrap();
-    let (id, service, envelope) = match decoded {
-        screen_ws::Frame::Reply {
-            id,
-            service,
-            envelope,
-        } => Some((id, service, envelope)),
-        screen_ws::Frame::Request { .. }
-        | screen_ws::Frame::Notify { .. }
-        | screen_ws::Frame::Ping
-        | screen_ws::Frame::Pong => None,
-    }
-    .unwrap();
-    assert_eq!(id, "1");
-    assert_eq!(service, "LedgerEvents");
-    assert_eq!(envelope.get("ok"), Some(&serde_json::json!(true)));
-}
-
-/// `FrameReply::send` is never reached through `dispatch`: `LedgerEvents` declares only a
-/// one-way operation, which never answers through it. Constructed and driven directly, the same
-/// way an arm would, it still renders the reply frame `into_text` returns.
-#[tokio::test]
-async fn screen_ws_frame_reply_send_renders_the_reply_frame() {
-    let reply = screen_ws::FrameReply::new("1");
-    screen_ws::Reply::send(&reply, serde_json::json!({ "ok": true }), Vec::new()).await;
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&reply.into_text()).unwrap(),
-        serde_json::json!({ "kind": "reply", "id": "1", "service": "LedgerEvents", "ok": true }),
     );
 }

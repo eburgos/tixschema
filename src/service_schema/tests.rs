@@ -1295,6 +1295,46 @@ fn a_service_asking_for_only_ws_rpc_emits_its_dispatcher_and_its_client() {
     );
 }
 
+/// The dispatcher's own `Frame` reads a request, a notify or a ping — the reply frame and the
+/// liveness probe it originates are the client's alone, so the dispatcher body carries neither the
+/// `Reply` variant nor `ping_frame`. A one-way-only service's dispatch never calls `Reply::send`,
+/// so its `Reply` and `FrameReply` publish `fault` alone.
+#[test]
+fn the_ws_rpc_dispatcher_body_carries_no_reply_variant_and_no_ping_frame() {
+    let body = macro_body_over_ws_rpc(MIXED_SERVICE, "usage_service_ws_rpc_dispatcher");
+    assert!(
+        !body.contains(
+            "Reply { id : String , service : String , envelope : :: serde_json :: Map < String \
+             , :: serde_json :: Value > , }"
+        ),
+        "the `Reply` frame variant is decoded by the client macro alone. Got: {body}"
+    );
+    assert!(
+        !body.contains("ping_frame"),
+        "originating a liveness probe is the client's job - the dispatcher only answers one with \
+         a pong. Got: {body}"
+    );
+    let one_way = macro_body_over_ws_rpc(ONE_WAY_SERVICE, "note_service_ws_rpc_dispatcher");
+    assert!(
+        !one_way.contains("fn send"),
+        "every operation here is one-way, so dispatch never calls `Reply::send`. Got: {one_way}"
+    );
+}
+
+/// The client's own `Frame` reads a reply, a ping or a pong - the request and notify frames, and
+/// the `IncomingMessage` they carry, are the dispatcher's alone to decode: a client sends
+/// operations and reads answers, never dispatches one.
+#[test]
+fn the_ws_rpc_client_body_carries_no_request_or_notify_variant_and_no_incoming_message() {
+    let body = macro_body_over_ws_rpc(MIXED_SERVICE, "usage_service_ws_rpc_client");
+    for absent in ["Request {", "Notify {", "IncomingMessage"] {
+        assert!(
+            !body.contains(absent),
+            "`{absent}` is decoded by the dispatcher macro alone. Got: {body}"
+        );
+    }
+}
+
 /// The client macro's own body: `SERVICE`, `Frame` and its `decode`, `request_frame`,
 /// `notify_frame`, `FrameWriter` and `FrameSession` (`Clone`, `new`, `deliver`, `close`), types
 /// preceding impls preceding functions, the way [`the_ws_rpc_dispatcher_macro_is_grouped_types_then_impls_then_functions`]
