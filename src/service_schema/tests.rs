@@ -200,8 +200,8 @@ fn expansion_over_http_rest(source: &str) -> TokenStream {
     )
 }
 
-/// The same expansion for a service that asked for `ws_rpc`, which carries only a dispatcher: the
-/// client macro lands later.
+/// The same expansion for a service that asked for `ws_rpc`, which is what carries both a
+/// dispatcher and a client, the `ws_rpc` counterpart of [`expansion_over_amqp_rpc`].
 fn expansion_over_ws_rpc(source: &str) -> TokenStream {
     exec_service_schema(
         quote! { transports = ["ws_rpc"] },
@@ -1211,10 +1211,13 @@ fn a_service_asking_for_no_transport_is_emitted_the_contract_and_nothing_else() 
 }
 
 /// `ws_rpc`'s own `emit` publishes a dispatcher carrying the shared dispatch items plus this
-/// transport's own frame codec, `FrameReply` and `answer` — and nothing the client macro or the
-/// `amqp_rpc`/`http_rest` transports own, the client landing later.
+/// transport's own frame codec, `FrameReply` and `answer`, and a client carrying the shared client
+/// items plus its own copy of the frame codec, `request_frame`, `notify_frame`, `FrameWriter` and
+/// `FrameSession` — and nothing either the `amqp_rpc`/`http_rest` transports or a server macro own,
+/// `ws_rpc` publishing no server macro at all. The dispatcher's own body carries none of the
+/// client's items, and the client's own body carries none of the dispatcher's.
 #[test]
-fn a_service_asking_for_only_ws_rpc_emits_its_dispatcher_and_the_shared_dispatch_items() {
+fn a_service_asking_for_only_ws_rpc_emits_its_dispatcher_and_its_client() {
     let expansion = expansion_over_ws_rpc(MIXED_SERVICE);
     let emitted = expansion.to_string();
     for present in [
@@ -1226,17 +1229,22 @@ fn a_service_asking_for_only_ws_rpc_emits_its_dispatcher_and_the_shared_dispatch
         "pub enum Frame",
         "pub struct FrameReply",
         "pub async fn answer",
+        "macro_rules ! usage_service_ws_rpc_client { () => {",
+        "pub trait Transport",
+        "pub struct UsageServiceClient",
+        "pub struct FrameWriter",
+        "pub struct FrameSession",
+        "pub fn request_frame",
+        "pub fn notify_frame",
         "serde_json",
         "tracing",
     ] {
         assert!(
             emitted.contains(present),
-            "`{present}` is part of a ws_rpc dispatcher. Got: {emitted}"
+            "`{present}` is part of a ws_rpc dispatcher or client. Got: {emitted}"
         );
     }
     for absent in [
-        "pub trait Transport",
-        "pub struct UsageServiceClient",
         "pub struct Context",
         "pub struct ReplyHandle",
         "pub async fn serve_until",
@@ -1244,8 +1252,35 @@ fn a_service_asking_for_only_ws_rpc_emits_its_dispatcher_and_the_shared_dispatch
     ] {
         assert!(
             !emitted.contains(absent),
-            "`{absent}` belongs to the client macro or to a different transport, and `ws_rpc` \
-             publishes only its dispatcher so far. Got: {emitted}"
+            "`{absent}` belongs to a server macro, and `ws_rpc` publishes none. Got: {emitted}"
+        );
+    }
+    let dispatcher_body = macro_body_over_ws_rpc(MIXED_SERVICE, "usage_service_ws_rpc_dispatcher");
+    for client_only in [
+        "pub trait Transport",
+        "pub struct UsageServiceClient",
+        "FrameWriter",
+        "FrameSession",
+        "request_frame",
+        "notify_frame",
+    ] {
+        assert!(
+            !dispatcher_body.contains(client_only),
+            "`{client_only}` belongs to the client macro, and the dispatcher's own body carries \
+             none of it. Got: {dispatcher_body}"
+        );
+    }
+    let client_body = macro_body_over_ws_rpc(MIXED_SERVICE, "usage_service_ws_rpc_client");
+    for dispatcher_only in [
+        "pub fn dispatch",
+        "pub trait Reply",
+        "pub async fn answer",
+        "FrameReply",
+    ] {
+        assert!(
+            !client_body.contains(dispatcher_only),
+            "`{dispatcher_only}` belongs to the dispatcher macro, and the client's own body \
+             carries none of it. Got: {client_body}"
         );
     }
     assert!(
@@ -1257,6 +1292,116 @@ fn a_service_asking_for_only_ws_rpc_emits_its_dispatcher_and_the_shared_dispatch
         held.contains("RootAnchor"),
         "a service that asked for `ws_rpc` still asked for a transport, so the module anchors at \
          the crate root the same as it does for any other. Got: {held}"
+    );
+}
+
+/// The client macro's own body: `SERVICE`, `Frame` and its `decode`, `request_frame`,
+/// `notify_frame`, `FrameWriter` and `FrameSession` (`Clone`, `new`, `deliver`, `close`), types
+/// preceding impls preceding functions, the way [`the_ws_rpc_dispatcher_macro_is_grouped_types_then_impls_then_functions`]
+/// holds for the dispatcher.
+#[test]
+fn the_ws_rpc_client_macro_carries_the_frame_codec_and_both_transports_grouped_types_then_impls_then_functions()
+ {
+    let body = macro_body_over_ws_rpc(MIXED_SERVICE, "usage_service_ws_rpc_client");
+    let transport_trait_at = body.find("pub trait Transport").unwrap();
+    let frame_type = body.find("pub enum Frame").unwrap();
+    let frame_impl = body.find("impl Frame {").unwrap();
+    let writer_type = body.find("pub struct FrameWriter").unwrap();
+    let writer_impl = body.find("impl FrameWriter {").unwrap();
+    let session_type = body
+        .find("# [derive (Clone)] pub struct FrameSession")
+        .unwrap();
+    let session_impl = body.find("impl FrameSession {").unwrap();
+    let request_frame_fn = body.find("pub fn request_frame").unwrap();
+    let notify_frame_fn = body.find("pub fn notify_frame").unwrap();
+    assert!(
+        transport_trait_at < frame_type && frame_type < writer_type && writer_type < session_type,
+        "the seam and the frame codec precede the two transports. Got: {body}"
+    );
+    assert!(
+        frame_type < frame_impl && frame_impl < request_frame_fn,
+        "Frame's type precedes its impl, which precedes the encoders. Got: {body}"
+    );
+    assert!(
+        writer_type < writer_impl && writer_impl < request_frame_fn,
+        "FrameWriter's type precedes its impls, which precede the encoders. Got: {body}"
+    );
+    assert!(
+        session_type < session_impl && session_impl < request_frame_fn,
+        "FrameSession's type precedes its impls, which precede the encoders. Got: {body}"
+    );
+    assert!(request_frame_fn < notify_frame_fn, "Got: {body}");
+}
+
+/// `FrameSession` publishes `new`, `deliver` and `close`, `FrameWriter` publishes `new`, and both
+/// implement `Transport`.
+#[test]
+fn frame_writer_and_frame_session_publish_the_constructors_the_design_specifies() {
+    let published = published_macro_over_ws_rpc(MIXED_SERVICE, "usage_service_ws_rpc_client");
+    for signature in [
+        "impl FrameWriter { # [doc",
+        "pub fn new < F , Fut > (send : F) -> Self",
+        "pub async fn deliver (& self , text : & str)",
+        "pub fn close (& self , detail : & str)",
+    ] {
+        assert!(published.contains(signature), "Got: {published}");
+    }
+    assert_eq!(
+        published.matches("impl Transport for").count(),
+        2,
+        "both FrameWriter and FrameSession implement the seam. Got: {published}"
+    );
+}
+
+/// Every runtime crate the client body calls is written with a leading `::` — `serde`,
+/// `serde_json`, `core` and `std`, the last two for `FrameSession`'s correlation map — and
+/// `tracing` is not one of them: nothing here catches a panic, so nothing here has anything to
+/// write down.
+#[test]
+fn every_runtime_crate_the_ws_rpc_client_body_calls_is_written_with_a_leading_colon_pair_and_tracing_is_not_one()
+ {
+    let body = macro_body_over_ws_rpc(MIXED_SERVICE, "usage_service_ws_rpc_client");
+    for called in ["serde :: Serialize", "serde_json", "core", "std"] {
+        assert!(
+            every_mention_is_qualified(&body, called, ":: "),
+            "`{called}` is reached without a leading `::` somewhere in the client body, so it \
+             resolves against whatever the invoking crate happens to have in scope. Got: {body}"
+        );
+    }
+    assert!(
+        !body.contains("tracing"),
+        "a caller that only wants to make calls or push events names one crate fewer than a \
+         crate that answers them. Got: {body}"
+    );
+}
+
+/// Every name the client body reaches in the declaring crate's own module is written through
+/// `$crate`, the same as every other transport's client — the trait itself is never named here,
+/// the client calling through `Transport` rather than an implementation.
+#[test]
+fn every_generated_name_the_ws_rpc_client_body_reaches_is_written_through_crate() {
+    let body = macro_body_over_ws_rpc(MIXED_SERVICE, "usage_service_ws_rpc_client");
+    for reached in ["ServiceFault", "CallError", "GetAvailableBalanceMessage"] {
+        assert!(
+            every_mention_is_qualified(&body, reached, "$ crate :: usage_service_schema :: "),
+            "`{reached}` is reached unqualified somewhere in the client body, which resolves in \
+             whichever crate invoked the macro. Got: {body}"
+        );
+    }
+}
+
+/// The client macro's own placement doc names `ws_client`, the module a consumer places it in.
+#[test]
+fn the_ws_rpc_client_macros_placement_doc_names_ws_client() {
+    let emitted = expanded_over_ws_rpc(MIXED_SERVICE);
+    assert!(
+        emitted.contains("mod ws_client;"),
+        "the placement section shows the module this transport's own client doc names. Got: \
+         {emitted}"
+    );
+    assert!(
+        emitted.contains("the_contract_crate::usage_service_ws_rpc_client!();"),
+        "the placement section shows the bare invocation. Got: {emitted}"
     );
 }
 
