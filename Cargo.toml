@@ -45,8 +45,14 @@ tracing = "0.1"
 # six. Dev-only: the harness compiles that expansion, but tixschema itself stays a proc-macro crate
 # with no runtime dependency of its own.
 lapin = ">=4.10.0"
-tokio = { version = ">=1.53.1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = ">=1.53.1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 futures = ">=0.3.33"
+# A crate that runs the `ws_rpc` transport's adapters over a real socket names these two beside
+# `tokio`, `serde`, `serde_json` and `tracing`, because the axum server loop and the
+# tokio-tungstenite client loop both call them. Dev-only, same as `lapin` above: tixschema stays a
+# proc-macro crate with no runtime dependency of its own.
+axum = { version = "0.8.9", features = ["ws"] }
+tokio-tungstenite = "0.30.0"
 
 # Transitive dep floors — pinned to fix known vulnerabilities:
 # - bytes >=1.11.1: RUSTSEC-2026-0007 (integer overflow in BytesMut::reserve)
