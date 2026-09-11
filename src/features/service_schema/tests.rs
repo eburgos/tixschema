@@ -21,6 +21,8 @@ mod dart_ws_client_tests;
 mod http_client_tests;
 #[cfg(feature = "zod")]
 mod service_tests;
+#[cfg(feature = "zod")]
+mod ws_client_tests;
 
 #[cfg(feature = "zod")]
 use super::client;
@@ -32,6 +34,8 @@ use super::dart_ws_client;
 use super::http_client;
 #[cfg(feature = "zod")]
 use super::service;
+#[cfg(feature = "zod")]
+use super::ws_client;
 use super::{emit, result};
 use crate::service_schema::parse::{ServiceDef, parse_service};
 use quote::ToTokens as _;
@@ -348,6 +352,11 @@ fn http_client_of(source: &str) -> String {
     http_client::emit(&parsed(source)).join("\n\n")
 }
 
+#[cfg(feature = "zod")]
+fn ws_client_of(source: &str) -> String {
+    ws_client::emit(&parsed(source)).join("\n\n")
+}
+
 #[cfg(feature = "dart")]
 fn dart_http_client_of(source: &str) -> String {
     dart_http_client::emit(&parsed(source)).join("\n\n")
@@ -594,11 +603,12 @@ fn a_build_that_publishes_a_schema_publishes_the_client_and_the_dispatcher_that_
         "pub fn ts_client",
         "pub fn ts_http_client",
         "pub fn ts_service",
+        "pub fn ts_ws_client",
         "pub fn ts_definition",
     ] {
         assert!(
             rendered.contains(published),
-            "a build with a schema to parse against publishes all four artifacts. \
+            "a build with a schema to parse against publishes all five artifacts. \
              Got: {rendered}"
         );
     }
@@ -621,6 +631,7 @@ fn a_build_that_publishes_no_schema_publishes_no_client_and_no_dispatcher() {
         "pub fn ts_client",
         "pub fn ts_http_client",
         "pub fn ts_service",
+        "pub fn ts_ws_client",
     ] {
         assert!(
             !rendered.contains(withheld),

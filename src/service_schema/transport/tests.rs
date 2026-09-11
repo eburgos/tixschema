@@ -44,6 +44,11 @@ fn a_named_transport_is_read_into_the_list() {
     assert_eq!(asked_for(r#"transports = ["amqp_rpc"]"#), ["amqp_rpc"]);
 }
 
+#[test]
+fn a_named_ws_rpc_transport_is_read_into_the_list() {
+    assert_eq!(asked_for(r#"transports = ["ws_rpc"]"#), ["ws_rpc"]);
+}
+
 /// The list is the service's, in its order: nothing sorts it and nothing dedupes it. Written over
 /// every known transport and over that list reversed, so a second transport makes the two runs
 /// differ.
@@ -67,7 +72,7 @@ fn an_unknown_transport_names_itself_and_what_is_known() {
     assert_eq!(
         refusal(r#"transports = ["grpc"]"#).to_string(),
         "service_schema: `grpc` is not a transport this version knows\n       \
-         known transports: `amqp_rpc`, `http_rest`"
+         known transports: `amqp_rpc`, `http_rest`, `ws_rpc`"
     );
 }
 
