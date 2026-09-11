@@ -30,6 +30,7 @@
 
 mod amqp_rpc;
 mod http_rest;
+mod ws_rpc;
 
 use super::parse::ServiceDef;
 use crate::rename_rule::RenameRule;
@@ -55,11 +56,12 @@ const WRITTEN_SHAPE_MESSAGE: &str = concat!(
 pub enum Transport {
     AmqpRpc,
     HttpRest,
+    WsRpc,
 }
 
 impl Transport {
     /// Every transport this version knows, in the order a refusal lists them.
-    pub const KNOWN: &'static [Self] = &[Self::AmqpRpc, Self::HttpRest];
+    pub const KNOWN: &'static [Self] = &[Self::AmqpRpc, Self::HttpRest, Self::WsRpc];
 
     fn from_name(written: &str) -> Option<Self> {
         Self::KNOWN
@@ -73,6 +75,7 @@ impl Transport {
         match self {
             Self::AmqpRpc => "amqp_rpc",
             Self::HttpRest => "http_rest",
+            Self::WsRpc => "ws_rpc",
         }
     }
 }
@@ -117,6 +120,7 @@ pub fn emit(service: &ServiceDef, asked: &[Transport]) -> TokenStream {
         .map(|known| match *known {
             Transport::AmqpRpc => amqp_rpc::emit(service, *known),
             Transport::HttpRest => http_rest::emit(service, *known),
+            Transport::WsRpc => ws_rpc::emit(service, *known),
         })
         .collect()
 }
@@ -158,7 +162,7 @@ pub fn emit(service: &ServiceDef, asked: &[Transport]) -> TokenStream {
 ///
 /// ```text
 /// error: service_schema: `grpc` is not a transport this version knows
-///               known transports: `amqp_rpc`, `http_rest`
+///               known transports: `amqp_rpc`, `http_rest`, `ws_rpc`
 ///   --> tests/zz_probe.rs:11:32
 ///    |
 /// 11 | #[service_schema(transports = ["grpc"])]

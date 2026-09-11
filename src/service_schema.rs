@@ -113,8 +113,8 @@ pub fn exec_service_schema(args: TokenStream, input: TokenStream) -> TokenStream
             // service tripping both is told about each rather than about whichever was read
             // first.
             let combined_refusal = [
-                multipart_amqp_refusal(&service, &wanted),
-                stream_amqp_refusal(&service, &wanted),
+                multipart_envelope_refusal(&service, &wanted),
+                stream_envelope_refusal(&service, &wanted),
             ]
             .into_iter()
             .flatten()
@@ -171,8 +171,9 @@ pub fn exec_service_schema(args: TokenStream, input: TokenStream) -> TokenStream
     }
 }
 
-/// Refuses a `body = "multipart"` operation's file part on a service that also asks for the
-/// `amqp_rpc` transport.
+/// Refuses a `body = "multipart"` operation's file part on a service that also declares an
+/// envelope transport — `amqp_rpc` or `ws_rpc`, both of which answer inside the
+/// `{ ok, value, error }` envelope `support::answered_envelope` publishes.
 ///
 /// A `part("name" = parameter)` binding claims its value out of a named request part — the
 /// mechanism `http_rest`'s own dispatcher reads through, never a field a deserialized message
@@ -180,9 +181,11 @@ pub fn exec_service_schema(args: TokenStream, input: TokenStream) -> TokenStream
 /// dispatcher has no multipart channel of its own and creates no local binding for a
 /// `part(...)`-claimed identifier — its own `call_arguments` reuses the identifier verbatim — so
 /// `{service}_amqp_rpc_dispatcher!()`'s own expansion would fail with a bare "cannot find value in
-/// this scope" the moment it is invoked, naming neither the operation nor the reason. This is
-/// checked here instead, once both the requested transports and every operation's own bindings are
-/// known, ahead of every transport's own macros.
+/// this scope" the moment it is invoked, naming neither the operation nor the reason. `ws_rpc`
+/// carries the same envelope over its own wire and inherits the identical gap the moment its own
+/// dispatcher exists, so it is refused here too, ahead of that macro rather than left to fail the
+/// same way once it lands. This is checked once both the requested transports and every
+/// operation's own bindings are known, ahead of every transport's own macros.
 ///
 /// A `body = "multipart"` operation with no `part(...)` binding at all is untouched: every field is
 /// then a plain scalar with no file part to carry, read straight off the deserialized message
@@ -226,8 +229,57 @@ pub fn exec_service_schema(args: TokenStream, input: TokenStream) -> TokenStream
 /// ```
 ///
 /// ```text
-/// error: service_schema: operation `upload_document` declares a multipart file part, and this service also asks for the `amqp_rpc` transport
-///               a file part has no carrier on the bus wire; amqp_rpc has no multipart channel to read it from - drop `amqp_rpc` from `transports`, or drop the `part(...)` binding and `body = "multipart"` from this operation
+/// error: service_schema: operation `upload_document` declares a multipart file part, and this service also declares `amqp_rpc`
+///               a file part has no carrier inside the `{ ok, value, error }` envelope those transports answer with - drop them from `transports`, or drop the `part(...)` binding and `body = "multipart"` from this operation
+///   --> tests/zz_probe.rs:22:14
+///    |
+/// 22 |     async fn upload_document(
+///    |              ^^^^^^^^^^^^^^^
+///
+/// error: could not compile `tixschema` (test "zz_probe") due to 1 previous error
+/// ```
+///
+/// # The same refusal reaches `ws_rpc`
+///
+/// The service below is the one above with `amqp_rpc` swapped for `ws_rpc` in `transports`, and
+/// nothing else changed:
+///
+/// ```rust,compile_fail
+/// use tixschema::service_schema;
+///
+/// #[derive(serde::Deserialize, serde::Serialize)]
+/// pub struct UploadResponse {
+///     pub document_id: String,
+/// }
+///
+/// #[derive(serde::Deserialize, serde::Serialize)]
+/// pub enum UploadError {
+///     TooLarge,
+/// }
+///
+/// #[service_schema(transports = ["ws_rpc", "http_rest"])]
+/// pub trait UploadService<Ctx> {
+///     #[service_schema_op(http(
+///         method = "POST",
+///         path = "/documents",
+///         body = "multipart",
+///         part("file" = attachment),
+///         error_status(TooLarge = 413),
+///     ))]
+///     async fn upload_document(
+///         &self,
+///         ctx: &Ctx,
+///         title: String,
+///         attachment: Box<dyn upload_service_schema::BodySource + Send>,
+///     ) -> Result<UploadResponse, UploadError>;
+/// }
+///
+/// fn main() {}
+/// ```
+///
+/// ```text
+/// error: service_schema: operation `upload_document` declares a multipart file part, and this service also declares `ws_rpc`
+///               a file part has no carrier inside the `{ ok, value, error }` envelope those transports answer with - drop them from `transports`, or drop the `part(...)` binding and `body = "multipart"` from this operation
 ///   --> tests/zz_probe.rs:22:14
 ///    |
 /// 22 |     async fn upload_document(
@@ -236,11 +288,12 @@ pub fn exec_service_schema(args: TokenStream, input: TokenStream) -> TokenStream
 /// error: could not compile `tixschema` (test "zz_probe") due to 1 previous error
 /// ```
 #[cfg(feature = "serde")]
-fn multipart_amqp_refusal(
+fn multipart_envelope_refusal(
     service: &parse::ServiceDef,
     wanted: &[transport::Transport],
 ) -> Option<syn::Error> {
-    if !wanted.contains(&transport::Transport::AmqpRpc) {
+    let envelopes = envelope_transports(wanted);
+    if envelopes.is_empty() {
         return None;
     }
     service
@@ -255,7 +308,7 @@ fn multipart_amqp_refusal(
         .map(|operation| {
             syn::Error::new(
                 operation.ident.span(),
-                multipart_amqp_message(&operation.ident),
+                multipart_envelope_message(&operation.ident, &envelopes),
             )
         })
         .reduce(|mut collected, refusal| {
@@ -265,28 +318,54 @@ fn multipart_amqp_refusal(
 }
 
 #[cfg(feature = "serde")]
-fn multipart_amqp_message(operation: &Ident) -> String {
+fn multipart_envelope_message(operation: &Ident, envelopes: &[transport::Transport]) -> String {
+    let named = envelopes
+        .iter()
+        .map(|transport| format!("`{}`", transport.name()))
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
         "service_schema: operation `{operation}` declares a multipart file part, and this \
-         service also asks for the `amqp_rpc` transport\n       \
-         a file part has no carrier on the bus wire; amqp_rpc has no multipart channel to read it \
-         from - drop `amqp_rpc` from `transports`, or drop the `part(...)` binding and \
-         `body = \"multipart\"` from this operation"
+         service also declares {named}\n       \
+         a file part has no carrier inside the `{{ ok, value, error }}` envelope those \
+         transports answer with - drop them from `transports`, or drop the `part(...)` binding \
+         and `body = \"multipart\"` from this operation"
     )
 }
 
-/// Refuses a `body = "stream"` operation on a service that also asks for the `amqp_rpc`
-/// transport.
+/// The transports a service declared that answer inside the `{ ok, value, error }` envelope, in
+/// the order the service wrote them — the ones [`multipart_envelope_refusal`] and
+/// [`stream_envelope_refusal`] read, since a streamed or multipart body has no carrier inside it
+/// whichever of them the service asked for.
+#[cfg(feature = "serde")]
+fn envelope_transports(wanted: &[transport::Transport]) -> Vec<transport::Transport> {
+    wanted
+        .iter()
+        .copied()
+        .filter(|declared| {
+            matches!(
+                declared,
+                transport::Transport::AmqpRpc | transport::Transport::WsRpc
+            )
+        })
+        .collect()
+}
+
+/// Refuses a `body = "stream"` operation on a service that also declares an envelope transport —
+/// `amqp_rpc` or `ws_rpc`, both of which answer inside the `{ ok, value, error }` envelope
+/// `support::answered_envelope` publishes.
 ///
 /// Such an operation answers with `StreamedAnswer` — a `Box<dyn BodySource + Send>`, pulled one
 /// chunk at a time, wrapped in `Full` or `Partial`. It publishes neither `Serialize` nor
-/// `Deserialize` and cannot: a trait object pulled incrementally has no whole value to write.
-/// `amqp_rpc`'s own envelope (`Answered<T, E>`) carries every success value through
-/// `serde_json`, so an `amqp_rpc` dispatcher answering a `body = "stream"` operation would fail
-/// where `{service}_amqp_rpc_dispatcher!()` is invoked, with rustc's own `E0277` naming
-/// `Answered<StreamedAnswer, _>`'s unmet `Serialize` bound — an error naming neither the
-/// operation nor the reason. This is checked here instead, at the declaration, ahead of every
-/// transport's own macros.
+/// `Deserialize` and cannot: a trait object pulled incrementally has no whole value to write. The
+/// envelope (`Answered<T, E>`) carries every success value through `serde_json`, so an `amqp_rpc`
+/// dispatcher answering a `body = "stream"` operation would fail where
+/// `{service}_amqp_rpc_dispatcher!()` is invoked, with rustc's own `E0277` naming
+/// `Answered<StreamedAnswer, _>`'s unmet `Serialize` bound — an error naming neither the operation
+/// nor the reason. `ws_rpc` carries the same envelope over its own wire and inherits the
+/// identical gap the moment its own dispatcher exists, so it is refused here too, ahead of that
+/// macro rather than left to fail the same way once it lands. This is checked at the declaration,
+/// ahead of every transport's own macros.
 ///
 /// A service with no `body = "stream"` operation at all is untouched: an ordinary `Json` or
 /// `Bytes` success answers through the same envelope with no such bound to fail.
@@ -320,8 +399,50 @@ fn multipart_amqp_message(operation: &Ident) -> String {
 /// ```
 ///
 /// ```text
-/// error: service_schema: operation `get_content` declares a streamed body, and this service also asks for the `amqp_rpc` transport
-///               a streamed body has no carrier on the bus wire; amqp_rpc has no streaming channel to carry it - drop `amqp_rpc` from `transports`, or drop `body = "stream"` from this operation
+/// error: service_schema: operation `get_content` declares a streamed body, and this service also declares `amqp_rpc`
+///               a streamed body has no carrier inside the `{ ok, value, error }` envelope those transports answer with - drop them from `transports`, or drop `body = "stream"` from this operation
+///   --> tests/zz_probe.rs:16:14
+///    |
+/// 16 |     async fn get_content(
+///    |              ^^^^^^^^^^^
+///
+/// error: could not compile `tixschema` (test "zz_probe") due to 1 previous error
+/// ```
+///
+/// # The same refusal reaches `ws_rpc`
+///
+/// The service below is the one above with `amqp_rpc` swapped for `ws_rpc` in `transports`, and
+/// nothing else changed:
+///
+/// ```rust,compile_fail
+/// use tixschema::service_schema;
+///
+/// #[derive(serde::Deserialize, serde::Serialize)]
+/// pub enum ContentError {
+///     NotFound,
+/// }
+///
+/// #[service_schema(transports = ["ws_rpc", "http_rest"])]
+/// pub trait ContentService<Ctx> {
+///     #[service_schema_op(http(
+///         method = "GET",
+///         path = "/documents/{document_id}/content",
+///         body = "stream",
+///         error_status(NotFound = 404),
+///     ))]
+///     async fn get_content(
+///         &self,
+///         ctx: &Ctx,
+///         document_id: String,
+///     ) -> Result<content_service_schema::StreamedAnswer, ContentError>;
+/// }
+///
+/// fn main() {}
+/// ```
+///
+/// ```text
+/// error: service_schema: operation `get_content` declares a streamed body, and this service also declares `ws_rpc`
+///               a streamed body has no carrier inside the `{ ok, value, error }` envelope those transports answer with - drop them from `transports`, or drop `body = "stream"` from this operation
 ///   --> tests/zz_probe.rs:16:14
 ///    |
 /// 16 |     async fn get_content(
@@ -330,11 +451,12 @@ fn multipart_amqp_message(operation: &Ident) -> String {
 /// error: could not compile `tixschema` (test "zz_probe") due to 1 previous error
 /// ```
 #[cfg(feature = "serde")]
-fn stream_amqp_refusal(
+fn stream_envelope_refusal(
     service: &parse::ServiceDef,
     wanted: &[transport::Transport],
 ) -> Option<syn::Error> {
-    if !wanted.contains(&transport::Transport::AmqpRpc) {
+    let envelopes = envelope_transports(wanted);
+    if envelopes.is_empty() {
         return None;
     }
     service
@@ -349,7 +471,7 @@ fn stream_amqp_refusal(
         .map(|operation| {
             syn::Error::new(
                 operation.ident.span(),
-                stream_amqp_message(&operation.ident),
+                stream_envelope_message(&operation.ident, &envelopes),
             )
         })
         .reduce(|mut collected, refusal| {
@@ -359,13 +481,18 @@ fn stream_amqp_refusal(
 }
 
 #[cfg(feature = "serde")]
-fn stream_amqp_message(operation: &Ident) -> String {
+fn stream_envelope_message(operation: &Ident, envelopes: &[transport::Transport]) -> String {
+    let named = envelopes
+        .iter()
+        .map(|transport| format!("`{}`", transport.name()))
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
         "service_schema: operation `{operation}` declares a streamed body, and this service \
-         also asks for the `amqp_rpc` transport\n       \
-         a streamed body has no carrier on the bus wire; amqp_rpc has no streaming channel to \
-         carry it - drop `amqp_rpc` from `transports`, or drop `body = \"stream\"` from this \
-         operation"
+         also declares {named}\n       \
+         a streamed body has no carrier inside the `{{ ok, value, error }}` envelope those \
+         transports answer with - drop them from `transports`, or drop `body = \"stream\"` from \
+         this operation"
     )
 }
 
