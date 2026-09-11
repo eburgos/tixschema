@@ -261,7 +261,7 @@ pub fn emit(service: &ServiceDef, transport: Transport) -> TokenStream {
 /// `declares_an_ordinary_reply` and `declares_a_unit_reply` read the same [`takes_unit_answer`]
 /// judgement [`client_answer`] branches on, so the two cannot drift apart into one reader emitted
 /// dead or a branch calling one that was never written.
-fn answer_reader(service: &ServiceDef, generated: &Generated) -> TokenStream {
+pub(super) fn answer_reader(service: &ServiceDef, generated: &Generated) -> TokenStream {
     let Generated {
         call_error,
         fault,
@@ -374,7 +374,7 @@ pub(super) fn answers(operation: &OperationDef, generated: &Generated) -> TokenS
 /// buys there is the return itself — the transport acknowledges after `dispatch` returns, and a
 /// panic that unwound past it would leave the delivery outstanding. The record is what keeps that
 /// return from being silent, so a panic is written down on both outcomes.
-fn arm(module: &Ident, operation: &OperationDef) -> TokenStream {
+pub(super) fn arm(module: &Ident, operation: &OperationDef) -> TokenStream {
     let wire = &operation.wire_name;
     let message = message_alias_ident(operation);
     let validator = message_validator_ident(operation);
@@ -880,7 +880,7 @@ fn consumer_loop_helpers() -> TokenStream {
 
 /// Whether the service declares an operation that answers, which is what reads a reply back and
 /// therefore the only thing that needs a fault mirror or an answer reader.
-fn declares_a_reply(service: &ServiceDef) -> bool {
+pub(super) fn declares_a_reply(service: &ServiceDef) -> bool {
     service
         .operations
         .iter()
@@ -898,13 +898,13 @@ fn takes_unit_answer(operation: &OperationDef) -> bool {
 
 /// Whether the service declares an operation [`takes_unit_answer`] of, which is what needs the
 /// client's unit-only answer reader.
-fn declares_a_unit_reply(service: &ServiceDef) -> bool {
+pub(super) fn declares_a_unit_reply(service: &ServiceDef) -> bool {
     service.operations.iter().any(takes_unit_answer)
 }
 
 /// Whether the service declares a request-and-reply operation that does not
 /// [`take a unit answer`](takes_unit_answer), which is what needs the ordinary answer reader.
-fn declares_an_ordinary_reply(service: &ServiceDef) -> bool {
+pub(super) fn declares_an_ordinary_reply(service: &ServiceDef) -> bool {
     service.operations.iter().any(|operation| {
         matches!(operation.outcome, OperationOutcome::Reply { .. }) && !takes_unit_answer(operation)
     })
@@ -912,7 +912,7 @@ fn declares_an_ordinary_reply(service: &ServiceDef) -> bool {
 
 /// Whether the service declares an operation whose `http(...)` group claims at least one
 /// incoming header, which is what needs a decoder for it on whichever side reads one.
-fn declares_header_in(service: &ServiceDef) -> bool {
+pub(super) fn declares_header_in(service: &ServiceDef) -> bool {
     service.operations.iter().any(|operation| {
         operation
             .http
@@ -923,7 +923,7 @@ fn declares_header_in(service: &ServiceDef) -> bool {
 
 /// Whether the service declares an operation whose `http(...)` group writes at least one outgoing
 /// header, which is what needs an encoder for it on whichever side writes one.
-fn declares_header_out(service: &ServiceDef) -> bool {
+pub(super) fn declares_header_out(service: &ServiceDef) -> bool {
     service.operations.iter().any(|operation| {
         operation
             .http
@@ -941,7 +941,7 @@ fn declares_header_out(service: &ServiceDef) -> bool {
 /// macro stays grouped types-then-impls-then-functions; either way the one `dispatch` a service
 /// answers through is built by the same emitter and cannot drift between the two macros'
 /// definitions.
-fn dispatcher_items(service: &ServiceDef) -> TokenStream {
+pub(super) fn dispatcher_items(service: &ServiceDef) -> TokenStream {
     let types = dispatcher_types(service);
     let impls = dispatcher_impls(service);
     let fns = dispatcher_fns(service);
@@ -954,7 +954,7 @@ fn dispatcher_items(service: &ServiceDef) -> TokenStream {
 
 /// `IncomingMessage` and `Reply`, the two types [`dispatcher_fns`] and a placed transport read and
 /// implement.
-fn dispatcher_types(service: &ServiceDef) -> TokenStream {
+pub(super) fn dispatcher_types(service: &ServiceDef) -> TokenStream {
     let contract = &service.ident;
     let module = module_ident(service);
     let incoming = incoming_message(declares_header_in(service));
@@ -970,12 +970,12 @@ fn dispatcher_types(service: &ServiceDef) -> TokenStream {
 /// The `headers` accessor travels with the field it reads, gated the same way: a service with no
 /// `header_in` binding reads no header off an incoming message anywhere in its own dispatch, and
 /// an unread accessor over an unread field is `dead_code` in plenty of consumers' builds.
-fn dispatcher_impls(service: &ServiceDef) -> TokenStream {
+pub(super) fn dispatcher_impls(service: &ServiceDef) -> TokenStream {
     incoming_message_accessors(declares_header_in(service))
 }
 
 /// The readers an arm needs, and `dispatch` itself.
-fn dispatcher_fns(service: &ServiceDef) -> TokenStream {
+pub(super) fn dispatcher_fns(service: &ServiceDef) -> TokenStream {
     let contract = &service.ident;
     let module = module_ident(service);
     let arms = service
@@ -1086,7 +1086,7 @@ fn dispatcher_macro(service: &ServiceDef, transport: Transport) -> TokenStream {
 /// in an answer, and a service that answers nothing has no answer to read one out of. The readers
 /// that mint from it are [`fault_mirror_readers`], emitted under the same condition and separately
 /// so that every type either macro writes is emitted above every `impl`.
-fn fault_mirror() -> TokenStream {
+pub(super) fn fault_mirror() -> TokenStream {
     quote! {
         /// A fault as it arrives, which is the one shape that reads one back. `ServiceFault`
         /// derives no `Deserialize` of its own, that being a public constructor by another name.
@@ -1135,7 +1135,7 @@ fn fault_mirror() -> TokenStream {
 /// A fault is minted through the constructors the service's module publishes rather than written as
 /// a literal: the fields are private and this expands outside the module they are private to. Each
 /// kind therefore carries exactly what its own constructor carries.
-fn fault_mirror_readers(generated: &Generated) -> TokenStream {
+pub(super) fn fault_mirror_readers(generated: &Generated) -> TokenStream {
     let Generated { fault, .. } = generated;
     quote! {
         impl FaultOnTheWire {
@@ -1185,7 +1185,7 @@ fn fault_mirror_readers(generated: &Generated) -> TokenStream {
 /// Reads and decodes one header a `header_in` or `header_out` binding claims. A header nothing
 /// carried decodes as JSON `null`, which succeeds only where the declared type is an `Option` —
 /// anything else surfaces as the decode failure a missing required header is.
-fn header_decoder() -> TokenStream {
+pub(super) fn header_decoder() -> TokenStream {
     quote! {
         fn decoded_header<T>(headers: &[(String, String)], name: &str) -> Result<T, String>
         where
@@ -1203,7 +1203,7 @@ fn header_decoder() -> TokenStream {
 /// Encodes one `header_out` value for the reply's headers table. `None` says the value could not
 /// be represented as JSON at all — vanishingly rare for what a header carries — and is logged and
 /// dropped rather than losing the whole reply over one field that would not encode.
-fn header_encoder() -> TokenStream {
+pub(super) fn header_encoder() -> TokenStream {
     quote! {
         fn encoded_header<T>(name: &str, value: &T) -> Option<(String, String)>
         where
@@ -1332,7 +1332,7 @@ fn header_out_shape(operation: &OperationDef) -> Option<(Vec<String>, Type, Vec<
 /// operation needs one. Carrying it and never reading it — the case a service with no `header_in`
 /// binding would be in — is `dead_code` in plenty of consumers' builds, so the field is left off
 /// entirely there instead.
-fn incoming_message(declares_header_in: bool) -> TokenStream {
+pub(super) fn incoming_message(declares_header_in: bool) -> TokenStream {
     if declares_header_in {
         quote! {
             /// One message as the transport read it: the operation it names, the headers it
@@ -1379,7 +1379,7 @@ fn incoming_message(declares_header_in: bool) -> TokenStream {
 /// not this service declares a `header_in` binding — but a service with none never reads the
 /// argument back: [`incoming_message`] left the field off, so it is dropped here instead of
 /// stored.
-fn incoming_message_accessors(declares_header_in: bool) -> TokenStream {
+pub(super) fn incoming_message_accessors(declares_header_in: bool) -> TokenStream {
     // `headers` is moved into `Self` where the field exists, so `new` never drops it and stays
     // `const`. Where the field is absent, the argument goes unused and is dropped when `new`
     // returns instead — and `Vec`'s destructor cannot run in a `const fn`, so `new` cannot be one
@@ -1429,7 +1429,7 @@ fn incoming_message_accessors(declares_header_in: bool) -> TokenStream {
 /// One operation's client method: validate, then send. The transport is reached only once the
 /// message has passed its own validator, which is what makes the never-called-transport case
 /// observable.
-fn method(operation: &OperationDef, generated: &Generated) -> TokenStream {
+pub(super) fn method(operation: &OperationDef, generated: &Generated) -> TokenStream {
     let Generated { module, .. } = generated;
     let named = &operation.ident;
     let check = message_validator_ident(operation);
@@ -1515,7 +1515,7 @@ fn header_encode_refusal(
 /// A `header_out`-bound success type carries its extra values beside the response rather than
 /// inside it: the payload is decoded as the response alone, and each header value is decoded off
 /// the reply's own headers and rejoined into the tuple the trait declared.
-fn client_answer(operation: &OperationDef, generated: &Generated) -> TokenStream {
+pub(super) fn client_answer(operation: &OperationDef, generated: &Generated) -> TokenStream {
     let Generated {
         call_error,
         fault,
@@ -1959,7 +1959,7 @@ fn reply_handle_impls(module: &Ident) -> TokenStream {
 ///
 /// It travels with the dispatcher because its shape is the dispatcher's: one reply per message,
 /// answered with a value or with a defect.
-fn reply_trait(contract: &Ident, module: &Ident) -> TokenStream {
+pub(super) fn reply_trait(contract: &Ident, module: &Ident) -> TokenStream {
     let reply_doc = format!(
         "The handle a transport gives the `{contract}` dispatcher so it can settle *this* \
          message.\n\n\
@@ -2088,7 +2088,7 @@ fn server_macro(service: &ServiceDef, transport: Transport) -> TokenStream {
     }
 }
 
-fn transport_trait(contract: &Ident) -> TokenStream {
+pub(super) fn transport_trait(contract: &Ident) -> TokenStream {
     let transport_doc = format!(
         "What binds a `{contract}` client to a bus.\n\n\
          The operation name travels beside the payload rather than inside it, so no message type \
