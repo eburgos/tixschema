@@ -677,7 +677,8 @@ fn a_build_that_publishes_no_client_says_on_the_registry_why_not() {
     let rendered = registration(MIXED_SERVICE);
     for said in [
         "This build publishes no `UsageServiceSchema::ts_client()`, no \
-         `UsageServiceSchema::ts_http_client()`, and no `UsageServiceSchema::ts_service()`.",
+         `UsageServiceSchema::ts_http_client()`, no `UsageServiceSchema::ts_service()`, no \
+         `UsageServiceSchema::ts_ws_client()`, and no `UsageServiceSchema::ts_ws_service()`.",
         "only a build with tixschema's `zod` feature writes one",
         "Add `features = [\\\"zod\\\"]` to the tixschema dependency to get them.",
     ] {

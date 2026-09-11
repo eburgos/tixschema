@@ -291,12 +291,13 @@ fn seam_rustdoc(service: &str) -> Vec<String> {
         String::new(),
         format!(
             " This build publishes no `{service}Schema::ts_client()`, no \
-             `{service}Schema::ts_http_client()`, and no `{service}Schema::ts_service()`. All \
-             three parse a message against the schema `#[model_schema()]` writes for it, and only \
-             a build with tixschema's `zod` feature writes one — so rather than a client and a \
-             dispatcher that check nothing, this build publishes the service's types and leaves \
-             the three seam artifacts out. Add `features = [\"zod\"]` to the tixschema dependency \
-             to get them."
+             `{service}Schema::ts_http_client()`, no `{service}Schema::ts_service()`, no \
+             `{service}Schema::ts_ws_client()`, and no `{service}Schema::ts_ws_service()`. All \
+             five parse a message against the schema `#[model_schema()]` writes for it, and only \
+             a build with tixschema's `zod` feature writes one — so rather than a client, a \
+             transport and a dispatcher that check nothing, this build publishes the service's \
+             types and leaves the five seam artifacts out. Add `features = [\"zod\"]` to the \
+             tixschema dependency to get them."
         ),
     ]
 }
