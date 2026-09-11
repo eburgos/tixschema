@@ -200,8 +200,8 @@ fn expansion_over_http_rest(source: &str) -> TokenStream {
     )
 }
 
-/// The same expansion for a service that asked for `ws_rpc`, which emits nothing transport-shaped
-/// yet.
+/// The same expansion for a service that asked for `ws_rpc`, which carries only a dispatcher: the
+/// client macro lands later.
 fn expansion_over_ws_rpc(source: &str) -> TokenStream {
     exec_service_schema(
         quote! { transports = ["ws_rpc"] },
@@ -209,11 +209,21 @@ fn expansion_over_ws_rpc(source: &str) -> TokenStream {
     )
 }
 
+/// The same expansion, rendered — the `ws_rpc` counterpart of [`expanded_over_amqp_rpc`].
+fn expanded_over_ws_rpc(source: &str) -> String {
+    expansion_over_ws_rpc(source).to_string()
+}
+
 /// One published `http_rest` macro's stored tokens and nothing beside them, with every literal
 /// blanked so a name a doc comment mentions is not read as a path — the `http_rest` counterpart of
 /// [`macro_body`].
 fn macro_body_over_http_rest(source: &str, named: &str) -> String {
     macro_rules_stream(without_literals(expansion_over_http_rest(source)), named).to_string()
+}
+
+/// The `ws_rpc` counterpart of [`macro_body`].
+fn macro_body_over_ws_rpc(source: &str, named: &str) -> String {
+    macro_rules_stream(without_literals(expansion_over_ws_rpc(source)), named).to_string()
 }
 
 /// Whether every mention of `named` in the macro body is written under `qualifier`. A mention that
@@ -240,6 +250,11 @@ fn published_macro(source: &str, named: &str) -> String {
 /// The `http_rest` counterpart of [`published_macro`]: literals left as written.
 fn published_macro_over_http_rest(source: &str, named: &str) -> String {
     macro_rules_stream(expansion_over_http_rest(source), named).to_string()
+}
+
+/// The `ws_rpc` counterpart of [`published_macro`]: literals left as written.
+fn published_macro_over_ws_rpc(source: &str, named: &str) -> String {
+    macro_rules_stream(expansion_over_ws_rpc(source), named).to_string()
 }
 
 /// Every item a token stream declares, in the order it declares them.
@@ -1195,22 +1210,33 @@ fn a_service_asking_for_no_transport_is_emitted_the_contract_and_nothing_else() 
     );
 }
 
-/// `ws_rpc`'s own `emit` publishes nothing yet, but the service still asked for a transport: the
-/// module still anchors at the crate root the way it does for any transport, and nothing
-/// transport-shaped — no `macro_rules!`, no dispatcher, no client — reaches the expansion.
+/// `ws_rpc`'s own `emit` publishes a dispatcher carrying the shared dispatch items plus this
+/// transport's own frame codec, `FrameReply` and `answer` — and nothing the client macro or the
+/// `amqp_rpc`/`http_rest` transports own, the client landing later.
 #[test]
-fn a_service_asking_for_only_ws_rpc_is_emitted_nothing_transport_shaped() {
+fn a_service_asking_for_only_ws_rpc_emits_its_dispatcher_and_the_shared_dispatch_items() {
     let expansion = expansion_over_ws_rpc(MIXED_SERVICE);
     let emitted = expansion.to_string();
-    for absent in [
-        "macro_rules",
+    for present in [
+        "macro_rules ! usage_service_ws_rpc_dispatcher { () => {",
         "pub fn dispatch",
-        "IncomingMessage",
+        "pub struct IncomingMessage",
         "pub trait Reply",
-        "pub trait Transport",
-        "pub struct UsageServiceClient",
+        "pub const SERVICE",
+        "pub enum Frame",
+        "pub struct FrameReply",
+        "pub async fn answer",
         "serde_json",
         "tracing",
+    ] {
+        assert!(
+            emitted.contains(present),
+            "`{present}` is part of a ws_rpc dispatcher. Got: {emitted}"
+        );
+    }
+    for absent in [
+        "pub trait Transport",
+        "pub struct UsageServiceClient",
         "pub struct Context",
         "pub struct ReplyHandle",
         "pub async fn serve_until",
@@ -1218,7 +1244,8 @@ fn a_service_asking_for_only_ws_rpc_is_emitted_nothing_transport_shaped() {
     ] {
         assert!(
             !emitted.contains(absent),
-            "`{absent}` belongs to a transport, and `ws_rpc` publishes nothing yet. Got: {emitted}"
+            "`{absent}` belongs to the client macro or to a different transport, and `ws_rpc` \
+             publishes only its dispatcher so far. Got: {emitted}"
         );
     }
     assert!(
@@ -1230,6 +1257,115 @@ fn a_service_asking_for_only_ws_rpc_is_emitted_nothing_transport_shaped() {
         held.contains("RootAnchor"),
         "a service that asked for `ws_rpc` still asked for a transport, so the module anchors at \
          the crate root the same as it does for any other. Got: {held}"
+    );
+}
+
+/// The macro takes no arguments and opens no module: the caller supplies the module, exactly as
+/// the `amqp_rpc` dispatcher does.
+#[test]
+fn the_ws_rpc_dispatcher_macro_takes_no_arguments_and_opens_no_module_of_its_own() {
+    let emitted = expanded_over_ws_rpc(MIXED_SERVICE);
+    assert!(
+        emitted.contains("macro_rules ! usage_service_ws_rpc_dispatcher { () => {"),
+        "the one rule matches an empty invocation. Got: {emitted}"
+    );
+    let body = macro_body_over_ws_rpc(MIXED_SERVICE, "usage_service_ws_rpc_dispatcher");
+    assert!(
+        !body.contains(" mod "),
+        "the items are bare, so the caller names the module they land in. Got: {body}"
+    );
+}
+
+/// Every runtime crate the macro body calls is written with a leading `::`, exactly as
+/// `amqp_rpc`'s own dispatcher is — the same crates plus `std`, for `FrameReply`'s `Mutex`.
+#[test]
+fn every_runtime_crate_the_ws_rpc_dispatcher_body_calls_is_written_with_a_leading_colon_pair() {
+    let body = macro_body_over_ws_rpc(MIXED_SERVICE, "usage_service_ws_rpc_dispatcher");
+    for called in ["serde :: Serialize", "serde_json", "tracing", "core", "std"] {
+        assert!(
+            every_mention_is_qualified(&body, called, ":: "),
+            "`{called}` is reached without a leading `::` somewhere in the macro body, so it \
+             resolves against whatever the invoking crate happens to have in scope. Got: {body}"
+        );
+    }
+}
+
+/// Every name the macro body reaches in the declaring crate is written through `$crate`, exactly
+/// as `amqp_rpc`'s own dispatcher is.
+#[test]
+fn every_generated_name_the_ws_rpc_dispatcher_body_reaches_is_written_through_crate() {
+    let body = macro_body_over_ws_rpc(MIXED_SERVICE, "usage_service_ws_rpc_dispatcher");
+    assert!(
+        every_mention_is_qualified(&body, "UsageService", "$ crate :: "),
+        "the trait is reached unqualified somewhere in the macro body, which resolves in whichever \
+         crate invoked the macro. Got: {body}"
+    );
+    for reached in [
+        "ServiceFault",
+        "Answered",
+        "named_field",
+        "violated_field",
+        "violation_detail",
+        "GetAvailableBalanceMessage",
+    ] {
+        assert!(
+            every_mention_is_qualified(&body, reached, "$ crate :: usage_service_schema :: "),
+            "`{reached}` is reached unqualified somewhere in the macro body, which resolves in \
+             whichever crate invoked the macro. Got: {body}"
+        );
+    }
+}
+
+/// Types, then impls, then functions, whole macro through — the grouping
+/// `clippy::arbitrary_source_item_ordering` asks for by default and every other macro here holds.
+#[test]
+fn the_ws_rpc_dispatcher_macro_is_grouped_types_then_impls_then_functions() {
+    let body = macro_body_over_ws_rpc(MIXED_SERVICE, "usage_service_ws_rpc_dispatcher");
+    let incoming_message_type = body.find("pub struct IncomingMessage").unwrap();
+    let incoming_message_impl = body.find("impl IncomingMessage").unwrap();
+    let frame_type = body.find("pub enum Frame").unwrap();
+    let frame_impl = body.find("impl Frame {").unwrap();
+    let frame_reply_type = body.find("pub struct FrameReply").unwrap();
+    let frame_reply_impl = body.find("impl FrameReply").unwrap();
+    let dispatch_fn = body.find("pub fn dispatch").unwrap();
+    let answer_fn = body.find("pub async fn answer").unwrap();
+    assert!(
+        incoming_message_type < incoming_message_impl && incoming_message_impl < dispatch_fn,
+        "IncomingMessage's type precedes its impl, which precedes dispatch. Got: {body}"
+    );
+    assert!(
+        frame_type < frame_impl && frame_impl < answer_fn,
+        "Frame's type precedes its impl, which precedes answer. Got: {body}"
+    );
+    assert!(
+        frame_reply_type < frame_reply_impl && frame_reply_impl < answer_fn,
+        "FrameReply's type precedes its impl, which precedes answer. Got: {body}"
+    );
+}
+
+/// The macro doc carries the same placement section `amqp_rpc`'s dispatcher does, naming this
+/// transport's own module.
+#[test]
+fn the_ws_rpc_dispatcher_macros_placement_doc_names_ws_transport() {
+    let emitted = expanded_over_ws_rpc(MIXED_SERVICE);
+    assert!(
+        emitted.contains("mod ws_transport;"),
+        "the placement section shows the module this transport's own doc names. Got: {emitted}"
+    );
+    assert!(
+        emitted.contains("the_contract_crate::usage_service_ws_rpc_dispatcher!();"),
+        "the placement section shows the bare invocation. Got: {emitted}"
+    );
+}
+
+/// `SERVICE` publishes the trait's own ident, unrenamed — the name `Frame::decode` and `answer`
+/// match a frame's own `service` field against.
+#[test]
+fn service_const_publishes_the_traits_own_ident() {
+    let published = published_macro_over_ws_rpc(MIXED_SERVICE, "usage_service_ws_rpc_dispatcher");
+    assert!(
+        published.contains("pub const SERVICE : & str = \"UsageService\" ;"),
+        "Got: {published}"
     );
 }
 
