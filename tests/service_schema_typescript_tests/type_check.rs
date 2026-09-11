@@ -43,8 +43,16 @@ const COMPILER_VAR: &str = "TIXSCHEMA_TSC";
 /// What every check compiles under. `--strict` is the bar a consuming codebase sets; `--pretty
 /// false` keeps a diagnostic readable when it lands in an assertion message.
 const UNDER: [&str; 10] = [
-    "--noEmit", "--strict", "--pretty", "false", "--target", "es2020", "--lib", "es2020",
-    "--module", "preserve",
+    "--noEmit",
+    "--strict",
+    "--pretty",
+    "false",
+    "--target",
+    "es2020",
+    "--lib",
+    "es2020,dom",
+    "--module",
+    "preserve",
 ];
 
 /// Said once per test binary when no compiler is reachable.
@@ -186,6 +194,24 @@ export async function read(): Promise<string> {
     return `${kind}:${field ?? ""}:${answered.error.fault.operation}`;
   }
   return answered.error.errorCode;
+}
+"#;
+
+/// A caller binding the socket transport to a bare `WebSocket`, with `--lib es2020,dom` naming
+/// the browser's own declaration for it. Nothing here asserts either — a browser socket satisfying
+/// the seam with no adapter is what compiling at all says.
+#[cfg(feature = "zod")]
+const WS_CALLER: &str = r#"import { createProbeServiceClient, createProbeServiceWsTransport } from "./bundle";
+
+declare const socket: WebSocket;
+
+export async function read(): Promise<string> {
+  const client = createProbeServiceClient(createProbeServiceWsTransport(socket));
+  const answered = await client.getBalance({ organization_id: "acme" });
+  if (answered.ok) {
+    return `${answered.value.credits}`;
+  }
+  return "failed";
 }
 "#;
 
@@ -376,5 +402,23 @@ fn an_implementation_missing_one_operation_is_refused_at_the_factory_call() {
     assert!(
         said.contains("is missing") && said.contains("ProbeServiceImpl"),
         "the refusal has to be a member missing from the service's own interface. Got:\n{said}"
+    );
+}
+
+/// What no string test can give the socket seam: a browser's own `WebSocket`, typed by `--lib
+/// es2020,dom` rather than by anything this crate declares, satisfies it with no adapter written
+/// in between.
+#[cfg(feature = "zod")]
+#[test]
+fn the_socket_transport_binds_a_browser_websocket() {
+    let bundled_with_ws_client = format!("{}\n\n{}", bundle(), ProbeServiceSchema::ts_ws_client());
+    let mut files = bundled(bundled_with_ws_client);
+    files.push(("caller.ts", WS_CALLER.to_owned()));
+    let Some((accepted, said)) = compiled("ws-socket", &files) else {
+        return;
+    };
+    assert!(
+        accepted,
+        "a browser `WebSocket` assigned into the generated socket seam does not compile:\n{said}"
     );
 }
