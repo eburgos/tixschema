@@ -10,10 +10,10 @@ install-tools:
     cargo install cargo-hack || echo "cargo-hack already installed"
     cargo install just || echo "just already installed"
 
-# Test all possible feature combinations (2^5 = 32 combinations)
+# Test all possible feature combinations (2^7 = 128 combinations)
 test:
     @echo "Testing all feature combinations..."
-    @echo "This will test 32 different feature combinations (2^5 with 5 features)"
+    @echo "This will test 128 different feature combinations (2^7 with 7 features)"
     cargo hack test --feature-powerset
     @echo "✅ All feature combinations passed!"
 
@@ -32,7 +32,7 @@ test-named-features:
     cargo test --no-default-features --features "typescript,zod"
     cargo test --no-default-features --features "serde,zod"
     cargo test --no-default-features --features "serde,zod,object_id"
-    cargo test --features "serde,zod,jsonschema,object_id,typescript"
+    cargo test --all-features
     @echo "✅ Key feature combinations passed!"
 
 # Test with default features
@@ -118,9 +118,20 @@ clean:
     cargo clean
     @echo "✅ Build artifacts cleaned!"
 
-# Full pipeline (standardized `all` entry point across tixena repos).
-all: lint lint-all test
+# Full pipeline (standardized `all` entry point across tixena repos): lints and key feature
+# combinations, each gate a single build. The exhaustive powerset lives in `all-powerset`.
+all: lint lint-all-features test-named-features
     @echo "All checks completed successfully!"
+
+# Exhaustive pipeline - the feature-powerset gates over all 128 combinations (what `all` ran
+# before). Slow; run before a release or after touching feature gates.
+all-powerset: lint lint-all test
+    @echo "All powerset checks completed successfully!"
+
+# Lint with every feature on at once - one build that reaches the feature-gated code (dart,
+# chrono, object_id) the default-features `lint` misses, without the powerset's 128 builds.
+lint-all-features:
+    cargo clippy --all-targets --all-features -- -D warnings
 
 # Full CI pipeline - what CI would run
 ci: clean check-all lint-all test fmt
