@@ -14,7 +14,7 @@
 use crate::document_session_schema::{CallError, ServiceFaultKind};
 use crate::events_client::{self, SessionEventsClient};
 use crate::ws_client::{self, DocumentSessionClient, FrameSession, Transport as _};
-use crate::ws_transport::{self, Frame};
+use crate::ws_transport;
 use alloc::sync::Arc;
 use core::future::{Future, ready};
 use core::pin::{Pin, pin};
@@ -542,37 +542,6 @@ fn a_header_in_binding_nothing_carried_decodes_as_the_arguments_own_absent_value
     assert_eq!(service.reached(), vec!["read_range doc-2 None".to_owned()]);
 }
 
-/// `ping_frame` is the client macro's — a session sends one, a dispatcher only ever answers one —
-/// but the two share one codec, so the dispatcher publishes it too.
-#[test]
-fn ping_frame_encodes_the_kind_ping_frame() {
-    assert_eq!(ws_transport::ping_frame(), r#"{"kind":"ping"}"#);
-}
-
-/// `Frame::Reply` is the client macro's own frame kind — this dispatcher never answers with one,
-/// it only decodes one, which `answer` itself has no reason to do.
-#[test]
-fn frame_decode_reads_a_reply_frame_into_its_id_service_and_envelope() {
-    let decoded = Frame::decode(
-        r#"{"kind":"reply","id":"1","service":"DocumentSession","ok":true,"value":{"accepted":true}}"#,
-    )
-    .unwrap();
-    assert!(matches!(decoded, Frame::Reply { .. }));
-    if let Frame::Reply {
-        id,
-        service,
-        envelope,
-    } = decoded
-    {
-        assert_eq!(id, "1");
-        assert_eq!(service, "DocumentSession");
-        assert_eq!(
-            envelope.get("value"),
-            Some(&serde_json::json!({ "accepted": true }))
-        );
-    }
-}
-
 /// A request-and-reply call is `Pending` until its reply is delivered, and reads back the
 /// declared value once it is — the frame it sent along the way carries the id `FrameSession`
 /// drew from its own counter.
@@ -757,50 +726,6 @@ fn the_events_client_frame_session_answers_a_ping_and_publishes_ping_frame() {
     assert_eq!(events_client::ping_frame(), r#"{"kind":"ping"}"#);
 }
 
-/// `events_client::Frame::decode` reads a request frame into an `IncomingMessage` the same way
-/// `ws_client`'s own copy does — nothing in `SessionEvents` ever receives one, but the codec is one
-/// copy shared with every frame kind, request and notify included.
-#[test]
-fn the_events_client_frame_decode_reads_a_request_frame_into_an_incoming_message() {
-    let decoded = events_client::Frame::decode(
-        r#"{"kind":"request","id":"9","service":"SessionEvents","operation":"probe","payload":{"n":1}}"#,
-    )
-    .unwrap();
-    let (id, service, message) = match decoded {
-        events_client::Frame::Request {
-            id,
-            service,
-            message,
-        } => Some((id, service, message)),
-        events_client::Frame::Notify { .. }
-        | events_client::Frame::Reply { .. }
-        | events_client::Frame::Ping
-        | events_client::Frame::Pong => None,
-    }
-    .unwrap();
-    assert_eq!(id, "9");
-    assert_eq!(service, "SessionEvents");
-    assert_eq!(message.operation(), "probe");
-    assert_eq!(message.payload(), br#"{"n":1}"#);
-    let notified = events_client::Frame::decode(
-        r#"{"kind":"notify","service":"SessionEvents","operation":"probe","payload":{"n":1}}"#,
-    )
-    .unwrap();
-    let (notify_service, notify_message) = match notified {
-        events_client::Frame::Notify {
-            service: notify_service,
-            message: notify_message,
-        } => Some((notify_service, notify_message)),
-        events_client::Frame::Request { .. }
-        | events_client::Frame::Reply { .. }
-        | events_client::Frame::Ping
-        | events_client::Frame::Pong => None,
-    }
-    .unwrap();
-    assert_eq!(notify_service, "SessionEvents");
-    assert_eq!(notify_message.operation(), "probe");
-}
-
 /// `SessionEventsClient::transport` reaches the transport a client was bound to, the same as
 /// every other generated client.
 #[test]
@@ -920,59 +845,11 @@ fn read_range_round_trips_header_in_and_header_out() {
     );
 }
 
-/// `ws_client`'s own copy of `ping_frame`, published beside `FrameSession`'s liveness probe —
-/// `deliver_answers_a_ping_with_a_pong` exercises `pong_frame` already, this exercises the other.
+/// `ping_frame`, the client's alone to publish — `deliver_answers_a_ping_with_a_pong` exercises
+/// `pong_frame` already, this exercises the other.
 #[test]
 fn ws_client_ping_frame_encodes_the_kind_ping_frame() {
     assert_eq!(ws_client::ping_frame(), r#"{"kind":"ping"}"#);
-}
-
-/// `ws_client::Frame::decode` reads a request frame into an `IncomingMessage`, headers included —
-/// `deliver` only ever decodes a reply or a ping, so nothing else in this file reaches the other
-/// two branches `answer`'s own dispatcher-side test already covers from that side.
-#[test]
-fn ws_client_frame_decode_reads_a_request_frame_into_an_incoming_message() {
-    let decoded = ws_client::Frame::decode(
-        r#"{"kind":"request","id":"9","service":"DocumentSession","operation":"watch","payload":{"document_id":"doc-1"},"headers":{"range":"bytes=0-1"}}"#,
-    )
-    .unwrap();
-    let (id, service, message) = match decoded {
-        ws_client::Frame::Request {
-            id,
-            service,
-            message,
-        } => Some((id, service, message)),
-        ws_client::Frame::Notify { .. }
-        | ws_client::Frame::Reply { .. }
-        | ws_client::Frame::Ping
-        | ws_client::Frame::Pong => None,
-    }
-    .unwrap();
-    assert_eq!(id, "9");
-    assert_eq!(service, "DocumentSession");
-    assert_eq!(message.operation(), "watch");
-    assert_eq!(message.payload(), br#"{"document_id":"doc-1"}"#);
-    assert_eq!(
-        message.headers(),
-        &[("range".to_owned(), "\"bytes=0-1\"".to_owned())]
-    );
-    let notified = ws_client::Frame::decode(
-        r#"{"kind":"notify","service":"DocumentSession","operation":"touch","payload":{"document_id":"doc-1"}}"#,
-    )
-    .unwrap();
-    let (notify_service, notify_message) = match notified {
-        ws_client::Frame::Notify {
-            service: notify_service,
-            message: notify_message,
-        } => Some((notify_service, notify_message)),
-        ws_client::Frame::Request { .. }
-        | ws_client::Frame::Reply { .. }
-        | ws_client::Frame::Ping
-        | ws_client::Frame::Pong => None,
-    }
-    .unwrap();
-    assert_eq!(notify_service, "DocumentSession");
-    assert_eq!(notify_message.operation(), "touch");
 }
 
 /// `DocumentSessionClient::transport` reaches the transport a client was bound to.

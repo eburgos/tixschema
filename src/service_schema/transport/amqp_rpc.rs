@@ -958,7 +958,9 @@ pub(super) fn dispatcher_types(service: &ServiceDef) -> TokenStream {
     let contract = &service.ident;
     let module = module_ident(service);
     let incoming = incoming_message(declares_header_in(service));
-    let reply = reply_trait(contract, &module);
+    // `send` always stands here: this dispatcher's own `ReplyHandle` and `http_rest`'s implement
+    // `Reply` by hand, and neither is generated conditionally on the service's own operations.
+    let reply = reply_trait(contract, &module, true);
     quote! {
         #incoming
         #reply
@@ -1958,26 +1960,34 @@ fn reply_handle_impls(module: &Ident) -> TokenStream {
 /// The `Reply` trait, which a transport implements once per dispatcher it places.
 ///
 /// It travels with the dispatcher because its shape is the dispatcher's: one reply per message,
-/// answered with a value or with a defect.
-pub(super) fn reply_trait(contract: &Ident, module: &Ident) -> TokenStream {
-    let reply_doc = format!(
-        "The handle a transport gives the `{contract}` dispatcher so it can settle *this* \
-         message.\n\n\
-         A request-and-reply operation answers with [`send`](Reply::send) or \
-         [`fault`](Reply::fault). A one-way operation calls neither, and the transport \
-         acknowledges the delivery after dispatch returns. Encoding sits behind the trait, which \
-         is what keeps the generator out of the wire format. `send`'s `headers` carries every \
-         `header_out` value a bound operation declared, and is empty for every other one."
-    );
-    quote! {
-        #[doc = #reply_doc]
-        pub trait Reply {
-            /// Answer with a defect the operation never declared.
-            fn fault(
-                &self,
-                fault: $crate::#module::ServiceFault,
-            ) -> impl ::core::future::Future<Output = ()> + Send;
-
+/// answered with a value or with a defect. `with_send` is false only where the dispatcher's own
+/// arms never call `send` — a service every one of whose operations is one-way — and there the
+/// trait carries `fault` alone: `amqp_rpc` passes `true` unconditionally, since its adapters
+/// implement this trait by hand and their shape must not move underneath them.
+pub(super) fn reply_trait(contract: &Ident, module: &Ident, with_send: bool) -> TokenStream {
+    let reply_doc = if with_send {
+        format!(
+            "The handle a transport gives the `{contract}` dispatcher so it can settle *this* \
+             message.\n\n\
+             A request-and-reply operation answers with [`send`](Reply::send) or \
+             [`fault`](Reply::fault). A one-way operation calls neither, and the transport \
+             acknowledges the delivery after dispatch returns. Encoding sits behind the trait, \
+             which is what keeps the generator out of the wire format. `send`'s `headers` \
+             carries every `header_out` value a bound operation declared, and is empty for every \
+             other one."
+        )
+    } else {
+        format!(
+            "The handle a transport gives the `{contract}` dispatcher so it can settle *this* \
+             message.\n\n\
+             Every operation this service declares is one-way, so the only settlement is \
+             [`fault`](Reply::fault) - for a payload that fails to decode or validate, or a \
+             message naming an operation this dispatcher does not recognise. Encoding sits \
+             behind the trait, which is what keeps the generator out of the wire format."
+        )
+    };
+    let send = with_send.then(|| {
+        quote! {
             /// Answer with a value and the headers a `header_out` binding wrote beside it. The
             /// transport serializes the value, which is why it is handed over rather than an
             /// encoded buffer.
@@ -1988,6 +1998,18 @@ pub(super) fn reply_trait(contract: &Ident, module: &Ident) -> TokenStream {
             ) -> impl ::core::future::Future<Output = ()> + Send
             where
                 T: ::serde::Serialize + Send;
+        }
+    });
+    quote! {
+        #[doc = #reply_doc]
+        pub trait Reply {
+            /// Answer with a defect the operation never declared.
+            fn fault(
+                &self,
+                fault: $crate::#module::ServiceFault,
+            ) -> impl ::core::future::Future<Output = ()> + Send;
+
+            #send
         }
     }
 }

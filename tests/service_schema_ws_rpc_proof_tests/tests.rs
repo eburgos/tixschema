@@ -598,22 +598,6 @@ fn a_stray_reply_is_ignored_and_state_stays_usable() {
     let harness = Harness::new();
     let stray = r#"{"kind":"reply","id":"999","service":"DocumentSession","ok":true,"value":{"accepted":true}}"#;
 
-    let decoded = ws_transport::Frame::decode(stray).unwrap();
-    assert!(matches!(decoded, ws_transport::Frame::Reply { .. }));
-    if let ws_transport::Frame::Reply {
-        id,
-        service,
-        envelope,
-    } = decoded
-    {
-        assert_eq!(id, "999");
-        assert_eq!(service, "DocumentSession");
-        assert_eq!(
-            envelope.get("value"),
-            Some(&serde_json::json!({ "accepted": true })),
-        );
-    }
-
     harness
         .wire
         .to_client
@@ -651,58 +635,21 @@ fn close_settles_a_waiting_call_with_a_transport_failure_fault() {
     assert_eq!(fault.detail(), "the socket closed before the reply arrived");
 }
 
-// The scenarios above never reach every corner of four independently generated macro
-// expansions — a dispatcher's own copy of a reply it never answers with, a client's own copy of
-// a request it only ever sends, `SessionEvents`'s unused browser-side `FrameSession` half. What
-// follows exercises what the wire never happened to.
+// The scenarios above never reach every corner of the generated client machinery - the
+// `FrameWriter` refusal a call never exercises, `SessionEvents`'s unused browser-side
+// `FrameSession` half, the transport each client was bound to. What follows exercises what the
+// wire never happened to.
 
+/// `ping_frame` is the client's alone to publish - a dispatcher only ever answers one with a
+/// pong - so both clients' own copies are checked here rather than every module's.
 #[test]
-fn every_modules_ping_frame_encodes_the_same_liveness_probe() {
+fn every_client_ping_frame_encodes_the_same_liveness_probe() {
     let ping = serde_json::json!({ "kind": "ping" });
-    for encoded in [
-        ws_transport::ping_frame(),
-        ws_client::ping_frame(),
-        events_client::ping_frame(),
-        events_transport::ping_frame(),
-    ] {
+    for encoded in [ws_client::ping_frame(), events_client::ping_frame()] {
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&encoded).unwrap(),
             ping
         );
-    }
-}
-
-#[test]
-fn ws_client_frame_decode_reads_request_and_notify_frames() {
-    let decoded = ws_client::Frame::decode(
-        r#"{"kind":"request","id":"9","service":"DocumentSession","operation":"watch","payload":{"document_id":"doc-1"},"headers":{"range":"bytes=0-1"}}"#,
-    )
-    .unwrap();
-    assert!(matches!(decoded, ws_client::Frame::Request { .. }));
-    if let ws_client::Frame::Request {
-        id,
-        service,
-        message,
-    } = decoded
-    {
-        assert_eq!(id, "9");
-        assert_eq!(service, "DocumentSession");
-        assert_eq!(message.operation(), "watch");
-        assert_eq!(message.payload(), br#"{"document_id":"doc-1"}"#);
-        assert_eq!(
-            message.headers(),
-            &[("range".to_owned(), "\"bytes=0-1\"".to_owned())]
-        );
-    }
-
-    let notified = ws_client::Frame::decode(
-        r#"{"kind":"notify","service":"DocumentSession","operation":"touch","payload":{"document_id":"doc-1"}}"#,
-    )
-    .unwrap();
-    assert!(matches!(notified, ws_client::Frame::Notify { .. }));
-    if let ws_client::Frame::Notify { service, message } = notified {
-        assert_eq!(service, "DocumentSession");
-        assert_eq!(message.operation(), "touch");
     }
 }
 
@@ -819,36 +766,6 @@ fn events_client_frame_session_completes_a_request_and_reply_round_trip_and_answ
 }
 
 #[test]
-fn events_client_frame_decode_reads_request_and_notify_frames() {
-    let decoded = events_client::Frame::decode(
-        r#"{"kind":"request","id":"9","service":"SessionEvents","operation":"probe","payload":{"n":1}}"#,
-    )
-    .unwrap();
-    assert!(matches!(decoded, events_client::Frame::Request { .. }));
-    if let events_client::Frame::Request {
-        id,
-        service,
-        message,
-    } = decoded
-    {
-        assert_eq!(id, "9");
-        assert_eq!(service, "SessionEvents");
-        assert_eq!(message.operation(), "probe");
-        assert_eq!(message.payload(), br#"{"n":1}"#);
-    }
-
-    let notified = events_client::Frame::decode(
-        r#"{"kind":"notify","service":"SessionEvents","operation":"probe","payload":{"n":1}}"#,
-    )
-    .unwrap();
-    assert!(matches!(notified, events_client::Frame::Notify { .. }));
-    if let events_client::Frame::Notify { service, message } = notified {
-        assert_eq!(service, "SessionEvents");
-        assert_eq!(message.operation(), "probe");
-    }
-}
-
-#[test]
 fn a_session_events_client_exposes_the_transport_it_was_bound_to() {
     let harness = Harness::new();
     let refused = match poll_by_hand(
@@ -865,48 +782,4 @@ fn a_session_events_client_exposes_the_transport_it_was_bound_to() {
     }
     .unwrap();
     assert!(refused.contains("probe"), "got: {refused}");
-}
-
-/// `SessionEvents` declares one operation and it is one-way, so nothing this crate dispatches
-/// ever answers through `Reply::send` — a real reply-shaped operation would, exactly as
-/// `DocumentSession`'s own scenarios above already prove. Proven directly here instead, alongside
-/// the reply frame this dispatcher only ever decodes and never answers with.
-#[test]
-fn events_transport_frame_reply_writes_a_send_envelope_and_decodes_a_reply_frame() {
-    use events_transport::Reply as _;
-
-    let reply = events_transport::FrameReply::new("7");
-    let answered =
-        session_events_schema::Answered::answering(Ok::<_, ()>(DocumentChangedRequest {
-            document_id: "doc-9".to_owned(),
-            version: 1,
-        }));
-    let written = poll_by_hand(pin!(reply.send(answered, Vec::new())).as_mut());
-    assert_eq!(written, Poll::Ready(()));
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&reply.into_text()).unwrap(),
-        serde_json::json!({
-            "id": "7",
-            "kind": "reply",
-            "ok": true,
-            "service": "SessionEvents",
-            "value": { "document_id": "doc-9", "version": 1_u32 },
-        }),
-    );
-
-    let decoded = events_transport::Frame::decode(
-        r#"{"kind":"reply","id":"1","service":"SessionEvents","ok":true,"value":null}"#,
-    )
-    .unwrap();
-    assert!(matches!(decoded, events_transport::Frame::Reply { .. }));
-    if let events_transport::Frame::Reply {
-        id,
-        service,
-        envelope,
-    } = decoded
-    {
-        assert_eq!(id, "1");
-        assert_eq!(service, "SessionEvents");
-        assert_eq!(envelope.get("value"), Some(&serde_json::Value::Null));
-    }
 }
