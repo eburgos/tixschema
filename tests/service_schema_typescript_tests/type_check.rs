@@ -215,6 +215,33 @@ export async function read(): Promise<string> {
 }
 "#;
 
+/// Everything above the attachment's members: the same [`IMPLEMENTATION_MEMBERS`] the bare factory
+/// is checked with, reaching `attachProbeServiceWsDispatcher` as its third argument instead of
+/// `createProbeServiceDispatcher`'s only one, with a required `onFault` after it.
+#[cfg(feature = "zod")]
+const ATTACHMENT_HEAD: &str = r#"import {
+  attachProbeServiceWsDispatcher,
+  type ProbeServiceExpireCreditOutcome,
+  type ProbeServiceFaultKind,
+  type ProbeServiceGetBalanceOutcome,
+  type ProbeServiceSettleOutcome,
+  type ProbeServiceSweepOutcome,
+} from "./bundle";
+
+type ProbeContext = { loggerName: string };
+
+declare const socket: WebSocket;
+
+attachProbeServiceWsDispatcher<ProbeContext>(socket, { loggerName: "probe" }, {
+"#;
+
+#[cfg(feature = "zod")]
+const ATTACHMENT_TAIL: &str = "}, (fault) => {
+  const kind: ProbeServiceFaultKind = fault.kind;
+  void kind;
+});
+";
+
 /// The implementation fixture, with every named operation but the ones listed as left out.
 #[cfg(feature = "zod")]
 fn implementation(without: &[&str]) -> String {
@@ -226,6 +253,31 @@ fn implementation(without: &[&str]) -> String {
     }
     written.push_str(IMPLEMENTATION_TAIL);
     written
+}
+
+/// The attachment fixture, with every named operation but the ones listed as left out.
+#[cfg(feature = "zod")]
+fn attachment(without: &[&str]) -> String {
+    let mut written = String::from(ATTACHMENT_HEAD);
+    for (named, member) in IMPLEMENTATION_MEMBERS {
+        if !without.contains(&named) {
+            written.push_str(member);
+        }
+    }
+    written.push_str(ATTACHMENT_TAIL);
+    written
+}
+
+/// The bundle plus both socket surfaces: the seam `ts_ws_client()` publishes, which names the
+/// socket type the attachment takes, and `ts_ws_service()` itself.
+#[cfg(feature = "zod")]
+fn bundle_with_ws_seam() -> String {
+    format!(
+        "{}\n\n{}\n\n{}",
+        bundle(),
+        ProbeServiceSchema::ts_ws_client(),
+        ProbeServiceSchema::ts_ws_service(),
+    )
 }
 
 /// Said on the process's own stderr rather than through `eprintln!`, which `cargo test` captures
@@ -420,5 +472,48 @@ fn the_socket_transport_binds_a_browser_websocket() {
     assert!(
         accepted,
         "a browser `WebSocket` assigned into the generated socket seam does not compile:\n{said}"
+    );
+}
+
+/// The positive half of the attachment's own seal: an implementation answering every operation is
+/// accepted where it reaches `attachProbeServiceWsDispatcher`, bound to a browser `WebSocket`, with
+/// a required `onFault` whose parameter narrows to the published fault kind.
+#[cfg(feature = "zod")]
+#[test]
+fn a_complete_implementation_is_accepted_at_the_dispatcher_attachment() {
+    let mut files = bundled(bundle_with_ws_seam());
+    files.push(("attachment.ts", attachment(&[])));
+    let Some((accepted, said)) = compiled("ws-attach-complete", &files) else {
+        return;
+    };
+    assert!(
+        accepted,
+        "an implementation answering every operation, attached to a browser `WebSocket` with a \
+         required `onFault`, does not compile:\n{said}"
+    );
+}
+
+/// The negative half: an implementation missing one operation, handed to the attachment exactly as
+/// it is handed to the bare dispatcher factory above, is refused the same way.
+#[cfg(feature = "zod")]
+#[test]
+fn an_implementation_missing_one_operation_is_refused_at_the_dispatcher_attachment() {
+    let mut files = bundled(bundle_with_ws_seam());
+    files.push(("attachment.ts", attachment(&[OMITTED])));
+    let Some((accepted, said)) = compiled("ws-attach-incomplete", &files) else {
+        return;
+    };
+    assert!(
+        !accepted,
+        "an implementation answering four of five operations reached \
+         `attachProbeServiceWsDispatcher` and the compiler allowed it:\n{said}"
+    );
+    assert!(
+        said.contains(OMITTED),
+        "the refusal has to name the operation left out. Got:\n{said}"
+    );
+    assert!(
+        said.contains("is missing") && said.contains("ProbeServiceImpl"),
+        "the refusal has to be a member missing from the service's own interface. Got:\n{said}"
     );
 }
