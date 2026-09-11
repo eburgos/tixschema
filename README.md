@@ -1831,11 +1831,11 @@ On the Rust side, beside the trait, in a module named for the service (`usage_se
 
 Beside the trait, the `macro_rules!` each transport the service asked for contributes -- three for `amqp_rpc`, two for `http_rest`, two for `ws_rpc`; see [Transports](#transports) -- and nothing else transport-shaped. A service that asks for no transport is emitted none of them.
 
-#### Transports
+#### The `amqp_rpc` walkthrough
 
-`#[service_schema(transports = ["amqp_rpc"])]` says which transports the service wants. Each one contributes three `#[macro_export]` macros, `{service_snake_case}_{transport}_dispatcher`, `{service_snake_case}_{transport}_client` and `{service_snake_case}_{transport}_server`, whose bodies hold that transport's halves as *tokens*: nothing inside any of them is compiled where the service is declared.
+`#[service_schema(transports = ["amqp_rpc"])]` says which transports the service wants. Each one contributes `#[macro_export]` macros named `{service_snake_case}_{transport}_dispatcher` and `{service_snake_case}_{transport}_client`, and `amqp_rpc` a third, `{service_snake_case}_{transport}_server`, all emitted at the trait's own scope, whose bodies hold that transport's halves as *tokens*: nothing inside any of them is compiled where the service is declared.
 
-Three macros rather than one, because the halves of a service usually live in different crates -- a crate that calls the service can see the contract but has no business seeing the server's backend, a server crate has no use for a client, and a crate that only wants `dispatch` -- a hand-rolled adapter, or a test with no broker in reach -- has no business seeing `lapin`, `tokio` or `futures` either. Each is invoked and placed by the half that wants it, none drags in another, and a crate that wants more than one places more than one.
+Two macros rather than one, and a third for `amqp_rpc`, because the halves of a service usually live in different crates -- a crate that calls the service can see the contract but has no business seeing the server's backend, a server crate has no use for a client, and a crate that only wants `dispatch` -- a hand-rolled adapter, or a test with no broker in reach -- has no business seeing `lapin`, `tokio` or `futures` either. `amqp_rpc` earns the third because one consumer loop over `lapin` serves every service that places it; `http_rest` and `ws_rpc` have no such fixed loop, a server there being the hosting application's own router or socket handler. Each is invoked and placed by the half that wants it, none drags in another, and a crate that wants more than one places more than one.
 
 ```rust,ignore
 // In the crate that declares the service: nothing below is built here.
