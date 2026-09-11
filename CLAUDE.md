@@ -33,7 +33,7 @@ just quick
 # or
 cargo test
 
-# Comprehensive test - all 32 feature combinations (run before commits)
+# Comprehensive test - all 128 feature combinations (run before commits)
 just test
 
 # Test specific feature combinations
@@ -158,17 +158,19 @@ argument — an alias, a branded newtype — calls `with_opaque_type_parameters`
 
 ### Feature Flag System
 
-The crate uses 5 optional features for minimal dependencies:
+The crate uses 7 optional features for minimal dependencies:
 
 - `serde`: Enables Serde attribute parsing and field renaming
 - `zod`: Enables Zod schema generation (v4 syntax)
 - `jsonschema`: Enables `json_schema()` method generation
 - `object_id`: Enables MongoDB ObjectId type support
 - `typescript`: Enables TypeScript type generation
+- `chrono`: Enables chrono date/time type support (`NaiveDate`, `NaiveTime`, `NaiveDateTime`, `DateTime<Tz>`)
+- `dart`: Enables Dart type generation with a JSON codec, and the Dart HTTP client
 
-**Total combinations tested**: 2^5 = 32 (via `cargo-hack` in CI)
+**Total combinations tested**: 2^7 = 128 (via `cargo-hack` in CI)
 
-**Default configuration**: All features enabled
+**Default configuration**: `serde`, `zod`, `jsonschema`, `typescript` (the `object_id`, `chrono` and `dart` features are opt-in)
 
 ## Critical Development Rules
 
@@ -885,7 +887,7 @@ The CI pipeline ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs:
 1. `cargo build --verbose`
 2. `just check` (cargo check + clippy)
 3. `cargo test --verbose` (basic tests)
-4. `just test` (all 32 feature combinations via cargo-hack)
+4. `just test` (all 128 feature combinations via cargo-hack)
 5. Discord notification with build status
 
 **Before pushing**, run `just ci` locally to replicate the CI pipeline.
