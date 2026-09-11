@@ -10,7 +10,10 @@ use super::parse::{
     BodyKind, HttpMethod, OperationDef, OperationInputs, OperationOutcome, PathSegment, ServiceDef,
     parse_service,
 };
-use super::{emitted_trait, exec_service_schema};
+use super::transport::Transport;
+use super::{
+    emitted_trait, exec_service_schema, multipart_envelope_refusal, stream_envelope_refusal,
+};
 use crate::model_schema::exec_model_schema;
 use core::mem::take;
 use proc_macro2::{Delimiter, Group, Span, TokenStream, TokenTree};
@@ -138,6 +141,26 @@ const STREAM_SERVICE: &str = r#"
     }
 "#;
 
+/// A service declaring one `body = "multipart"` operation with a `part(...)` binding, so a file
+/// part is claimed out of the request rather than read off the deserialized message.
+const MULTIPART_SERVICE: &str = r#"
+    pub trait UploadService<Ctx> {
+        #[service_schema_op(http(
+            method = "POST",
+            path = "/documents",
+            body = "multipart",
+            part("file" = attachment),
+            error_status(TooLarge = 413),
+        ))]
+        async fn upload_document(
+            &self,
+            ctx: &Ctx,
+            title: String,
+            attachment: Box<dyn upload_service_schema::BodySource + Send>,
+        ) -> Result<UploadResponse, UploadError>;
+    }
+"#;
+
 /// One item as either macro body emits it: what its doc attributes said, everything ahead of the
 /// block it opens, the keyword that opened it, and that block.
 struct EmittedItem {
@@ -173,6 +196,15 @@ fn expansion_over_amqp_rpc(source: &str) -> TokenStream {
 fn expansion_over_http_rest(source: &str) -> TokenStream {
     exec_service_schema(
         quote! { transports = ["http_rest"] },
+        declared(source).to_token_stream(),
+    )
+}
+
+/// The same expansion for a service that asked for `ws_rpc`, which emits nothing transport-shaped
+/// yet.
+fn expansion_over_ws_rpc(source: &str) -> TokenStream {
+    exec_service_schema(
+        quote! { transports = ["ws_rpc"] },
         declared(source).to_token_stream(),
     )
 }
@@ -1160,6 +1192,82 @@ fn a_service_asking_for_no_transport_is_emitted_the_contract_and_nothing_else() 
         emitted.contains("ExpireCreditRequest :: zod_schema"),
         "and a build with a schema to publish brings each message's along with its type. \
          Got: {emitted}"
+    );
+}
+
+/// `ws_rpc`'s own `emit` publishes nothing yet, but the service still asked for a transport: the
+/// module still anchors at the crate root the way it does for any transport, and nothing
+/// transport-shaped — no `macro_rules!`, no dispatcher, no client — reaches the expansion.
+#[test]
+fn a_service_asking_for_only_ws_rpc_is_emitted_nothing_transport_shaped() {
+    let expansion = expansion_over_ws_rpc(MIXED_SERVICE);
+    let emitted = expansion.to_string();
+    for absent in [
+        "macro_rules",
+        "pub fn dispatch",
+        "IncomingMessage",
+        "pub trait Reply",
+        "pub trait Transport",
+        "pub struct UsageServiceClient",
+        "serde_json",
+        "tracing",
+        "pub struct Context",
+        "pub struct ReplyHandle",
+        "pub async fn serve_until",
+        "lapin",
+    ] {
+        assert!(
+            !emitted.contains(absent),
+            "`{absent}` belongs to a transport, and `ws_rpc` publishes nothing yet. Got: {emitted}"
+        );
+    }
+    assert!(
+        emitted.contains("pub trait UsageService < Ctx >"),
+        "the contract is emitted whatever transport was asked for. Got: {emitted}"
+    );
+    let held = module_body(expansion, "usage_service_schema").to_string();
+    assert!(
+        held.contains("RootAnchor"),
+        "a service that asked for `ws_rpc` still asked for a transport, so the module anchors at \
+         the crate root the same as it does for any other. Got: {held}"
+    );
+}
+
+/// A service declaring both envelope transports together earns one refusal that names both,
+/// rather than one refusal per transport that carries the envelope.
+#[test]
+fn a_streamed_body_beside_both_envelope_transports_is_refused_once_naming_both() {
+    let refused = stream_envelope_refusal(
+        &service(STREAM_SERVICE),
+        &[Transport::AmqpRpc, Transport::HttpRest, Transport::WsRpc],
+    )
+    .unwrap();
+    assert_eq!(
+        refused.to_string(),
+        "service_schema: operation `get_content` declares a streamed body, and this service \
+         also declares `amqp_rpc`, `ws_rpc`\n       \
+         a streamed body has no carrier inside the `{ ok, value, error }` envelope those \
+         transports answer with - drop them from `transports`, or drop `body = \"stream\"` from \
+         this operation"
+    );
+}
+
+/// The multipart guard combines the same way: one refusal, naming every envelope transport the
+/// service declared.
+#[test]
+fn a_multipart_file_part_beside_both_envelope_transports_is_refused_once_naming_both() {
+    let refused = multipart_envelope_refusal(
+        &service(MULTIPART_SERVICE),
+        &[Transport::AmqpRpc, Transport::HttpRest, Transport::WsRpc],
+    )
+    .unwrap();
+    assert_eq!(
+        refused.to_string(),
+        "service_schema: operation `upload_document` declares a multipart file part, and this \
+         service also declares `amqp_rpc`, `ws_rpc`\n       \
+         a file part has no carrier inside the `{ ok, value, error }` envelope those \
+         transports answer with - drop them from `transports`, or drop the `part(...)` binding \
+         and `body = \"multipart\"` from this operation"
     );
 }
 

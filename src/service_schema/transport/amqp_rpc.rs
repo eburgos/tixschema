@@ -479,7 +479,7 @@ fn arm(module: &Ident, operation: &OperationDef) -> TokenStream {
 /// and, last, one more per `part` binding, `http_rest`'s own multipart decode building the local
 /// of the same name. AMQP carries no multipart channel of its own and creates no local binding for
 /// a `part`-claimed identifier here — a service declaring a multipart file part alongside
-/// `amqp_rpc` is refused at the declaration instead, by `multipart_amqp_refusal` in
+/// `amqp_rpc` is refused at the declaration instead, by `multipart_envelope_refusal` in
 /// `service_schema.rs`, before this function's own call is ever reached.
 pub(super) fn call_arguments(operation: &OperationDef) -> Vec<TokenStream> {
     let mut arguments: Vec<TokenStream> = match &operation.inputs {
