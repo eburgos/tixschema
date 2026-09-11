@@ -38,6 +38,9 @@
 //!   per-operation client, in Dart, over the `dart` feature's own types and codec rather than Zod,
 //!   and throwing on failure rather than returning a result union (published only where the `dart`
 //!   feature is on).
+//! - `dart_ws_client()`: the Dart `ws_rpc` sibling — a transport over a sink and a stream, the
+//!   per-operation client, and a dispatcher attachment for a service the app implements (published
+//!   only where the `dart` feature is on).
 //!
 //! # The client and the dispatcher exist only where the Zod surface does
 //!
@@ -83,6 +86,8 @@
 mod client;
 #[cfg(feature = "dart")]
 mod dart_http_client;
+#[cfg(feature = "dart")]
+mod dart_ws_client;
 mod fault;
 #[cfg(feature = "zod")]
 mod http_client;
@@ -122,18 +127,27 @@ pub fn emit(service: &ServiceDef) -> TokenStream {
     }
 }
 
-/// The service's generated Dart `http_rest` client: the transport seam, the exceptions a call
-/// throws, the client class, and the fault helpers every method reaches for — published only where
-/// the `dart` feature publishes the Dart types and codec this client's messages, successes and
-/// errors are written in.
+/// The service's generated Dart clients: the `http_rest` transport seam, the exceptions a call
+/// throws, the client class, and the fault helpers every method reaches for; and the `ws_rpc`
+/// transport over a sink and a stream, its own client and exceptions, and a dispatcher attachment
+/// for a service the app implements — published only where the `dart` feature publishes the Dart
+/// types and codec this client's messages, successes and errors are written in.
 #[cfg(feature = "dart")]
 fn dart_seam(service: &ServiceDef) -> TokenStream {
     let client = dart_http_client::emit(service).join("\n\n");
+    let ws_client = dart_ws_client::emit(service).join("\n\n");
     quote! {
         #[doc = " The service's generated Dart `http_rest` client: the transport seam, the"]
         #[doc = " exceptions a call throws, and the client class."]
         pub fn dart_http_client() -> String {
             #client.to_owned()
+        }
+
+        #[doc = " The service's generated Dart `ws_rpc` client: the transport over a sink and a"]
+        #[doc = " stream, the client class, the exceptions a call throws, and the dispatcher"]
+        #[doc = " attachment."]
+        pub fn dart_ws_client() -> String {
+            #ws_client.to_owned()
         }
     }
 }

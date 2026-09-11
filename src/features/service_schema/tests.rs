@@ -15,6 +15,8 @@
 mod client_tests;
 #[cfg(feature = "dart")]
 mod dart_http_client_tests;
+#[cfg(feature = "dart")]
+mod dart_ws_client_tests;
 #[cfg(feature = "zod")]
 mod http_client_tests;
 #[cfg(feature = "zod")]
@@ -24,6 +26,8 @@ mod service_tests;
 use super::client;
 #[cfg(feature = "dart")]
 use super::dart_http_client;
+#[cfg(feature = "dart")]
+use super::dart_ws_client;
 #[cfg(feature = "zod")]
 use super::http_client;
 #[cfg(feature = "zod")]
@@ -318,6 +322,22 @@ const DART_MULTIPART_HTTP_SERVICE: &str = "
     }
 ";
 
+/// A service exercising both operation shapes `ws_rpc` answers for: a reply operation over a
+/// `Named` message, and a one-way operation. Named for the design's own running example.
+#[cfg(feature = "dart")]
+const DART_WS_SERVICE: &str = "
+    pub trait Ledger<Ctx> {
+        async fn list_transactions(
+            &self,
+            ctx: &Ctx,
+            req: ListTransactionsRequest,
+        ) -> Result<TransactionList, ListError>;
+
+        #[service_schema_op(one_way)]
+        async fn apply_bundle(&self, ctx: &Ctx, req: ApplyBundleRequest);
+    }
+";
+
 #[cfg(feature = "zod")]
 fn client_of(source: &str) -> String {
     client::emit(&parsed(source)).join("\n\n")
@@ -331,6 +351,11 @@ fn http_client_of(source: &str) -> String {
 #[cfg(feature = "dart")]
 fn dart_http_client_of(source: &str) -> String {
     dart_http_client::emit(&parsed(source)).join("\n\n")
+}
+
+#[cfg(feature = "dart")]
+fn dart_ws_client_of(source: &str) -> String {
+    dart_ws_client::emit(&parsed(source)).join("\n\n")
 }
 
 fn parsed(source: &str) -> ServiceDef {
