@@ -50,3 +50,4 @@ tsconfig.tsbuildinfo
 .beads/proxieddb/
 *.gate.lock*
 .remargin/
+.remargin.yaml
