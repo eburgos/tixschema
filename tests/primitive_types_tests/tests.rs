@@ -146,7 +146,7 @@ fn test_primitive_structs_constructible() {
         optional_large_signed: None,
         optional_large_unsigned: None,
     };
-    assert!(large.id.is_empty());
+    assert_eq!(large.id, String::new());
     let mixed = MixedIntegers {
         isize_type: 0,
         large_i64: 0,
@@ -189,7 +189,7 @@ fn test_primitive_structs_constructible() {
         tiny_signed: 0,
         tiny_unsigned: 0,
     };
-    assert!(showcase.array_f64.is_empty());
+    assert_eq!(showcase.array_f64, Vec::<f64>::new());
 }
 
 #[cfg(any(feature = "typescript", feature = "jsonschema", feature = "zod"))]

@@ -351,7 +351,7 @@ pub fn parse_arguments(args: TokenStream) -> Result<ServiceArguments, syn::Error
 fn transport_written(element: &Expr) -> Result<Transport, syn::Error> {
     let Expr::Lit(ExprLit {
         lit: Lit::Str(named),
-        ..
+        attrs: _attrs,
     }) = element
     else {
         return Err(syn::Error::new(element.span(), WRITTEN_SHAPE_MESSAGE));

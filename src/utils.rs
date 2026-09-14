@@ -432,7 +432,10 @@ impl JsSpelling {
     fn group(&mut self, group: &Group) {
         match &group.kind {
             GroupKind::CaptureIndex(_) => {}
-            GroupKind::CaptureName { starts_with_p, .. } => {
+            GroupKind::CaptureName {
+                starts_with_p,
+                name: _name,
+            } => {
                 if *starts_with_p {
                     // `(?P<name>` and `(?<name>` are one construct under two spellings, and the
                     // `P` that tells them apart sits two bytes into the group's span.
@@ -959,7 +962,7 @@ fn collect_doc_lines(attrs: &[Attribute]) -> Option<Vec<String>> {
             && let Meta::NameValue(meta_name_value) = &attr.meta
             && let Expr::Lit(syn::ExprLit {
                 lit: Lit::Str(lit_str),
-                ..
+                attrs: _attrs,
             }) = &meta_name_value.value
         {
             let value = lit_str.value();
@@ -1012,7 +1015,7 @@ fn doc_lines_with_spans(attrs: &[Attribute]) -> Vec<DocLine> {
             && let Meta::NameValue(meta_name_value) = &attr.meta
             && let Expr::Lit(syn::ExprLit {
                 lit: Lit::Str(lit_str),
-                ..
+                attrs: _attrs,
             }) = &meta_name_value.value
         {
             // `resolved_at` keeps the doc line's location (what a diagnostic underlines) while

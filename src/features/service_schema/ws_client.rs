@@ -58,14 +58,24 @@ pub fn emit(service: &ServiceDef) -> Vec<String> {
 /// valid reply against a schema nothing on the wire is meant to satisfy.
 fn success_type(operation: &OperationDef) -> Option<&Type> {
     match &operation.outcome {
-        OperationOutcome::Reply { success, .. } if !is_unit_type(success) => Some(success),
-        OperationOutcome::Reply { .. } | OperationOutcome::OneWay => None,
+        OperationOutcome::Reply {
+            success,
+            error: _error,
+        } if !is_unit_type(success) => Some(success),
+        OperationOutcome::Reply {
+            error: _error,
+            success: _success,
+        } => None,
+        OperationOutcome::OneWay => None,
     }
 }
 
 fn error_type(operation: &OperationDef) -> Option<&Type> {
     match &operation.outcome {
-        OperationOutcome::Reply { error, .. } => Some(error),
+        OperationOutcome::Reply {
+            error,
+            success: _success,
+        } => Some(error),
         OperationOutcome::OneWay => None,
     }
 }

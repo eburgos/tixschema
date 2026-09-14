@@ -3000,7 +3000,7 @@ fn a_required_field_unbound_by_the_path_of_a_bodyless_method_is_refused() {
 /// as "may be absent" on every other surface, and a query-less `GET` is exactly that.
 #[test]
 fn an_optional_field_unbound_by_the_path_of_a_bodyless_method_is_not_refused() {
-    assert!(
+    assert_eq!(
         refusals(
             "pub trait WidgetService<Ctx> {
                 #[service_schema_op(http(method = \"GET\", path = \"/widgets/{widget_id}\", ok_status = 200))]
@@ -3011,8 +3011,8 @@ fn an_optional_field_unbound_by_the_path_of_a_bodyless_method_is_not_refused() {
                     filter: Option<String>,
                 ) -> Result<WidgetResponse, WidgetError>;
             }"
-        )
-        .is_empty()
+        ),
+        Vec::<String>::new()
     );
 }
 

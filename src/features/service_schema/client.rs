@@ -203,11 +203,14 @@ fn method(service: &ServiceDef, operation: &OperationDef) -> String {
     let wire = &operation.wire_name;
     let call = &operation.ts_name;
     let checked = validation(service, operation);
-    let sending = match operation.outcome {
+    let sending = match &operation.outcome {
         OperationOutcome::OneWay => {
             format!("      await transport.notify(\"{wire}\", validated.data);")
         }
-        OperationOutcome::Reply { .. } => format!(
+        OperationOutcome::Reply {
+            error: _error,
+            success: _success,
+        } => format!(
             "      return transport.request<{}>(\"{wire}\", validated.data);",
             answers(&named, operation)
         ),
@@ -232,11 +235,14 @@ fn method_doc(service: &str, operation: &OperationDef) -> String {
 /// without opening the trait.
 fn method_summary(service: &str, operation: &OperationDef) -> String {
     let wire = &operation.wire_name;
-    match operation.outcome {
+    match &operation.outcome {
         OperationOutcome::OneWay => {
             format!("Sends `{wire}` on `{service}`, which expects no reply.")
         }
-        OperationOutcome::Reply { .. } => {
+        OperationOutcome::Reply {
+            error: _error,
+            success: _success,
+        } => {
             format!("Calls `{wire}` on `{service}` and waits for the answer.")
         }
     }
@@ -249,12 +255,15 @@ fn validation(service: &ServiceDef, operation: &OperationDef) -> String {
     let prefix = RenameRule::CamelCase.apply_to_variant(&named);
     let wire = &operation.wire_name;
     let schema = message::schema(operation);
-    let refusal = match operation.outcome {
+    let refusal = match &operation.outcome {
         OperationOutcome::OneWay => format!(
             "        throw {prefix}Refused({prefix}OutboundFault(\"{wire}\", \
              validated.error.issues));"
         ),
-        OperationOutcome::Reply { .. } => format!(
+        OperationOutcome::Reply {
+            error: _error,
+            success: _success,
+        } => format!(
             "        return {{\n          \
              ok: false,\n          \
              error: {{\n            \
@@ -274,7 +283,7 @@ fn validation(service: &ServiceDef, operation: &OperationDef) -> String {
 /// What a method's `JSDoc` says it throws. Only a one-way method throws at all — a replying one
 /// answers its refusal into the failure arm it already has.
 fn throws_clause(service: &str, operation: &OperationDef) -> String {
-    match operation.outcome {
+    match &operation.outcome {
         OperationOutcome::OneWay => format!(
             "   * @throws {{{service}Refusal}} when the message fails its own schema. The \
              operation\n   \
@@ -282,7 +291,10 @@ fn throws_clause(service: &str, operation: &OperationDef) -> String {
              transport\n   \
              * is still never reached."
         ),
-        OperationOutcome::Reply { .. } => String::new(),
+        OperationOutcome::Reply {
+            error: _error,
+            success: _success,
+        } => String::new(),
     }
 }
 

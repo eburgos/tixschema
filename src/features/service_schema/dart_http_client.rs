@@ -254,7 +254,10 @@ fn stream_success_dart_type(shape: &HttpShape, success: &Type) -> String {
 fn return_type(operation: &OperationDef, shape: &HttpShape) -> String {
     match &operation.outcome {
         OperationOutcome::OneWay => "Future<void>".to_owned(),
-        OperationOutcome::Reply { success, .. } => match shape.body_kind {
+        OperationOutcome::Reply {
+            success,
+            error: _error,
+        } => match shape.body_kind {
             BodyKind::Bytes => format!("Future<{}>", dart_type_of(success)),
             BodyKind::Stream => format!("Future<{}>", stream_success_dart_type(shape, success)),
             BodyKind::Json | BodyKind::Multipart => {

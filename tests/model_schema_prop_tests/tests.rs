@@ -288,12 +288,12 @@ fn test_model_schema_prop_structs_constructible() {
         nbf: 0,
         sub: String::new(),
     };
-    assert!(account.aud.is_empty());
+    assert_eq!(account.aud, String::new());
     let array_literal = ArrayLiteral {
         id: String::new(),
         literal_array: Vec::new(),
     };
-    assert!(array_literal.id.is_empty());
+    assert_eq!(array_literal.id, String::new());
     let non_string_literals = NonStringLiterals {
         id: String::new(),
         is_active: true,
@@ -305,7 +305,7 @@ fn test_model_schema_prop_structs_constructible() {
         fixed_field: String::new(),
         normal_field: String::new(),
     };
-    assert!(combined.fixed_field.is_empty());
+    assert_eq!(combined.fixed_field, String::new());
     let min_length = MinLengthTest {
         description: String::new(),
         name: String::new(),
@@ -314,23 +314,23 @@ fn test_model_schema_prop_structs_constructible() {
         tags: Vec::new(),
         username: String::new(),
     };
-    assert!(min_length.description.is_empty());
+    assert_eq!(min_length.description, String::new());
     let multiple = MultipleLiterals {
         id: String::new(),
         name: String::new(),
         type_field: String::new(),
         version: String::new(),
     };
-    assert!(multiple.id.is_empty());
+    assert_eq!(multiple.id, String::new());
     let optional_literal = OptionalLiteral {
         id: String::new(),
         optional_type: None,
     };
-    assert!(optional_literal.id.is_empty());
+    assert_eq!(optional_literal.id, String::new());
     let inner = Inner {
         value: String::new(),
     };
-    assert!(inner.value.is_empty());
+    assert_eq!(inner.value, String::new());
     let ts_optional = TsOptionalStruct {
         f: None,
         g: None,
@@ -357,7 +357,10 @@ fn test_model_schema_prop_structs_constructible() {
 #[test]
 fn test_ts_optional_variant_constructible() {
     let variant = TsOptionalVariant::FilterPart { filter: None };
-    assert!(matches!(variant, TsOptionalVariant::FilterPart { .. }));
+    assert!(matches!(
+        variant,
+        TsOptionalVariant::FilterPart { filter: _filter }
+    ));
 }
 
 #[test]

@@ -418,7 +418,7 @@ fn every_serde_written_oid_payload_satisfies_the_unified_spelling() {
             &mut written,
         );
     }
-    assert!(!written.is_empty());
+    assert_ne!(written, Vec::<serde_json::Value>::new());
 
     for oid_object in written {
         let members = oid_object.as_object().unwrap();

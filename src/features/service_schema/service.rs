@@ -53,11 +53,14 @@ fn arm(service: &ServiceDef, operation: &OperationDef) -> String {
     let wire = &operation.wire_name;
     let call = &operation.ts_name;
     let received = payload_check(service, operation);
-    let answering = match operation.outcome {
+    let answering = match &operation.outcome {
         OperationOutcome::OneWay => {
             format!("        await impl.{call}(ctx, received.data);\n        return undefined;")
         }
-        OperationOutcome::Reply { .. } => {
+        OperationOutcome::Reply {
+            error: _error,
+            success: _success,
+        } => {
             format!("        return impl.{call}(ctx, received.data);")
         }
     };
@@ -243,11 +246,14 @@ fn implementation_answers(service: &str, operation: &OperationDef) -> String {
 /// A one-line summary for the member's own `JSDoc`.
 fn method_summary(service: &str, operation: &OperationDef) -> String {
     let wire = &operation.wire_name;
-    match operation.outcome {
+    match &operation.outcome {
         OperationOutcome::OneWay => {
             format!("Handles `{wire}` on `{service}`, which expects no reply.")
         }
-        OperationOutcome::Reply { .. } => {
+        OperationOutcome::Reply {
+            error: _error,
+            success: _success,
+        } => {
             format!("Handles `{wire}` on `{service}` and answers it.")
         }
     }

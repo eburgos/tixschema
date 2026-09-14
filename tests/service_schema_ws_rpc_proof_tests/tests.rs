@@ -497,7 +497,7 @@ fn a_failed_validation_becomes_a_fault_through_the_wire() {
             "service": "DocumentSession",
         }),
     );
-    assert!(harness.back_end.reached().is_empty());
+    assert_eq!(harness.back_end.reached(), Vec::<String>::new());
 }
 
 #[test]

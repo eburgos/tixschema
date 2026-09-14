@@ -253,13 +253,16 @@ fn method(service: &ServiceDef, operation: &OperationDef, has_multipart: bool) -
 /// named, exactly as the AMQP client's own outbound check does.
 fn validation_stmt(prefix: &str, operation: &OperationDef, wire: &str) -> String {
     let schema = message::schema(operation);
-    let refusal = match operation.outcome {
+    let refusal = match &operation.outcome {
         OperationOutcome::OneWay => format!(
             "        throw {prefix}HttpRefused(\n          \
              {prefix}HttpOutboundFault(\"{wire}\", validated.error.issues),\n        \
              );\n"
         ),
-        OperationOutcome::Reply { .. } => format!(
+        OperationOutcome::Reply {
+            error: _error,
+            success: _success,
+        } => format!(
             "        return {{\n          \
              ok: false,\n          \
              error: {{\n            \
@@ -461,13 +464,16 @@ fn send_stmt(
     method_str: &str,
     has_multipart: bool,
 ) -> String {
-    let failure = match operation.outcome {
+    let failure = match &operation.outcome {
         OperationOutcome::OneWay => format!(
             "        throw {prefix}HttpRefused(\n          \
              {prefix}HttpTransportFailure(\"{wire}\", String(uncarried)),\n        \
              );\n"
         ),
-        OperationOutcome::Reply { .. } => format!(
+        OperationOutcome::Reply {
+            error: _error,
+            success: _success,
+        } => format!(
             "        return {{\n          \
              ok: false,\n          \
              error: {{\n            \

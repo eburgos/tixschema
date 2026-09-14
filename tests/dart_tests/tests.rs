@@ -296,7 +296,7 @@ fn test_document_is_constructible() {
     let document = Document {
         id: ObjectId::new(),
     };
-    assert!(!document.id.to_hex().is_empty());
+    assert_ne!(document.id.to_hex(), String::new());
 }
 
 #[test]

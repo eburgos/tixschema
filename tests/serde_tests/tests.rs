@@ -186,18 +186,18 @@ fn test_serde_types_constructible() {
     let event = Event::Deleted {
         user_id: String::new(),
     };
-    assert!(matches!(event, Event::Deleted { .. }));
+    assert!(matches!(event, Event::Deleted { user_id: _user_id }));
     let lowercase = Lowercase {
         field_one: String::new(),
         field_two: String::new(),
     };
-    assert!(lowercase.field_one.is_empty());
+    assert_eq!(lowercase.field_one, String::new());
     let optional = OptionalFields {
         another_optional: None,
         optional_field: None,
         required_field: String::new(),
     };
-    assert!(optional.required_field.is_empty());
+    assert_eq!(optional.required_field, String::new());
     let status = Status::Active;
     assert!(matches!(status, Status::Active));
     let user = UserWithSerde {
@@ -208,7 +208,7 @@ fn test_serde_types_constructible() {
         last_name: String::new(),
         user_id: String::new(),
     };
-    assert!(user.user_id.is_empty());
+    assert_eq!(user.user_id, String::new());
     let message = Message {
         id: String::new(),
         reply_to: None,
@@ -217,19 +217,24 @@ fn test_serde_types_constructible() {
     let delivery = Delivery::Sent {
         sent_at: String::new(),
     };
-    assert!(matches!(delivery, Delivery::Sent { .. }));
+    assert!(matches!(delivery, Delivery::Sent { sent_at: _sent_at }));
     let envelope = Envelope {
         body: Body::Reply {
             reply_to: String::new(),
         },
         id: String::new(),
     };
-    assert!(matches!(envelope.body, Body::Reply { .. }));
+    assert!(matches!(
+        envelope.body,
+        Body::Reply {
+            reply_to: _reply_to
+        }
+    ));
     let plain = PlainKeys {
         reference: String::new(),
         user_id: String::new(),
     };
-    assert!(plain.reference.is_empty());
+    assert_eq!(plain.reference, String::new());
 }
 
 #[test]

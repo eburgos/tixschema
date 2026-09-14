@@ -1651,7 +1651,7 @@ fn collapsed_wrapper_def(
 fn literal_array_length(len: &syn::Expr) -> Option<usize> {
     let syn::Expr::Lit(syn::ExprLit {
         lit: syn::Lit::Int(literal),
-        ..
+        attrs: _attrs,
     }) = len
     else {
         return None;

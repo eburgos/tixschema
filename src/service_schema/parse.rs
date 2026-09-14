@@ -1890,18 +1890,20 @@ fn body_kind_refusals(raw: &RawHttp, outcome: &OperationOutcome) -> Option<syn::
             BYTES_BODY_SUCCESS_SHAPE_MESSAGE,
             match outcome {
                 OperationOutcome::OneWay => false,
-                OperationOutcome::Reply { success, .. } => {
-                    is_bytes_success_shape(success, header_out_len)
-                }
+                OperationOutcome::Reply {
+                    success,
+                    error: _error,
+                } => is_bytes_success_shape(success, header_out_len),
             },
         ),
         BodyKind::Stream => (
             STREAM_BODY_SUCCESS_SHAPE_MESSAGE,
             match outcome {
                 OperationOutcome::OneWay => false,
-                OperationOutcome::Reply { success, .. } => {
-                    is_stream_success_shape(success, header_out_len)
-                }
+                OperationOutcome::Reply {
+                    success,
+                    error: _error,
+                } => is_stream_success_shape(success, header_out_len),
             },
         ),
     };
@@ -1910,7 +1912,10 @@ fn body_kind_refusals(raw: &RawHttp, outcome: &OperationOutcome) -> Option<syn::
     }
     let spanned = match outcome {
         OperationOutcome::OneWay => declared.span(),
-        OperationOutcome::Reply { success, .. } => success.span(),
+        OperationOutcome::Reply {
+            success,
+            error: _error,
+        } => success.span(),
     };
     Some(syn::Error::new(spanned, shape_message))
 }
@@ -1928,8 +1933,14 @@ fn body_kind_refusals(raw: &RawHttp, outcome: &OperationOutcome) -> Option<syn::
 pub fn default_ok_status(outcome: &OperationOutcome) -> u16 {
     match outcome {
         OperationOutcome::OneWay => 204,
-        OperationOutcome::Reply { success, .. } if is_unit_type(success) => 204,
-        OperationOutcome::Reply { .. } => 200,
+        OperationOutcome::Reply {
+            success,
+            error: _error,
+        } if is_unit_type(success) => 204,
+        OperationOutcome::Reply {
+            error: _error,
+            success: _success,
+        } => 200,
     }
 }
 
@@ -2162,7 +2173,10 @@ fn header_out_refusals(
         OperationOutcome::OneWay => raw.header_out.first().map(|first| {
             syn::Error::new(first.span(), header_out_on_one_way_message(operation_ident))
         }),
-        OperationOutcome::Reply { success, .. } => {
+        OperationOutcome::Reply {
+            success,
+            error: _error,
+        } => {
             // `body = "bytes"` and `body = "stream"` each compose `header_out` onto their own
             // fixed shape (the bytes pair, or the streamed answer) rather than an ordinary tuple
             // with no further meaning of its own — `body_kind_refusals` checks the resulting arity

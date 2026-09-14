@@ -190,7 +190,7 @@ fn test_no_example_no_method() {
     let no_example = NoExample {
         value: String::new(),
     };
-    assert!(no_example.value.is_empty());
+    assert_eq!(no_example.value, String::new());
 
     #[cfg(feature = "zod")]
     {

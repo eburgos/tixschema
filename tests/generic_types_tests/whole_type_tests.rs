@@ -720,12 +720,15 @@ fn every_fixture_expands_in_this_build() {
         stamp,
         tags: Vec::new(),
     };
-    assert!(entry.tags.is_empty());
+    assert_eq!(entry.tags, Vec::<String>::new());
 
     let event = ArchiveEvent::Purged {
         reason: "expired".to_owned(),
     };
-    assert!(matches!(event, ArchiveEvent::<String>::Purged { .. }));
+    assert!(matches!(
+        event,
+        ArchiveEvent::<String>::Purged { reason: _reason }
+    ));
     let wire = ArchiveWire::<String>::Counted { count: 2_u32 };
     assert!(matches!(wire, ArchiveWire::Counted { count: 2_u32 }));
 

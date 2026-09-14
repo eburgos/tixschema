@@ -65,7 +65,7 @@ fn test_basic_structs_constructible() {
         is_active: false,
         name: String::new(),
     };
-    assert!(basic.id.is_empty());
+    assert_eq!(basic.id, String::new());
     let empty = EmptyStruct;
     assert_eq!(format!("{empty:?}"), "EmptyStruct");
     let optionals = UserWithOptionals {
@@ -75,7 +75,7 @@ fn test_basic_structs_constructible() {
         name: String::new(),
         nickname: None,
     };
-    assert!(optionals.id.is_empty());
+    assert_eq!(optionals.id, String::new());
 }
 
 #[test]
@@ -219,7 +219,7 @@ fn test_empty_struct_json_schema() {
     assert!(properties.is_empty());
 
     let required = schema["required"].as_array().unwrap();
-    assert!(required.is_empty());
+    assert_eq!(required, &Vec::<Value>::new());
 }
 
 #[test]

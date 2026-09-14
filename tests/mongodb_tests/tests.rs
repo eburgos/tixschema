@@ -171,7 +171,7 @@ fn test_mongodb_structs_constructible() {
         references: Vec::new(),
         title: String::new(),
     };
-    assert!(complex.title.is_empty());
+    assert_eq!(complex.title, String::new());
     let document = Document {
         author_id: ObjectId::new(),
         id: ObjectId::new(),
@@ -181,44 +181,44 @@ fn test_mongodb_structs_constructible() {
         references: Vec::new(),
         title: String::new(),
     };
-    assert!(document.title.is_empty());
+    assert_eq!(document.title, String::new());
     let post = Post {
         author_id: ObjectId::new(),
         id: ObjectId::new(),
         parent_id: None,
         title: String::new(),
     };
-    assert!(post.title.is_empty());
+    assert_eq!(post.title, String::new());
     let hashmap_obj = UserWithHashMapObjectId {
         id: ObjectId::new(),
         name: String::new(),
         relationships: HashMap::new(),
     };
-    assert!(hashmap_obj.name.is_empty());
+    assert_eq!(hashmap_obj.name, String::new());
     let array_obj = UserWithObjectIdArray {
         friend_ids: Vec::new(),
         id: ObjectId::new(),
         name: String::new(),
     };
-    assert!(array_obj.name.is_empty());
+    assert_eq!(array_obj.name, String::new());
     let map_obj = UserWithObjectIdMap {
         id: ObjectId::new(),
         name: String::new(),
         relationships: HashMap::new(),
     };
-    assert!(map_obj.name.is_empty());
+    assert_eq!(map_obj.name, String::new());
     let optional_id = UserWithOptionalId {
         email: String::new(),
         id: None,
         name: String::new(),
     };
-    assert!(optional_id.name.is_empty());
+    assert_eq!(optional_id.name, String::new());
     let other_map = UserWithOtherHashMapObjectId {
         id: ObjectId::new(),
         metadata: HashMap::new(),
         name: String::new(),
     };
-    assert!(other_map.name.is_empty());
+    assert_eq!(other_map.name, String::new());
 }
 
 #[test]

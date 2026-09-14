@@ -388,7 +388,7 @@ fn test_untagged_entry_constructible() {
             sample_values: Vec::new(),
         },
     };
-    assert!(entry.data_element_id.is_empty());
+    assert_eq!(entry.data_element_id, String::new());
 }
 
 #[test]

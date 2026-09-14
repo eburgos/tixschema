@@ -1348,7 +1348,7 @@ fn test_flatten_structs_constructible() {
     let base = BasePart {
         owner: String::new(),
     };
-    assert!(base.owner.is_empty());
+    assert_eq!(base.owner, String::new());
     let extra = ExtraPart { priority: 0 };
     assert_eq!(extra.priority, 0_i64);
     let flatten_only = FlattenOnly {
@@ -1358,7 +1358,9 @@ fn test_flatten_structs_constructible() {
     };
     assert!(matches!(
         flatten_only.variant,
-        DataElementSampleValueVariant::Alphanumeric { .. }
+        DataElementSampleValueVariant::Alphanumeric {
+            sample_values: _sample_values
+        }
     ));
     let multi = MultiFlatten {
         base: BasePart {
@@ -1367,12 +1369,12 @@ fn test_flatten_structs_constructible() {
         extra: ExtraPart { priority: 0 },
         id: String::new(),
     };
-    assert!(multi.id.is_empty());
+    assert_eq!(multi.id, String::new());
     let no_flatten = NoFlatten {
         id: String::new(),
         name: String::new(),
     };
-    assert!(no_flatten.id.is_empty());
+    assert_eq!(no_flatten.id, String::new());
 }
 
 #[test]

@@ -157,7 +157,7 @@ fn test_edge_case_structs_constructible() {
         street: String::new(),
         zip_code: String::new(),
     };
-    assert!(address.city.is_empty());
+    assert_eq!(address.city, String::new());
     let original = OriginalBugReproduction {
         problematic_map: HashMap::new(),
         string_to_optional_vec_u64: HashMap::new(),
@@ -195,16 +195,16 @@ fn test_edge_case_structs_constructible() {
         id: String::new(),
         name: String::new(),
     };
-    assert!(user.id.is_empty());
+    assert_eq!(user.id, String::new());
 }
 
 #[cfg(all(test, any(feature = "typescript", feature = "zod", feature = "serde")))]
 #[test]
 fn test_edge_case_aliases_and_complex_constructible() {
     let optional_nested: OptionalNestedValue = Vec::new();
-    assert!(optional_nested.is_empty());
+    assert_eq!(optional_nested, Vec::new());
     let quadruple: QuadrupleNestedValue = Vec::new();
-    assert!(quadruple.is_empty());
+    assert_eq!(quadruple, Vec::new());
     let complex = ReallyComplexTest {
         optional_nested: None,
         quadruple_nested: HashMap::new(),

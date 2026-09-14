@@ -198,9 +198,14 @@ fn route_table(service: &ServiceDef) -> TokenStream {
         let wire = &operation.wire_name;
         let ok_status = shape.ok_status;
         let error_statuses: Vec<u16> = if shape.error_status.is_empty() {
-            match operation.outcome {
+            match &operation.outcome {
                 OperationOutcome::OneWay => Vec::new(),
-                OperationOutcome::Reply { .. } => vec![DEFAULT_BINDING_ERROR_STATUS],
+                OperationOutcome::Reply {
+                    error: _error,
+                    success: _success,
+                } => {
+                    vec![DEFAULT_BINDING_ERROR_STATUS]
+                }
             }
         } else {
             shape.error_status.iter().map(|(_, code)| *code).collect()
@@ -1649,7 +1654,11 @@ fn streamed_transport_items(outgoing_request: &TokenStream, module: &Ident) -> T
 /// `Deserialize` of its own, so this is what stands in for one on the way back into a fault minted
 /// through the service's own constructors.
 fn client_fault_mirror_types(generated: &Generated) -> TokenStream {
-    let Generated { fault, .. } = generated;
+    let Generated {
+        fault,
+        call_error: _call_error,
+        module: _module,
+    } = generated;
     quote! {
         #[derive(::serde::Deserialize)]
         #[serde(rename_all = "camelCase")]
@@ -1701,7 +1710,11 @@ fn client_fault_mirror_types(generated: &Generated) -> TokenStream {
 /// part of [`client_fault_mirror_types`]'s own `impl`, so every function the macro emits still
 /// groups after every type and every impl.
 fn client_fault_mirror_fn(generated: &Generated) -> TokenStream {
-    let Generated { fault, .. } = generated;
+    let Generated {
+        fault,
+        call_error: _call_error,
+        module: _module,
+    } = generated;
     quote! {
         fn fault_from_body(operation: &str, body: &[u8]) -> #fault {
             match ::serde_json::from_slice::<FaultOnTheWire>(body) {

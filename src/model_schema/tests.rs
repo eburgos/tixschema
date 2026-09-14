@@ -5160,11 +5160,14 @@ fn a_deferred_answer_reads_the_record_the_consult_would_have_read() {
 
     assert!(ask_about(&brand_over("FlatlyString")));
     seed_value_shape("FlatlyString", None);
-    assert!(deferred_refusals_for("FlatlyString").is_empty());
+    assert_eq!(deferred_refusals_for("FlatlyString"), Vec::<String>::new());
 
     assert!(ask_about(&brand_over("PublishesUnwritten<String>")));
     seed_published_shape("PublishesUnwritten", PublishedShape::Parameter(1));
-    assert!(deferred_refusals_for("PublishesUnwritten").is_empty());
+    assert_eq!(
+        deferred_refusals_for("PublishesUnwritten"),
+        Vec::<String>::new()
+    );
 }
 
 /// What a tuple struct records: serde writes one slot as that slot's value alone, so the schema is
@@ -5647,7 +5650,7 @@ fn a_shape_the_parser_cannot_read_is_refused() {
 #[test]
 fn an_unparseable_argument_list_is_refused() {
     let rejection = args_rejection(quote::quote! { name = }).unwrap();
-    assert!(!rejection.is_empty());
+    assert_ne!(rejection, String::new());
 }
 
 /// An argument the parser reads before the refused one still lands: the refusal reports the
@@ -6864,7 +6867,7 @@ fn assert_points_only_at(tokens: &proc_macro2::TokenStream, expected: &str, cont
 fn the_span_probe_sees_an_unlocated_token_stream() {
     let tokens = quote::quote! { const _: () = {}; };
     assert!(tokens.span().source_text().is_none());
-    assert!(located_source_texts(&tokens).is_empty());
+    assert_eq!(located_source_texts(&tokens), Vec::<String>::new());
 }
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
@@ -11249,7 +11252,7 @@ fn a_flattened_variant_field_is_split_out_of_the_variants_members() {
 #[cfg(feature = "serde")]
 #[test]
 fn a_flattened_variant_field_over_an_unrecorded_name_is_not_refused() {
-    assert!(
+    assert_eq!(
         discriminated_guard_errors(syn::parse_quote! {
             enum Probe {
                 Named {
@@ -11258,8 +11261,8 @@ fn a_flattened_variant_field_over_an_unrecorded_name_is_not_refused() {
                     x: String,
                 },
             }
-        })
-        .is_empty()
+        }),
+        Vec::<String>::new()
     );
 }
 
@@ -11483,7 +11486,7 @@ fn a_flattened_untagged_variant_field_over_a_multi_branch_source_is_accepted() {
 #[cfg(feature = "serde")]
 #[test]
 fn a_flattened_untagged_variant_field_over_a_single_key_set_source_is_not_refused() {
-    assert!(
+    assert_eq!(
         untagged_guard_errors(syn::parse_quote! {
             enum Probe {
                 Named {
@@ -11492,8 +11495,8 @@ fn a_flattened_untagged_variant_field_over_a_single_key_set_source_is_not_refuse
                     x: String,
                 },
             }
-        })
-        .is_empty()
+        }),
+        Vec::<String>::new()
     );
 }
 

@@ -356,7 +356,9 @@ pub(super) fn answer_reader(service: &ServiceDef, generated: &Generated) -> Toke
 /// underneath it, so `http_rest`'s client reads the same answer type off the same declaration.
 pub(super) fn answers(operation: &OperationDef, generated: &Generated) -> TokenStream {
     let Generated {
-        call_error, fault, ..
+        call_error,
+        fault,
+        module: _module,
     } = generated;
     match &operation.outcome {
         OperationOutcome::OneWay => quote! { Result<(), #fault> },
@@ -388,7 +390,10 @@ pub(super) fn arm(module: &Ident, operation: &OperationDef) -> TokenStream {
                 record_panic(#wire, &panicked);
             }
         },
-        OperationOutcome::Reply { .. } => {
+        OperationOutcome::Reply {
+            error: _error,
+            success: _success,
+        } => {
             let names = header_out_names(operation);
             if names.is_empty() {
                 quote! {
@@ -881,10 +886,15 @@ fn consumer_loop_helpers() -> TokenStream {
 /// Whether the service declares an operation that answers, which is what reads a reply back and
 /// therefore the only thing that needs a fault mirror or an answer reader.
 pub(super) fn declares_a_reply(service: &ServiceDef) -> bool {
-    service
-        .operations
-        .iter()
-        .any(|operation| matches!(operation.outcome, OperationOutcome::Reply { .. }))
+    service.operations.iter().any(|operation| {
+        matches!(
+            &operation.outcome,
+            OperationOutcome::Reply {
+                error: _error,
+                success: _success
+            }
+        )
+    })
 }
 
 /// Whether a request-and-reply operation's success is the unit type and it carries no
@@ -892,8 +902,10 @@ pub(super) fn declares_a_reply(service: &ServiceDef) -> bool {
 /// carried to exist. A `header_out` success is a tuple regardless of its first element, so that
 /// shape always reads through the ordinary answer reader instead.
 fn takes_unit_answer(operation: &OperationDef) -> bool {
-    matches!(&operation.outcome, OperationOutcome::Reply { success, .. } if is_unit_type(success))
-        && header_out_shape(operation).is_none()
+    matches!(
+        &operation.outcome,
+        OperationOutcome::Reply { success, error: _error } if is_unit_type(success)
+    ) && header_out_shape(operation).is_none()
 }
 
 /// Whether the service declares an operation [`takes_unit_answer`] of, which is what needs the
@@ -906,7 +918,13 @@ pub(super) fn declares_a_unit_reply(service: &ServiceDef) -> bool {
 /// [`take a unit answer`](takes_unit_answer), which is what needs the ordinary answer reader.
 pub(super) fn declares_an_ordinary_reply(service: &ServiceDef) -> bool {
     service.operations.iter().any(|operation| {
-        matches!(operation.outcome, OperationOutcome::Reply { .. }) && !takes_unit_answer(operation)
+        matches!(
+            &operation.outcome,
+            OperationOutcome::Reply {
+                error: _error,
+                success: _success
+            }
+        ) && !takes_unit_answer(operation)
     })
 }
 
@@ -1138,7 +1156,11 @@ pub(super) fn fault_mirror() -> TokenStream {
 /// a literal: the fields are private and this expands outside the module they are private to. Each
 /// kind therefore carries exactly what its own constructor carries.
 pub(super) fn fault_mirror_readers(generated: &Generated) -> TokenStream {
-    let Generated { fault, .. } = generated;
+    let Generated {
+        fault,
+        call_error: _call_error,
+        module: _module,
+    } = generated;
     quote! {
         impl FaultOnTheWire {
             /// The fault itself, minted through the constructors the service's own module
@@ -1252,7 +1274,9 @@ fn header_in_reads(module: &Ident, operation: &OperationDef) -> TokenStream {
     let wire = &operation.wire_name;
     let reads = header_in_bindings(operation).iter().map(|header| {
         let HeaderIn {
-            name, parameter, ..
+            name,
+            parameter,
+            ty: _ty,
         } = header;
         // No `: #ty` here: the argument's own type is the author's, and this arm is never the
         // module it is nameable from. Its type is instead inferred entirely from
@@ -1309,7 +1333,11 @@ fn header_out_shape(operation: &OperationDef) -> Option<(Vec<String>, Type, Vec<
     if binding.header_out.is_empty() {
         return None;
     }
-    let OperationOutcome::Reply { success, .. } = &operation.outcome else {
+    let OperationOutcome::Reply {
+        success,
+        error: _error,
+    } = &operation.outcome
+    else {
         return None;
     };
     let Type::Tuple(tuple) = success.as_ref() else {
@@ -1432,12 +1460,20 @@ pub(super) fn incoming_message_accessors(declares_header_in: bool) -> TokenStrea
 /// message has passed its own validator, which is what makes the never-called-transport case
 /// observable.
 pub(super) fn method(operation: &OperationDef, generated: &Generated) -> TokenStream {
-    let Generated { module, .. } = generated;
+    let Generated {
+        module,
+        call_error: _call_error,
+        fault: _fault,
+    } = generated;
     let named = &operation.ident;
     let check = message_validator_ident(operation);
     let (message_taken, packed) = call_message(operation, module);
     let header_taken = header_in_bindings(operation).iter().map(|header| {
-        let HeaderIn { parameter, ty, .. } = header;
+        let HeaderIn {
+            parameter,
+            ty,
+            name: _name,
+        } = header;
         quote! { #parameter: #ty }
     });
     let taken: Vec<TokenStream> = message_taken.into_iter().chain(header_taken).collect();
@@ -1474,7 +1510,9 @@ fn outbound_headers(operation: &OperationDef, generated: &Generated) -> TokenStr
     }
     let pushes = bindings.iter().map(|header| {
         let HeaderIn {
-            name, parameter, ..
+            name,
+            parameter,
+            ty: _ty,
         } = header;
         let refusal = header_encode_refusal(operation, generated, name);
         quote! {
@@ -1502,13 +1540,20 @@ fn header_encode_refusal(
     name: &str,
 ) -> TokenStream {
     let Generated {
-        call_error, fault, ..
+        call_error,
+        fault,
+        module: _module,
     } = generated;
     let wire = &operation.wire_name;
     let built = quote! { #fault::failed_validation(#wire, Some(#name), &detail) };
-    match operation.outcome {
+    match &operation.outcome {
         OperationOutcome::OneWay => quote! { return Err(#built); },
-        OperationOutcome::Reply { .. } => quote! { return Err(#call_error::Fault(#built)); },
+        OperationOutcome::Reply {
+            error: _error,
+            success: _success,
+        } => {
+            quote! { return Err(#call_error::Fault(#built)); }
+        }
     }
 }
 
@@ -1603,7 +1648,7 @@ fn method_doc(operation: &OperationDef) -> String {
     let carried = &operation.wire_name;
     let context = " No context is taken. A context is what an implementation needs and a caller \
                     has nothing to hand one to, so a call carries the message and nothing else.";
-    match operation.outcome {
+    match &operation.outcome {
         OperationOutcome::OneWay => format!(
             " Sends `{carried}`, which expects no reply.\n\n\
              Nothing is awaited beyond the send, there being no reply to carry an error.\n\n\
@@ -1614,7 +1659,10 @@ fn method_doc(operation: &OperationDef) -> String {
              message the transport could not put out comes back as a `transport-failure` fault \
              carrying what the transport said."
         ),
-        OperationOutcome::Reply { .. } => format!(
+        OperationOutcome::Reply {
+            error: _error,
+            success: _success,
+        } => format!(
             " Calls `{carried}` and waits for the answer.\n\n\
             {context}\n\n\
              # Errors\n\n\
@@ -1646,9 +1694,14 @@ pub(super) fn outbound_refusal(operation: &OperationDef, generated: &Generated) 
             &$crate::#module::violation_detail(&violations),
         )
     };
-    match operation.outcome {
+    match &operation.outcome {
         OperationOutcome::OneWay => quote! { return Err(#built); },
-        OperationOutcome::Reply { .. } => quote! { return Err(#call_error::Fault(#built)); },
+        OperationOutcome::Reply {
+            error: _error,
+            success: _success,
+        } => {
+            quote! { return Err(#call_error::Fault(#built)); }
+        }
     }
 }
 

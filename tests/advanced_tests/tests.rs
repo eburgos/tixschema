@@ -195,7 +195,7 @@ fn test_advanced_types_constructible() {
         street: String::new(),
         zip_code: String::new(),
     };
-    assert!(address.city.is_empty());
+    assert_eq!(address.city, String::new());
     let settings = CompanySettings {
         allow_remote_work: false,
         health_insurance_provider: None,
@@ -211,14 +211,22 @@ fn test_advanced_types_constructible() {
         name: String::new(),
         settings,
     };
-    assert!(company.id.is_empty());
+    assert_eq!(company.id, String::new());
     let event = ComplexEvent::SystemMaintenance {
         affected_services: Vec::new(),
         estimated_duration: 0,
         notification_sent: false,
         scheduled_start: String::new(),
     };
-    assert!(matches!(event, ComplexEvent::SystemMaintenance { .. }));
+    assert!(matches!(
+        event,
+        ComplexEvent::SystemMaintenance {
+            affected_services: _affected_services,
+            estimated_duration: _estimated_duration,
+            notification_sent: _notification_sent,
+            scheduled_start: _scheduled_start,
+        }
+    ));
     let documented = DocumentedUser {
         email: String::new(),
         id: String::new(),
@@ -226,7 +234,7 @@ fn test_advanced_types_constructible() {
         metadata: None,
         name: String::new(),
     };
-    assert!(documented.id.is_empty());
+    assert_eq!(documented.id, String::new());
     let edge = EdgeCases {
         booleans: Vec::new(),
         float_number: 0.0,
@@ -242,19 +250,25 @@ fn test_advanced_types_constructible() {
         strings: Vec::new(),
         tiny_number: 0,
     };
-    assert!(edge.booleans.is_empty());
+    assert_eq!(edge.booleans, Vec::<bool>::new());
     let item = PurchaseItem {
         discount_applied: None,
         product_id: String::new(),
         quantity: 0,
         unit_price: 0,
     };
-    assert!(item.product_id.is_empty());
+    assert_eq!(item.product_id, String::new());
     let plan = RetirementPlan::Roth {
         contribution_limit: 0,
         employer_contribution: false,
     };
-    assert!(matches!(plan, RetirementPlan::Roth { .. }));
+    assert!(matches!(
+        plan,
+        RetirementPlan::Roth {
+            contribution_limit: _contribution_limit,
+            employer_contribution: _employer_contribution,
+        }
+    ));
 }
 
 #[cfg(all(feature = "typescript", feature = "zod"))]

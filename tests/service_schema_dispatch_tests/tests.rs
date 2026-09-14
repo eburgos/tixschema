@@ -300,8 +300,11 @@ pub mod a_message_annotated_with_a_constraint {
             // Which variant the read chose, so a test can say the bound still selects rather than
             // merely that a good payload got through.
             self.reached.lock().unwrap().push(match req.caller {
-                Caller::Attributed { name, .. } => format!("named:{name}"),
-                Caller::Unattributed { .. } => "anonymous".to_owned(),
+                Caller::Attributed {
+                    name,
+                    claims: _claims,
+                } => format!("named:{name}"),
+                Caller::Unattributed { claims: _claims } => "anonymous".to_owned(),
             });
             Ok(Admitted { admitted: true })
         }
@@ -2243,7 +2246,7 @@ fn a_no_payload_operation_answers_its_declared_status_and_no_body() {
         204,
         "the default for a no-payload operation"
     );
-    assert!(response.body().is_empty());
+    assert_eq!(response.body(), [] as [u8; 0]);
 }
 
 #[test]
@@ -2251,7 +2254,7 @@ fn a_no_payload_operation_may_override_its_declared_status() {
     let (reached, response) = http_dispatched("POST", "/documents/d1/archive", "", &[], b"{}");
     assert_eq!(reached, vec!["archive_document d1".to_owned()]);
     assert_eq!(response.status(), 202);
-    assert!(response.body().is_empty());
+    assert_eq!(response.body(), [] as [u8; 0]);
 }
 
 #[test]

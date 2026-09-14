@@ -460,7 +460,7 @@ fn a_frame_for_another_service_answers_nothing() {
         r#"{"kind":"request","id":"9","service":"OtherService","operation":"watch","payload":{}}"#,
     );
     assert_eq!(reply, None);
-    assert!(service.reached().is_empty());
+    assert_eq!(service.reached(), Vec::<String>::new());
 }
 
 #[test]

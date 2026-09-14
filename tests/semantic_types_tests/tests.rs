@@ -129,7 +129,7 @@ struct NestedAliasStruct {
 #[cfg(feature = "typescript")]
 fn test_string_alias_typescript() {
     let document_id: DocumentId = String::new();
-    assert!(document_id.is_empty());
+    assert_eq!(document_id, String::new());
     let ts = document_id_schema::Schema::ts_definition();
 
     assert!(
@@ -198,7 +198,7 @@ fn test_optional_alias_typescript() {
 #[cfg(feature = "typescript")]
 fn test_vec_alias_typescript() {
     let tags: Tags = Vec::new();
-    assert!(tags.is_empty());
+    assert_eq!(tags, Vec::<String>::new());
     let ts = tags_schema::Schema::ts_definition();
 
     assert!(
@@ -263,7 +263,7 @@ fn test_double_generic_alias_typescript() {
 fn test_nested_alias_typescript() {
     let order_id = OrderId::default();
     let audit_id: AuditId = order_id;
-    assert!(audit_id.is_empty());
+    assert_eq!(audit_id, String::new());
     let ts = audit_id_schema::Schema::ts_definition();
 
     assert!(
@@ -608,7 +608,7 @@ fn test_complex_alias_usage() {
 #[cfg(feature = "typescript")]
 fn test_name_override() {
     let some: SomeType = String::new();
-    assert!(some.is_empty());
+    assert_eq!(some, String::new());
     let ts = some_type_schema::Schema::ts_definition();
 
     assert!(
@@ -632,7 +632,7 @@ fn test_name_override() {
 #[cfg(feature = "typescript")]
 fn test_alias_with_docs() {
     let documented: DocumentedId = String::new();
-    assert!(documented.is_empty());
+    assert_eq!(documented, String::new());
     let ts = documented_id_schema::Schema::ts_definition();
 
     assert!(

@@ -307,7 +307,10 @@ fn client_class(service: &ServiceDef) -> String {
 fn return_type(operation: &OperationDef) -> String {
     match &operation.outcome {
         OperationOutcome::OneWay => "Future<void>".to_owned(),
-        OperationOutcome::Reply { success, .. } => {
+        OperationOutcome::Reply {
+            success,
+            error: _error,
+        } => {
             if is_unit_type(success) {
                 "Future<void>".to_owned()
             } else {
@@ -420,7 +423,10 @@ fn handler_signature(operation: &OperationDef) -> String {
     let req_ty = message_dart_typename(operation);
     match &operation.outcome {
         OperationOutcome::OneWay => format!("Future<void> Function(Ctx ctx, {req_ty} req)"),
-        OperationOutcome::Reply { success, .. } => {
+        OperationOutcome::Reply {
+            success,
+            error: _error,
+        } => {
             let ret = if is_unit_type(success) {
                 "void".to_owned()
             } else {

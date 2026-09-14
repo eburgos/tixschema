@@ -1057,14 +1057,14 @@ fn test_collection_structs_constructible() {
         mixed_map: HashMap::new(),
         u64_map: HashMap::new(),
     };
-    assert!(with_64bit.id.is_empty());
+    assert_eq!(with_64bit.id, String::new());
     let with_collections = UserWithCollections {
         id: String::new(),
         metadata: HashMap::new(),
         scores: Vec::new(),
         tags: Vec::new(),
     };
-    assert!(with_collections.id.is_empty());
+    assert_eq!(with_collections.id, String::new());
     let optional_values = OptionalMapValues {
         enum_keyed: HashMap::from([(MetricSlot::Daily, None)]),
         string_keyed: HashMap::from([("k".to_owned(), None)]),

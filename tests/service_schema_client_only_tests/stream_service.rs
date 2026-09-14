@@ -198,7 +198,10 @@ fn full_source(
 ) -> Option<Box<dyn content_client_service_schema::BodySource + Send>> {
     match answered {
         content_client_service_schema::StreamedAnswer::Full(source) => Some(source),
-        content_client_service_schema::StreamedAnswer::Partial { .. } => None,
+        content_client_service_schema::StreamedAnswer::Partial {
+            source: _source,
+            content_range: _content_range,
+        } => None,
     }
 }
 

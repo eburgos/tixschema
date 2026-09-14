@@ -2113,7 +2113,7 @@ fn a_dated_and_an_identified_argument_expand_to_rust_that_compiles() {
     };
     assert_eq!(mixed.sized.value, 1);
     assert_eq!(mixed.stamped.value.timestamp(), 0);
-    assert!(!mixed.keyed.value.to_hex().is_empty());
+    assert_ne!(mixed.keyed.value.to_hex(), String::new());
 
     let stored = StoredFolder {
         doc: EcmDocument {
@@ -2122,7 +2122,7 @@ fn a_dated_and_an_identified_argument_expand_to_rust_that_compiles() {
         },
     };
     assert_eq!(stored.doc.created_at.timestamp(), 0);
-    assert!(!stored.doc.document_id.to_hex().is_empty());
+    assert_ne!(stored.doc.document_id.to_hex(), String::new());
 }
 
 /// The enum half of the same question, in every shape the tagging attributes reach — plus the one
@@ -2134,7 +2134,7 @@ fn a_generic_enum_expands_to_rust_that_compiles() {
     assert!(matches!(External::<String>::Nothing, External::Nothing));
     assert!(matches!(
         Untagged::<String>::Numbered { count: 1 },
-        Untagged::Numbered { .. }
+        Untagged::Numbered { count: _count }
     ));
     assert!(matches!(PlainConst::<4>::Wide, PlainConst::Wide));
 }

@@ -176,7 +176,7 @@ fn test_chrono_types_constructible() {
         dates: Vec::new(),
         name: String::new(),
     };
-    assert!(date_list.dates.is_empty());
+    assert_eq!(date_list.dates, Vec::<NaiveDate>::new());
     let date_map = DateMap {
         events: HashMap::new(),
         name: String::new(),
@@ -233,12 +233,12 @@ fn test_chrono_types_constructible() {
         local_datetime: naive_dt,
         title: String::new(),
     };
-    assert!(local_event.title.is_empty());
+    assert_eq!(local_event.title, String::new());
     let local_timestamp = LocalTimestamp {
         id: String::new(),
         local_time: local_dt,
     };
-    assert!(local_timestamp.id.is_empty());
+    assert_eq!(local_timestamp.id, String::new());
     let optional_timestamp = OptionalTimestamp {
         id: String::new(),
         updated_at: None,
@@ -687,7 +687,7 @@ fn test_chrono_compilation_smoke_test() {
 
     assert_eq!(event.name, "Test Event");
     assert_eq!(schedule.task, "Meeting");
-    assert!(!timestamp.id.is_empty());
+    assert_eq!(timestamp.id, "123");
 }
 
 #[test]

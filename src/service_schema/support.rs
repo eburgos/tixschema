@@ -372,7 +372,11 @@ fn streamed_answer_type() -> TokenStream {
 fn http_error_status_completeness(service: &ServiceDef) -> TokenStream {
     let checks = service.operations.iter().filter_map(|operation| {
         let binding = operation.http.as_ref()?;
-        let OperationOutcome::Reply { error, .. } = &operation.outcome else {
+        let OperationOutcome::Reply {
+            error,
+            success: _success,
+        } = &operation.outcome
+        else {
             return None;
         };
         let summary = http_binding_summary(binding);

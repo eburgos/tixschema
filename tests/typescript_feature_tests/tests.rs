@@ -32,7 +32,10 @@ fn test_typescript_feature_types_constructible() {
     let payment = TypeScriptTestPayment::PayPal {
         email: String::new(),
     };
-    assert!(matches!(payment, TypeScriptTestPayment::PayPal { .. }));
+    assert!(matches!(
+        payment,
+        TypeScriptTestPayment::PayPal { email: _email }
+    ));
     let status = TypeScriptTestStatus::Active;
     assert_eq!(status, TypeScriptTestStatus::Active);
     let user = TypeScriptTestUser {
@@ -41,7 +44,7 @@ fn test_typescript_feature_types_constructible() {
         id: String::new(),
         name: String::new(),
     };
-    assert!(user.id.is_empty());
+    assert_eq!(user.id, String::new());
 }
 
 #[test]

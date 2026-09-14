@@ -49,9 +49,12 @@ pub fn emit(service: &ServiceDef) -> Vec<String> {
 /// What one operation's result type is called: `get_balance` on `UsageService` answers a
 /// `UsageServiceGetBalanceResult`. `None` for a one-way operation, which answers nothing.
 pub fn result_name(service: &str, operation: &OperationDef) -> Option<String> {
-    match operation.outcome {
+    match &operation.outcome {
         OperationOutcome::OneWay => None,
-        OperationOutcome::Reply { .. } => Some(format!(
+        OperationOutcome::Reply {
+            error: _error,
+            success: _success,
+        } => Some(format!(
             "{service}{}Result",
             RenameRule::PascalCase.apply_to_field(&operation.ident.to_string())
         )),
