@@ -109,19 +109,21 @@ mod ws_client;
 mod ws_service;
 
 use crate::service_schema::parse::ServiceDef;
-use crate::service_schema::support::{fault_fields_typescript_name, module_ident};
+use crate::service_schema::support::{exhaustiveness, fault_fields_typescript_name, module_ident};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
-pub fn emit(service: &ServiceDef) -> TokenStream {
+pub fn emit(service: &ServiceDef, non_exhaustive: bool) -> TokenStream {
     let named = service.ident.to_string();
     let registry = format_ident!("{named}Schema", span = service.ident.span());
     let rustdoc = registry_rustdoc(&named);
     let published = published(service);
     let seam = seam(service);
     let dart_seam = dart_seam(service);
+    let sealed = exhaustiveness(non_exhaustive);
     quote! {
         #(#[doc = #rustdoc])*
+        #sealed
         pub struct #registry;
 
         impl #registry {

@@ -1,23 +1,24 @@
 //! What `#[service_schema(...)]`'s own arguments are read into, and every refusal they earn.
 //!
-//! The refusals are read off `parse_transports` rather than off rendered `compile_error!` tokens,
+//! The refusals are read off `parse_arguments` rather than off rendered `compile_error!` tokens,
 //! so an assertion compares the text the compiler shows against the text the design specifies,
 //! character for character.
 
-use super::{Transport, parse_transports};
+use super::{ServiceArguments, Transport, parse_arguments};
 use proc_macro2::TokenStream;
 
 /// The transports `args` asks for, named as the service wrote them.
 fn asked_for(args: &str) -> Vec<&'static str> {
-    parse_transports(written(args))
+    parse_arguments(written(args))
         .unwrap()
+        .transports
         .iter()
         .map(|known| known.name())
         .collect()
 }
 
 fn refusal(args: &str) -> syn::Error {
-    parse_transports(written(args)).unwrap_err()
+    parse_arguments(written(args)).unwrap_err()
 }
 
 /// Attribute arguments carrying file locations, so a refusal's span can be read back to the text it
@@ -27,16 +28,20 @@ fn written(args: &str) -> TokenStream {
 }
 
 /// A service that says nothing about transports asks for none, and an attribute written with empty
-/// parentheses is the same declaration — the macro is handed no tokens either way.
+/// parentheses is the same declaration — the macro is handed no tokens either way. Nothing written
+/// is the default `ServiceArguments`: no transport, exhaustive.
 #[test]
-fn an_attribute_carrying_no_arguments_asks_for_no_transport() {
-    assert!(parse_transports(TokenStream::new()).unwrap().is_empty());
+fn an_attribute_carrying_no_arguments_reads_the_default() {
+    assert_eq!(
+        parse_arguments(TokenStream::new()).unwrap(),
+        ServiceArguments::default()
+    );
 }
 
 /// The written empty list is the same answer said out loud, and is not a refusal.
 #[test]
 fn an_empty_written_list_asks_for_no_transport() {
-    assert!(asked_for("transports = []").is_empty());
+    assert_eq!(asked_for("transports = []"), Vec::<&str>::new());
 }
 
 #[test]
@@ -113,13 +118,70 @@ fn a_list_written_without_brackets_says_what_shape_was_expected() {
     );
 }
 
-/// The singular spelling is the mistake this refusal exists for: it is not an argument the
-/// attribute takes, and reading it as one would let a service name transports the macro never saw.
+/// The singular spelling is not an argument the attribute takes, and the refusal names both of the
+/// arguments it does take rather than just the one this service happened to reach for.
 #[test]
-fn an_argument_that_is_not_transports_says_what_the_one_argument_is() {
+fn an_unknown_argument_names_both_arguments() {
     assert_eq!(
         refusal(r#"transport = ["amqp_rpc"]"#).to_string(),
         "service_schema: unknown `service_schema` argument\n       \
-         the one argument is `transports`, written `transports = [\"amqp_rpc\"]`"
+         the arguments are `transports`, written `transports = [\"amqp_rpc\"]`,\n       \
+         and `non_exhaustive`, written bare"
+    );
+}
+
+/// The flag alone, with no transport, is read into `ServiceArguments` with an empty transport list.
+#[test]
+fn the_flag_alone_asks_for_no_transport_and_reads_non_exhaustive() {
+    assert_eq!(
+        parse_arguments(written("non_exhaustive")).unwrap(),
+        ServiceArguments {
+            non_exhaustive: true,
+            transports: Vec::new(),
+        }
+    );
+}
+
+/// `#[service_schema(non_exhaustive)]` with no `transports` is accepted and asks for no transport —
+/// the two arguments are independent, and neither is required for the other to be written.
+#[test]
+fn the_flag_composes_with_a_transport_list() {
+    assert_eq!(
+        parse_arguments(written(r#"non_exhaustive, transports = ["amqp_rpc"]"#)).unwrap(),
+        ServiceArguments {
+            non_exhaustive: true,
+            transports: vec![Transport::AmqpRpc],
+        }
+    );
+}
+
+/// Argument order is free: the flag before the list reads the same as the list before the flag.
+#[test]
+fn argument_order_does_not_change_what_is_read() {
+    let forward = parse_arguments(written(r#"non_exhaustive, transports = ["amqp_rpc"]"#)).unwrap();
+    let reversed =
+        parse_arguments(written(r#"transports = ["amqp_rpc"], non_exhaustive"#)).unwrap();
+    assert_eq!(forward, reversed);
+}
+
+/// `non_exhaustive` is a bare flag: writing it as `= true` is refused rather than read as a second
+/// spelling of the same request.
+#[test]
+fn non_exhaustive_written_with_a_value_says_it_takes_none() {
+    assert_eq!(
+        refusal("non_exhaustive = true").to_string(),
+        "service_schema: `non_exhaustive` is a bare flag and takes no value\n       \
+         write `non_exhaustive`, and leave it out for the exhaustive generated types"
+    );
+}
+
+/// The refusal is spanned on the flag itself rather than on the whole argument list, so the caret
+/// points at the one word that has to lose its `= true`.
+#[test]
+fn non_exhaustive_written_with_a_value_is_spanned_on_the_flag() {
+    let refused = refusal("non_exhaustive = true");
+    assert_eq!(
+        refused.span().source_text().as_deref(),
+        Some("non_exhaustive")
     );
 }

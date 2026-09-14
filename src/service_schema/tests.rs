@@ -50,6 +50,19 @@ const MIXED_SERVICE: &str = r#"
     }
 "#;
 
+/// A single-operation service whose one operation takes two arguments after the context, so it
+/// generates one message — `ExpireCreditRequest` — beside the three types every service carries.
+const CREDIT_SERVICE: &str = "
+    pub trait UsageService<Ctx> {
+        async fn expire_credit(
+            &self,
+            ctx: &Ctx,
+            organization_id: OrganizationId,
+            credit_id: CreditId,
+        ) -> Result<ExpiredCredit, UsageError>;
+    }
+";
+
 /// A service declaring no operation at all, whose dispatcher has only the arm that answers a name
 /// nothing recognises.
 const BARE_SERVICE: &str = "
@@ -187,6 +200,15 @@ fn expanded_over_amqp_rpc(source: &str) -> String {
 fn expansion_over_amqp_rpc(source: &str) -> TokenStream {
     exec_service_schema(
         quote! { transports = ["amqp_rpc"] },
+        declared(source).to_token_stream(),
+    )
+}
+
+/// The same expansion as [`expansion_over_amqp_rpc`], with the service also asking for
+/// `non_exhaustive`.
+fn expansion_over_amqp_rpc_non_exhaustive(source: &str) -> TokenStream {
+    exec_service_schema(
+        quote! { transports = ["amqp_rpc"], non_exhaustive },
         declared(source).to_token_stream(),
     )
 }
@@ -3151,4 +3173,106 @@ fn a_streamed_operations_expansion_names_no_runtime_crate() {
         !expanded.contains(":: bytes") && !expanded.contains("bytes ::"),
         "a path segment named the `bytes` crate leaked into the expansion. got: {expanded}"
     );
+}
+
+/// The `non_exhaustive` argument seals exactly the four generated types the design names — the
+/// registry, the fault kind, `CallError`, and a generated message struct — and nothing else in the
+/// expansion. The registry (`UsageServiceSchema`) is `features::service_schema::emit`'s own type
+/// and that module only builds where `typescript` does, so a build without it seals the other three
+/// and stops there.
+#[test]
+fn the_non_exhaustive_flag_seals_exactly_the_four_generated_types() {
+    let emitted = expansion_over_amqp_rpc_non_exhaustive(CREDIT_SERVICE).to_string();
+    for sealed in [
+        "# [non_exhaustive] pub enum UsageServiceFaultKind",
+        "# [non_exhaustive] pub enum CallError",
+        "# [non_exhaustive] pub struct ExpireCreditRequest",
+    ] {
+        assert!(
+            emitted.contains(sealed),
+            "missing `{sealed}`. Got: {emitted}"
+        );
+    }
+    #[cfg(feature = "typescript")]
+    {
+        assert!(
+            emitted.contains("# [non_exhaustive] pub struct UsageServiceSchema"),
+            "missing `# [non_exhaustive] pub struct UsageServiceSchema`. Got: {emitted}"
+        );
+        assert_eq!(
+            emitted.matches("# [non_exhaustive]").count(),
+            4,
+            "exactly the four generated types should be sealed, and nothing else. Got: {emitted}"
+        );
+    }
+    #[cfg(not(feature = "typescript"))]
+    {
+        assert!(
+            !emitted.contains("UsageServiceSchema"),
+            "a build with no TypeScript publishes no registry to seal. Got: {emitted}"
+        );
+        assert_eq!(
+            emitted.matches("# [non_exhaustive]").count(),
+            3,
+            "exactly the three generated types this build carries should be sealed, and nothing \
+             else. Got: {emitted}"
+        );
+    }
+}
+
+/// Without the argument, the expansion carries no `#[non_exhaustive]` anywhere — the default this
+/// task preserves, so `#[service_schema(transports = ["amqp_rpc"])]` still expands to what it did
+/// before this argument existed.
+#[test]
+fn the_default_expansion_carries_no_non_exhaustive_anywhere() {
+    let emitted = expansion_over_amqp_rpc(CREDIT_SERVICE).to_string();
+    assert!(!emitted.contains("non_exhaustive"), "got: {emitted}");
+}
+
+/// `#[service_schema(non_exhaustive)]` with no `transports` is accepted and asks for no transport:
+/// the flag and the transport list are independent arguments, and neither is required for the
+/// other to be written.
+#[test]
+fn the_flag_alone_is_accepted_and_asks_for_no_transport() {
+    let emitted = exec_service_schema(
+        quote! { non_exhaustive },
+        declared(CREDIT_SERVICE).to_token_stream(),
+    )
+    .to_string();
+    for absent in ["macro_rules", "pub trait Transport", "lapin"] {
+        assert!(
+            !emitted.contains(absent),
+            "`{absent}` belongs to a transport, and this service asked for none. Got: {emitted}"
+        );
+    }
+    // The registry (`UsageServiceSchema`) only exists in a build with `typescript`; `CallError`
+    // is generated in every build with `serde`, so it stands in for the flag reaching the
+    // expansion where the registry does not exist to check.
+    #[cfg(feature = "typescript")]
+    assert!(
+        emitted.contains("# [non_exhaustive] pub struct UsageServiceSchema"),
+        "got: {emitted}"
+    );
+    #[cfg(not(feature = "typescript"))]
+    assert!(
+        emitted.contains("# [non_exhaustive] pub enum CallError"),
+        "got: {emitted}"
+    );
+}
+
+/// Argument order is free: the flag before the transport list reads the same as the list before
+/// the flag.
+#[test]
+fn argument_order_does_not_change_the_expansion() {
+    let forward = exec_service_schema(
+        quote! { non_exhaustive, transports = ["amqp_rpc"] },
+        declared(CREDIT_SERVICE).to_token_stream(),
+    )
+    .to_string();
+    let reversed = exec_service_schema(
+        quote! { transports = ["amqp_rpc"], non_exhaustive },
+        declared(CREDIT_SERVICE).to_token_stream(),
+    )
+    .to_string();
+    assert_eq!(forward, reversed);
 }

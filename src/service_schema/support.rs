@@ -176,7 +176,7 @@ use syn::Ident;
 /// placement and nothing else about the program. The import those four errors resolve against is
 /// what the unit test `the_generated_module_reaches_the_author_s_declarations_through_super` reads
 /// back off the expansion.
-pub fn emit(service: &ServiceDef, asked: &[Transport]) -> TokenStream {
+pub fn emit(service: &ServiceDef, asked: &[Transport], non_exhaustive: bool) -> TokenStream {
     let declared = &service.ident;
     let module = module_ident(service);
     let module_doc = format!(
@@ -184,8 +184,8 @@ pub fn emit(service: &ServiceDef, asked: &[Transport]) -> TokenStream {
          Every type here belongs to this service alone: the crate that declares `{declared}` \
          owns them, and nothing is imported from tixschema at runtime."
     );
-    let fault = fault_declaration(declared);
-    let call_error = call_error_declaration(declared);
+    let fault = fault_declaration(declared, non_exhaustive);
+    let call_error = call_error_declaration(declared, non_exhaustive);
     let accessors = fault_accessors();
     let constructors = fault_constructors();
     let renderings = renderings();
@@ -226,6 +226,16 @@ pub fn emit(service: &ServiceDef, asked: &[Transport]) -> TokenStream {
             #body_source
             #streamed_answer
         }
+    }
+}
+
+/// The attribute a generated type carries when the service asked for it, and nothing when it did
+/// not. Written once so the four emitters cannot disagree about the spelling or about the default.
+pub fn exhaustiveness(non_exhaustive: bool) -> TokenStream {
+    if non_exhaustive {
+        quote! { #[non_exhaustive] }
+    } else {
+        TokenStream::new()
     }
 }
 
@@ -885,17 +895,19 @@ fn fault_fields_ident(declared: &Ident) -> Ident {
 /// // Declared at module scope, which is where the generated module reaches for them.
 /// fn main() {}
 /// ```
-fn call_error_declaration(declared: &Ident) -> TokenStream {
+fn call_error_declaration(declared: &Ident, non_exhaustive: bool) -> TokenStream {
     let call_error_doc = format!(
         "What a `{declared}` client returns in the failure position, a call having three \
          outcomes where `Result` has two arms."
     );
+    let sealed = exhaustiveness(non_exhaustive);
     quote! {
         #[doc = #call_error_doc]
         ///
         /// [`Operation`](CallError::Operation) is the error the operation declared — the thing it
         /// said it could fail at. [`Fault`](CallError::Fault) means a defect reached the caller.
         #[derive(Clone, Debug, Eq, PartialEq)]
+        #sealed
         pub enum CallError<E> {
             /// A defect reached the caller: the remote produced a fault, or the client refused the
             /// message it was about to send.
@@ -1105,8 +1117,9 @@ fn fault_constructors() -> TokenStream {
 ///
 /// The kind is declared before the fault that carries it, so the field walk resolves its name off
 /// the registry rather than falling back to a spelling written before the type expanded.
-fn fault_declaration(declared: &Ident) -> TokenStream {
+fn fault_declaration(declared: &Ident, non_exhaustive: bool) -> TokenStream {
     let fields = fault_fields_ident(declared);
+    let sealed = exhaustiveness(non_exhaustive);
     let kind = format_ident!("{declared}FaultKind", span = declared.span());
     let fault_doc = format!(
         "A failure `{declared}` never declared: a payload that would not deserialize, a message \
@@ -1134,6 +1147,7 @@ fn fault_declaration(declared: &Ident) -> TokenStream {
         #[::tixschema::model_schema()]
         #[derive(Clone, Copy, Debug, Eq, PartialEq, ::serde::Serialize)]
         #[serde(rename_all = "kebab-case")]
+        #sealed
         pub enum #kind {
             /// A message reached its operation and did not satisfy the operation's schema. The
             /// fault names the field that failed.

@@ -96,7 +96,7 @@ pub fn exec_service_schema(_args: TokenStream, input: TokenStream) -> TokenStrea
 
 #[cfg(feature = "serde")]
 pub fn exec_service_schema(args: TokenStream, input: TokenStream) -> TokenStream {
-    let asked = transport::parse_transports(args);
+    let asked = transport::parse_arguments(args);
     let declared = match syn::parse2::<ItemTrait>(input) {
         Ok(parsed) => parsed,
         Err(rejection) => return rejection.to_compile_error(),
@@ -113,8 +113,8 @@ pub fn exec_service_schema(args: TokenStream, input: TokenStream) -> TokenStream
             // service tripping both is told about each rather than about whichever was read
             // first.
             let combined_refusal = [
-                multipart_envelope_refusal(&service, &wanted),
-                stream_envelope_refusal(&service, &wanted),
+                multipart_envelope_refusal(&service, &wanted.transports),
+                stream_envelope_refusal(&service, &wanted.transports),
             ]
             .into_iter()
             .flatten()
@@ -124,19 +124,20 @@ pub fn exec_service_schema(args: TokenStream, input: TokenStream) -> TokenStream
             });
             combined_refusal.map_or_else(
                 || {
-                    let messages = messages::emit(&service);
+                    let messages = messages::emit(&service, wanted.non_exhaustive);
                     // The module is handed the asked-for list as well: it anchors, at the
                     // declaration, the root names a transport's macro reaches through `$crate`,
                     // and a service that asked for no transport publishes no macro and so owes no
                     // root anything.
-                    let support = support::emit(&service, &wanted);
+                    let support =
+                        support::emit(&service, &wanted.transports, wanted.non_exhaustive);
                     // Both halves a transport contributes are `macro_rules!` bodies rather than
                     // compiled items, so they stay at the trait's scope; `#[macro_export]` hoists
                     // each name to the crate root from wherever the service was written.
-                    let transports = transport::emit(&service, &wanted);
+                    let transports = transport::emit(&service, &wanted.transports);
                     // The TypeScript artifacts are strings rather than callers of anything
                     // private, so they stay at the trait's scope where a bundle can name them.
-                    let typescript = typescript(&service);
+                    let typescript = typescript(&service, wanted.non_exhaustive);
                     quote! {
                         #messages
                         #support
@@ -157,8 +158,8 @@ pub fn exec_service_schema(args: TokenStream, input: TokenStream) -> TokenStream
                 },
             )
         }
-        (transports, read) => {
-            let refusals: TokenStream = [transports.err(), read.err()]
+        (arguments, read) => {
+            let refusals: TokenStream = [arguments.err(), read.err()]
                 .into_iter()
                 .flatten()
                 .map(|refusal| refusal.to_compile_error())
@@ -672,12 +673,12 @@ fn emitted_trait(declared: &ItemTrait) -> ItemTrait {
 /// The service's TypeScript, which only a build that writes TypeScript at all has anything to say
 /// for.
 #[cfg(all(feature = "serde", feature = "typescript"))]
-fn typescript(service: &parse::ServiceDef) -> TokenStream {
-    emit_typescript(service)
+fn typescript(service: &parse::ServiceDef, non_exhaustive: bool) -> TokenStream {
+    emit_typescript(service, non_exhaustive)
 }
 
 #[cfg(all(feature = "serde", not(feature = "typescript")))]
-fn typescript(_service: &parse::ServiceDef) -> TokenStream {
+fn typescript(_service: &parse::ServiceDef, _non_exhaustive: bool) -> TokenStream {
     TokenStream::new()
 }
 

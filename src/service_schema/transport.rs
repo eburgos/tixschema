@@ -1,9 +1,10 @@
 //! The transports a service can ask for, and the one place a name is bound to one.
 //!
 //! `#[service_schema(transports = ["amqp_rpc"])]` is where a service says which of them it wants.
-//! [`parse_transports`] reads that list, and [`Transport`] is the vocabulary it reads against —
+//! [`parse_arguments`] reads that list, and [`Transport`] is the vocabulary it reads against —
 //! written with an underscore rather than a hyphen, because a transport's name reaches a generated
-//! macro name and a hyphen cannot.
+//! macro name and a hyphen cannot. The same call also reads `non_exhaustive`, the attribute's other
+//! argument, into [`ServiceArguments`] beside the list.
 //!
 //! # Adding one
 //!
@@ -44,16 +45,34 @@ use syn::spanned::Spanned as _;
 use syn::{Expr, ExprLit, Ident, Lit, meta::parser, parse::Parser as _};
 
 const TRANSPORTS_ARGUMENT: &str = "transports";
+const NON_EXHAUSTIVE_ARGUMENT: &str = "non_exhaustive";
 
 const UNKNOWN_ARGUMENT_MESSAGE: &str = concat!(
     "service_schema: unknown `service_schema` argument\n",
-    "       the one argument is `transports`, written `transports = [\"amqp_rpc\"]`"
+    "       the arguments are `transports`, written `transports = [\"amqp_rpc\"]`,\n",
+    "       and `non_exhaustive`, written bare"
 );
 
 const WRITTEN_SHAPE_MESSAGE: &str = concat!(
     "service_schema: `transports` takes a bracketed list of transport names\n",
     "       write `transports = [\"amqp_rpc\"]`, or `transports = []` for none"
 );
+
+const NON_EXHAUSTIVE_SHAPE_MESSAGE: &str = concat!(
+    "service_schema: `non_exhaustive` is a bare flag and takes no value\n",
+    "       write `non_exhaustive`, and leave it out for the exhaustive generated types"
+);
+
+/// Everything `#[service_schema(...)]`'s own arguments say, read once by [`parse_arguments`].
+#[derive(Debug, Default, Eq, PartialEq)]
+pub struct ServiceArguments {
+    /// Whether the generated types carry `#[non_exhaustive]`. Absent by default: a service that
+    /// says nothing keeps every generated type exhaustive, so a variant or field added later
+    /// fails a consumer's `match` or destructuring rather than passing unnoticed.
+    pub non_exhaustive: bool,
+    /// The transports asked for, in the order written. Nothing sorts or dedupes it.
+    pub transports: Vec<Transport>,
+}
 
 /// One transport a service asks for by name.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -129,10 +148,11 @@ pub fn emit(service: &ServiceDef, asked: &[Transport]) -> TokenStream {
         .collect()
 }
 
-/// Reads `#[service_schema(...)]`'s own arguments into the transports the service asked for, in the
-/// order it wrote them.
+/// Reads `#[service_schema(...)]`'s own arguments into a [`ServiceArguments`], in the order they
+/// were written. Argument order is free — `non_exhaustive, transports = [...]` and the reverse
+/// read the same.
 ///
-/// A bare `#[service_schema]` and an empty `#[service_schema()]` ask for none, and so does
+/// A bare `#[service_schema]` and an empty `#[service_schema()]` ask for nothing, and so does
 /// `transports = []` — the same list, said out loud. Anything else the attribute carries is
 /// refused rather than dropped, so a service cannot ask for a transport this version does not have
 /// and be handed silence.
@@ -234,7 +254,8 @@ pub fn emit(service: &ServiceDef, asked: &[Transport]) -> TokenStream {
 ///
 /// ```text
 /// error: service_schema: unknown `service_schema` argument
-///               the one argument is `transports`, written `transports = ["amqp_rpc"]`
+///               the arguments are `transports`, written `transports = ["amqp_rpc"]`,
+///               and `non_exhaustive`, written bare
 ///   --> tests/zz_probe.rs:11:18
 ///    |
 /// 11 | #[service_schema(transport = ["amqp_rpc"])]
@@ -265,9 +286,51 @@ pub fn emit(service: &ServiceDef, asked: &[Transport]) -> TokenStream {
 ///
 /// fn main() {}
 /// ```
-pub fn parse_transports(args: TokenStream) -> Result<Vec<Transport>, syn::Error> {
-    let mut asked = Vec::new();
+///
+/// # `non_exhaustive` is a bare flag, and takes no value
+///
+/// It reads as the attribute it produces, so `= true` is refused rather than read as a second way
+/// of asking for the default:
+///
+/// ```rust,compile_fail
+/// use tixschema::service_schema;
+///
+/// #[derive(serde::Deserialize, serde::Serialize)]
+/// pub struct BalanceResponse;
+///
+/// #[derive(serde::Deserialize, serde::Serialize)]
+/// pub enum BalanceError {
+///     DbError,
+/// }
+///
+/// #[service_schema(non_exhaustive = true)]
+/// pub trait UsageService<Ctx> {
+///     async fn sweep(&self, ctx: &Ctx) -> Result<BalanceResponse, BalanceError>;
+/// }
+///
+/// fn main() {}
+/// ```
+///
+/// ```text
+/// error: service_schema: `non_exhaustive` is a bare flag and takes no value
+///               write `non_exhaustive`, and leave it out for the exhaustive generated types
+///   --> tests/zz_probe.rs:11:18
+///    |
+/// 11 | #[service_schema(non_exhaustive = true)]
+///    |                  ^^^^^^^^^^^^^^
+///
+/// error: could not compile `tixschema` (test "zz_probe") due to 1 previous error
+/// ```
+pub fn parse_arguments(args: TokenStream) -> Result<ServiceArguments, syn::Error> {
+    let mut read = ServiceArguments::default();
     let reader = parser(|meta| {
+        if meta.path.is_ident(NON_EXHAUSTIVE_ARGUMENT) {
+            if meta.input.peek(syn::Token![=]) {
+                return Err(meta.error(NON_EXHAUSTIVE_SHAPE_MESSAGE));
+            }
+            read.non_exhaustive = true;
+            return Ok(());
+        }
         if !meta.path.is_ident(TRANSPORTS_ARGUMENT) {
             return Err(meta.error(UNKNOWN_ARGUMENT_MESSAGE));
         }
@@ -276,12 +339,12 @@ pub fn parse_transports(args: TokenStream) -> Result<Vec<Transport>, syn::Error>
             return Err(syn::Error::new(written.span(), WRITTEN_SHAPE_MESSAGE));
         };
         for element in &listed.elems {
-            asked.push(transport_written(element)?);
+            read.transports.push(transport_written(element)?);
         }
         Ok(())
     });
     reader.parse2(args)?;
-    Ok(asked)
+    Ok(read)
 }
 
 /// One element of the written list, which is a string naming a transport this version has.

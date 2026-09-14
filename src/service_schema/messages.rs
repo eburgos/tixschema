@@ -14,6 +14,7 @@
 //! exactly as a hand-written field is.
 
 use super::parse::{GeneratedMessage, ServiceDef};
+use super::support::exhaustiveness;
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::Type;
@@ -99,8 +100,11 @@ use syn::Type;
 /// It is a build failure either way, which is what a bundle needs: nothing that reaches TypeScript
 /// can carry the same generated message twice. Whether the macro should say so in one sentence
 /// instead is a separate question and not one this emitter answers today.
-pub fn emit(service: &ServiceDef) -> TokenStream {
-    let declared = service.generated_messages.iter().map(message);
+pub fn emit(service: &ServiceDef, non_exhaustive: bool) -> TokenStream {
+    let declared = service
+        .generated_messages
+        .iter()
+        .map(|generated| message(generated, non_exhaustive));
     quote! {
         #(#declared)*
     }
@@ -140,8 +144,9 @@ fn cost_note(operation: &str, empty: bool) -> Vec<String> {
     }
 }
 
-fn message(declared: &GeneratedMessage) -> TokenStream {
+fn message(declared: &GeneratedMessage, non_exhaustive: bool) -> TokenStream {
     let named = &declared.ident;
+    let sealed = exhaustiveness(non_exhaustive);
     let members = declared.fields.iter().map(|(field, carried)| {
         if is_option_type(carried) {
             // `#[model_schema()]` requires an `Option<T>` field to say what an absent value does
@@ -165,6 +170,7 @@ fn message(declared: &GeneratedMessage) -> TokenStream {
         #[::tixschema::model_schema()]
         #[derive(::serde::Serialize, ::serde::Deserialize)]
         #[serde(rename_all = "camelCase")]
+        #sealed
         pub struct #named {
             #(#members,)*
         }

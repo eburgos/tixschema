@@ -381,7 +381,7 @@ fn parsed(source: &str) -> ServiceDef {
 }
 
 fn registration(source: &str) -> String {
-    emit(&parsed(source)).to_token_stream().to_string()
+    emit(&parsed(source), false).to_token_stream().to_string()
 }
 
 #[cfg(feature = "zod")]
