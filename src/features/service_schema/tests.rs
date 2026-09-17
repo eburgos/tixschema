@@ -253,10 +253,6 @@ const MULTIPART_HTTP_SERVICE: &str = "
     }
 ";
 
-/// A service declaring two bodyless operations under a path carrying exactly one placeholder: a
-/// `GET` whose one argument is an author's own message, a struct carrying the placeholder's field
-/// beside one the path does not bind, and a one-way `DELETE` whose one argument is the bare
-/// `String` that is the placeholder and the whole message at once.
 #[cfg(feature = "zod")]
 const SINGLE_PLACEHOLDER_HTTP_SERVICE: &str = "
     pub trait ConversationClientService<Ctx> {
@@ -356,11 +352,6 @@ const DART_MULTIPART_HTTP_SERVICE: &str = "
     }
 ";
 
-/// A service declaring two bodyless operations under a path carrying exactly one placeholder: a
-/// `GET` whose one argument is an author's own message, a struct carrying the placeholder's field
-/// beside one the path does not bind, and a one-way `DELETE` whose one argument is the bare
-/// `String` that is the placeholder and the whole message at once. Dart-gated mirror of
-/// `SINGLE_PLACEHOLDER_HTTP_SERVICE`.
 #[cfg(feature = "dart")]
 const DART_SINGLE_PLACEHOLDER_HTTP_SERVICE: &str = "
     pub trait ConversationClientService<Ctx> {

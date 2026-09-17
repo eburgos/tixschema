@@ -334,10 +334,6 @@ fn method(
 // ---------------------------------------------------------------------------------------------
 
 /// The value one path placeholder reads off `req`: one of its own fields under its own written
-/// spelling for a generated message or for a named message that is a struct of its own, or the
-/// whole message where a named message is itself a wire scalar answering to exactly one
-/// placeholder — mirrors the Rust and TypeScript clients' own
-/// `client_placeholder_value`/`placeholder_value_expr`.
 fn placeholder_value_dart_expr(
     operation: &OperationDef,
     shape: &HttpShape,
@@ -378,11 +374,6 @@ fn path_build_stmt(operation: &OperationDef, shape: &HttpShape) -> String {
     stmt
 }
 
-/// The query string a `Named` message's own unbound fields build: every key its own `toJson`
-/// writes that no path placeholder already spends. A `Named` type is an author's own, declared
-/// elsewhere, so this macro cannot name its fields to spell them one by one the way
-/// [`query_build_stmt`] spells a `Generated` message's — the emitted loop walks the rendered map
-/// instead. Mirrors the TypeScript client's own `named_query_build_stmt`.
 fn named_query_build_stmt(shape: &HttpShape) -> String {
     let bound = shape
         .placeholder_names()
@@ -405,9 +396,6 @@ fn named_query_build_stmt(shape: &HttpShape) -> String {
     )
 }
 
-/// The query string a bodyless method's own unbound fields build, spelled field by field for a
-/// `Generated` message and walked at call time for a `Named` one. Mirrors the TypeScript client's
-/// own `query_build_stmt`.
 fn query_build_stmt(operation: &OperationDef, shape: &HttpShape) -> String {
     if shape.method.carries_a_body() {
         return "    const query = '';\n".to_owned();

@@ -686,9 +686,6 @@ fn a_no_payload_operation_resolves_on_its_declared_status_without_reading_a_body
     assert_eq!(client.transport().requests()[0].path, "/documents/d1");
 }
 
-/// A path carrying exactly one placeholder over a message the author declared: the placeholder
-/// names a field on that message, so the segment is that field's value rather than the whole
-/// message rendered.
 #[test]
 fn a_lone_placeholder_on_an_author_s_own_message_sends_the_field_it_names() {
     let transport =

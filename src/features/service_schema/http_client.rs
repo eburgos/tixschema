@@ -281,13 +281,8 @@ fn validation_stmt(prefix: &str, operation: &OperationDef, wire: &str) -> String
 }
 
 /// The value one path placeholder reads off `sending`: a generated field under its camelCase wire
-/// key; the whole message where a `Named` type is itself a wire scalar answering to exactly one
-/// placeholder; a `Named` type's own field, spelled exactly as the placeholder names it,
-/// otherwise. Mirrors the Rust client's own `client_placeholder_value` and the dispatcher's own
-/// `message_value_for_named`, which decides the same case the same way — an author's `Named` type
-/// keeps whatever casing its own serde attributes give it, which this macro cannot see, so a
-/// `Named` message's field is read back under the placeholder's own written spelling rather than
-/// a guessed one.
+/// key; the whole message where a `Named` type is itself a wire scalar; a `Named` type's own
+/// field, spelled exactly as the placeholder names it, otherwise.
 fn placeholder_value_expr(
     operation: &OperationDef,
     shape: &HttpShape,
@@ -327,12 +322,6 @@ fn path_build_stmt(operation: &OperationDef, shape: &HttpShape) -> String {
     stmt
 }
 
-/// The query string a `Named` message's own unbound fields build: every key it carries that no
-/// path placeholder already spends, read off the validated message at call time. A `Named` type
-/// is an author's own, declared elsewhere, so this macro cannot name its fields to spell them one
-/// by one the way [`query_build_stmt`] spells a `Generated` message's — the emitted loop walks the
-/// message instead. A type that is itself a wire scalar never reaches here: it has no keys, and
-/// the path is where it went.
 fn named_query_build_stmt(shape: &HttpShape) -> String {
     let bound = shape
         .placeholder_names()
@@ -356,9 +345,6 @@ fn named_query_build_stmt(shape: &HttpShape) -> String {
     )
 }
 
-/// The query string a bodyless method's own unbound fields build, spelled field by field for a
-/// `Generated` message and walked at call time for a `Named` one. A method that carries a body
-/// carries its fields there instead, and an `Empty` message has none to carry either way.
 fn query_build_stmt(operation: &OperationDef, shape: &HttpShape) -> String {
     if shape.method.carries_a_body() {
         return "      const query = \"\";\n".to_owned();

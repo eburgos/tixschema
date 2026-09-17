@@ -1851,10 +1851,8 @@ fn client_method(
 }
 
 /// The client's own placeholder value: a Generated field is read off `sending` by name; a Named
-/// message that is a struct of its own is read the same way, under the same documented requirement
-/// that its fields are visible under those names; a Named message that is itself a wire scalar
-/// answering to exactly one placeholder *is* the value, the same case [`message_value_for_named`]
-/// decides on the dispatching side.
+/// message's field is read the same way; a Named message that is itself a wire scalar *is* the
+/// value.
 fn client_placeholder_value(operation: &OperationDef, placeholder: &str) -> TokenStream {
     match &operation.inputs {
         // A path placeholder on an `Empty` input is refused at parse time - there is no field for
