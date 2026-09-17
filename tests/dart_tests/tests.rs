@@ -50,9 +50,7 @@ pub struct Warehouse {
 }
 
 // ---------------------------------------------------------------------------------------------
-// A struct carrying no field at all, and a struct whose key serde drops for an empty value although
-// its type is not an `Option` — the two shapes a Dart constructor gets wrong when it reads the
-// wire's own questions as if they were the language's.
+// Structs with no fields, and with a key serde drops over a non-Option type.
 // ---------------------------------------------------------------------------------------------
 
 #[model_schema()]
@@ -868,8 +866,7 @@ fn test_enum_keyed_map_decodes_and_encodes_through_the_enum_itself() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// A constructor's parameter list: the empty one, and the one whose requiredness the wire's own
-// key-dropping must not decide.
+// Constructor parameter lists: the empty one, and requiredness over a dropped key.
 // ---------------------------------------------------------------------------------------------
 
 #[test]

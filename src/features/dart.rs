@@ -109,12 +109,6 @@ struct ClassBodyParts {
 }
 
 impl ClassBodyParts {
-    /// The constructor's whole parameter list, braces included: `({required this.a,this.b,})` for a
-    /// set of fields, and the empty string for a set with none. Dart's named-parameter group has to
-    /// hold at least one parameter — `const Empty({});` is not a constructor with no parameters but
-    /// a parse error, `missing_identifier` ("Expected an identifier") — so a zero-field
-    /// `#[model_schema]` struct or a zero-field struct-shaped variant has to publish
-    /// `const Empty();` instead, with no parameter group of its own at all.
     fn ctor_parameter_group(&self) -> String {
         if self.ctor_params.is_empty() {
             String::new()
@@ -688,19 +682,6 @@ fn dart_decode_at(field: &FieldDef, level: u8, expr: &str) -> String {
 /// The expression that encodes `field`'s Dart value `expr` into a `jsonEncode`-safe value (`null`,
 /// `bool`, `num`, `String`, `List<dynamic>` or `Map<String, dynamic>`) — the whole field including
 /// its outer optionality, mirroring [`dart_decode_expr`].
-///
-/// `promoted` says whether Dart's flow analysis narrows `expr` to its non-`null` type inside the
-/// `== null` guard this writes. A bare local — a lambda parameter this module named itself — is
-/// narrowed; a read through a getter is not, however `final` the thing behind it: *field promotion*
-/// reaches a class's **private** fields alone, and a generated class publishes its fields, so
-/// `x == null ? null : x.toJson()` over a field is `unchecked_use_of_nullable_value` ("the method
-/// 'toJson' can't be unconditionally invoked because the receiver can be 'null'"). A record slot
-/// and a `MapEntry`'s `value` read the same way. An unnarrowed receiver therefore spells the `null`
-/// away with `!` inside the guard, which the guard has already proved — and only where something is
-/// called on it, since a value that encodes as itself calls nothing and a `!` there would be
-/// `unnecessary_non_null_assertion` noise of the opposite kind.
-///
-/// Unlike [`dart_decode_expr`], whose source is a `dynamic` the analyzer asks nothing of.
 fn dart_encode_expr(field: &FieldDef, expr: &str, promoted: bool) -> String {
     let unwrapped = dart_encode_at(field, field.array_depth, expr);
     if !field.is_optional() {
@@ -837,15 +818,6 @@ fn class_body_parts(fields: &[DartField], extra_to_json: &[String]) -> ClassBody
     let ctor_params: String = fields
         .iter()
         .map(|field| {
-            // A parameter that is not `required` falls back to `null`, which only a nullable Dart
-            // type admits: `this.x` over a non-nullable one is `missing_default_value_for_parameter`
-            // ("the parameter 'x' can't have a value of 'null' because of its type"). Whether the
-            // *wire key* may be dropped is a separate question, and the two part company on exactly
-            // the field whose key serde omits for an empty value while its type is not an `Option`
-            // at all — `#[serde(skip_serializing_if = "Vec::is_empty")] pub tags: Vec<String>`, a
-            // `List<String>` that is never `null`. Such a field is required here; a nullable one
-            // whose key is always written stays required as it was, `required` being legal beside a
-            // nullable type.
             if field.required || !field.field_def.is_optional() {
                 format!("required this.{},", field.rust_name)
             } else {
@@ -887,13 +859,6 @@ fn class_body_parts(fields: &[DartField], extra_to_json: &[String]) -> ClassBody
                     format!("...({encode} as Map<String, dynamic>),")
                 }
             } else if field.required || !field.field_def.is_optional() {
-                // A key serde may drop is dropped here by the `null` that stands for its absence —
-                // so a field with no `null` in its Dart type has no absence to test, and testing one
-                // anyway earns `unnecessary_null_comparison` ("the operand can't be 'null', so the
-                // condition is always 'true'"). Its key is written every time, which the same serde
-                // attribute that drops it (`default`, or the `skip_serializing_if` beside one) reads
-                // back on the other side. The `flatten` arm above asks the same question the same
-                // way.
                 format!("'{}': {encode},", field.wire_name)
             } else {
                 format!(

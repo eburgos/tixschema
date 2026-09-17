@@ -425,10 +425,6 @@ fn header_in_build_stmt(shape: &HttpShape) -> String {
         let name = &header.name;
         let parameter = &header.parameter;
         if let Some(inner) = option_inner(&header.ty) {
-            // `parameter` is a local — the method's own parameter — so the `!= null` test below
-            // narrows it to its non-`null` type for the body, and spelling the `null` away again
-            // would be `unnecessary_non_null_assertion` ("the '!' will have no effect because the
-            // receiver can't be null").
             let text = dart_wire_text(inner, &parameter.to_string());
             let _ = writeln!(
                 stmt,
@@ -843,12 +839,6 @@ fn fault_helpers(service: &ServiceDef, named: &str, fn_prefix: &str) -> Vec<Stri
     helpers
 }
 
-/// Whether any operation in `service` reads a response header back — a declared `header_out`
-/// binding, a `body = "bytes"` answer's own content type, or a `body = "stream"` answer's content
-/// range. The one gate on [`find_header_fn`]: a service whose every operation answers plain JSON
-/// and declares no `header_out` calls it from nowhere, and a private top-level function nothing
-/// references is `unused_element` ("the declaration '_findHeader' isn't referenced") in the
-/// consumer's own analysis of the file this client is vendored into.
 fn reads_a_response_header(service: &ServiceDef) -> bool {
     service.operations.iter().any(|operation| {
         operation.http.as_ref().is_some_and(|binding| {
