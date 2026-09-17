@@ -103,9 +103,11 @@ fn a_header_in_binding_becomes_an_extra_parameter_and_a_built_header() {
     assert!(
         method.contains("final headers = <(String, String)>[];")
             && method.contains(
-                "if (byte_range != null) {\n      headers.add(('range', '${byte_range!}'));\n    }"
+                "if (byte_range != null) {\n      headers.add(('range', '${byte_range}'));\n    }"
             ),
-        "the header is built from the extra argument, never from the message. Got: {method}"
+        "the header is built from the extra argument, never from the message, and reads the \
+         parameter the `!= null` test has already narrowed rather than spelling the `null` away a \
+         second time. Got: {method}"
     );
 }
 
@@ -470,5 +472,34 @@ fn a_multipart_method_builds_one_text_part_per_field_and_one_file_part_per_bindi
              headers: headers, body: body, parts: parts));"
         ),
         "`parts` rides beside `body` in the request the seam is handed. Got: {method}"
+    );
+}
+
+#[test]
+fn the_header_reader_is_published_only_for_a_service_that_calls_it() {
+    for (source, service) in [
+        (DART_HTTP_SERVICE, "a declared header_out"),
+        (
+            DART_BYTES_HEADER_OUT_SERVICE,
+            "a bytes answer's content type",
+        ),
+        (
+            DART_STREAM_HTTP_SERVICE,
+            "a streamed answer's content range",
+        ),
+    ] {
+        let written = dart_http_client_of(source);
+        assert!(
+            written.contains("String? _findHeader("),
+            "{service} reads a response header back, so the reader is published beside the \
+             client. Got: {written}"
+        );
+    }
+    let written = dart_http_client_of(DART_MULTIPART_HTTP_SERVICE);
+    assert!(
+        !written.contains("_findHeader"),
+        "every operation on this service answers plain JSON and declares no header_out, so \
+         nothing calls the reader — and a private top-level function nothing references is \
+         `unused_element` in the analysis of the file this client is vendored into. Got: {written}"
     );
 }

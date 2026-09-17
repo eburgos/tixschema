@@ -88,7 +88,7 @@ pub fn emit(service: &ServiceDef) -> Vec<String> {
         published.push(refusal_class(&named));
     }
     published.push(client_class(service, has_stream, has_multipart));
-    published.extend(fault_helpers(&named, &fn_prefix));
+    published.extend(fault_helpers(service, &named, &fn_prefix));
     published
 }
 
@@ -425,7 +425,11 @@ fn header_in_build_stmt(shape: &HttpShape) -> String {
         let name = &header.name;
         let parameter = &header.parameter;
         if let Some(inner) = option_inner(&header.ty) {
-            let text = dart_wire_text(inner, &format!("{parameter}!"));
+            // `parameter` is a local — the method's own parameter — so the `!= null` test below
+            // narrows it to its non-`null` type for the body, and spelling the `null` away again
+            // would be `unnecessary_non_null_assertion` ("the '!' will have no effect because the
+            // receiver can't be null").
+            let text = dart_wire_text(inner, &parameter.to_string());
             let _ = writeln!(
                 stmt,
                 "    if ({parameter} != null) {{\n      headers.add(('{name}', {text}));\n    }}"
@@ -826,13 +830,32 @@ fn bytes_success_decode_block(
 // The fault helpers every method reaches for.
 // ---------------------------------------------------------------------------------------------
 
-fn fault_helpers(named: &str, fn_prefix: &str) -> Vec<String> {
-    vec![
-        find_header_fn(),
+fn fault_helpers(service: &ServiceDef, named: &str, fn_prefix: &str) -> Vec<String> {
+    let mut helpers = Vec::new();
+    if reads_a_response_header(service) {
+        helpers.push(find_header_fn());
+    }
+    helpers.extend([
         transport_failure_fn(named, fn_prefix),
         undeserializable_payload_fn(named, fn_prefix),
         fault_from_body_fn(named, fn_prefix),
-    ]
+    ]);
+    helpers
+}
+
+/// Whether any operation in `service` reads a response header back — a declared `header_out`
+/// binding, a `body = "bytes"` answer's own content type, or a `body = "stream"` answer's content
+/// range. The one gate on [`find_header_fn`]: a service whose every operation answers plain JSON
+/// and declares no `header_out` calls it from nowhere, and a private top-level function nothing
+/// references is `unused_element` ("the declaration '_findHeader' isn't referenced") in the
+/// consumer's own analysis of the file this client is vendored into.
+fn reads_a_response_header(service: &ServiceDef) -> bool {
+    service.operations.iter().any(|operation| {
+        operation.http.as_ref().is_some_and(|binding| {
+            !binding.header_out.is_empty()
+                || matches!(binding.body_kind, BodyKind::Bytes | BodyKind::Stream)
+        })
+    })
 }
 
 /// Reads one response header back case-insensitively, the way HTTP headers are read — Dart's

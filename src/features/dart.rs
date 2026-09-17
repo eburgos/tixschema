@@ -108,6 +108,22 @@ struct ClassBodyParts {
     to_json_map: String,
 }
 
+impl ClassBodyParts {
+    /// The constructor's whole parameter list, braces included: `({required this.a,this.b,})` for a
+    /// set of fields, and the empty string for a set with none. Dart's named-parameter group has to
+    /// hold at least one parameter — `const Empty({});` is not a constructor with no parameters but
+    /// a parse error, `missing_identifier` ("Expected an identifier") — so a zero-field
+    /// `#[model_schema]` struct or a zero-field struct-shaped variant has to publish
+    /// `const Empty();` instead, with no parameter group of its own at all.
+    fn ctor_parameter_group(&self) -> String {
+        if self.ctor_params.is_empty() {
+            String::new()
+        } else {
+            format!("{{{}}}", self.ctor_params)
+        }
+    }
+}
+
 thread_local! {
     /// The Dart class/enum name each Rust ident publishes — the one thing a reference to a sibling
     /// item needs, since the reference's own field carries the type arguments (real Dart generics
@@ -529,14 +545,18 @@ fn dart_map_key_encode(key: &FieldDef, expr: &str) -> String {
             | FieldDefType::Map(_, _)
             | FieldDefType::Tuple(_)
             | FieldDefType::TypeParam(_)
-            | FieldDefType::Unknown => format!("({}) as String", dart_encode_expr(key, expr)),
+            | FieldDefType::Unknown => {
+                format!("({}) as String", dart_encode_expr(key, expr, false))
+            }
             #[cfg(feature = "object_id")]
-            FieldDefType::ObjectId => format!("({}) as String", dart_encode_expr(key, expr)),
+            FieldDefType::ObjectId => format!("({}) as String", dart_encode_expr(key, expr, false)),
             #[cfg(feature = "chrono")]
             FieldDefType::NaiveDate
             | FieldDefType::NaiveTime
             | FieldDefType::NaiveDateTime
-            | FieldDefType::DateTime => format!("({}) as String", dart_encode_expr(key, expr)),
+            | FieldDefType::DateTime => {
+                format!("({}) as String", dart_encode_expr(key, expr, false))
+            }
         },
     }
 }
@@ -668,13 +688,29 @@ fn dart_decode_at(field: &FieldDef, level: u8, expr: &str) -> String {
 /// The expression that encodes `field`'s Dart value `expr` into a `jsonEncode`-safe value (`null`,
 /// `bool`, `num`, `String`, `List<dynamic>` or `Map<String, dynamic>`) — the whole field including
 /// its outer optionality, mirroring [`dart_decode_expr`].
-fn dart_encode_expr(field: &FieldDef, expr: &str) -> String {
+///
+/// `promoted` says whether Dart's flow analysis narrows `expr` to its non-`null` type inside the
+/// `== null` guard this writes. A bare local — a lambda parameter this module named itself — is
+/// narrowed; a read through a getter is not, however `final` the thing behind it: *field promotion*
+/// reaches a class's **private** fields alone, and a generated class publishes its fields, so
+/// `x == null ? null : x.toJson()` over a field is `unchecked_use_of_nullable_value` ("the method
+/// 'toJson' can't be unconditionally invoked because the receiver can be 'null'"). A record slot
+/// and a `MapEntry`'s `value` read the same way. An unnarrowed receiver therefore spells the `null`
+/// away with `!` inside the guard, which the guard has already proved — and only where something is
+/// called on it, since a value that encodes as itself calls nothing and a `!` there would be
+/// `unnecessary_non_null_assertion` noise of the opposite kind.
+///
+/// Unlike [`dart_decode_expr`], whose source is a `dynamic` the analyzer asks nothing of.
+fn dart_encode_expr(field: &FieldDef, expr: &str, promoted: bool) -> String {
     let unwrapped = dart_encode_at(field, field.array_depth, expr);
-    if field.is_optional() {
-        format!("({expr} == null ? null : {unwrapped})")
-    } else {
-        unwrapped
+    if !field.is_optional() {
+        return unwrapped;
     }
+    if promoted || unwrapped == expr {
+        return format!("({expr} == null ? null : {unwrapped})");
+    }
+    let asserted = dart_encode_at(field, field.array_depth, &format!("{expr}!"));
+    format!("({expr} == null ? null : {asserted})")
 }
 
 /// [`dart_encode_expr`] before the outer optionality — the encode counterpart of [`dart_decode_at`].
@@ -697,7 +733,7 @@ fn dart_encode_at(field: &FieldDef, level: u8, expr: &str) -> String {
                 .iter()
                 .enumerate()
                 .map(|(index, element)| {
-                    dart_encode_expr(element, &format!("({expr}).${}", index + 1))
+                    dart_encode_expr(element, &format!("({expr}).${}", index + 1), false)
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -715,7 +751,7 @@ fn dart_encode_at(field: &FieldDef, level: u8, expr: &str) -> String {
             } else {
                 let converters = generics
                     .iter()
-                    .map(|argument| format!("(e) => {}", dart_encode_expr(argument, "e")))
+                    .map(|argument| format!("(e) => {}", dart_encode_expr(argument, "e", true)))
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("({expr}).toJson({converters})")
@@ -723,7 +759,7 @@ fn dart_encode_at(field: &FieldDef, level: u8, expr: &str) -> String {
         }
         FieldDefType::Map(key, value) => {
             let key_encode = dart_map_key_encode(key, "e.key");
-            let value_encode = dart_encode_expr(value, "e.value");
+            let value_encode = dart_encode_expr(value, "e.value", false);
             format!(
                 "Map<String, dynamic>.fromEntries(({expr}).entries.map((e) => MapEntry({key_encode}, {value_encode})))"
             )
@@ -801,7 +837,16 @@ fn class_body_parts(fields: &[DartField], extra_to_json: &[String]) -> ClassBody
     let ctor_params: String = fields
         .iter()
         .map(|field| {
-            if field.required {
+            // A parameter that is not `required` falls back to `null`, which only a nullable Dart
+            // type admits: `this.x` over a non-nullable one is `missing_default_value_for_parameter`
+            // ("the parameter 'x' can't have a value of 'null' because of its type"). Whether the
+            // *wire key* may be dropped is a separate question, and the two part company on exactly
+            // the field whose key serde omits for an empty value while its type is not an `Option`
+            // at all — `#[serde(skip_serializing_if = "Vec::is_empty")] pub tags: Vec<String>`, a
+            // `List<String>` that is never `null`. Such a field is required here; a nullable one
+            // whose key is always written stays required as it was, `required` being legal beside a
+            // nullable type.
+            if field.required || !field.field_def.is_optional() {
                 format!("required this.{},", field.rust_name)
             } else {
                 format!("this.{},", field.rust_name)
@@ -831,7 +876,7 @@ fn class_body_parts(fields: &[DartField], extra_to_json: &[String]) -> ClassBody
     let to_json_entries: String = fields
         .iter()
         .map(|field| {
-            let encode = dart_encode_expr(&field.field_def, &field.rust_name);
+            let encode = dart_encode_expr(&field.field_def, &field.rust_name, false);
             if field.flatten {
                 if field.field_def.is_optional() {
                     format!(
@@ -841,7 +886,14 @@ fn class_body_parts(fields: &[DartField], extra_to_json: &[String]) -> ClassBody
                 } else {
                     format!("...({encode} as Map<String, dynamic>),")
                 }
-            } else if field.required {
+            } else if field.required || !field.field_def.is_optional() {
+                // A key serde may drop is dropped here by the `null` that stands for its absence —
+                // so a field with no `null` in its Dart type has no absence to test, and testing one
+                // anyway earns `unnecessary_null_comparison` ("the operand can't be 'null', so the
+                // condition is always 'true'"). Its key is written every time, which the same serde
+                // attribute that drops it (`default`, or the `skip_serializing_if` beside one) reads
+                // back on the other side. The `flatten` arm above asks the same question the same
+                // way.
                 format!("'{}': {encode},", field.wire_name)
             } else {
                 format!(
@@ -875,10 +927,10 @@ fn class_body_content(
 ) -> String {
     let parts = class_body_parts(fields, extra_to_json);
     format!(
-        "const {class_name}({{{ctor_params}}}); {field_decls} \
+        "const {class_name}({ctor_group}); {field_decls} \
          factory {class_name}.fromJson(Map<String, dynamic> json{fp}) => {class_name}({ctor_args}); \
          Map<String, dynamic> toJson({tp}) => {to_json_map};",
-        ctor_params = parts.ctor_params,
+        ctor_group = parts.ctor_parameter_group(),
         field_decls = parts.field_decls,
         ctor_args = parts.ctor_args,
         to_json_map = parts.to_json_map,
@@ -977,7 +1029,7 @@ fn value_wrapper_tokens(
     let parameters = type_parameters_in_scope(generics);
     let codec = generic_codec(&parameters);
     let decode = dart_decode_expr(value_field, "json");
-    let encode = dart_encode_expr(value_field, "value");
+    let encode = dart_encode_expr(value_field, "value", false);
     let value_ty = dart_typename(value_field);
     let body = format!(
         "class {export_name}{generic_params} {{ const {export_name}(this.value); final {value_ty} value; \
@@ -1203,10 +1255,10 @@ fn tagged_variant_tokens(
                 let parts = class_body_parts(fields, &[]);
                 let wrapped = tagged_wrap_encode(shape, wire_tag, Some(&parts.to_json_map));
                 format!(
-                    "class {subclass_name}{generic_params} {extends} {{ const {subclass_name}({{{ctor_params}}}); \
+                    "class {subclass_name}{generic_params} {extends} {{ const {subclass_name}({ctor_group}); \
                      {field_decls} factory {subclass_name}.fromJson(Map<String, dynamic> json{fp}) => \
                      {subclass_name}({ctor_args}); @override dynamic toJson({tp}) => {wrapped}; }}",
-                    ctor_params = parts.ctor_params,
+                    ctor_group = parts.ctor_parameter_group(),
                     field_decls = parts.field_decls,
                     ctor_args = parts.ctor_args,
                     fp = codec.from_json_params,
@@ -1221,7 +1273,7 @@ fn tagged_variant_tokens(
         }
         VariantPayload::Value(field_def) => {
             let decode = dart_decode_expr(field_def, &payload_expr);
-            let own_encode = dart_encode_expr(field_def, "value");
+            let own_encode = dart_encode_expr(field_def, "value", false);
             let wrapped_encode = if shape.merge_tag_into_object {
                 // Internal tagging with a non-`Named` payload: real serde refuses this unless the
                 // payload is itself object-shaped (`#[serde(tag = "...")]` cannot carry a scalar or
@@ -1364,7 +1416,7 @@ fn untagged_enum_dart_source(
             }
             VariantPayload::Value(field_def) => {
                 let decode = dart_decode_expr(field_def, "json");
-                let encode = dart_encode_expr(field_def, "value");
+                let encode = dart_encode_expr(field_def, "value", false);
                 (
                     format!(
                         "class {subclass_name}{generic_params} {extends} {{ const {subclass_name}(this.value); \
