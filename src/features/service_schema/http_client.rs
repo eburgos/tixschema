@@ -53,8 +53,9 @@ use crate::field_type::get_field_def;
 use crate::rename_rule::RenameRule;
 use crate::service_schema::parse::{
     BodyKind, DEFAULT_BINDING_ERROR_STATUS, HttpShape, OperationDef, OperationInputs,
-    OperationOutcome, PathSegment, ScalarKind, ServiceDef, is_unit_type, option_inner, scalar_kind,
-    service_declares_a_stream, service_declares_multipart, tuple_elements, vec_inner, wire_key,
+    OperationOutcome, PathSegment, ScalarKind, ServiceDef, is_scalar_named_type, is_unit_type,
+    option_inner, scalar_kind, service_declares_a_stream, service_declares_multipart,
+    tuple_elements, vec_inner, wire_key,
 };
 use core::fmt::Write as _;
 use syn::Type;
@@ -280,11 +281,13 @@ fn validation_stmt(prefix: &str, operation: &OperationDef, wire: &str) -> String
 }
 
 /// The value one path placeholder reads off `sending`: a generated field under its camelCase wire
-/// key; the whole message where a `Named` type answers to exactly one placeholder; a `Named`
-/// type's own field, spelled exactly as the placeholder names it, otherwise. Mirrors the Rust
-/// client's own `client_placeholder_value` — an author's `Named` type keeps whatever casing its
-/// own serde attributes give it, which this macro cannot see, so a multi-placeholder `Named`
-/// message is read back under the placeholder's own written spelling rather than a guessed one.
+/// key; the whole message where a `Named` type is itself a wire scalar answering to exactly one
+/// placeholder; a `Named` type's own field, spelled exactly as the placeholder names it,
+/// otherwise. Mirrors the Rust client's own `client_placeholder_value` and the dispatcher's own
+/// `message_value_for_named`, which decides the same case the same way — an author's `Named` type
+/// keeps whatever casing its own serde attributes give it, which this macro cannot see, so a
+/// `Named` message's field is read back under the placeholder's own written spelling rather than
+/// a guessed one.
 fn placeholder_value_expr(
     operation: &OperationDef,
     shape: &HttpShape,
@@ -298,8 +301,8 @@ fn placeholder_value_expr(
                 RenameRule::CamelCase.apply_to_field(placeholder)
             )
         }
-        OperationInputs::Named(_) => {
-            if shape.placeholder_names().len() == 1 {
+        OperationInputs::Named(declared) => {
+            if shape.placeholder_names().len() == 1 && is_scalar_named_type(declared) {
                 "sending".to_owned()
             } else {
                 format!("sending.{placeholder}")
@@ -324,17 +327,53 @@ fn path_build_stmt(operation: &OperationDef, shape: &HttpShape) -> String {
     stmt
 }
 
-/// The query string a bodyless method's own unbound fields build. Only a `Generated` message
-/// carries query fields in this version — mirroring the Rust client, whose own `query_build_stmts`
-/// answers `let query = String::new();` unconditionally for anything else — since every field a
-/// bodyless `Named` message carries has to be exposed through a path placeholder instead.
+/// The query string a `Named` message's own unbound fields build: every key it carries that no
+/// path placeholder already spends, read off the validated message at call time. A `Named` type
+/// is an author's own, declared elsewhere, so this macro cannot name its fields to spell them one
+/// by one the way [`query_build_stmt`] spells a `Generated` message's — the emitted loop walks the
+/// message instead. A type that is itself a wire scalar never reaches here: it has no keys, and
+/// the path is where it went.
+fn named_query_build_stmt(shape: &HttpShape) -> String {
+    let bound = shape
+        .placeholder_names()
+        .iter()
+        .map(|name| format!("\"{name}\""))
+        .collect::<Vec<String>>()
+        .join(", ");
+    format!(
+        "      const queryParts: Array<string> = [];\n      \
+         const pathBound: ReadonlyArray<string> = [{bound}];\n      \
+         for (const [key, value] of Object.entries(sending)) {{\n        \
+         if (pathBound.includes(key) || value === undefined || value === null) {{\n          \
+         continue;\n        \
+         }}\n        \
+         const rendered = Array.isArray(value)\n          \
+         ? value.map((element) => String(element)).join(\",\")\n          \
+         : String(value);\n        \
+         queryParts.push(`${{key}}=${{encodeURIComponent(rendered)}}`);\n      \
+         }}\n      \
+         const query = queryParts.join(\"&\");\n"
+    )
+}
+
+/// The query string a bodyless method's own unbound fields build, spelled field by field for a
+/// `Generated` message and walked at call time for a `Named` one. A method that carries a body
+/// carries its fields there instead, and an `Empty` message has none to carry either way.
 fn query_build_stmt(operation: &OperationDef, shape: &HttpShape) -> String {
-    let OperationInputs::Generated(fields) = &operation.inputs else {
-        return "      const query = \"\";\n".to_owned();
-    };
     if shape.method.carries_a_body() {
         return "      const query = \"\";\n".to_owned();
     }
+    let fields = match &operation.inputs {
+        OperationInputs::Empty => return "      const query = \"\";\n".to_owned(),
+        OperationInputs::Named(declared) => {
+            return if is_scalar_named_type(declared) {
+                "      const query = \"\";\n".to_owned()
+            } else {
+                named_query_build_stmt(shape)
+            };
+        }
+        OperationInputs::Generated(fields) => fields,
+    };
     let placeholders = shape.placeholder_names();
     let mut pushes = String::new();
     for (field, ty) in fields {

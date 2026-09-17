@@ -6,7 +6,7 @@
 
 use super::{
     DART_BYTES_HEADER_OUT_SERVICE, DART_HTTP_SERVICE, DART_MULTIPART_HTTP_SERVICE,
-    DART_STREAM_HTTP_SERVICE, dart_http_client_of,
+    DART_SINGLE_PLACEHOLDER_HTTP_SERVICE, DART_STREAM_HTTP_SERVICE, dart_http_client_of,
 };
 
 /// The body of one method, from its own doc comment through the closing brace of the method
@@ -88,6 +88,64 @@ fn a_path_placeholder_is_filled_by_exact_segment_substitution() {
             && method.contains("path += Uri.encodeComponent('${req.version_id}');"),
         "each segment is pushed in template order, a placeholder reading its own field off the \
          message under its own written spelling. Got: {method}"
+    );
+}
+
+#[test]
+fn a_lone_placeholder_on_an_author_s_own_message_reads_the_field_it_names() {
+    let written = dart_http_client_of(DART_SINGLE_PLACEHOLDER_HTTP_SERVICE);
+    let method = method_body(&written, "window");
+    assert!(
+        method.contains("path += Uri.encodeComponent('${req.conversation_id}');"),
+        "a message the author declared is a class whatever the path is shaped like, so the one \
+         placeholder reads the field it names off it. Got: {method}"
+    );
+    assert!(
+        !method.contains("path += Uri.encodeComponent('${(req).toJson()}');"),
+        "serializing the whole message would send a rendered map as the segment. Got: {method}"
+    );
+}
+
+#[test]
+fn a_lone_placeholder_on_a_scalar_message_still_is_the_whole_message() {
+    let written = dart_http_client_of(DART_SINGLE_PLACEHOLDER_HTTP_SERVICE);
+    let method = method_body(&written, "purgeConversation");
+    assert!(
+        method.contains("path += Uri.encodeComponent('${req}');"),
+        "a message that already is a wire scalar has no field to read: it is the segment. \
+         Got: {method}"
+    );
+}
+
+#[test]
+fn a_named_message_s_unbound_fields_build_the_query_string_of_a_bodyless_method() {
+    let written = dart_http_client_of(DART_SINGLE_PLACEHOLDER_HTTP_SERVICE);
+    let method = method_body(&written, "window");
+    assert!(
+        method.contains("req.toJson().forEach((key, value) {")
+            && method.contains(
+                "if (const <String>['conversation_id'].contains(key) || value == null) {"
+            )
+            && method.contains("queryParts.add('$key=${Uri.encodeComponent(rendered)}');")
+            && method.contains("final query = queryParts.join('&');"),
+        "a field the path does not bind is a query parameter; the rendered map is walked because \
+         this macro cannot name an author's own fields. Got: {method}"
+    );
+    assert!(
+        !method.contains("const query = '';"),
+        "a message carrying more than the path spends does not send an empty query. \
+         Got: {method}"
+    );
+}
+
+#[test]
+fn a_scalar_named_message_builds_no_query_string() {
+    let written = dart_http_client_of(DART_SINGLE_PLACEHOLDER_HTTP_SERVICE);
+    let method = method_body(&written, "purgeConversation");
+    assert!(
+        method.contains("const query = '';"),
+        "a message that already is a wire scalar has no keys left over: the path spent it. \
+         Got: {method}"
     );
 }
 

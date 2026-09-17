@@ -6,8 +6,8 @@
 //! type-checks the bundle.
 
 use super::{
-    BYTES_HTTP_SERVICE, MIXED_HTTP_SERVICE, MULTIPART_HTTP_SERVICE, STREAM_HTTP_SERVICE,
-    http_client_of,
+    BYTES_HTTP_SERVICE, MIXED_HTTP_SERVICE, MULTIPART_HTTP_SERVICE,
+    SINGLE_PLACEHOLDER_HTTP_SERVICE, STREAM_HTTP_SERVICE, http_client_of,
 };
 
 #[test]
@@ -84,6 +84,63 @@ fn a_path_placeholder_is_filled_by_exact_segment_substitution() {
             && method.contains("path += encodeURIComponent(String(sending.version_id));"),
         "each segment is pushed in template order, a placeholder reading its own field off the \
          validated message rather than splitting a shared prefix. Got: {method}"
+    );
+}
+
+#[test]
+fn a_lone_placeholder_on_an_author_s_own_message_reads_the_field_it_names() {
+    let written = http_client_of(SINGLE_PLACEHOLDER_HTTP_SERVICE);
+    let method = method_body(&written, "window");
+    assert!(
+        method.contains("path += encodeURIComponent(String(sending.conversation_id));"),
+        "a message the author declared is an object whatever the path is shaped like, so the one \
+         placeholder reads the field it names off it. Got: {method}"
+    );
+    assert!(
+        !method.contains("path += encodeURIComponent(String(sending));"),
+        "stringifying the whole message would send `[object Object]` as the segment. \
+         Got: {method}"
+    );
+}
+
+#[test]
+fn a_lone_placeholder_on_a_scalar_message_still_is_the_whole_message() {
+    let written = http_client_of(SINGLE_PLACEHOLDER_HTTP_SERVICE);
+    let method = method_body(&written, "purgeConversation");
+    assert!(
+        method.contains("path += encodeURIComponent(String(sending));"),
+        "a message that already is a wire scalar has no field to read: it is the segment. \
+         Got: {method}"
+    );
+}
+
+#[test]
+fn a_named_message_s_unbound_fields_build_the_query_string_of_a_bodyless_method() {
+    let written = http_client_of(SINGLE_PLACEHOLDER_HTTP_SERVICE);
+    let method = method_body(&written, "window");
+    assert!(
+        method.contains("const pathBound: ReadonlyArray<string> = [\"conversation_id\"];")
+            && method.contains("for (const [key, value] of Object.entries(sending)) {")
+            && method.contains("queryParts.push(`${key}=${encodeURIComponent(rendered)}`);")
+            && method.contains("const query = queryParts.join(\"&\");"),
+        "a field the path does not bind is a query parameter; the message is walked because this \
+         macro cannot name an author's own fields. Got: {method}"
+    );
+    assert!(
+        !method.contains("const query = \"\";"),
+        "a message carrying more than the path spends does not send an empty query. \
+         Got: {method}"
+    );
+}
+
+#[test]
+fn a_scalar_named_message_builds_no_query_string() {
+    let written = http_client_of(SINGLE_PLACEHOLDER_HTTP_SERVICE);
+    let method = method_body(&written, "purgeConversation");
+    assert!(
+        method.contains("const query = \"\";"),
+        "a message that already is a wire scalar has no keys left over: the path spent it. \
+         Got: {method}"
     );
 }
 

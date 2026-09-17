@@ -8,7 +8,7 @@
 
 use crate::tests::{
     CreateDocumentError, CreateDocumentRequest, CreateDocumentResponse, GetVersionError,
-    GetVersionRequest, ThumbnailError, VersionResponse,
+    GetVersionRequest, ReadWindowRequest, ThumbnailError, VersionResponse,
 };
 
 document_client_service_http_rest_client!();
