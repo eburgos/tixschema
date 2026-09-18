@@ -242,8 +242,9 @@ fn a_header_out_tuple_success_reads_the_body_and_the_header_back() {
         "got: {method}"
     );
     assert!(
-        method.contains("final rawHeaderOut0 = _findHeader(response.headers, 'etag');")
-            && method.contains("if (rawHeaderOut0 == null) {")
+        method.contains(
+            "final rawHeaderOut0 = _documentClientServiceHttpFindHeader(response.headers, 'etag');"
+        ) && method.contains("if (rawHeaderOut0 == null) {")
             && method.contains("final headerOut0 = rawHeaderOut0;")
             && method.contains("return (value, headerOut0);"),
         "the response header is read back and joined onto the decoded body as a record. Got: \
@@ -290,8 +291,9 @@ fn a_bytes_operation_reads_the_body_and_content_type_back() {
     );
     let method = method_body(&written, "getThumbnail");
     assert!(
-        method.contains("final contentType = _findHeader(response.headers, 'content-type') ?? '';")
-            && method.contains("return (response.body, contentType);"),
+        method.contains(
+            "final contentType = _documentClientServiceHttpFindHeader(response.headers, 'content-type') ?? '';"
+        ) && method.contains("return (response.body, contentType);"),
         "no `jsonDecode` runs on a bytes body — it is read bare, and the content type is read \
          back from the response header. Got: {method}"
     );
@@ -331,9 +333,11 @@ fn a_bytes_operation_with_header_out_composes_body_content_type_and_the_header()
     );
     let method = method_body(&written, "getThumbnail");
     assert!(
-        method.contains("final contentType = _findHeader(response.headers, 'content-type') ?? '';")
-            && method
-                .contains("final rawHeaderOut0 = _findHeader(response.headers, 'x-document-id');")
+        method.contains(
+            "final contentType = _thumbnailClientServiceHttpFindHeader(response.headers, 'content-type') ?? '';"
+        ) && method.contains(
+            "final rawHeaderOut0 = _thumbnailClientServiceHttpFindHeader(response.headers, 'x-document-id');"
+        )
             && method.contains("if (rawHeaderOut0 == null) {")
             && method.contains("final headerOut0 = rawHeaderOut0;")
             && method.contains("return (response.body, contentType, headerOut0);"),
@@ -356,7 +360,7 @@ fn a_stream_operation_answers_a_content_range_and_body_record_at_200_and_206() {
     assert!(
         method.contains("if (status == 206) {")
             && method.contains(
-                "final contentRange = _findHeader(response.headers, 'content-range') ?? '';"
+                "final contentRange = _contentClientServiceHttpFindHeader(response.headers, 'content-range') ?? '';"
             )
             && method.contains(
                 "final answer = (contentRange: contentRange, body: response.bodyStream);"
@@ -384,7 +388,7 @@ fn a_stream_operation_with_header_out_wraps_the_record_in_a_tuple() {
     );
     let method = method_body(&written, "getTaggedFile");
     assert!(
-        method.contains("final rawHeaderOut0 = _findHeader(response.headers, 'x-checksum');")
+        method.contains("final rawHeaderOut0 = _contentClientServiceHttpFindHeader(response.headers, 'x-checksum');")
             && method.contains("final headerOut0 = rawHeaderOut0;")
             && method.contains("return (answer, headerOut0);"),
         "the header is read back once the record is built, in both the `206` and `200` arms. \
@@ -476,30 +480,71 @@ fn a_multipart_method_builds_one_text_part_per_field_and_one_file_part_per_bindi
 }
 
 #[test]
-fn the_header_reader_is_published_only_for_a_service_that_calls_it() {
-    for (source, service) in [
-        (DART_HTTP_SERVICE, "a declared header_out"),
+fn the_header_reader_is_published_under_the_service_prefix_only_where_it_is_called() {
+    for (source, reader, service) in [
+        (
+            DART_HTTP_SERVICE,
+            "_documentClientServiceHttpFindHeader",
+            "a declared header_out",
+        ),
         (
             DART_BYTES_HEADER_OUT_SERVICE,
+            "_thumbnailClientServiceHttpFindHeader",
             "a bytes answer's content type",
         ),
         (
             DART_STREAM_HTTP_SERVICE,
+            "_contentClientServiceHttpFindHeader",
             "a streamed answer's content range",
         ),
     ] {
         let written = dart_http_client_of(source);
         assert!(
-            written.contains("String? _findHeader("),
+            written.contains(&format!("String? {reader}(")),
             "{service} reads a response header back, so the reader is published beside the \
-             client. Got: {written}"
+             client — under the service's own prefix, since two clients vendored into one Dart \
+             library would otherwise both declare it: `duplicate_definition`. Got: {written}"
+        );
+        assert!(
+            !written.contains("_findHeader"),
+            "no unprefixed spelling survives anywhere. Got: {written}"
         );
     }
     let written = dart_http_client_of(DART_MULTIPART_HTTP_SERVICE);
     assert!(
-        !written.contains("_findHeader"),
+        !written.contains("FindHeader"),
         "every operation on this service answers plain JSON and declares no header_out, so \
          nothing calls the reader — and a private top-level function nothing references is \
          `unused_element` in the analysis of the file this client is vendored into. Got: {written}"
+    );
+}
+
+#[test]
+fn a_header_vec_of_options_narrows_its_element_without_spelling_the_null_away() {
+    let written = dart_http_client_of(
+        "
+    pub trait TagClientService<Ctx> {
+        #[service_schema_op(http(
+            method = \"GET\",
+            path = \"/tags\",
+            header_in(\"x-tags\" = tags),
+        ))]
+        async fn list_tags(
+            &self,
+            ctx: &Ctx,
+            req: ListTagsRequest,
+            tags: Vec<Option<String>>,
+        ) -> Result<ListTagsResponse, ListTagsError>;
+    }
+    ",
+    );
+    let method = method_body(&written, "listTags");
+    assert!(
+        method.contains(
+            "headers.add(('x-tags', (tags).map((e) => (e == null ? '' : '${e}')).join(\",\")));"
+        ),
+        "`e` is the closure's own parameter, which Dart narrows inside the `== null` test — so a \
+         `!` there is `unnecessary_non_null_assertion`, the same diagnostic the binding's own \
+         parameter was changed to stop raising. Got: {method}"
     );
 }

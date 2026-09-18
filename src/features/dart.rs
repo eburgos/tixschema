@@ -328,6 +328,11 @@ fn collect_dart_fields(
         let wire_name = wire_field_name(&rust_name, rename_override(&field.attrs).as_deref(), rule);
         let mut field_def = field_def_with_prop_meta(&rust_name, &field.ty, &field.attrs);
         field_def.erase_type_parameters(type_parameters);
+        if omission.omits_key && !field_def.is_optional() {
+            // Dart has no absent-key spelling: a `Map<String, dynamic>` answers a dropped key and
+            // an explicit `null` alike, so an omitted key is the outer level's own nullability.
+            field_def.nullable_levels.push(field_def.array_depth);
+        }
         collected.push(DartField {
             required: !omission.omits_key,
             flatten: field_is_flatten(&field.attrs),
@@ -818,7 +823,7 @@ fn class_body_parts(fields: &[DartField], extra_to_json: &[String]) -> ClassBody
     let ctor_params: String = fields
         .iter()
         .map(|field| {
-            if field.required || !field.field_def.is_optional() {
+            if field.required {
                 format!("required this.{},", field.rust_name)
             } else {
                 format!("this.{},", field.rust_name)
@@ -858,7 +863,7 @@ fn class_body_parts(fields: &[DartField], extra_to_json: &[String]) -> ClassBody
                 } else {
                     format!("...({encode} as Map<String, dynamic>),")
                 }
-            } else if field.required || !field.field_def.is_optional() {
+            } else if field.required {
                 format!("'{}': {encode},", field.wire_name)
             } else {
                 format!(

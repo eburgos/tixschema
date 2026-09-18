@@ -7,6 +7,11 @@
 //! and these tests are where that is held.
 
 #[cfg(test)]
-#[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
+#[cfg(any(
+    feature = "typescript",
+    feature = "zod",
+    feature = "jsonschema",
+    feature = "dart"
+))]
 #[path = "omitted_key_tests/tests.rs"]
 mod tests;

@@ -50,12 +50,15 @@ pub struct Warehouse {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Structs with no fields, and with a key serde drops over a non-Option type.
+// A struct whose whole field set serde drops, and a key serde drops over a non-Option type.
 // ---------------------------------------------------------------------------------------------
 
 #[model_schema()]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StockAudit;
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StockAudit {
+    #[serde(skip)]
+    pub note: String,
+}
 
 #[model_schema()]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -261,8 +264,10 @@ fn test_every_declared_type_is_constructible() {
     ];
     assert_eq!(events.len(), 3);
 
-    let audit = StockAudit;
-    assert_eq!(audit, StockAudit);
+    let audit = StockAudit {
+        note: String::new(),
+    };
+    assert_eq!(audit, StockAudit::default());
 
     let label = StockLabel {
         batch_codes: Vec::new(),
@@ -882,10 +887,15 @@ fn test_a_struct_with_no_fields_writes_no_parameter_group_at_all() {
         !dart.contains("({})"),
         "no empty brace pair survives anywhere in the class. Got: {dart}"
     );
+    assert_eq!(
+        serde_json::to_string(&StockAudit::default()).unwrap(),
+        "{}",
+        "the class reads and writes `{{}}`, and so does serde: every field this struct has is one \
+         serde keeps off the wire, which is the empty object the codec above pins"
+    );
 }
 
 #[test]
-#[cfg(feature = "serde")]
 fn test_a_struct_shaped_variant_with_no_fields_writes_no_parameter_group_either() {
     let dart = dynamic_value_dart::dart_definition();
     assert!(
@@ -901,29 +911,33 @@ fn test_a_struct_shaped_variant_with_no_fields_writes_no_parameter_group_either(
 }
 
 #[test]
-#[cfg(feature = "serde")]
-fn test_a_dropped_key_on_a_field_that_is_not_an_option_stays_required() {
+fn test_a_dropped_key_on_a_field_that_is_not_an_option_is_nullable_in_dart() {
     let dart = stock_label_dart::dart_definition();
     assert!(
-        dart.contains("final List<String> batch_codes;"),
-        "a Vec is not an Option, whatever serde does with its key. Got: {dart}"
+        dart.contains("final List<String>? batch_codes;"),
+        "serde writes this key for a full `Vec` and leaves it out for an empty one, and a Dart \
+         `Map<String, dynamic>` answers a dropped key and an explicit `null` alike — so the \
+         absent payload is admissible only if the type carries the `?`. Got: {dart}"
     );
     assert!(
-        dart.contains("required this.batch_codes,"),
-        "a parameter that is not `required` falls back to `null`, which a non-nullable type \
-         refuses: `missing_default_value_for_parameter`. Got: {dart}"
+        dart.contains("this.batch_codes,") && !dart.contains("required this.batch_codes,"),
+        "a nullable parameter defaults to `null`, which is what lets a caller build the value \
+         serde writes no key for. Got: {dart}"
     );
     assert!(
-        dart.contains("'batchCodes': batch_codes.map((e) => e).toList(),")
-            && !dart.contains("if (batch_codes != null)"),
-        "a field with no `null` in its Dart type has no absence to test, and testing one anyway \
-         is `unnecessary_null_comparison`; its key is written every time, which the `default` \
-         that drops it reads back on the other side. Got: {dart}"
+        dart.contains("batch_codes: (json['") && dart.contains("] == null ? null : (json['"),
+        "`fromJson` reads the key through a `null` guard rather than casting it: a `List` cast \
+         over the payload serde wrote without the key is a `TypeError` on every such answer. \
+         Got: {dart}"
+    );
+    assert!(
+        dart.contains("if (batch_codes != null)"),
+        "`toJson` writes the key only when it has a value, which is the same pair of payloads \
+         serde writes and the other three surfaces admit. Got: {dart}"
     );
 }
 
 #[test]
-#[cfg(feature = "serde")]
 fn test_an_optional_reference_spells_the_null_away_before_calling_its_own_codec() {
     let dart = warehouse_dart::dart_definition();
     assert!(
@@ -935,7 +949,6 @@ fn test_an_optional_reference_spells_the_null_away_before_calling_its_own_codec(
 }
 
 #[test]
-#[cfg(feature = "serde")]
 fn test_an_optional_scalar_calls_nothing_and_so_spells_no_null_away() {
     let dart = stock_item_dart::dart_definition();
     assert!(

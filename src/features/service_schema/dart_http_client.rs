@@ -349,11 +349,11 @@ fn placeholder_value_dart_expr(
             .find(|(field, _)| field == placeholder)
             .map_or_else(
                 || format!("'${{req.{placeholder}}}'"),
-                |(_, ty)| dart_wire_text(ty, &format!("req.{placeholder}")),
+                |(_, ty)| dart_wire_text(ty, &format!("req.{placeholder}"), false),
             ),
         OperationInputs::Named(declared) => {
             if shape.placeholder_names().len() == 1 {
-                dart_wire_text(declared, "req")
+                dart_wire_text(declared, "req", true)
             } else {
                 format!("'${{req.{placeholder}}}'")
             }
@@ -398,7 +398,7 @@ fn query_build_stmt(operation: &OperationDef, shape: &HttpShape) -> String {
         // A bodyless method's own field, unbound to a placeholder, is always `Option<...>` — a
         // required field with nowhere else to go is refused at parse time.
         let inner = option_inner(ty).unwrap_or(ty);
-        let rendered = dart_wire_text(inner, "value");
+        let rendered = dart_wire_text(inner, "value", true);
         let _ = write!(
             pushes,
             "    {{\n      final value = req.{field_name};\n      if (value != null) {{\n        \
@@ -425,13 +425,13 @@ fn header_in_build_stmt(shape: &HttpShape) -> String {
         let name = &header.name;
         let parameter = &header.parameter;
         if let Some(inner) = option_inner(&header.ty) {
-            let text = dart_wire_text(inner, &parameter.to_string());
+            let text = dart_wire_text(inner, &parameter.to_string(), true);
             let _ = writeln!(
                 stmt,
                 "    if ({parameter} != null) {{\n      headers.add(('{name}', {text}));\n    }}"
             );
         } else {
-            let text = dart_wire_text(&header.ty, &parameter.to_string());
+            let text = dart_wire_text(&header.ty, &parameter.to_string(), true);
             let _ = writeln!(stmt, "    headers.add(('{name}', {text}));");
         }
     }
@@ -480,7 +480,7 @@ fn multipart_parts_build_stmt(
             }
             let key = wire_key(field);
             if let Some(inner) = option_inner(ty) {
-                let text = dart_wire_text(inner, &format!("req.{field_name}!"));
+                let text = dart_wire_text(inner, &format!("req.{field_name}!"), false);
                 let _ = write!(
                     stmt,
                     "    if (req.{field_name} != null) {{\n      \
@@ -488,7 +488,7 @@ fn multipart_parts_build_stmt(
                      }}\n"
                 );
             } else {
-                let text = dart_wire_text(ty, &format!("req.{field_name}"));
+                let text = dart_wire_text(ty, &format!("req.{field_name}"), false);
                 let _ = writeln!(stmt, "    parts.add(('{key}', {text}));");
             }
         }
@@ -674,8 +674,10 @@ fn stream_success_arm(
     partial: bool,
 ) -> String {
     let mut stmt = if partial {
-        "      final contentRange = _findHeader(response.headers, 'content-range') ?? '';\n"
-            .to_owned()
+        format!(
+            "      final contentRange = {}(response.headers, 'content-range') ?? '';\n",
+            find_header_call(fn_prefix)
+        )
     } else {
         "      const String? contentRange = null;\n".to_owned()
     };
@@ -720,13 +722,14 @@ fn header_out_read_stmts(
         let decode = dart_header_out_decode(element_ty, &raw_ident);
         let _ = write!(
             stmt,
-            "      final {raw_ident} = _findHeader(response.headers, '{name}');\n      \
+            "      final {raw_ident} = {find_header}(response.headers, '{name}');\n      \
              if ({raw_ident} == null) {{\n        \
              throw {named}HttpError<{error_ty}>.fault(\n          \
              _{fn_prefix}HttpUndeserializablePayload('{wire}', 'a declared response header was missing'),\n        \
              );\n      \
              }}\n      \
-             final {ident} = {decode};\n"
+             final {ident} = {decode};\n",
+            find_header = find_header_call(fn_prefix)
         );
         idents.push(ident);
     }
@@ -803,9 +806,10 @@ fn bytes_success_decode_block(
     error_ty: &str,
     success: &Type,
 ) -> String {
-    let mut stmt =
-        "      final contentType = _findHeader(response.headers, 'content-type') ?? '';\n"
-            .to_owned();
+    let mut stmt = format!(
+        "      final contentType = {}(response.headers, 'content-type') ?? '';\n",
+        find_header_call(fn_prefix)
+    );
     if shape.header_out.is_empty() {
         stmt.push_str("      return (response.body, contentType);\n");
         return stmt;
@@ -829,7 +833,7 @@ fn bytes_success_decode_block(
 fn fault_helpers(service: &ServiceDef, named: &str, fn_prefix: &str) -> Vec<String> {
     let mut helpers = Vec::new();
     if reads_a_response_header(service) {
-        helpers.push(find_header_fn());
+        helpers.push(find_header_fn(fn_prefix));
     }
     helpers.extend([
         transport_failure_fn(named, fn_prefix),
@@ -839,26 +843,35 @@ fn fault_helpers(service: &ServiceDef, named: &str, fn_prefix: &str) -> Vec<Stri
     helpers
 }
 
+/// Read through [`HttpShape::of`], the shape every method above is built from, so the gate and the
+/// methods cannot answer differently for an operation with no `http(...)` group.
 fn reads_a_response_header(service: &ServiceDef) -> bool {
     service.operations.iter().any(|operation| {
-        operation.http.as_ref().is_some_and(|binding| {
-            !binding.header_out.is_empty()
-                || matches!(binding.body_kind, BodyKind::Bytes | BodyKind::Stream)
-        })
+        let shape = HttpShape::of(operation);
+        !shape.header_out.is_empty()
+            || matches!(shape.body_kind, BodyKind::Bytes | BodyKind::Stream)
     })
 }
 
 /// Reads one response header back case-insensitively, the way HTTP headers are read — Dart's
 /// core `Iterable` carries no `firstWhereOrNull` of its own.
-fn find_header_fn() -> String {
-    "/// Reads one response header back case-insensitively, the way HTTP headers are read.\n\
-     String? _findHeader(List<(String, String)> headers, String name) {\n  \
-     for (final header in headers) {\n    \
-     if (header.$1.toLowerCase() == name) return header.$2;\n  \
-     }\n  \
-     return null;\n\
-     }"
-    .to_owned()
+fn find_header_fn(fn_prefix: &str) -> String {
+    format!(
+        "/// Reads one response header back case-insensitively, the way HTTP headers are read.\n\
+         String? {}(List<(String, String)> headers, String name) {{\n  \
+         for (final header in headers) {{\n    \
+         if (header.$1.toLowerCase() == name) return header.$2;\n  \
+         }}\n  \
+         return null;\n\
+         }}",
+        find_header_call(fn_prefix)
+    )
+}
+
+/// Prefixed like every other private helper here, so two clients vendored into one Dart library
+/// do not both declare it.
+fn find_header_call(fn_prefix: &str) -> String {
+    format!("_{fn_prefix}HttpFindHeader")
 }
 
 fn transport_failure_fn(named: &str, fn_prefix: &str) -> String {
@@ -956,14 +969,22 @@ fn is_sibling_type(ty: &Type) -> bool {
 /// interpolation would otherwise call `Object`'s default `toString()` on the class instance rather
 /// than on the value it wraps. A `String`, a `bool` and a number all interpolate correctly as
 /// themselves, which is what lets everything else fall through to plain interpolation.
-fn dart_wire_text(ty: &Type, expr: &str) -> String {
+///
+/// `promoted` says whether Dart narrows `expr` inside the `== null` test an `Option<T>` renders
+/// through — a parameter or a local, never a read through a published field's getter.
+fn dart_wire_text(ty: &Type, expr: &str, promoted: bool) -> String {
     if let Some(inner) = option_inner(ty) {
-        let non_null = format!("{expr}!");
-        let rendered = dart_wire_text(inner, &non_null);
+        let narrowed = if promoted {
+            expr.to_owned()
+        } else {
+            format!("{expr}!")
+        };
+        let rendered = dart_wire_text(inner, &narrowed, promoted);
         return format!("({expr} == null ? '' : {rendered})");
     }
     if let Some(inner) = vec_inner(ty) {
-        let element = dart_wire_text(inner, "e");
+        // `e` is the closure's own parameter, which Dart narrows.
+        let element = dart_wire_text(inner, "e", true);
         return format!("({expr}).map((e) => {element}).join(\",\")");
     }
     if is_sibling_type(ty) {
