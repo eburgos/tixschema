@@ -333,7 +333,8 @@ fn method(
 // Building the request from the validated message.
 // ---------------------------------------------------------------------------------------------
 
-/// The value one path placeholder reads off `req`: one of its own fields under its own written
+/// The value one path placeholder reads off `req`: the field the placeholder names, or the whole
+/// message where that message is itself a wire scalar.
 fn placeholder_value_dart_expr(
     operation: &OperationDef,
     shape: &HttpShape,

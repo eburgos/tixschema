@@ -708,6 +708,26 @@ fn a_lone_placeholder_on_an_author_s_own_message_sends_the_field_it_names() {
     );
 }
 
+#[test]
+fn a_lone_placeholder_leaves_the_rest_of_the_message_in_the_query() {
+    let transport =
+        RecordingTransport::queued(vec![(200, Vec::new(), br#"{"content":"d1"}"#.to_vec())]);
+    let client = http_rest_client::DocumentClientServiceClient::new(transport);
+    poll_once(client.read_window(ReadWindowRequest {
+        document_id: "d1".to_owned(),
+        from_version: Some("v1".to_owned()),
+    }))
+    .unwrap()
+    .unwrap();
+    let sent = &client.transport().requests()[0];
+    assert_eq!(sent.path, "/documents/d1/window");
+    assert_eq!(
+        sent.query, "from_version=v1",
+        "`from_version` is bound to no placeholder, so the only place left for it is the query \
+         string; an empty query drops the field the caller passed. Got: {sent:?}"
+    );
+}
+
 /// A `body = "bytes"` operation reads the response body bare, the `content-type` header back into
 /// the tuple's second element, and its declared `header_out` entry back into the third - no
 /// `serde_json` decode anywhere on the success path.

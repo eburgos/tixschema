@@ -38,6 +38,7 @@
 //! attributes a generated message needs onto them.
 
 use crate::rename_rule::RenameRule;
+use crate::utils::is_wire_scalar_type;
 use proc_macro2::TokenTree;
 use quote::{ToTokens as _, format_ident};
 use std::collections::{HashMap, HashSet};
@@ -535,39 +536,12 @@ pub fn scalar_kind(ty: &Type) -> ScalarKind {
     }
 }
 
-/// Whether a Named type's own declared type is one of the wire-scalar shapes this crate
-/// recognises — the only case a whole message may be read back from a single path placeholder
-/// rather than an object.
+/// Whether a Named type's own declared type is one serde writes as a bare wire scalar — the only
+/// case a whole message may be read back from a single path placeholder rather than an object.
+///
+/// Recognised through a registry, so a declaration *below* the service is not yet recorded.
 pub fn is_scalar_named_type(ty: &Type) -> bool {
-    let Type::Path(named) = ty else {
-        return false;
-    };
-    let Some(leaf) = named.path.segments.last() else {
-        return false;
-    };
-    matches!(
-        leaf.ident.to_string().as_str(),
-        "String"
-            | "str"
-            | "bool"
-            | "u8"
-            | "u16"
-            | "u32"
-            | "u64"
-            | "u128"
-            | "usize"
-            | "i8"
-            | "i16"
-            | "i32"
-            | "i64"
-            | "i128"
-            | "isize"
-            | "f32"
-            | "f64"
-            | "NaiveDate"
-            | "NaiveDateTime"
-            | "NaiveTime"
-    )
+    is_wire_scalar_type(ty)
 }
 
 /// The one generic argument inside `Option<...>` or `Vec<...>`, if `ty` is written as that generic.

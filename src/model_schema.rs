@@ -158,6 +158,7 @@ use crate::utils::record_ts_union_members;
 
 #[cfg(any(feature = "typescript", feature = "zod", feature = "jsonschema"))]
 use crate::utils::register_alias_info;
+use crate::utils::{is_wire_scalar_type, record_wire_scalar};
 
 #[cfg(feature = "serde")]
 use crate::utils::to_snake_case;
@@ -1105,6 +1106,8 @@ pub fn exec_model_schema(args: TokenStream, input: TokenStream) -> TokenStream {
     {
         return output;
     }
+    // Read in every feature combination: a transport reads it whether or not a surface is on.
+    record_wire_scalar_item(&item);
     // A `default_types` declaration is read against the item's own parameters, which the parser
     // never sees, so both directions are answered here — ahead of every shape, and of the branded
     // split inside the struct path.
@@ -3783,6 +3786,34 @@ fn assert_no_struct_string_constraints(args: &ModelSchemaArgs) {
         !args.has_string_constraints(),
         "model_schema constraints (pattern, minLength, maxLength) are only supported on branded newtype structs (#[serde(transparent)] single-field tuple structs)"
     );
+}
+
+/// Records `item` where serde writes it as a bare wire scalar rather than an object: a
+/// `#[serde(transparent)]` single-slot tuple struct over one, and an alias of one.
+fn record_wire_scalar_item(item: &Item) {
+    let Some((name, inner)) = wire_scalar_candidate(item) else {
+        return;
+    };
+    if is_wire_scalar_type(inner) {
+        record_wire_scalar(&name.to_string());
+    }
+}
+
+/// The name and inner type of the two shapes that can publish a bare scalar under their own name.
+fn wire_scalar_candidate(item: &Item) -> Option<(&syn::Ident, &syn::Type)> {
+    if let Item::Type(item_type) = item {
+        return Some((&item_type.ident, &item_type.ty));
+    }
+    let Item::Struct(item_struct) = item else {
+        return None;
+    };
+    let syn::Fields::Unnamed(slots) = &item_struct.fields else {
+        return None;
+    };
+    if slots.unnamed.len() != 1 || !has_serde_transparent(&item_struct.attrs) {
+        return None;
+    }
+    Some((&item_struct.ident, &slots.unnamed[0].ty))
 }
 
 /// Returns whether a struct is a branded newtype: `#[serde(transparent)]` plus a single field.

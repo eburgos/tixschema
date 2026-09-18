@@ -93,6 +93,23 @@ typecheck-ts:
     TIXSCHEMA_TSC="$(command -v "${TIXSCHEMA_TSC:-tsc}")" cargo test --no-default-features --features "serde,typescript" --test service_schema_typescript_tests type_check
     @echo "✅ The emitted bundle type-checks!"
 
+# Run the emitted clients through their own language's runtime, with a real message object.
+#
+# What a string test cannot reach: `String(sending)` is well-formed TypeScript that renders every
+# object as the constant `[object Object]`, so only running the client shows which URL comes out.
+# The groups inside `cargo test` stand down when they find no runtime, saying so on stderr. This
+# recipe refuses to stand down — it resolves each runtime up front and names it for the tests,
+# where a named runtime that cannot be started is a failure. Set TIXSCHEMA_NODE or TIXSCHEMA_DART
+# to use one that is not on PATH.
+test-emitted:
+    @command -v "${TIXSCHEMA_NODE:-node}" >/dev/null 2>&1 || { echo "No node: put \`node\` on PATH, or set TIXSCHEMA_NODE to one." >&2; exit 1; }
+    @echo "Running the emitted TypeScript client with $(command -v "${TIXSCHEMA_NODE:-node}")..."
+    TIXSCHEMA_NODE="$(command -v "${TIXSCHEMA_NODE:-node}")" cargo test --test service_schema_emitted_client_tests run_node
+    @command -v "${TIXSCHEMA_DART:-dart}" >/dev/null 2>&1 || { echo "No Dart SDK: put \`dart\` on PATH, or set TIXSCHEMA_DART to one." >&2; exit 1; }
+    @echo "Running the emitted Dart client with $(command -v "${TIXSCHEMA_DART:-dart}")..."
+    TIXSCHEMA_DART="$(command -v "${TIXSCHEMA_DART:-dart}")" cargo test --all-features --test service_schema_emitted_client_tests run_dart
+    @echo "✅ The emitted clients build the URLs they claim to!"
+
 # Check code without running tests
 check:
     @echo "Checking code..."

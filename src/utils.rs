@@ -12,7 +12,6 @@ use regex_syntax::ast::{
 };
 use regex_syntax::hir;
 use std::collections::HashMap;
-#[cfg(feature = "zod")]
 use std::collections::HashSet;
 use syn::{Attribute, Expr, Field, GenericParam, Generics, Lit, LitStr, Meta, Type, Variant};
 
@@ -604,6 +603,13 @@ thread_local! {
 }
 
 thread_local! {
+    /// The names whose items serde writes as a bare wire scalar rather than an object. Kept out
+    /// of [`ALIAS_INFO`], which is written only where a generation surface is on: a transport
+    /// reads this in every build.
+    static WIRE_SCALARS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+thread_local! {
     static ALIAS_INFO: RefCell<HashMap<String, AliasInfo>> = RefCell::new(HashMap::new());
     /// The Rust ident holding each published name — see [`claim_published_name`]. Kept out of
     /// [`ALIAS_INFO`], which is keyed the other way round and only written where a surface is on.
@@ -808,6 +814,55 @@ const fn negated_perl_class_written(kind: &ClassPerlKind) -> &'static str {
         ClassPerlKind::Word => r"the `\W` negated word class",
         ClassPerlKind::Space => r"the `\S` negated whitespace class",
     }
+}
+
+/// Whether serde writes `ty` as a bare wire scalar rather than an object — one of the spellings
+/// this crate recognises outright, or a name [`record_wire_scalar`] has seen.
+pub fn is_wire_scalar_type(ty: &Type) -> bool {
+    let Type::Path(named) = ty else {
+        return false;
+    };
+    let Some(leaf) = named.path.segments.last() else {
+        return false;
+    };
+    let spelled = leaf.ident.to_string();
+    is_recorded_wire_scalar(&spelled)
+        || matches!(
+            spelled.as_str(),
+            "String"
+                | "str"
+                | "bool"
+                | "u8"
+                | "u16"
+                | "u32"
+                | "u64"
+                | "u128"
+                | "usize"
+                | "i8"
+                | "i16"
+                | "i32"
+                | "i64"
+                | "i128"
+                | "isize"
+                | "f32"
+                | "f64"
+                | "NaiveDate"
+                | "NaiveDateTime"
+                | "NaiveTime"
+        )
+}
+
+/// Records that `rust_ident` names an item serde writes as a bare wire scalar.
+pub fn record_wire_scalar(rust_ident: &str) {
+    WIRE_SCALARS.with(|names| {
+        names.borrow_mut().insert(rust_ident.to_owned());
+    });
+}
+
+/// Whether `rust_ident` named an item [`record_wire_scalar`] has seen. `false` for a name declared
+/// below the item asking.
+pub fn is_recorded_wire_scalar(rust_ident: &str) -> bool {
+    WIRE_SCALARS.with(|names| names.borrow().contains(rust_ident))
 }
 
 pub fn lookup_alias_info(rust_ident: &str) -> Option<AliasInfo> {
