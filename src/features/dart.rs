@@ -108,6 +108,16 @@ struct ClassBodyParts {
     to_json_map: String,
 }
 
+impl ClassBodyParts {
+    fn ctor_parameter_group(&self) -> String {
+        if self.ctor_params.is_empty() {
+            String::new()
+        } else {
+            format!("{{{}}}", self.ctor_params)
+        }
+    }
+}
+
 thread_local! {
     /// The Dart class/enum name each Rust ident publishes — the one thing a reference to a sibling
     /// item needs, since the reference's own field carries the type arguments (real Dart generics
@@ -318,6 +328,11 @@ fn collect_dart_fields(
         let wire_name = wire_field_name(&rust_name, rename_override(&field.attrs).as_deref(), rule);
         let mut field_def = field_def_with_prop_meta(&rust_name, &field.ty, &field.attrs);
         field_def.erase_type_parameters(type_parameters);
+        if omission.omits_key && !field_def.is_optional() {
+            // Dart has no absent-key spelling: a `Map<String, dynamic>` answers a dropped key and
+            // an explicit `null` alike, so an omitted key is the outer level's own nullability.
+            field_def.nullable_levels.push(field_def.array_depth);
+        }
         collected.push(DartField {
             required: !omission.omits_key,
             flatten: field_is_flatten(&field.attrs),
@@ -529,14 +544,18 @@ fn dart_map_key_encode(key: &FieldDef, expr: &str) -> String {
             | FieldDefType::Map(_, _)
             | FieldDefType::Tuple(_)
             | FieldDefType::TypeParam(_)
-            | FieldDefType::Unknown => format!("({}) as String", dart_encode_expr(key, expr)),
+            | FieldDefType::Unknown => {
+                format!("({}) as String", dart_encode_expr(key, expr, false))
+            }
             #[cfg(feature = "object_id")]
-            FieldDefType::ObjectId => format!("({}) as String", dart_encode_expr(key, expr)),
+            FieldDefType::ObjectId => format!("({}) as String", dart_encode_expr(key, expr, false)),
             #[cfg(feature = "chrono")]
             FieldDefType::NaiveDate
             | FieldDefType::NaiveTime
             | FieldDefType::NaiveDateTime
-            | FieldDefType::DateTime => format!("({}) as String", dart_encode_expr(key, expr)),
+            | FieldDefType::DateTime => {
+                format!("({}) as String", dart_encode_expr(key, expr, false))
+            }
         },
     }
 }
@@ -668,13 +687,16 @@ fn dart_decode_at(field: &FieldDef, level: u8, expr: &str) -> String {
 /// The expression that encodes `field`'s Dart value `expr` into a `jsonEncode`-safe value (`null`,
 /// `bool`, `num`, `String`, `List<dynamic>` or `Map<String, dynamic>`) — the whole field including
 /// its outer optionality, mirroring [`dart_decode_expr`].
-fn dart_encode_expr(field: &FieldDef, expr: &str) -> String {
+fn dart_encode_expr(field: &FieldDef, expr: &str, promoted: bool) -> String {
     let unwrapped = dart_encode_at(field, field.array_depth, expr);
-    if field.is_optional() {
-        format!("({expr} == null ? null : {unwrapped})")
-    } else {
-        unwrapped
+    if !field.is_optional() {
+        return unwrapped;
     }
+    if promoted || unwrapped == expr {
+        return format!("({expr} == null ? null : {unwrapped})");
+    }
+    let asserted = dart_encode_at(field, field.array_depth, &format!("{expr}!"));
+    format!("({expr} == null ? null : {asserted})")
 }
 
 /// [`dart_encode_expr`] before the outer optionality — the encode counterpart of [`dart_decode_at`].
@@ -697,7 +719,7 @@ fn dart_encode_at(field: &FieldDef, level: u8, expr: &str) -> String {
                 .iter()
                 .enumerate()
                 .map(|(index, element)| {
-                    dart_encode_expr(element, &format!("({expr}).${}", index + 1))
+                    dart_encode_expr(element, &format!("({expr}).${}", index + 1), false)
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -715,7 +737,7 @@ fn dart_encode_at(field: &FieldDef, level: u8, expr: &str) -> String {
             } else {
                 let converters = generics
                     .iter()
-                    .map(|argument| format!("(e) => {}", dart_encode_expr(argument, "e")))
+                    .map(|argument| format!("(e) => {}", dart_encode_expr(argument, "e", true)))
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("({expr}).toJson({converters})")
@@ -723,7 +745,7 @@ fn dart_encode_at(field: &FieldDef, level: u8, expr: &str) -> String {
         }
         FieldDefType::Map(key, value) => {
             let key_encode = dart_map_key_encode(key, "e.key");
-            let value_encode = dart_encode_expr(value, "e.value");
+            let value_encode = dart_encode_expr(value, "e.value", false);
             format!(
                 "Map<String, dynamic>.fromEntries(({expr}).entries.map((e) => MapEntry({key_encode}, {value_encode})))"
             )
@@ -831,7 +853,7 @@ fn class_body_parts(fields: &[DartField], extra_to_json: &[String]) -> ClassBody
     let to_json_entries: String = fields
         .iter()
         .map(|field| {
-            let encode = dart_encode_expr(&field.field_def, &field.rust_name);
+            let encode = dart_encode_expr(&field.field_def, &field.rust_name, false);
             if field.flatten {
                 if field.field_def.is_optional() {
                     format!(
@@ -875,10 +897,10 @@ fn class_body_content(
 ) -> String {
     let parts = class_body_parts(fields, extra_to_json);
     format!(
-        "const {class_name}({{{ctor_params}}}); {field_decls} \
+        "const {class_name}({ctor_group}); {field_decls} \
          factory {class_name}.fromJson(Map<String, dynamic> json{fp}) => {class_name}({ctor_args}); \
          Map<String, dynamic> toJson({tp}) => {to_json_map};",
-        ctor_params = parts.ctor_params,
+        ctor_group = parts.ctor_parameter_group(),
         field_decls = parts.field_decls,
         ctor_args = parts.ctor_args,
         to_json_map = parts.to_json_map,
@@ -977,7 +999,7 @@ fn value_wrapper_tokens(
     let parameters = type_parameters_in_scope(generics);
     let codec = generic_codec(&parameters);
     let decode = dart_decode_expr(value_field, "json");
-    let encode = dart_encode_expr(value_field, "value");
+    let encode = dart_encode_expr(value_field, "value", false);
     let value_ty = dart_typename(value_field);
     let body = format!(
         "class {export_name}{generic_params} {{ const {export_name}(this.value); final {value_ty} value; \
@@ -1203,10 +1225,10 @@ fn tagged_variant_tokens(
                 let parts = class_body_parts(fields, &[]);
                 let wrapped = tagged_wrap_encode(shape, wire_tag, Some(&parts.to_json_map));
                 format!(
-                    "class {subclass_name}{generic_params} {extends} {{ const {subclass_name}({{{ctor_params}}}); \
+                    "class {subclass_name}{generic_params} {extends} {{ const {subclass_name}({ctor_group}); \
                      {field_decls} factory {subclass_name}.fromJson(Map<String, dynamic> json{fp}) => \
                      {subclass_name}({ctor_args}); @override dynamic toJson({tp}) => {wrapped}; }}",
-                    ctor_params = parts.ctor_params,
+                    ctor_group = parts.ctor_parameter_group(),
                     field_decls = parts.field_decls,
                     ctor_args = parts.ctor_args,
                     fp = codec.from_json_params,
@@ -1221,7 +1243,7 @@ fn tagged_variant_tokens(
         }
         VariantPayload::Value(field_def) => {
             let decode = dart_decode_expr(field_def, &payload_expr);
-            let own_encode = dart_encode_expr(field_def, "value");
+            let own_encode = dart_encode_expr(field_def, "value", false);
             let wrapped_encode = if shape.merge_tag_into_object {
                 // Internal tagging with a non-`Named` payload: real serde refuses this unless the
                 // payload is itself object-shaped (`#[serde(tag = "...")]` cannot carry a scalar or
@@ -1364,7 +1386,7 @@ fn untagged_enum_dart_source(
             }
             VariantPayload::Value(field_def) => {
                 let decode = dart_decode_expr(field_def, "json");
-                let encode = dart_encode_expr(field_def, "value");
+                let encode = dart_encode_expr(field_def, "value", false);
                 (
                     format!(
                         "class {subclass_name}{generic_params} {extends} {{ const {subclass_name}(this.value); \

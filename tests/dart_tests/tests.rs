@@ -50,6 +50,26 @@ pub struct Warehouse {
 }
 
 // ---------------------------------------------------------------------------------------------
+// A struct whose whole field set serde drops, and a key serde drops over a non-Option type.
+// ---------------------------------------------------------------------------------------------
+
+#[model_schema()]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StockAudit {
+    #[serde(skip)]
+    pub note: String,
+}
+
+#[model_schema()]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StockLabel {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub batch_codes: Vec<String>,
+    pub printed_by: String,
+}
+
+// ---------------------------------------------------------------------------------------------
 // Plain enum: an enhanced enum carrying serde's own wire string.
 // ---------------------------------------------------------------------------------------------
 
@@ -83,6 +103,10 @@ pub enum StockEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value")]
 pub enum DynamicValue {
+    Cleared {
+        #[serde(skip)]
+        reason: String,
+    },
     Flag(bool),
     Nothing,
     Number(i64),
@@ -240,12 +264,26 @@ fn test_every_declared_type_is_constructible() {
     ];
     assert_eq!(events.len(), 3);
 
+    let audit = StockAudit {
+        note: String::new(),
+    };
+    assert_eq!(audit, StockAudit::default());
+
+    let label = StockLabel {
+        batch_codes: Vec::new(),
+        printed_by: "Acme".to_owned(),
+    };
+    assert_eq!(label.printed_by, "Acme");
+
     let dynamic_values = [
+        DynamicValue::Cleared {
+            reason: String::new(),
+        },
         DynamicValue::Number(1),
         DynamicValue::Flag(true),
         DynamicValue::Nothing,
     ];
-    assert_eq!(dynamic_values.len(), 3);
+    assert_eq!(dynamic_values.len(), 4);
 
     let payment_methods = [
         PaymentMethod::Cash,
@@ -829,5 +867,93 @@ fn test_enum_keyed_map_decodes_and_encodes_through_the_enum_itself() {
     assert!(
         dart.contains("(e.key).toJson()"),
         "encoding an enum key should go through the enum's own toJson. Got: {dart}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Constructor parameter lists: the empty one, and requiredness over a dropped key.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn test_a_struct_with_no_fields_writes_no_parameter_group_at_all() {
+    let dart = stock_audit_dart::dart_definition();
+    assert!(
+        dart.contains("const StockAudit();"),
+        "Dart's named-parameter group has to name at least one parameter: `const StockAudit({{}});` \
+         is not an empty parameter list but a parse error, `missing_identifier` (\"Expected an \
+         identifier\"). Got: {dart}"
+    );
+    assert!(
+        !dart.contains("({})"),
+        "no empty brace pair survives anywhere in the class. Got: {dart}"
+    );
+    assert_eq!(
+        serde_json::to_string(&StockAudit::default()).unwrap(),
+        "{}",
+        "the class reads and writes `{{}}`, and so does serde: every field this struct has is one \
+         serde keeps off the wire, which is the empty object the codec above pins"
+    );
+}
+
+#[test]
+fn test_a_struct_shaped_variant_with_no_fields_writes_no_parameter_group_either() {
+    let dart = dynamic_value_dart::dart_definition();
+    assert!(
+        dart.contains("const DynamicValueCleared();"),
+        "a struct-shaped variant whose every field serde keeps off the wire carries no \
+         parameter either, and builds its subclass the way a fieldless struct builds its class. \
+         Got: {dart}"
+    );
+    assert!(
+        !dart.contains("({})"),
+        "no empty brace pair survives anywhere in the enum's subclasses. Got: {dart}"
+    );
+}
+
+#[test]
+fn test_a_dropped_key_on_a_field_that_is_not_an_option_is_nullable_in_dart() {
+    let dart = stock_label_dart::dart_definition();
+    assert!(
+        dart.contains("final List<String>? batch_codes;"),
+        "serde writes this key for a full `Vec` and leaves it out for an empty one, and a Dart \
+         `Map<String, dynamic>` answers a dropped key and an explicit `null` alike — so the \
+         absent payload is admissible only if the type carries the `?`. Got: {dart}"
+    );
+    assert!(
+        dart.contains("this.batch_codes,") && !dart.contains("required this.batch_codes,"),
+        "a nullable parameter defaults to `null`, which is what lets a caller build the value \
+         serde writes no key for. Got: {dart}"
+    );
+    assert!(
+        dart.contains("batch_codes: (json['") && dart.contains("] == null ? null : (json['"),
+        "`fromJson` reads the key through a `null` guard rather than casting it: a `List` cast \
+         over the payload serde wrote without the key is a `TypeError` on every such answer. \
+         Got: {dart}"
+    );
+    assert!(
+        dart.contains("if (batch_codes != null)"),
+        "`toJson` writes the key only when it has a value, which is the same pair of payloads \
+         serde writes and the other three surfaces admit. Got: {dart}"
+    );
+}
+
+#[test]
+fn test_an_optional_reference_spells_the_null_away_before_calling_its_own_codec() {
+    let dart = warehouse_dart::dart_definition();
+    assert!(
+        dart.contains("(backup_address == null ? null : (backup_address!).toJson())"),
+        "Dart narrows a *private* final field inside an `== null` guard and a published one \
+         never, so the guard alone does not let `toJson` be called on the field it guards: \
+         `unchecked_use_of_nullable_value`. Got: {dart}"
+    );
+}
+
+#[test]
+fn test_an_optional_scalar_calls_nothing_and_so_spells_no_null_away() {
+    let dart = stock_item_dart::dart_definition();
+    assert!(
+        dart.contains("'note': (note == null ? null : note),"),
+        "a value that encodes as itself calls nothing on the field, and a `!` there would be \
+         `unnecessary_non_null_assertion` noise of the opposite kind. Got: {dart}"
     );
 }

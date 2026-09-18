@@ -188,3 +188,41 @@ fn the_json_schema_describes_the_predicate_omitted_key_without_requiring_it() {
         "Got: {schema}"
     );
 }
+
+/// Dart has no absent-key spelling: a `Map<String, dynamic>` answers a dropped key and an explicit
+/// `null` alike, so the key the other three surfaces mark optional is the value's own nullability.
+#[test]
+#[cfg(feature = "dart")]
+fn dart_reads_the_predicate_omitted_key_through_a_null_guard() {
+    let dart = predicate_omitted_key_dart::dart_definition();
+
+    assert!(dart.contains("final List<String>? roles;"), "Got: {dart}");
+    assert!(
+        dart.contains("this.roles,") && !dart.contains("required this.roles,"),
+        "Got: {dart}"
+    );
+    assert!(
+        dart.contains("] == null ? null : (json['"),
+        "casting the key serde left out is a `TypeError` on the payload without it. Got: {dart}"
+    );
+    assert!(dart.contains("if (roles != null)"), "Got: {dart}");
+    assert!(dart.contains("required this.id,"), "Got: {dart}");
+}
+
+/// The `Option` carrying the same omission was already nullable, and is pinned here as undisturbed.
+#[test]
+#[cfg(feature = "dart")]
+fn dart_leaves_the_optional_field_carrying_the_same_omission_alone() {
+    let dart = omitted_key_fields_dart::dart_definition();
+
+    assert!(dart.contains("final int? age;"), "Got: {dart}");
+    assert!(
+        dart.contains("this.age,") && !dart.contains("required this.age,"),
+        "Got: {dart}"
+    );
+    assert!(dart.contains("if (age != null)"), "Got: {dart}");
+    assert!(
+        dart.contains("required this.roles,") && dart.contains("final List<String> roles;"),
+        "`roles` here carries no omission at all, so its key is written every time. Got: {dart}"
+    );
+}
